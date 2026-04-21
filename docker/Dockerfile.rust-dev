@@ -1,0 +1,32 @@
+# Reproducible Rust + Tauri v2 build environment for local `cargo` commands.
+#
+# Why this image exists: compiling the `src-tauri` crate requires the GTK /
+# WebKitGTK / libsoup / appindicator / rsvg / xdo development headers plus
+# `pkg-config`. Installing them on every contributor's host is fragile, so we
+# run `cargo check|build|test` inside this container instead.
+#
+# The image intentionally does NOT install Node.js or pnpm: frontend tooling
+# runs on the host. Tauri runtime (webview) is NOT exercised here either —
+# only the Rust crate is compiled and its unit/integration tests are executed.
+FROM rust:1.95-bookworm
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        pkg-config \
+        libwebkit2gtk-4.1-dev \
+        libjavascriptcoregtk-4.1-dev \
+        libglib2.0-dev \
+        libgtk-3-dev \
+        librsvg2-dev \
+        libayatana-appindicator3-dev \
+        libxdo-dev \
+        libssl-dev \
+        build-essential \
+        ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# Cargo caches mounted as named volumes from docker-compose; pre-creating the
+# target directory keeps permissions aligned with the non-root `cargo` user.
+WORKDIR /workspace
