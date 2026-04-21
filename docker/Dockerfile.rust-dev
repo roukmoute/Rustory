@@ -27,6 +27,12 @@ RUN apt-get update \
         ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
+# rustfmt + clippy are required by the verify CI lane and by the matching
+# local smoke tests (`cargo fmt --check`, `cargo clippy -- -D warnings`).
+# Install them into the base image so every `docker compose run` starts
+# fully equipped.
+RUN rustup component add rustfmt clippy
+
 # Cargo caches mounted as named volumes from docker-compose; pre-creating the
 # target directory keeps permissions aligned with the non-root `cargo` user.
 WORKDIR /workspace

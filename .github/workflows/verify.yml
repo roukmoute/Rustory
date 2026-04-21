@@ -1,0 +1,95 @@
+name: Verify
+
+# Verification-only pipeline. Release / multi-OS matrix / updater workflows
+# are intentionally deferred — see `docs/release-runbook.md` for the current
+# manual-delivery posture.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: verify-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  frontend:
+    name: Frontend (pnpm)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Type-check
+        run: pnpm typecheck
+
+      - name: Unit & contract tests
+        run: pnpm test
+
+      - name: Production build
+        run: pnpm build
+
+  rust:
+    name: Rust (cargo)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: src-tauri
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Tauri v2 Linux build deps — mirror `docker/Dockerfile.rust-dev` exactly.
+      - name: Install Tauri Linux build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config \
+            libwebkit2gtk-4.1-dev \
+            libjavascriptcoregtk-4.1-dev \
+            libglib2.0-dev \
+            libgtk-3-dev \
+            librsvg2-dev \
+            libayatana-appindicator3-dev \
+            libxdo-dev \
+            libssl-dev \
+            build-essential
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.95.0
+          components: rustfmt, clippy
+
+      - name: Cargo cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      - name: cargo fmt --check
+        run: cargo fmt --all -- --check
+
+      - name: cargo clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: cargo test
+        run: cargo test --all-targets

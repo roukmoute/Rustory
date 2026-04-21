@@ -58,7 +58,10 @@ mod tests {
     fn serializes_fields_in_camel_case() {
         let err = AppError::local_storage_unavailable("msg", "action");
         let v = serde_json::to_value(&err).expect("serialize");
-        assert!(v.get("userAction").is_some(), "userAction must be camelCase");
+        assert!(
+            v.get("userAction").is_some(),
+            "userAction must be camelCase"
+        );
         assert!(v.get("user_action").is_none(), "snake_case must not leak");
     }
 
