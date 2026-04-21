@@ -1,5 +1,5 @@
 import { StrictMode } from "react";
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -23,9 +23,7 @@ describe("<LibraryRoute />", () => {
 
     render(<LibraryRoute />);
 
-    const section = screen.getByText(/chargement de la bibliothèque/i)
-      .closest("section");
-    expect(section).toHaveAttribute("aria-busy", "true");
+    expect(screen.getByRole("progressbar")).toBeInTheDocument();
     expect(
       screen.queryByRole("heading", { name: /ta bibliothèque est vide/i }),
     ).not.toBeInTheDocument();
@@ -173,5 +171,82 @@ describe("<LibraryRoute />", () => {
 
     const alert = await screen.findByRole("alert");
     expect(alert).toHaveTextContent(/mis trop de temps/i);
+  });
+
+  it("renders three columns with semantic regions (nav/main/aside)", async () => {
+    mockGet.mockResolvedValueOnce({ stories: [] });
+
+    render(<LibraryRoute />);
+    await screen.findByRole("heading", { name: /ta bibliothèque est vide/i });
+
+    expect(
+      screen.getByRole("navigation", { name: /filtres bibliothèque/i }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("main", { name: /collection d'histoires/i }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("complementary", { name: /panneau de décision/i }),
+    ).toBeInTheDocument();
+  });
+
+  it("anchors the empty state in the center column, never in the nav or the panel", async () => {
+    mockGet.mockResolvedValueOnce({ stories: [] });
+
+    render(<LibraryRoute />);
+
+    const main = await screen.findByRole("main", {
+      name: /collection d'histoires/i,
+    });
+    expect(
+      within(main).getByRole("heading", { name: /ta bibliothèque est vide/i }),
+    ).toBeInTheDocument();
+
+    const nav = screen.getByRole("navigation", {
+      name: /filtres bibliothèque/i,
+    });
+    expect(
+      within(nav).queryByRole("heading", {
+        name: /ta bibliothèque est vide/i,
+      }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("shows the Lunii Decision Panel with 'Aucun appareil connecté' on boot", async () => {
+    mockGet.mockResolvedValueOnce({ stories: [] });
+
+    render(<LibraryRoute />);
+    await screen.findByRole("heading", { name: /ta bibliothèque est vide/i });
+
+    const panel = screen.getByRole("complementary", {
+      name: /panneau de décision/i,
+    });
+    expect(
+      within(panel).getByText(/aucun appareil connecté/i),
+    ).toBeInTheDocument();
+  });
+
+  it("preserves the 3-column layout when an error is surfaced — not a bare error screen", async () => {
+    mockGet.mockRejectedValueOnce({
+      code: "LOCAL_STORAGE_UNAVAILABLE",
+      message: "Le stockage local est inaccessible.",
+      userAction: "Vérifie les permissions puis relance.",
+      details: null,
+    });
+
+    render(<LibraryRoute />);
+    await screen.findByRole("alert");
+
+    // Nav and panel must still be mounted; the error lives inside the main column.
+    expect(
+      screen.getByRole("navigation", { name: /filtres bibliothèque/i }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("complementary", { name: /panneau de décision/i }),
+    ).toBeInTheDocument();
+    const main = screen.getByRole("main", {
+      name: /collection d'histoires/i,
+    });
+    expect(within(main).getByRole("alert")).toBeInTheDocument();
   });
 });

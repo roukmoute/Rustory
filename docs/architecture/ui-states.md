@@ -91,6 +91,8 @@ Preferred patterns:
 - `Envoi indisponible: histoire bloquée`
 - `Envoi indisponible: appareil non supporté`
 - `Relance indisponible: aucun brouillon préservé`
+- `Création d'histoire indisponible pour l'instant.`
+- `Filtres avancés à venir`
 
 Avoid:
 
@@ -130,3 +132,37 @@ Two visual modes only:
 - **reduced-density mode**: same architecture, margins and secondary columns lightly compressed. No structural rework, no hamburger, no bottom navigation, no second interface.
 
 Below the minimum size, the window refuses to shrink further through the Tauri constraint. No responsive fallback is attempted.
+
+## Library Layout Contract
+
+The library context is a stable three-column desktop grid. Future routes that
+compose the library must reuse this contract rather than invent a variant.
+
+| Zone | Role | ARIA region | CSS column (standard mode) | CSS column (reduced-density) |
+| --- | --- | --- | --- | --- |
+| Left column | Global filters / navigation entry points | `<nav aria-label="Filtres bibliothèque">` | `minmax(240px, 280px)` | `200px` |
+| Center column | Story collection — the main work surface | `<main aria-label="Collection d'histoires">` | `1fr` | `1fr` |
+| Right column | Decision panel (device state + send CTA) | `<aside aria-label="Panneau de décision">` | `minmax(320px, 360px)` | `300px` |
+
+Rules:
+
+- The center column is the only working surface; the two side columns support decision without stealing focus.
+- Error, empty, filtered-empty and loading states all live inside the center column — never in the nav or in the panel.
+- The right-column panel stays intentionally minimal: device state + one primary CTA + a short, standardized reason when the CTA is disabled.
+- No fourth column, no collapsible drawer, no hamburger.
+
+## UI Foundation Components
+
+The MVP design system ships a closed core of foundation primitives in `src/shared/ui/`. Feature code consumes them through the barrel export `src/shared/ui/index.ts` — no direct file-by-file import path needed.
+
+| Primitive | Responsibility | Key contract |
+| --- | --- | --- |
+| `Button` | Interactive action | `variant: "primary" \| "secondary" \| "quiet" \| "destructive"`; when `aria-disabled="true"`, the button stays focusable and clicks are swallowed (keyboard users must reach the reason) |
+| `Field` | Labelled text input | Visible `label`, stable `id`, `onChange` receives the next string (never the raw event) |
+| `SurfacePanel` | Neutral container surface | `elevation: 0 \| 1 \| 2`, `as`, `ariaLabelledBy` — no business logic |
+| `StateChip` | Status pill | `tone: "neutral" \| "info" \| "success" \| "warning" \| "error"`; every tone ships with an ASCII glyph so the signal survives grayscale / color-blindness |
+| `ProgressIndicator` | Long-operation feedback | `mode: "indeterminate" \| "determinate"`, always a visible `label`, respects `prefers-reduced-motion` |
+| `Dialog` | Modal surface | Native `<dialog>` (free focus trap + Escape); `open`, `onClose`, `title`, `ariaDescribedBy` |
+| `Toast` | Lightweight confirmation | `tone` typed to exclude `"error"` at compile time — critical errors never live in a toast alone |
+
+New shared primitives land here only when a motif has appeared at least three times with stable behavior (see UX spec — Core Set Boundary).

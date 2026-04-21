@@ -4,15 +4,14 @@ import { LibraryRoute } from "../routes/library/LibraryRoute";
 import "./AppShell.css";
 
 /**
- * Root application shell — a single desktop-only layout hosting the library
- * route. React Router and shell stores will layer on top when needed.
+ * Root application shell. `LibraryRoute` owns its own layout (three-column
+ * grid with semantic nav/main/aside regions), so this container stays
+ * minimal and future routes will plug in here.
  */
 export function AppShell(): React.JSX.Element {
   return (
     <div className="app-shell">
-      <main className="app-shell__main">
-        <LibraryRoute />
-      </main>
+      <LibraryRoute />
     </div>
   );
 }

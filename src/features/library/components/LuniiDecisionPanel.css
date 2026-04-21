@@ -1,0 +1,19 @@
+.lunii-panel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.lunii-panel__title {
+  margin: 0;
+  font-size: var(--font-size-h3);
+  font-weight: var(--font-weight-semibold);
+  color: var(--color-text-primary);
+  line-height: var(--line-height-tight);
+}
+
+.lunii-panel__reason {
+  margin: 0;
+  font-size: var(--font-size-meta);
+  color: var(--color-text-muted);
+}

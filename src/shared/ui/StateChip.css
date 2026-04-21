@@ -1,0 +1,48 @@
+.ds-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding: 2px var(--space-2);
+  font-family: var(--font-family-ui);
+  font-size: var(--font-size-meta);
+  font-weight: var(--font-weight-medium);
+  line-height: 1.4;
+  border-radius: 999px;
+  border: 1px solid transparent;
+}
+
+.ds-chip__glyph {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  font-size: 0.85em;
+  font-weight: var(--font-weight-semibold);
+}
+
+.ds-chip--neutral {
+  background: var(--color-surface-sunken);
+  color: var(--color-state-neutral);
+  border-color: var(--color-border-subtle);
+}
+.ds-chip--info {
+  background: rgba(58, 107, 138, 0.12);
+  color: var(--color-state-info);
+  border-color: rgba(58, 107, 138, 0.3);
+}
+.ds-chip--success {
+  background: rgba(61, 107, 71, 0.12);
+  color: var(--color-state-success);
+  border-color: rgba(61, 107, 71, 0.3);
+}
+.ds-chip--warning {
+  background: rgba(138, 106, 31, 0.12);
+  color: var(--color-state-warning);
+  border-color: rgba(138, 106, 31, 0.3);
+}
+.ds-chip--error {
+  background: rgba(143, 47, 47, 0.12);
+  color: var(--color-state-error);
+  border-color: rgba(143, 47, 47, 0.3);
+}

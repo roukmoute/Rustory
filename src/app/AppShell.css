@@ -6,16 +6,17 @@
  *   - standard mode (default): target configuration, full layout
  *   - reduced-density mode (<= 1280px width): margins and secondary columns
  *     lightly compressed; SAME architecture.
+ *
+ * Design tokens live in src/shared/ui/tokens.css (imported from main.tsx).
  */
 
 :root {
   color-scheme: light;
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
-    "Helvetica Neue", Arial, sans-serif;
+  font-family: var(--font-family-ui);
   font-size: 16px;
-  line-height: 1.5;
-  background: #fbfbfb;
-  color: #1f2328;
+  line-height: var(--line-height-normal);
+  background: var(--color-surface-base);
+  color: var(--color-text-primary);
 }
 
 * {
@@ -31,12 +32,6 @@ html,
 }
 
 .app-shell {
-  display: grid;
-  grid-template-columns: 1fr;
   min-height: 100vh;
-}
-
-.app-shell__main {
-  display: flex;
-  flex-direction: column;
+  background: var(--color-surface-base);
 }

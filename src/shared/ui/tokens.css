@@ -1,0 +1,84 @@
+/*
+ * Semantic design tokens. Neutral, warm palette (ivory / sand / graphite /
+ * deep teal). WCAG AA contrast on primary text (≥ 4.5:1) is required at this
+ * token level — any future palette change must re-verify contrast.
+ *
+ * Spacing uses an 8px base grid with an optional 4px micro-scale for short
+ * labels and optical adjustments.
+ */
+
+:root {
+  /* Surfaces */
+  --color-surface-base: #fbfaf6;
+  --color-surface-raised: #ffffff;
+  --color-surface-sunken: #f3f1ec;
+  --color-border-subtle: #e3ded4;
+  --color-border-strong: #b8b0a2;
+
+  /* Text */
+  --color-text-primary: #1f2328;
+  --color-text-secondary: #57606a;
+  --color-text-muted: #7a7265;
+  --color-text-inverse: #ffffff;
+
+  /* Actions */
+  --color-action-primary: #1f4d44;
+  --color-action-primary-hover: #1a3f38;
+  --color-action-on-primary: #ffffff;
+  --color-action-destructive: #8f2f2f;
+
+  /* States */
+  --color-state-info: #3a6b8a;
+  --color-state-success: #3d6b47;
+  --color-state-warning: #8a6a1f;
+  --color-state-error: #8f2f2f;
+  --color-state-neutral: #6a6258;
+
+  /* Typography */
+  --font-family-ui: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+    "Helvetica Neue", Arial, sans-serif;
+  --font-size-h1: 1.75rem; /* ~28-32px */
+  --font-size-h2: 1.375rem; /* ~22-24px */
+  --font-size-h3: 1.125rem; /* ~18-20px */
+  --font-size-body: 0.9375rem; /* ~15px */
+  --font-size-label: 0.8125rem; /* ~13px */
+  --font-size-meta: 0.75rem; /* ~12px */
+  --font-weight-regular: 400;
+  --font-weight-medium: 500;
+  --font-weight-semibold: 600;
+  --line-height-tight: 1.25;
+  --line-height-normal: 1.5;
+
+  /* Spacing — 8px base grid, 4px micro-scale */
+  --space-1: 0.25rem; /* 4px */
+  --space-2: 0.5rem; /* 8px */
+  --space-3: 1rem; /* 16px */
+  --space-4: 1.5rem; /* 24px */
+  --space-5: 2rem; /* 32px */
+  --space-6: 3rem; /* 48px */
+
+  /* Radii */
+  --radius-sm: 4px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+
+  /* Focus ring — visible, never only-by-color */
+  --focus-ring: 0 0 0 2px var(--color-surface-base),
+    0 0 0 4px var(--color-action-primary);
+}
+
+*:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+  border-radius: var(--radius-sm);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

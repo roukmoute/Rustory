@@ -1,0 +1,23 @@
+.ds-dialog {
+  max-width: 32rem;
+  padding: var(--space-4);
+  border: 1px solid var(--color-border-subtle);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-raised);
+  color: var(--color-text-primary);
+}
+
+.ds-dialog::backdrop {
+  background: rgba(31, 35, 40, 0.3);
+}
+
+.ds-dialog__title {
+  margin: 0 0 var(--space-2) 0;
+  font-size: var(--font-size-h3);
+  font-weight: var(--font-weight-semibold);
+}
+
+.ds-dialog__body {
+  font-size: var(--font-size-body);
+  line-height: var(--line-height-normal);
+}

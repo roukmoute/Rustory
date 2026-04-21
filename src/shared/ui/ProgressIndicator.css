@@ -1,0 +1,44 @@
+.ds-progress {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.ds-progress__label {
+  font-family: var(--font-family-ui);
+  font-size: var(--font-size-label);
+  color: var(--color-text-secondary);
+}
+
+.ds-progress__track {
+  position: relative;
+  height: 4px;
+  background: var(--color-surface-sunken);
+  border-radius: 999px;
+  overflow: hidden;
+}
+
+.ds-progress__fill {
+  display: block;
+  height: 100%;
+  background: var(--color-action-primary);
+  border-radius: inherit;
+}
+
+.ds-progress__track--determinate .ds-progress__fill {
+  transition: width 180ms ease;
+}
+
+.ds-progress__track--indeterminate .ds-progress__fill {
+  width: 30%;
+  animation: ds-progress-slide 1.2s ease-in-out infinite;
+}
+
+@keyframes ds-progress-slide {
+  0% {
+    margin-left: -30%;
+  }
+  100% {
+    margin-left: 100%;
+  }
+}

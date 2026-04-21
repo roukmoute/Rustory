@@ -1,0 +1,29 @@
+.story-card {
+  min-height: 92px;
+}
+
+.story-card__focusable {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  outline: none;
+  border-radius: var(--radius-sm);
+}
+
+.story-card__title {
+  margin: 0;
+  font-size: var(--font-size-h3);
+  font-weight: var(--font-weight-semibold);
+  color: var(--color-text-primary);
+  line-height: var(--line-height-tight);
+  /* Guard the grid against titles that lack obvious word breaks (long
+   * agglutinated strings, user-pasted identifiers) so they wrap inside the
+   * card instead of blowing out the column width. */
+  overflow-wrap: anywhere;
+}
+
+.story-card__meta {
+  font-size: var(--font-size-meta);
+  color: var(--color-text-muted);
+  font-variant-numeric: tabular-nums;
+}

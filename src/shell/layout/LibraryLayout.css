@@ -1,0 +1,28 @@
+.library-layout {
+  display: grid;
+  grid-template-columns: minmax(240px, 280px) 1fr minmax(320px, 360px);
+  gap: var(--space-3);
+  min-height: 100vh;
+  padding: var(--space-3);
+  background: var(--color-surface-base);
+}
+
+.library-layout__nav,
+.library-layout__main,
+.library-layout__panel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+/*
+ * Reduced-density mode. Exclusive upper bound (1279.98px) keeps the switch
+ * point clean and avoids a 1px overlap with the standard mode rule.
+ */
+@media (max-width: 1279.98px) {
+  .library-layout {
+    grid-template-columns: 200px 1fr 300px;
+    gap: var(--space-2);
+    padding: var(--space-2);
+  }
+}
