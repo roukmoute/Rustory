@@ -9,6 +9,7 @@ use serde::Serialize;
 pub enum AppErrorCode {
     LocalStorageUnavailable,
     LibraryInconsistent,
+    InvalidStoryTitle,
 }
 
 /// Normalized application error crossing the IPC boundary.
@@ -24,6 +25,21 @@ pub struct AppError {
     pub user_action: Option<String>,
     pub details: Option<serde_json::Value>,
 }
+
+impl std::fmt::Display for AppError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Stable, human-readable rendering used by OS-level boot diagnostics
+        // (setup handler, crash reports). Debug formatting would leak the
+        // internal struct layout; serialization keeps the wire shape so
+        // support can copy-paste it back into a JSON tool if needed.
+        match serde_json::to_string(self) {
+            Ok(json) => f.write_str(&json),
+            Err(_) => write!(f, "[{:?}] {}", self.code, self.message),
+        }
+    }
+}
+
+impl std::error::Error for AppError {}
 
 impl AppError {
     pub fn local_storage_unavailable(
@@ -44,6 +60,15 @@ impl AppError {
     ) -> Self {
         Self {
             code: AppErrorCode::LibraryInconsistent,
+            message: message.into(),
+            user_action: Some(user_action.into()),
+            details: None,
+        }
+    }
+
+    pub fn invalid_story_title(message: impl Into<String>, user_action: impl Into<String>) -> Self {
+        Self {
+            code: AppErrorCode::InvalidStoryTitle,
             message: message.into(),
             user_action: Some(user_action.into()),
             details: None,
@@ -91,5 +116,14 @@ mod tests {
         let err = AppError::library_inconsistent("msg", "action");
         let v = serde_json::to_value(&err).expect("serialize");
         assert_eq!(v["code"], "LIBRARY_INCONSISTENT");
+    }
+
+    #[test]
+    fn invalid_story_title_serializes_with_stable_code() {
+        let err = AppError::invalid_story_title("msg", "action");
+        let v = serde_json::to_value(&err).expect("serialize");
+        assert_eq!(v["code"], "INVALID_STORY_TITLE");
+        assert_eq!(v["message"], "msg");
+        assert_eq!(v["userAction"], "action");
     }
 }

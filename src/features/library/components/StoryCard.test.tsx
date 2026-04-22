@@ -11,7 +11,7 @@ const STORY: StoryCardDto = {
 };
 
 describe("StoryCard", () => {
-  it("renders title, short id and is exposed as a button", () => {
+  it("renders the title and is exposed as a button", () => {
     render(
       <StoryCard
         story={STORY}
@@ -24,7 +24,9 @@ describe("StoryCard", () => {
     const button = screen.getByRole("button", { name: STORY.title });
     expect(button).toHaveAttribute("tabindex", "0");
     expect(button).toHaveAttribute("aria-pressed", "false");
-    expect(screen.getByText("abc123de")).toBeInTheDocument();
+    // The card is title-centric; no short id is shown — the identifier
+    // stays an internal concern exposed through the URL only.
+    expect(screen.getByText(STORY.title)).toBeInTheDocument();
   });
 
   it("click without modifier calls onSelect with replace", async () => {
@@ -155,7 +157,7 @@ describe("StoryCard", () => {
     expect(onSelect).not.toHaveBeenCalled();
   });
 
-  it("double-click never mutates the current selection (multi-selection stays intact)", async () => {
+  it("double-click never mutates a multi-selection (stays intact across the two clicks)", async () => {
     const user = userEvent.setup();
     const onSelect = vi.fn();
     const onOpen = vi.fn();
@@ -163,6 +165,7 @@ describe("StoryCard", () => {
       <StoryCard
         story={STORY}
         isSelected={true}
+        selectionSize={3}
         onSelect={onSelect}
         onOpen={onOpen}
       />,
@@ -170,11 +173,33 @@ describe("StoryCard", () => {
 
     await user.dblClick(screen.getByRole("button", { name: STORY.title }));
 
-    // dblClick emits two click events; neither of them may call onSelect,
-    // otherwise a double-click on a multi-selected card would collapse the
-    // selection to a singleton before navigating.
+    // dblClick emits two click events; with a multi-selection in play,
+    // neither may call onSelect — otherwise a double-click would collapse
+    // the selection to a singleton before navigating.
     expect(onSelect).not.toHaveBeenCalled();
     expect(onOpen).toHaveBeenCalledWith(STORY.id);
+  });
+
+  it("click on the single selected card toggles it off (intuitive inverse of the first click)", async () => {
+    const user = userEvent.setup();
+    const onSelect = vi.fn();
+    const onOpen = vi.fn();
+    render(
+      <StoryCard
+        story={STORY}
+        isSelected={true}
+        selectionSize={1}
+        onSelect={onSelect}
+        onOpen={onOpen}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: STORY.title }));
+
+    // Single-selection re-click sends a toggle, letting the store drop
+    // the id — users don't have to learn Ctrl+click just to deselect.
+    expect(onSelect).toHaveBeenCalledWith(STORY.id, "toggle");
+    expect(onOpen).not.toHaveBeenCalled();
   });
 
   it("held Space / Enter (key repeat) fires at most once — no flicker", async () => {

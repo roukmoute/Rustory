@@ -23,6 +23,7 @@ interface HarnessProps {
   selectedStoryIds?: ReadonlySet<string>;
   onSelectStory?: (id: string, mode: "replace" | "toggle") => void;
   onOpenStory?: (id: string) => void;
+  onCreateStoryRequest?: () => void;
 }
 
 /** Testing harness that owns query/sort state locally so existing
@@ -47,6 +48,7 @@ function Harness(props: HarnessProps) {
       selectedStoryIds={props.selectedStoryIds}
       onSelectStory={props.onSelectStory}
       onOpenStory={props.onOpenStory}
+      onCreateStoryRequest={props.onCreateStoryRequest}
     />
   );
 }
@@ -386,5 +388,51 @@ describe("<StoryCollection />", () => {
     expect(
       screen.getByText(/^0 sur 3 — 1 sélectionnée$/),
     ).toBeInTheDocument();
+  });
+
+  // --- Create story CTA wiring ---
+
+  it("does not render the header Créer CTA when no handler is provided", () => {
+    render(<Harness />);
+    // In loaded state, only the filter placeholder button and the story
+    // cards are focusable — no Créer CTA appears.
+    const createButtons = screen
+      .queryAllByRole("button", { name: /créer une histoire/i });
+    expect(createButtons).toHaveLength(0);
+  });
+
+  it("renders a header Créer CTA that calls onCreateStoryRequest", async () => {
+    const user = userEvent.setup();
+    const onCreateStoryRequest = vi.fn();
+    render(<Harness onCreateStoryRequest={onCreateStoryRequest} />);
+
+    const create = screen.getByRole("button", {
+      name: /créer une histoire/i,
+    });
+    await user.click(create);
+    expect(onCreateStoryRequest).toHaveBeenCalledTimes(1);
+  });
+
+  it("promotes the empty-state Créer CTA to active (no disabled reason) when a handler is provided", async () => {
+    const user = userEvent.setup();
+    const onCreateStoryRequest = vi.fn();
+    render(
+      <Harness stories={[]} onCreateStoryRequest={onCreateStoryRequest} />,
+    );
+
+    // Two Créer CTAs now: header + empty-state region. Both must dispatch.
+    const creates = screen.getAllByRole("button", {
+      name: /créer une histoire/i,
+    });
+    expect(creates).toHaveLength(2);
+    for (const btn of creates) {
+      expect(btn).not.toHaveAttribute("aria-disabled", "true");
+    }
+    expect(
+      screen.queryByText(/création d'histoire indisponible/i),
+    ).not.toBeInTheDocument();
+
+    await user.click(creates[1]);
+    expect(onCreateStoryRequest).toHaveBeenCalledTimes(1);
   });
 });

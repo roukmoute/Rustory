@@ -22,6 +22,10 @@ export interface StoryCollectionProps {
   selectedStoryIds?: ReadonlySet<string>;
   onSelectStory?: (id: string, mode: StoryCardSelectionMode) => void;
   onOpenStory?: (id: string) => void;
+  /** Fires when the user requests to open the "Créer une histoire" flow.
+   *  When omitted, the CTA in the empty state falls back to its disabled
+   *  form with the canonical "indisponible" reason. */
+  onCreateStoryRequest?: () => void;
 }
 
 type CollectionState =
@@ -48,6 +52,7 @@ export function StoryCollection({
   selectedStoryIds = EMPTY_SELECTION,
   onSelectStory,
   onOpenStory,
+  onCreateStoryRequest,
 }: StoryCollectionProps): React.JSX.Element {
   const titleId = useId();
   const searchId = useId();
@@ -135,6 +140,13 @@ export function StoryCollection({
               Filtres avancés à venir
             </p>
           </div>
+          {onCreateStoryRequest ? (
+            <div className="story-collection__control">
+              <Button variant="primary" onClick={onCreateStoryRequest}>
+                Créer une histoire
+              </Button>
+            </div>
+          ) : null}
         </div>
         {/*
          * Counter is read by the empty / filtered-empty / pending regions via
@@ -144,6 +156,16 @@ export function StoryCollection({
         <p className="story-collection__counter">
           {countersLabel(stories.length, state, selectedCount)}
         </p>
+        {state.kind === "loaded" ? (
+          <p className="story-collection__selection-hint">
+            Clique une carte pour la sélectionner.{" "}
+            <kbd className="story-collection__kbd">Ctrl</kbd>
+            <span aria-hidden="true">+</span>clic (ou{" "}
+            <kbd className="story-collection__kbd">Cmd</kbd>
+            <span aria-hidden="true">+</span>clic sur macOS) pour en
+            sélectionner plusieurs. Double-clic pour ouvrir l'édition.
+          </p>
+        ) : null}
       </header>
 
       {state.kind === "pending" ? (
@@ -171,15 +193,23 @@ export function StoryCollection({
           <p className="story-collection__empty-hint">
             Crée ta première histoire pour la retrouver ici à chaque ouverture.
           </p>
-          <Button aria-disabled="true" aria-describedby={createDisabledId}>
-            Créer une histoire
-          </Button>
-          <p
-            id={createDisabledId}
-            className="story-collection__empty-reason"
-          >
-            Création d'histoire indisponible pour l'instant.
-          </p>
+          {onCreateStoryRequest ? (
+            <Button variant="primary" onClick={onCreateStoryRequest}>
+              Créer une histoire
+            </Button>
+          ) : (
+            <>
+              <Button aria-disabled="true" aria-describedby={createDisabledId}>
+                Créer une histoire
+              </Button>
+              <p
+                id={createDisabledId}
+                className="story-collection__empty-reason"
+              >
+                Création d'histoire indisponible pour l'instant.
+              </p>
+            </>
+          )}
         </section>
       ) : null}
 
@@ -206,6 +236,7 @@ export function StoryCollection({
               <StoryCard
                 story={story}
                 isSelected={selectedStoryIds.has(story.id)}
+                selectionSize={selectedCount}
                 onSelect={handleSelect}
                 onOpen={handleOpen}
               />

@@ -67,6 +67,12 @@ Les quatre éléments ci-dessous relèvent d'un futur travail de release hardeni
 
 Quand les quatre sont livrés, mettre à jour cette page : supprimer la section « Manual build procedure » au profit d'un renvoi vers `build-release.yml`, et déplacer la section « Manual posture » dans un encart historique.
 
+## Local persistence footprint
+
+La persistance locale du brouillon utilisateur repose sur SQLite embarqué (via `rusqlite` compilé en `bundled`). Le fichier `rustory.sqlite` est créé et lu dans le répertoire `app_data_dir` résolu par Tauri v2, spécifique à chaque plateforme. Les migrations SQL vivent dans [`src-tauri/migrations/`](../src-tauri/migrations/) et sont appliquées à chaque démarrage, en mode idempotent via une table `schema_migrations`.
+
+Le mode journal `WAL` est activé au premier `open_at`, ce qui produit deux fichiers annexes au voisinage de `rustory.sqlite` : `rustory.sqlite-wal` et `rustory.sqlite-shm`. Ces trois fichiers font partie de l'état local de l'application et doivent rester strictement dans `app_data_dir` — jamais dans le repo, jamais dans un dossier partagé entre utilisateurs.
+
 ## Failure-mode guardrails
 
 Même en livraison manuelle, ne **jamais** :

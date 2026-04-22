@@ -11,6 +11,8 @@ export interface FieldProps {
   placeholder?: string;
   "aria-describedby"?: string;
   autoFocus?: boolean;
+  onKeyDown?: React.KeyboardEventHandler<HTMLInputElement>;
+  inputRef?: React.Ref<HTMLInputElement>;
 }
 
 /**
@@ -25,6 +27,8 @@ export function Field({
   onChange,
   placeholder,
   autoFocus,
+  onKeyDown,
+  inputRef,
   ...rest
 }: FieldProps): React.JSX.Element {
   return (
@@ -34,12 +38,14 @@ export function Field({
       </label>
       <input
         id={id}
+        ref={inputRef}
         className="ds-field__input"
         type={type}
         value={value}
         placeholder={placeholder}
         autoFocus={autoFocus}
         onChange={(event) => onChange(event.target.value)}
+        onKeyDown={onKeyDown}
         aria-describedby={rest["aria-describedby"]}
       />
     </div>

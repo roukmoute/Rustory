@@ -8,6 +8,7 @@
 export type AppErrorCode =
   | "LOCAL_STORAGE_UNAVAILABLE"
   | "LIBRARY_INCONSISTENT"
+  | "INVALID_STORY_TITLE"
   | "UNKNOWN";
 
 export interface AppError {

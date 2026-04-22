@@ -19,6 +19,11 @@ dist-ssr
 # Local development artifact directory
 .agents/
 
+# Local SQLite runtime state (lives in app_data_dir, never in the repo)
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

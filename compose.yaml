@@ -50,6 +50,12 @@ services:
       - rustory-cargo-registry:/usr/local/cargo/registry
       - rustory-cargo-git:/usr/local/cargo/git
       - rustory-cargo-target:/workspace/src-tauri/target
+      # Persist the Tauri `app_data_dir` across ephemeral `docker compose run`
+      # invocations. Without this volume every restart spawns a fresh container
+      # whose `~/.local/share` is empty, so SQLite drafts never survive. The
+      # named volume keeps `rustory.sqlite` on the host Docker engine between
+      # sessions while staying scoped to this service.
+      - rustory-app-data:/root/.local/share
     devices:
       - /dev/dri:/dev/dri
     command: ["pnpm", "tauri", "dev"]
@@ -58,3 +64,4 @@ volumes:
   rustory-cargo-registry:
   rustory-cargo-git:
   rustory-cargo-target:
+  rustory-app-data:

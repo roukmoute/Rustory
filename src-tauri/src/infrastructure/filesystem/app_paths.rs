@@ -7,6 +7,18 @@ use tauri::{AppHandle, Manager};
 
 use crate::domain::shared::AppError;
 
+/// Canonical filename for the local SQLite store. Lives inside the Tauri
+/// `app_data_dir` so OS packaging rules about per-user state are honored by
+/// construction.
+pub const DB_FILENAME: &str = "rustory.sqlite";
+
+/// Resolve the SQLite database path for a given `app_data_dir`. Kept pure
+/// (no I/O, no creation) so integration tests can target a `TempDir`
+/// without spinning up a Tauri runtime.
+pub fn resolve_db_path(app_data_dir: &Path) -> PathBuf {
+    app_data_dir.join(DB_FILENAME)
+}
+
 const WRITE_CHECK_PREFIX: &str = ".rustory-write-check-";
 
 /// Monotonically increasing counter used as a last-resort entropy source for

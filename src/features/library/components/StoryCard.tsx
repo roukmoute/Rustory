@@ -10,6 +10,11 @@ export type StoryCardSelectionMode = "replace" | "toggle";
 export interface StoryCardProps {
   story: StoryCardDto;
   isSelected: boolean;
+  /** Total number of selected cards in the collection. Needed so a plain
+   *  click on the single selected card can deselect it, while preserving
+   *  the no-op behavior when a multi-selection is in play (avoids a
+   *  multi-select collapse on the first click of a double-click). */
+  selectionSize?: number;
   onSelect: (id: string, mode: StoryCardSelectionMode) => void;
   onOpen: (id: string) => void;
 }
@@ -26,6 +31,7 @@ export interface StoryCardProps {
 export function StoryCard({
   story,
   isSelected,
+  selectionSize = 0,
   onSelect,
   onOpen,
 }: StoryCardProps): React.JSX.Element {
@@ -36,14 +42,22 @@ export function StoryCard({
       event.preventDefault();
       return;
     }
-    // A click on an already-selected card is a no-op. This keeps a
-    // multi-selection intact when the user starts a double-click on one of
-    // the selected cards — the first click would otherwise collapse the
-    // selection to a singleton before the dblclick fires.
-    if (isSelected && !event.metaKey && !event.ctrlKey) return;
-    const mode: StoryCardSelectionMode =
-      event.metaKey || event.ctrlKey ? "toggle" : "replace";
-    onSelect(story.id, mode);
+    if (event.metaKey || event.ctrlKey) {
+      onSelect(story.id, "toggle");
+      return;
+    }
+    // Preserve a multi-selection against a stray first click of a
+    // double-click sequence: on the already-selected card, a plain click
+    // stays a no-op so the pending dblclick can still fire.
+    if (isSelected && selectionSize > 1) return;
+    // On a single-selected card, a plain click toggles the selection off.
+    // Users expect a click to be the inverse of itself — forcing Ctrl+click
+    // just to deselect surprises anyone who hasn't learned the shortcut.
+    if (isSelected && selectionSize === 1) {
+      onSelect(story.id, "toggle");
+      return;
+    }
+    onSelect(story.id, "replace");
   };
 
   const handleDoubleClick = (event: React.MouseEvent<HTMLDivElement>): void => {
@@ -90,13 +104,12 @@ export function StoryCard({
         onDoubleClick={handleDoubleClick}
         onKeyDown={handleKeyDown}
       >
-        <span className="story-card__marker" aria-hidden="true">
-          {isSelected ? "✓" : ""}
-        </span>
+        {isSelected ? (
+          <span className="story-card__marker" aria-hidden="true">
+            ✓
+          </span>
+        ) : null}
         <h3 className="story-card__title">{story.title}</h3>
-        <span className="story-card__meta" aria-label="Identifiant court">
-          {story.id.slice(0, 8)}
-        </span>
       </div>
     </SurfacePanel>
   );

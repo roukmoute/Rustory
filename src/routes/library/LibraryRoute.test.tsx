@@ -63,7 +63,7 @@ describe("<LibraryRoute />", () => {
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
 
-  it("shows an actionable empty state with a keyboard-reachable disabled CTA", async () => {
+  it("shows an actionable empty state with active Créer CTAs that open the dialog", async () => {
     mockGet.mockResolvedValueOnce({ stories: [] });
     renderLibrary();
 
@@ -73,17 +73,22 @@ describe("<LibraryRoute />", () => {
       }),
     ).toBeInTheDocument();
 
-    const primary = screen.getByRole("button", {
+    // Two entry points into the create flow are exposed: the header CTA
+    // and the one inside the empty-state region. Both are keyboard
+    // reachable and neither is disabled when the library is ready.
+    const primaryCtas = screen.getAllByRole("button", {
       name: /créer une histoire/i,
     });
-    expect(primary).not.toBeDisabled();
-    expect(primary).toHaveAttribute("aria-disabled", "true");
-
-    const describedBy = primary.getAttribute("aria-describedby");
-    expect(describedBy).toBeTruthy();
-    const reason = document.getElementById(describedBy as string);
-    expect(reason).toHaveTextContent(/création d'histoire indisponible/i);
-    expect(reason?.textContent).not.toMatch(/story\s*1/i);
+    expect(primaryCtas).toHaveLength(2);
+    for (const cta of primaryCtas) {
+      expect(cta).not.toBeDisabled();
+      expect(cta).not.toHaveAttribute("aria-disabled", "true");
+    }
+    // The legacy "indisponible" reason must not be displayed anymore when
+    // a handler is wired — the UI cannot be both actionable and reason-gated.
+    expect(
+      screen.queryByText(/création d'histoire indisponible/i),
+    ).not.toBeInTheDocument();
   });
 
   it("shows a localized error and a Réessayer button when storage init fails", async () => {
@@ -502,6 +507,73 @@ describe("<LibraryRoute />", () => {
       ),
     );
     expect(useLibraryShell.getState().selectedStoryIds.size).toBe(0);
+  });
+
+  it("opens the Créer dialog when the header CTA is pressed", async () => {
+    const user = userEvent.setup();
+    mockGet.mockResolvedValueOnce({
+      stories: [{ id: "s1", title: "Le soleil" }],
+    });
+    renderLibrary();
+
+    // Wait for the library to render so the header CTA is mounted.
+    await screen.findByRole("button", { name: /le soleil/i });
+    const headerCta = screen.getByRole("button", {
+      name: /créer une histoire/i,
+    });
+    expect(
+      screen.queryByRole("dialog", { name: /créer une histoire/i }),
+    ).not.toBeInTheDocument();
+    await user.click(headerCta);
+    const dialog = await screen.findByRole("dialog", {
+      name: /créer une histoire/i,
+    });
+    expect(within(dialog).getByLabelText(/^titre$/i)).toBeInTheDocument();
+  });
+
+  it("after a successful create_story, invalidates the cache and navigates to /story/:id/edit", async () => {
+    const user = userEvent.setup();
+    // First fetch returns an empty library; the second fetch — triggered
+    // after invalidation — returns the freshly created story.
+    mockGet
+      .mockResolvedValueOnce({ stories: [] })
+      .mockResolvedValueOnce({
+        stories: [{ id: "new-id", title: "Mon histoire" }],
+      });
+
+    const storyModule = await import("../../ipc/commands/story");
+    const createStorySpy = vi.spyOn(storyModule, "createStory");
+    createStorySpy.mockResolvedValueOnce({
+      id: "new-id",
+      title: "Mon histoire",
+    });
+
+    try {
+      renderLibrary();
+      await screen.findByRole("heading", {
+        name: /ta bibliothèque est vide/i,
+      });
+
+      const creates = screen.getAllByRole("button", {
+        name: /créer une histoire/i,
+      });
+      await user.click(creates[0]);
+
+      const dialog = await screen.findByRole("dialog", {
+        name: /créer une histoire/i,
+      });
+      await user.type(within(dialog).getByLabelText(/^titre$/i), "Mon histoire");
+      await user.click(within(dialog).getByRole("button", { name: /^créer$/i }));
+
+      await waitFor(() =>
+        expect(createStorySpy).toHaveBeenCalledWith({
+          title: "Mon histoire",
+        }),
+      );
+      await screen.findByTestId("story-edit-stub");
+    } finally {
+      createStorySpy.mockRestore();
+    }
   });
 
   it("never leaks internal planning jargon in the library DOM", async () => {
