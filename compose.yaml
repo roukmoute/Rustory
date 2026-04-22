@@ -5,10 +5,15 @@
 # `src-tauri` crate. This keeps contributor hosts free of the GTK / WebKitGTK
 # toolchain while still letting `cargo test` produce real results.
 #
+# The `tauri-dev` service uses the same native toolchain plus Node/pnpm to run
+# the desktop app through X11 without installing GTK/WebKitGTK headers on the
+# host.
+#
 # Typical usage:
 #   docker compose run --rm rust-dev cargo test
 #   docker compose run --rm rust-dev cargo check --tests
 #   docker compose run --rm rust-dev cargo clippy --all-targets
+#   docker compose run --rm -e DISPLAY tauri-dev
 #
 # Frontend (Vitest / pnpm) keeps running on the host — see README.
 
@@ -17,6 +22,7 @@ services:
     build:
       context: .
       dockerfile: docker/Dockerfile.rust-dev
+      target: rust-dev
     image: rustory-rust-dev:local
     working_dir: /workspace/src-tauri
     volumes:
@@ -27,6 +33,26 @@ services:
     # Run interactively by default — override with `docker compose run` to
     # pass arbitrary cargo subcommands.
     command: ["cargo", "test"]
+
+  tauri-dev:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.rust-dev
+      target: tauri-dev
+    image: rustory-tauri-dev:local
+    working_dir: /workspace
+    environment:
+      DISPLAY: ${DISPLAY}
+      NO_AT_BRIDGE: "1"
+    volumes:
+      - .:/workspace
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw
+      - rustory-cargo-registry:/usr/local/cargo/registry
+      - rustory-cargo-git:/usr/local/cargo/git
+      - rustory-cargo-target:/workspace/src-tauri/target
+    devices:
+      - /dev/dri:/dev/dri
+    command: ["pnpm", "tauri", "dev"]
 
 volumes:
   rustory-cargo-registry:

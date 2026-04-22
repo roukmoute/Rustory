@@ -1,14 +1,14 @@
-# Reproducible Rust + Tauri v2 build environment for local `cargo` commands.
+# Reproducible Rust + Tauri v2 build environments.
 #
-# Why this image exists: compiling the `src-tauri` crate requires the GTK /
+# Why these images exist: compiling the `src-tauri` crate requires the GTK /
 # WebKitGTK / libsoup / appindicator / rsvg / xdo development headers plus
 # `pkg-config`. Installing them on every contributor's host is fragile, so we
-# run `cargo check|build|test` inside this container instead.
+# run the native Linux toolchain inside containers instead.
 #
-# The image intentionally does NOT install Node.js or pnpm: frontend tooling
-# runs on the host. Tauri runtime (webview) is NOT exercised here either —
-# only the Rust crate is compiled and its unit/integration tests are executed.
-FROM rust:1.95-bookworm
+# Targets:
+# - rust-dev: Rust/Cargo only, used by local verification commands.
+# - tauri-dev: rust-dev plus Node/pnpm, used by `tauri dev` over X11.
+FROM rust:1.95-bookworm AS rust-tauri-base
 
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -36,3 +36,18 @@ RUN rustup component add rustfmt clippy
 # Cargo caches mounted as named volumes from docker-compose; pre-creating the
 # target directory keeps permissions aligned with the non-root `cargo` user.
 WORKDIR /workspace
+
+FROM rust-tauri-base AS rust-dev
+
+FROM node:20-bookworm AS node-runtime
+
+FROM rust-tauri-base AS tauri-dev
+
+# Copy the Node.js toolchain (node + npm) from the official image. We bypass
+# corepack because its activation pipeline assumes a writable ~/.cache layout
+# that does not survive a cross-stage `COPY --from`.
+COPY --from=node-runtime /usr/local /usr/local
+
+ENV PATH="/workspace/node_modules/.bin:${PATH}"
+
+RUN npm install -g pnpm@10.28.2

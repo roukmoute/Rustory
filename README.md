@@ -11,44 +11,69 @@ Local-first desktop companion for Lunii and other supported devices.
 
 ## Prerequisites
 
-- Node.js ≥ 20 and [pnpm](https://pnpm.io/) (project uses `pnpm-lock.yaml`)
-- Rust stable ≥ 1.95 on the host for `pnpm tauri dev` — the Tauri v2 dependency
-  tree requires the `edition2024` feature. The Docker dev image pins the same
-  version (`rust:1.95-bookworm`, see `docker/Dockerfile.rust-dev`).
-- Docker + Docker Compose (optional — used to run Rust tests without touching host GTK/WebKitGTK libs)
+- **Required**
+  - Node.js ≥ 20 and [pnpm](https://pnpm.io/) on the host (project uses
+    `pnpm-lock.yaml`, pinned via `package.json#packageManager`).
+  - Docker + Docker Compose — reproducible containers for Rust verification
+    commands and for running the desktop app over X11 without polluting the
+    host with GTK / WebKitGTK headers.
+- **Optional (only if you want to run `pnpm tauri dev` natively on the host)**
+  - Rust stable ≥ 1.95 (Tauri v2 needs `edition2024`). The `tauri-dev` image
+    pins the same version (`rust:1.95-bookworm`).
+  - Native Linux build deps: `pkg-config libwebkit2gtk-4.1-dev
+    libjavascriptcoregtk-4.1-dev libglib2.0-dev libgtk-3-dev librsvg2-dev
+    libayatana-appindicator3-dev libxdo-dev libssl-dev build-essential`.
 
 ## Getting started
 
-Install the frontend dependencies and launch the desktop app:
+Install the frontend dependencies, then launch the desktop app through the
+X11-enabled Docker service (no host GTK/WebKitGTK needed):
 
 ```bash
 pnpm install
+pnpm tauri:dev:docker
+```
+
+The `tauri:dev:docker` script handles the X11 authorisation dance for you:
+it runs `xhost +SI:localuser:root` before starting the container and revokes
+the grant on exit (success or failure) so the host never stays permissive.
+If you have the native build deps installed on the host and prefer a direct
+run:
+
+```bash
 pnpm tauri dev
 ```
 
 ## Commands
 
 ```bash
-# Frontend
+# Frontend (host)
 pnpm test          # Vitest (unit + component + IPC contract tests)
 pnpm typecheck     # TypeScript strict check
 pnpm build         # Production build of the frontend bundle
 
 # Tauri
-pnpm tauri dev     # Launch the desktop app in dev mode
+pnpm tauri:dev:docker
+                   # Launch the desktop app through Docker/X11 on Linux
+pnpm tauri dev     # Launch natively (requires host GTK/WebKitGTK)
 pnpm tauri build   # Produce a local desktop bundle — manual delivery only
                    # for now, see docs/release-runbook.md
 ```
 
-## Rust tests via Docker
+## Tauri and Rust via Docker
 
 Compiling the `src-tauri` crate requires the WebKitGTK / GTK / libsoup / rsvg /
 appindicator development headers on Linux. To avoid polluting contributor
-hosts, a `rust-dev` Compose service provides a reproducible Rust + Tauri build
-environment.
+hosts, [`compose.yaml`](compose.yaml) declares two reproducible services:
+
+- `rust-dev` — Rust/Cargo only, used by local verification commands
+  (`cargo check`, `cargo test`, `cargo fmt`, `cargo clippy`).
+- `tauri-dev` — `rust-dev` plus Node.js 20 + pnpm, used by `pnpm tauri dev`
+  with X11 forwarding (`/tmp/.X11-unix` bind-mount) and `/dev/dri` GPU
+  access.
 
 ```bash
-# Build the image once
+# Build the Cargo-only image once
 docker compose build rust-dev
 
 # Run all Rust tests (unit + integration + contract)
@@ -56,10 +81,16 @@ docker compose run --rm rust-dev cargo test
 
 # Quick type-check only
 docker compose run --rm rust-dev cargo check --tests
+
+# Build and launch the GUI dev image (pnpm tauri:dev:docker wraps the
+# xhost +/- dance around the `docker compose run` call)
+docker compose build tauri-dev
+pnpm tauri:dev:docker
 ```
 
 Cargo caches (`registry/`, `git/`, `target/`) live in named volumes so rebuilds
-stay fast.
+stay fast. `node_modules/` is shared from the host through the `.:/workspace`
+bind-mount — run `pnpm install` once on the host before the first GUI launch.
 
 ## Continuous verification
 

@@ -9,6 +9,7 @@
     "build": "tsc && vite build",
     "preview": "vite preview",
     "tauri": "tauri",
+    "tauri:dev:docker": "xhost +SI:localuser:root >/dev/null && { docker compose run --rm -e DISPLAY tauri-dev; status=$?; xhost -SI:localuser:root >/dev/null; exit $status; }",
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit"
