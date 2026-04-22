@@ -1,118 +1,162 @@
 import type React from "react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef } from "react";
+import { useNavigate } from "react-router-dom";
 
+import { LibraryErrorBanner } from "../../features/library/components/LibraryErrorBanner";
 import { LibraryFiltersNav } from "../../features/library/components/LibraryFiltersNav";
 import { LuniiDecisionPanel } from "../../features/library/components/LuniiDecisionPanel";
 import { StoryCollection } from "../../features/library/components/StoryCollection";
-import { getLibraryOverview } from "../../ipc/commands/library";
+import { useLibraryOverview } from "../../features/library/hooks/use-library-overview";
 import { LibraryLayout } from "../../shell/layout/LibraryLayout";
-import { toAppError, type AppError } from "../../shared/errors/app-error";
-import {
-  isLibraryOverviewDto,
-  type LibraryOverviewDto,
-} from "../../shared/ipc-contracts/library";
-import { Button } from "../../shared/ui";
-import "./LibraryRoute.css";
-
-type LibraryState =
-  | { kind: "loading" }
-  | { kind: "ready"; overview: LibraryOverviewDto }
-  | { kind: "error"; error: AppError };
-
-const MALFORMED_OVERVIEW_ERROR: AppError = {
-  code: "UNKNOWN",
-  message:
-    "Rustory a reçu une réponse inattendue pour la bibliothèque locale.",
-  userAction:
-    "Relance l'application. Si le problème persiste, signale-le avec les traces locales.",
-  details: null,
-};
-
-interface LibraryErrorBannerProps {
-  error: AppError;
-  onRetry: () => void;
-}
-
-function LibraryErrorBanner({
-  error,
-  onRetry,
-}: LibraryErrorBannerProps): React.JSX.Element {
-  // `role="alert"` already implies `aria-live="assertive"` — mixing it with
-  // `polite` produces contradictory behavior on several screen readers.
-  return (
-    <section className="library-route__error" role="alert">
-      <p className="library-route__error-badge" aria-hidden="true">
-        !
-      </p>
-      <div className="library-route__error-body">
-        <h1 className="library-route__error-title">
-          Bibliothèque indisponible
-        </h1>
-        <p className="library-route__error-message">{error.message}</p>
-        {error.userAction ? (
-          <p className="library-route__error-action">{error.userAction}</p>
-        ) : null}
-        <Button variant="secondary" onClick={onRetry}>
-          Réessayer
-        </Button>
-      </div>
-    </section>
-  );
-}
+import { useLibraryShell } from "../../shell/state/library-shell-store";
 
 export function LibraryRoute(): React.JSX.Element {
-  const [state, setState] = useState<LibraryState>({ kind: "loading" });
-  // Guards against late IPC responses landing after unmount / re-mount
-  // (StrictMode double-invokes effects in dev, and the user may press
-  // Réessayer before a previous call resolves).
-  const activeCallRef = useRef(0);
-  const mountedRef = useRef(true);
+  const { state, retry } = useLibraryOverview();
+  const selectedStoryIds = useLibraryShell((s) => s.selectedStoryIds);
+  const selectStory = useLibraryShell((s) => s.selectStory);
+  const pruneSelection = useLibraryShell((s) => s.pruneSelection);
+  const query = useLibraryShell((s) => s.query);
+  const sort = useLibraryShell((s) => s.sort);
+  const setQuery = useLibraryShell((s) => s.setQuery);
+  const setSort = useLibraryShell((s) => s.setSort);
+  const resetFilters = useLibraryShell((s) => s.resetFilters);
+  const navigate = useNavigate();
 
-  const load = useCallback(() => {
-    const callId = ++activeCallRef.current;
-    setState({ kind: "loading" });
+  const overview = state.kind === "ready" ? state.overview : null;
 
-    getLibraryOverview()
-      .then((overview) => {
-        if (!mountedRef.current || callId !== activeCallRef.current) return;
-        if (!isLibraryOverviewDto(overview)) {
-          setState({
-            kind: "error",
-            error: MALFORMED_OVERVIEW_ERROR,
-          });
-          return;
-        }
-        setState({ kind: "ready", overview });
-      })
-      .catch((err) => {
-        if (!mountedRef.current || callId !== activeCallRef.current) return;
-        setState({ kind: "error", error: toAppError(err) });
-      });
-  }, []);
+  // Snapshot the ids present in the current overview. Used both to derive
+  // the render-time "present" selection and to drive pruneSelection: when
+  // this ref changes value (not identity), a fresh overview has landed.
+  const presentIdsRef = useRef<ReadonlySet<string>>(new Set());
+  const presentIds = useMemo(() => {
+    if (!overview) return presentIdsRef.current;
+    const next = new Set(overview.stories.map((s) => s.id));
+    presentIdsRef.current = next;
+    return next;
+  }, [overview]);
 
+  // Prune the store's selection every time a fresh overview lands. Depending
+  // on `selectedStoryIds` here would feedback-loop this effect; reading it
+  // via the latest-snapshot helper also avoids racing with concurrent
+  // `selectStory` dispatches — we pass the freshest value Zustand has seen
+  // at the time the effect runs (not the render-time snapshot).
   useEffect(() => {
-    mountedRef.current = true;
-    load();
-    return () => {
-      mountedRef.current = false;
-    };
-  }, [load]);
+    if (!overview) return;
+    pruneSelection(presentIds);
+  }, [overview, presentIds, pruneSelection]);
 
-  const center =
-    state.kind === "error" ? (
-      <LibraryErrorBanner error={state.error} onRetry={load} />
-    ) : (
-      <StoryCollection
-        stories={state.kind === "ready" ? state.overview.stories : []}
-        isLoading={state.kind === "loading"}
-      />
-    );
+  // Derive a "present selection" for the same render that reads the fresh
+  // overview: if a stored id is no longer in the library, we MUST NOT let
+  // it activate Éditer before the prune effect flushes on the next tick.
+  const presentSelectedIds = useMemo(() => {
+    if (!overview) return selectedStoryIds;
+    if ([...selectedStoryIds].every((id) => presentIds.has(id))) {
+      return selectedStoryIds;
+    }
+    return new Set([...selectedStoryIds].filter((id) => presentIds.has(id)));
+  }, [overview, selectedStoryIds, presentIds]);
+
+  const handleOpenStory = useMemo(
+    () => (id: string) => {
+      // `replace` keeps one library entry in history instead of stacking a
+      // new one at every open — back button returns to the true previous
+      // context, not to the library-we-just-left.
+      navigate(`/story/${encodeURIComponent(id)}/edit`, { replace: true });
+    },
+    [navigate],
+  );
+
+  const handleEditSelected = (): void => {
+    if (presentSelectedIds.size !== 1) return;
+    const [id] = presentSelectedIds;
+    handleOpenStory(id);
+  };
+
+  const center = renderCenter(
+    state,
+    retry,
+    presentSelectedIds,
+    selectStory,
+    handleOpenStory,
+    query,
+    sort,
+    setQuery,
+    setSort,
+    resetFilters,
+  );
 
   return (
     <LibraryLayout
       leftNav={<LibraryFiltersNav />}
       center={center}
-      rightPanel={<LuniiDecisionPanel deviceState="absent" />}
+      rightPanel={
+        <LuniiDecisionPanel
+          deviceState="absent"
+          selectedCount={presentSelectedIds.size}
+          onEdit={handleEditSelected}
+        />
+      }
     />
   );
+}
+
+type LibraryState = ReturnType<typeof useLibraryOverview>["state"];
+
+function renderCenter(
+  state: LibraryState,
+  retry: () => void,
+  selectedStoryIds: ReadonlySet<string>,
+  onSelectStory: (id: string, mode: "replace" | "toggle") => void,
+  onOpenStory: (id: string) => void,
+  query: string,
+  sort: "titre-asc" | "titre-desc",
+  onQueryChange: (q: string) => void,
+  onSortChange: (s: "titre-asc" | "titre-desc") => void,
+  onResetFilters: () => void,
+): React.JSX.Element {
+  switch (state.kind) {
+    case "error": {
+      const title =
+        state.error.code === "LIBRARY_INCONSISTENT"
+          ? "Bibliothèque incohérente, recharge nécessaire"
+          : "Bibliothèque indisponible";
+      return (
+        <LibraryErrorBanner
+          error={state.error}
+          onRetry={retry}
+          title={title}
+        />
+      );
+    }
+    case "loading":
+      return (
+        <StoryCollection
+          stories={[]}
+          isLoading={true}
+          query={query}
+          sort={sort}
+          onQueryChange={onQueryChange}
+          onSortChange={onSortChange}
+          onResetFilters={onResetFilters}
+          selectedStoryIds={selectedStoryIds}
+          onSelectStory={onSelectStory}
+          onOpenStory={onOpenStory}
+        />
+      );
+    case "ready":
+      return (
+        <StoryCollection
+          stories={state.overview.stories}
+          isLoading={false}
+          query={query}
+          sort={sort}
+          onQueryChange={onQueryChange}
+          onSortChange={onSortChange}
+          onResetFilters={onResetFilters}
+          selectedStoryIds={selectedStoryIds}
+          onSelectStory={onSelectStory}
+          onOpenStory={onOpenStory}
+        />
+      );
+  }
 }

@@ -8,6 +8,7 @@ use serde::Serialize;
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum AppErrorCode {
     LocalStorageUnavailable,
+    LibraryInconsistent,
 }
 
 /// Normalized application error crossing the IPC boundary.
@@ -31,6 +32,18 @@ impl AppError {
     ) -> Self {
         Self {
             code: AppErrorCode::LocalStorageUnavailable,
+            message: message.into(),
+            user_action: Some(user_action.into()),
+            details: None,
+        }
+    }
+
+    pub fn library_inconsistent(
+        message: impl Into<String>,
+        user_action: impl Into<String>,
+    ) -> Self {
+        Self {
+            code: AppErrorCode::LibraryInconsistent,
             message: message.into(),
             user_action: Some(user_action.into()),
             details: None,
@@ -71,5 +84,12 @@ mod tests {
             .with_details(serde_json::json!({ "source": "unit-test" }));
         let v = serde_json::to_value(&err).expect("serialize");
         assert_eq!(v["details"]["source"], "unit-test");
+    }
+
+    #[test]
+    fn library_inconsistent_serializes_with_stable_code() {
+        let err = AppError::library_inconsistent("msg", "action");
+        let v = serde_json::to_value(&err).expect("serialize");
+        assert_eq!(v["code"], "LIBRARY_INCONSISTENT");
     }
 }

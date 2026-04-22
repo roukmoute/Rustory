@@ -16,6 +16,17 @@ export const LIBRARY_OVERVIEW_TIMEOUT_ERROR = {
 } as const;
 
 /**
+ * Cancelable handle returned by {@link getLibraryOverview}. Callers that
+ * unmount before the IPC settles MUST call `cancel()` so the timer guard is
+ * cleared — otherwise a long-lived timer would fire after unmount and
+ * accumulate timers across route switches.
+ */
+export interface LibraryOverviewCall {
+  promise: Promise<LibraryOverviewDto>;
+  cancel: () => void;
+}
+
+/**
  * Read the current library overview from the Rust core.
  *
  * Resolves with the typed DTO once the managed local storage is reachable,
@@ -25,20 +36,40 @@ export const LIBRARY_OVERVIEW_TIMEOUT_ERROR = {
  *
  * Components MUST NOT call `invoke` directly — go through this facade so the
  * wire contract stays owned by `src/ipc/`.
+ *
+ * Returns a handle with a `cancel()` method so consumers can tear down the
+ * timer guard on unmount. Cancelling after resolution is a no-op.
  */
-export async function getLibraryOverview(
+export function getLibraryOverview(
   timeoutMs: number = LIBRARY_OVERVIEW_TIMEOUT_MS,
-): Promise<LibraryOverviewDto> {
+): LibraryOverviewCall {
   const call = invoke<LibraryOverviewDto>("get_library_overview");
 
   let timer: ReturnType<typeof setTimeout> | undefined;
+  let cancelled = false;
+
   const guard = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => reject(LIBRARY_OVERVIEW_TIMEOUT_ERROR), timeoutMs);
+    timer = setTimeout(() => {
+      timer = undefined;
+      if (cancelled) return;
+      reject(LIBRARY_OVERVIEW_TIMEOUT_ERROR);
+    }, timeoutMs);
   });
 
-  try {
-    return await Promise.race([call, guard]);
-  } finally {
-    if (timer !== undefined) clearTimeout(timer);
-  }
+  const promise = Promise.race([call, guard]).finally(() => {
+    if (timer !== undefined) {
+      clearTimeout(timer);
+      timer = undefined;
+    }
+  });
+
+  const cancel = (): void => {
+    cancelled = true;
+    if (timer !== undefined) {
+      clearTimeout(timer);
+      timer = undefined;
+    }
+  };
+
+  return { promise, cancel };
 }

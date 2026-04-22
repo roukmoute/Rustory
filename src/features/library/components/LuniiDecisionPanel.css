@@ -1,7 +1,7 @@
 .lunii-panel {
   display: flex;
   flex-direction: column;
-  gap: var(--space-3);
+  gap: var(--space-4);
 }
 
 .lunii-panel__title {
@@ -10,6 +10,13 @@
   font-weight: var(--font-weight-semibold);
   color: var(--color-text-primary);
   line-height: var(--line-height-tight);
+}
+
+.lunii-panel__selection,
+.lunii-panel__device {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
 }
 
 .lunii-panel__reason {

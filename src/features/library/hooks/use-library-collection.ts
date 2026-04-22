@@ -1,6 +1,7 @@
 import type { StoryCardDto } from "../../../shared/ipc-contracts/library";
+import type { LibrarySortKey } from "../../../shared/types/library-sort";
 
-export type LibrarySortKey = "titre-asc" | "titre-desc";
+export type { LibrarySortKey };
 
 export interface LibraryProjectionInput {
   stories: StoryCardDto[];

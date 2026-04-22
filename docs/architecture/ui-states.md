@@ -93,6 +93,9 @@ Preferred patterns:
 - `Relance indisponible: aucun brouillon préservé`
 - `Création d'histoire indisponible pour l'instant.`
 - `Filtres avancés à venir`
+- `Reprise indisponible: aucune histoire sélectionnée`
+- `Reprise indisponible: sélection multiple`
+- `Bibliothèque incohérente, recharge nécessaire`
 
 Avoid:
 
@@ -166,3 +169,48 @@ The MVP design system ships a closed core of foundation primitives in `src/share
 | `Toast` | Lightweight confirmation | `tone` typed to exclude `"error"` at compile time — critical errors never live in a toast alone |
 
 New shared primitives land here only when a motif has appeared at least three times with stable behavior (see UX spec — Core Set Boundary).
+
+## Library Selection Contract
+
+The library supports single and multi selection from the story collection. The contract below is authoritative — feature code MUST NOT invent alternative selection models.
+
+| Aspect | Value |
+| --- | --- |
+| Source of truth | `selectedStoryIds: ReadonlySet<string>` on the `libraryShell` store (`src/shell/state/library-shell-store.ts`) |
+| Persistence | None — selection never survives a restart (avoids stale truth after the app relaunches). |
+| Visibility vs selection | Filtering and sorting NEVER change selection. An off-screen selected id stays selected; the counter makes the distinction explicit (`X sur Y — Z sélectionnée(s)`). |
+| Purge rule | On every successful `getLibraryOverview` read, the route calls `pruneSelection(presentIds)` to drop ids absent from the fresh overview. The cause is always explicable ("l'histoire a disparu de la bibliothèque locale"). |
+| Non-color signal | Selected cards render a colored border, a visible textual prefix (`✓`) in the DOM and `aria-pressed="true"`. Selection survives grayscale and color-blindness checks. |
+| Wording | `Aucune histoire sélectionnée` · `1 histoire sélectionnée` · `N histoires sélectionnées`. Strict singular/plural — never `picked`, `checked`, `active`. |
+
+## Story Card Interaction Contract
+
+A `Story Card` is a `role="button" aria-pressed={selected}` focus stop. Interaction maps to:
+
+| Input | Effect |
+| --- | --- |
+| Click (no modifier) | `replace` — the card becomes the unique selection. |
+| `Ctrl+click` / `Cmd+click` | `toggle` — add or remove the card from the current selection. |
+| `Shift+click` | Not implemented in the MVP (deferred). |
+| Double-click | Open the edit route (`/story/:storyId/edit`). |
+| `Enter` on the focused card | Open the edit route. |
+| `Space` on the focused card | `toggle` the selection for that card. |
+| `Tab` / `Shift+Tab` | Linear traversal through the collection (no composite listbox keyboard model at this stage). |
+
+A click that lands outside a card (header, controls, empty space, other columns) MUST NOT modify the selection — UX-DR7 forbids silent disappearance of selection.
+
+## Library Routing Contract
+
+`React Router` is the sole source of truth for navigation; the Zustand shell store never mirrors the active route.
+
+| Path | Route | Purpose |
+| --- | --- | --- |
+| `/` | redirect to `/library` | Default entry point. |
+| `/library` | `LibraryRoute` | Three-column library context (see `Library Layout Contract`). |
+| `/story/:storyId/edit` | `StoryEditRoute` | Resume a `brouillon local` for a library-owned story. No device call, no mutation at this stage. |
+| `*` | redirect to `/library` | Unknown paths bounce back to the library. |
+
+Rules:
+
+- Returning to `/library` from `/story/:storyId/edit` preserves shell continuity (selection, filters) through the Zustand store — the URL does not carry that state.
+- New routes land here only when a real dominant-context switch appears. The `settings` route is not wired at this stage; add it when a specific need emerges.

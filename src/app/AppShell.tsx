@@ -1,17 +1,17 @@
 import type React from "react";
+import { Outlet } from "react-router-dom";
 
-import { LibraryRoute } from "../routes/library/LibraryRoute";
 import "./AppShell.css";
 
 /**
- * Root application shell. `LibraryRoute` owns its own layout (three-column
- * grid with semantic nav/main/aside regions), so this container stays
- * minimal and future routes will plug in here.
+ * Root application shell. Hosts routed contexts through `<Outlet />` — each
+ * route owns its own layout (library uses the 3-column grid, the edit route
+ * uses a single-column reading surface).
  */
 export function AppShell(): React.JSX.Element {
   return (
     <div className="app-shell">
-      <LibraryRoute />
+      <Outlet />
     </div>
   );
 }

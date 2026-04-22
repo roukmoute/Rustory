@@ -1,30 +1,235 @@
 import { render, screen } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
+import userEvent from "@testing-library/user-event";
+import { describe, expect, it, vi } from "vitest";
 
+import type { StoryCardDto } from "../../../shared/ipc-contracts/library";
 import { StoryCard } from "./StoryCard";
 
-describe("<StoryCard />", () => {
-  it("renders the title as the primary content and a truncated id as metadata", () => {
+const STORY: StoryCardDto = {
+  id: "abc123def456",
+  title: "Le soleil couchant",
+};
+
+describe("StoryCard", () => {
+  it("renders title, short id and is exposed as a button", () => {
     render(
-      <StoryCard story={{ id: "abcd1234-efgh", title: "Le soleil d'Éloi" }} />,
+      <StoryCard
+        story={STORY}
+        isSelected={false}
+        onSelect={vi.fn()}
+        onOpen={vi.fn()}
+      />,
     );
-    expect(
-      screen.getByRole("heading", { name: /le soleil d'éloi/i, level: 3 }),
-    ).toBeInTheDocument();
-    expect(screen.getByText("abcd1234")).toBeInTheDocument();
+
+    const button = screen.getByRole("button", { name: STORY.title });
+    expect(button).toHaveAttribute("tabindex", "0");
+    expect(button).toHaveAttribute("aria-pressed", "false");
+    expect(screen.getByText("abc123de")).toBeInTheDocument();
   });
 
-  it("does not expose any interactive button — selection/edit belong to a future iteration", () => {
+  it("click without modifier calls onSelect with replace", async () => {
+    const user = userEvent.setup();
+    const onSelect = vi.fn();
     render(
-      <StoryCard story={{ id: "id-1", title: "Titre" }} />,
+      <StoryCard
+        story={STORY}
+        isSelected={false}
+        onSelect={onSelect}
+        onOpen={vi.fn()}
+      />,
     );
-    expect(screen.queryByRole("button")).not.toBeInTheDocument();
-    expect(screen.queryByRole("link")).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: STORY.title }));
+    expect(onSelect).toHaveBeenCalledWith(STORY.id, "replace");
   });
 
-  it("exposes a keyboard-reachable group so Tab can reach the card from the library controls", () => {
-    render(<StoryCard story={{ id: "id-1", title: "Le soleil" }} />);
-    const group = screen.getByRole("group", { name: /le soleil/i });
-    expect(group).toHaveAttribute("tabindex", "0");
+  it("Ctrl+click calls onSelect with toggle", async () => {
+    const user = userEvent.setup();
+    const onSelect = vi.fn();
+    render(
+      <StoryCard
+        story={STORY}
+        isSelected={false}
+        onSelect={onSelect}
+        onOpen={vi.fn()}
+      />,
+    );
+
+    await user.keyboard("{Control>}");
+    await user.click(screen.getByRole("button", { name: STORY.title }));
+    await user.keyboard("{/Control}");
+    expect(onSelect).toHaveBeenCalledWith(STORY.id, "toggle");
+  });
+
+  it("double-click opens the story", async () => {
+    const user = userEvent.setup();
+    const onOpen = vi.fn();
+    render(
+      <StoryCard
+        story={STORY}
+        isSelected={false}
+        onSelect={vi.fn()}
+        onOpen={onOpen}
+      />,
+    );
+
+    await user.dblClick(screen.getByRole("button", { name: STORY.title }));
+    expect(onOpen).toHaveBeenCalledWith(STORY.id);
+  });
+
+  it("Space on the focused card toggles selection", async () => {
+    const user = userEvent.setup();
+    const onSelect = vi.fn();
+    render(
+      <StoryCard
+        story={STORY}
+        isSelected={false}
+        onSelect={onSelect}
+        onOpen={vi.fn()}
+      />,
+    );
+
+    const button = screen.getByRole("button", { name: STORY.title });
+    button.focus();
+    await user.keyboard(" ");
+    expect(onSelect).toHaveBeenCalledWith(STORY.id, "toggle");
+  });
+
+  it("Enter on the focused card opens the story", async () => {
+    const user = userEvent.setup();
+    const onOpen = vi.fn();
+    render(
+      <StoryCard
+        story={STORY}
+        isSelected={false}
+        onSelect={vi.fn()}
+        onOpen={onOpen}
+      />,
+    );
+
+    const button = screen.getByRole("button", { name: STORY.title });
+    button.focus();
+    await user.keyboard("{Enter}");
+    expect(onOpen).toHaveBeenCalledWith(STORY.id);
+  });
+
+  it("selected state ships aria-pressed + visible check glyph", () => {
+    render(
+      <StoryCard
+        story={STORY}
+        isSelected={true}
+        onSelect={vi.fn()}
+        onOpen={vi.fn()}
+      />,
+    );
+
+    const button = screen.getByRole("button", { name: STORY.title });
+    expect(button).toHaveAttribute("aria-pressed", "true");
+    // The marker glyph lives in the DOM (not only as ::before) so a grayscale
+    // render still shows the selection without relying on color.
+    expect(button.textContent).toContain("✓");
+  });
+
+  it("Shift+click does NOT call onSelect (range selection is out of MVP)", () => {
+    const onSelect = vi.fn();
+    render(
+      <StoryCard
+        story={STORY}
+        isSelected={false}
+        onSelect={onSelect}
+        onOpen={vi.fn()}
+      />,
+    );
+
+    const button = screen.getByRole("button", { name: STORY.title });
+    // Dispatch a real MouseEvent with shiftKey=true via the DOM — the
+    // userEvent v14 keyboard-modifier path does not consistently propagate
+    // shiftKey onto the synthesized pointer event in our setup.
+    button.dispatchEvent(
+      new MouseEvent("click", {
+        bubbles: true,
+        cancelable: true,
+        shiftKey: true,
+      }),
+    );
+    expect(onSelect).not.toHaveBeenCalled();
+  });
+
+  it("double-click never mutates the current selection (multi-selection stays intact)", async () => {
+    const user = userEvent.setup();
+    const onSelect = vi.fn();
+    const onOpen = vi.fn();
+    render(
+      <StoryCard
+        story={STORY}
+        isSelected={true}
+        onSelect={onSelect}
+        onOpen={onOpen}
+      />,
+    );
+
+    await user.dblClick(screen.getByRole("button", { name: STORY.title }));
+
+    // dblClick emits two click events; neither of them may call onSelect,
+    // otherwise a double-click on a multi-selected card would collapse the
+    // selection to a singleton before navigating.
+    expect(onSelect).not.toHaveBeenCalled();
+    expect(onOpen).toHaveBeenCalledWith(STORY.id);
+  });
+
+  it("held Space / Enter (key repeat) fires at most once — no flicker", async () => {
+    const user = userEvent.setup();
+    const onSelect = vi.fn();
+    const onOpen = vi.fn();
+    render(
+      <StoryCard
+        story={STORY}
+        isSelected={false}
+        onSelect={onSelect}
+        onOpen={onOpen}
+      />,
+    );
+
+    const button = screen.getByRole("button", { name: STORY.title });
+    button.focus();
+    // First, real keyboard event fires onSelect once.
+    await user.keyboard(" ");
+    expect(onSelect).toHaveBeenCalledTimes(1);
+
+    // Simulate an OS-level auto-repeat by dispatching a keydown with
+    // `repeat: true` — userEvent does not synthesize this flag, so we go
+    // through the raw DOM event path.
+    const repeatEvent = new KeyboardEvent("keydown", {
+      key: " ",
+      bubbles: true,
+      cancelable: true,
+    });
+    Object.defineProperty(repeatEvent, "repeat", { value: true });
+    button.dispatchEvent(repeatEvent);
+    expect(onSelect).toHaveBeenCalledTimes(1);
+
+    const repeatEnter = new KeyboardEvent("keydown", {
+      key: "Enter",
+      bubbles: true,
+      cancelable: true,
+    });
+    Object.defineProperty(repeatEnter, "repeat", { value: true });
+    button.dispatchEvent(repeatEnter);
+    expect(onOpen).not.toHaveBeenCalled();
+  });
+
+  it("tolerates very long titles without breaking the grid", () => {
+    const longTitle = "x".repeat(500);
+    render(
+      <StoryCard
+        story={{ id: "x1", title: longTitle }}
+        isSelected={false}
+        onSelect={vi.fn()}
+        onOpen={vi.fn()}
+      />,
+    );
+
+    const title = screen.getByRole("heading", { level: 3 });
+    expect(title).toHaveClass("story-card__title");
   });
 });

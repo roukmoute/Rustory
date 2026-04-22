@@ -1,11 +1,12 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
+import { RouterProvider } from "react-router-dom";
 
 import "./shared/ui/tokens.css";
-import { AppShell } from "./app/AppShell";
+import { router } from "./app/router";
 
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
   <React.StrictMode>
-    <AppShell />
+    <RouterProvider router={router} />
   </React.StrictMode>,
 );

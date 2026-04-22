@@ -5,7 +5,10 @@
  * stable discriminant the UI switches on; `message` and `userAction` are
  * already localized strings produced by the Rust side.
  */
-export type AppErrorCode = "LOCAL_STORAGE_UNAVAILABLE" | "UNKNOWN";
+export type AppErrorCode =
+  | "LOCAL_STORAGE_UNAVAILABLE"
+  | "LIBRARY_INCONSISTENT"
+  | "UNKNOWN";
 
 export interface AppError {
   code: AppErrorCode;

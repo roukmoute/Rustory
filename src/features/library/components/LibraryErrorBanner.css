@@ -1,4 +1,4 @@
-.library-route__error {
+.library-error-banner {
   display: flex;
   align-items: flex-start;
   gap: var(--space-3);
@@ -15,7 +15,7 @@
  * even under grayscale / color-blindness simulations. The colored left border
  * becomes redundant, which is the point (NFR21, UX-DR21).
  */
-.library-route__error-badge {
+.library-error-banner__badge {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -31,25 +31,25 @@
   flex-shrink: 0;
 }
 
-.library-route__error-body {
+.library-error-banner__body {
   display: flex;
   flex-direction: column;
   gap: var(--space-2);
 }
 
-.library-route__error-title {
+.library-error-banner__title {
   margin: 0;
   font-size: var(--font-size-h3);
   font-weight: var(--font-weight-semibold);
 }
 
-.library-route__error-message,
-.library-route__error-action {
+.library-error-banner__message,
+.library-error-banner__action {
   margin: 0;
   font-size: var(--font-size-body);
   line-height: var(--line-height-normal);
 }
 
-.library-route__error-action {
+.library-error-banner__action {
   color: var(--color-text-secondary);
 }

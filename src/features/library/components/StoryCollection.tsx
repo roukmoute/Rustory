@@ -1,5 +1,5 @@
 import type React from "react";
-import { useId, useMemo, useState } from "react";
+import { useId, useMemo } from "react";
 
 import type { StoryCardDto } from "../../../shared/ipc-contracts/library";
 import { Button, Field, ProgressIndicator } from "../../../shared/ui";
@@ -7,13 +7,21 @@ import {
   applyLibraryFilters,
   type LibrarySortKey,
 } from "../hooks/use-library-collection";
-import { StoryCard } from "./StoryCard";
+import { StoryCard, type StoryCardSelectionMode } from "./StoryCard";
 
 import "./StoryCollection.css";
 
 export interface StoryCollectionProps {
   stories: StoryCardDto[];
   isLoading: boolean;
+  query: string;
+  sort: LibrarySortKey;
+  onQueryChange: (query: string) => void;
+  onSortChange: (sort: LibrarySortKey) => void;
+  onResetFilters: () => void;
+  selectedStoryIds?: ReadonlySet<string>;
+  onSelectStory?: (id: string, mode: StoryCardSelectionMode) => void;
+  onOpenStory?: (id: string) => void;
 }
 
 type CollectionState =
@@ -23,7 +31,7 @@ type CollectionState =
   | { kind: "loaded"; visible: StoryCardDto[] };
 
 const SORT_VALUES = new Set<LibrarySortKey>(["titre-asc", "titre-desc"]);
-const DEFAULT_SORT: LibrarySortKey = "titre-asc";
+const EMPTY_SELECTION: ReadonlySet<string> = new Set();
 
 function isLibrarySortKey(value: string): value is LibrarySortKey {
   return (SORT_VALUES as Set<string>).has(value);
@@ -32,9 +40,15 @@ function isLibrarySortKey(value: string): value is LibrarySortKey {
 export function StoryCollection({
   stories,
   isLoading,
+  query,
+  sort,
+  onQueryChange,
+  onSortChange,
+  onResetFilters,
+  selectedStoryIds = EMPTY_SELECTION,
+  onSelectStory,
+  onOpenStory,
 }: StoryCollectionProps): React.JSX.Element {
-  const [query, setQuery] = useState("");
-  const [sort, setSort] = useState<LibrarySortKey>(DEFAULT_SORT);
   const titleId = useId();
   const searchId = useId();
   const sortId = useId();
@@ -56,9 +70,14 @@ export function StoryCollection({
         ? { kind: "filtered-empty" }
         : { kind: "loaded", visible };
 
-  const resetFilters = (): void => {
-    setQuery("");
-    setSort(DEFAULT_SORT);
+  const selectedCount = selectedStoryIds.size;
+
+  const handleSelect = (id: string, mode: StoryCardSelectionMode): void => {
+    onSelectStory?.(id, mode);
+  };
+
+  const handleOpen = (id: string): void => {
+    onOpenStory?.(id);
   };
 
   return (
@@ -73,7 +92,7 @@ export function StoryCollection({
             label="Rechercher une histoire"
             type="search"
             value={query}
-            onChange={setQuery}
+            onChange={onQueryChange}
             placeholder="Titre…"
           />
           <div className="story-collection__control">
@@ -87,7 +106,7 @@ export function StoryCollection({
               onChange={(event) => {
                 const next = event.target.value;
                 if (isLibrarySortKey(next)) {
-                  setSort(next);
+                  onSortChange(next);
                 }
               }}
             >
@@ -123,7 +142,7 @@ export function StoryCollection({
          * on every keystroke — rely on the status regions instead.
          */}
         <p className="story-collection__counter">
-          {countersLabel(stories.length, state)}
+          {countersLabel(stories.length, state, selectedCount)}
         </p>
       </header>
 
@@ -152,10 +171,7 @@ export function StoryCollection({
           <p className="story-collection__empty-hint">
             Crée ta première histoire pour la retrouver ici à chaque ouverture.
           </p>
-          <Button
-            aria-disabled="true"
-            aria-describedby={createDisabledId}
-          >
+          <Button aria-disabled="true" aria-describedby={createDisabledId}>
             Créer une histoire
           </Button>
           <p
@@ -173,13 +189,11 @@ export function StoryCollection({
           role="status"
           aria-live="polite"
         >
-          <h2 className="story-collection__empty-title">
-            Aucun résultat
-          </h2>
+          <h2 className="story-collection__empty-title">Aucun résultat</h2>
           <p className="story-collection__empty-hint">
             Aucune histoire ne correspond à ta recherche ou à tes filtres.
           </p>
-          <Button variant="secondary" onClick={resetFilters}>
+          <Button variant="secondary" onClick={onResetFilters}>
             Réinitialiser les filtres
           </Button>
         </section>
@@ -189,7 +203,12 @@ export function StoryCollection({
         <ul className="story-collection__list">
           {state.visible.map((story) => (
             <li key={story.id} className="story-collection__item">
-              <StoryCard story={story} />
+              <StoryCard
+                story={story}
+                isSelected={selectedStoryIds.has(story.id)}
+                onSelect={handleSelect}
+                onOpen={handleOpen}
+              />
             </li>
           ))}
         </ul>
@@ -198,11 +217,24 @@ export function StoryCollection({
   );
 }
 
-function countersLabel(total: number, state: CollectionState): string {
+function countersLabel(
+  total: number,
+  state: CollectionState,
+  selectedCount: number,
+): string {
   if (state.kind === "pending") return "Chargement en cours";
   if (state.kind === "loaded-empty") return "0 histoire";
-  if (state.kind === "filtered-empty") return `0 sur ${total}`;
+  const selectedClause =
+    selectedCount === 0
+      ? ""
+      : selectedCount === 1
+        ? " — 1 sélectionnée"
+        : ` — ${selectedCount} sélectionnées`;
+  if (state.kind === "filtered-empty") return `0 sur ${total}${selectedClause}`;
   const shown = state.visible.length;
-  if (shown === total) return `${total} histoire${total > 1 ? "s" : ""}`;
-  return `${shown} sur ${total}`;
+  const base =
+    shown === total
+      ? `${total} histoire${total > 1 ? "s" : ""}`
+      : `${shown} sur ${total}`;
+  return `${base}${selectedClause}`;
 }
