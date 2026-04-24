@@ -168,7 +168,7 @@ export function CreateStoryDialog({
       </p>
       {issue !== null && !isSubmitting ? (
         <p id={reasonId} className="create-story-dialog__reason">
-          {reasonFor(issue)}
+          {reasonFor(issue, { charCount })}
         </p>
       ) : null}
       {serverError !== null ? (

@@ -32,6 +32,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::library::get_library_overview,
             commands::story::create_story,
+            commands::story::get_story_detail,
+            commands::story::update_story,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

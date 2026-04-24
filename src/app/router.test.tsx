@@ -3,6 +3,7 @@ import { RouterProvider } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const getLibraryOverviewMock = vi.fn();
+const getStoryDetailMock = vi.fn();
 
 vi.mock("../ipc/commands/library", () => ({
   getLibraryOverview: () => ({
@@ -18,6 +19,12 @@ vi.mock("../ipc/commands/library", () => ({
   },
 }));
 
+vi.mock("../ipc/commands/story", () => ({
+  createStory: vi.fn(),
+  saveStory: vi.fn(),
+  getStoryDetail: (...args: unknown[]) => getStoryDetailMock(...args),
+}));
+
 import { createAppRouter } from "./router";
 
 describe("router", () => {
@@ -26,6 +33,18 @@ describe("router", () => {
     getLibraryOverviewMock.mockResolvedValue({
       stories: [{ id: "abc-123", title: "Le soleil" }],
     });
+    getStoryDetailMock.mockReset();
+    getStoryDetailMock.mockImplementation(({ storyId }: { storyId: string }) =>
+      Promise.resolve({
+        id: storyId,
+        title: "Le soleil",
+        schemaVersion: 1,
+        structureJson: '{"schemaVersion":1,"nodes":[]}',
+        contentChecksum: "a".repeat(64),
+        createdAt: "2026-04-23T09:00:00.000Z",
+        updatedAt: "2026-04-23T09:00:00.000Z",
+      }),
+    );
   });
 
   afterEach(() => {

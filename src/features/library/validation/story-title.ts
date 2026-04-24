@@ -54,12 +54,27 @@ function isDeniedFormattingCodePoint(code: number): boolean {
   );
 }
 
-export function reasonFor(issue: StoryTitleIssue): string {
+export interface ReasonContext {
+  /** Number of code points in the normalized title. Used to compute the
+   *  exact excess for the `too-long` reason so the user knows how many
+   *  characters they need to trim. */
+  charCount?: number;
+}
+
+export function reasonFor(
+  issue: StoryTitleIssue,
+  context: ReasonContext = {},
+): string {
   switch (issue) {
     case "empty":
       return "Création impossible: titre requis";
-    case "too-long":
-      return "Création impossible: titre trop long (120 caractères maximum)";
+    case "too-long": {
+      const excess = Math.max(
+        (context.charCount ?? MAX_STORY_TITLE_CHARS + 1) - MAX_STORY_TITLE_CHARS,
+        1,
+      );
+      return `Création impossible: titre trop long (${MAX_STORY_TITLE_CHARS} caractères maximum, ${excess} en trop)`;
+    }
     case "control-chars":
       return "Création impossible: titre contient des caractères non autorisés";
   }

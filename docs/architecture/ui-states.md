@@ -97,8 +97,21 @@ Preferred patterns:
 - `Reprise indisponible: sélection multiple`
 - `Bibliothèque incohérente, recharge nécessaire`
 - `Création impossible: titre requis`
-- `Création impossible: titre trop long (120 caractères maximum)`
+- `Création impossible: titre trop long (120 caractères maximum, N en trop)` — `N` is the exact excess (`chars - 120`, minimum `1`) computed both by the Rust domain and the TS mirror so the user sees how many code points to trim.
 - `Création impossible: titre contient des caractères non autorisés`
+- `Reprise indisponible: histoire introuvable`
+- `Enregistrement en échec: vérifie le disque local et réessaie.`
+
+Error payloads that surface in the autosave alert carry a stable
+`details.source` discriminator so support can triage the cause without
+parsing the user-facing message:
+
+- `sqlite_update` — transport failure on the UPDATE itself. `details.stage` is one of `begin_transaction`, `update`, `commit` and `details.kind` is one of `busy`, `locked`, `constraint_violation`, `other`. A `constraint_violation` is re-mapped to `INVALID_STORY_TITLE` so the same canonical reason text as the creation dialog is shown.
+- `story_missing` — the UPDATE matched zero rows (the id is no longer in the table). Surfaces as `LIBRARY_INCONSISTENT` with the canonical "Histoire introuvable" copy.
+- `story_duplicate` — the UPDATE matched more than one row (schema corruption: duplicate primary keys). Surfaces as `LIBRARY_INCONSISTENT` and includes `details.rowsAffected`.
+- `story_id_invalid` — the UPDATE or read received an empty or oversize id. `details.cause` is `empty` or `too_long`.
+- `sqlite_select` — transport failure on the detail read. No `stage` subdivision (the query is a single `SELECT`).
+- `system_clock_invalid` — `OffsetDateTime::format` refused to produce an ISO-8601 timestamp (system clock outside representable range).
 
 Avoid:
 
@@ -235,3 +248,24 @@ A new `brouillon local` is created through a single modal dialog in the `library
 | Ordering | Library default sort is `ORDER BY created_at ASC, id ASC`. UUIDv7 keeps the ordering stable without an extra secondary key. |
 | Post-success flow | The module-local SWR cache for `useLibraryOverview` is invalidated, a fresh fetch is triggered, and the router navigates to `/story/:storyId/edit` with `replace: true` so the history stack stays flat. |
 | Failure recovery | On rejection, the dialog stays open, the typed title survives, the focus returns to the field, and the Rust-supplied `message` + `userAction` are rendered inside a `role="alert"` region below the field. |
+
+## Story Autosave Contract
+
+A persisted story is editable from the `/story/:storyId/edit` route. MVP
+Phase 1 exposes exactly one editable field — the title. The full Story
+Node Editor (nodes, media, option links) remains Post-MVP.
+
+| Aspect | Value |
+| --- | --- |
+| Read rule | `useStoryEditor` calls `get_story_detail` on mount and on every `storyId` change. The overview cache never substitutes for this authoritative read. A `null` return maps to the `Histoire introuvable` surface; a rejection maps to `Reprise indisponible`. |
+| Write rule | Each `setDraftTitle` plans a single autosave `500 ms` after the last keystroke. The debounce cancels on every new keystroke so only the latest value survives. The save fires `update_story({ id, title })` in a `BEGIN IMMEDIATE` SQLite transaction. `structure_json` and `content_checksum` are never modified by an autosave. |
+| No-op rule | Typing a value that normalizes (NFC + trim) back to the persisted title cancels any pending save, clears any stale failure alert, and settles the chip back to `Brouillon local`. |
+| Authoritative validation | Rust re-validates on every `update_story` call with the same rules as `create_story`; an invalid title is refused via `AppError { code: "INVALID_STORY_TITLE" }` and leaves the row untouched. |
+| State chip mapping | `idle → Brouillon local (info)`, `pending → Modifications en attente (neutral)`, `saving → Enregistrement… (neutral)`, `saved → Enregistré (success)`, `failed → Enregistrement en échec (error)`. The `saved` state is announced via an `aria-live="polite"` region; transient states stay silent to avoid AT chatter. |
+| Failure recovery (AC3) | On rejection, `detail.title` keeps the previous value — never "Enregistré". The typed draft is preserved in the Field. A `role="alert"` region renders the Rust-supplied `message` + `userAction`, with a `Réessayer l'enregistrement` button that re-fires the save using the attempted title. The library overview cache is NOT invalidated on failure — the UPDATE is atomic (NFR9), so the persisted state is unchanged and the overview already reflects the truth. |
+| Library coherence | After every successful save, `invalidateLibraryOverviewCache()` drops the module-local SWR snapshot so the next mount of `LibraryRoute` observes the updated title. The invalidation runs BEFORE the `mountedRef` guard so an ACK that arrives after the route unmounted (navigate-away race) still refreshes the overview. No explicit `retry()` is chained — the fetch happens naturally at next mount. |
+| Stale success rule | If the save ACK arrives for a title the user has already typed past (e.g. "A" was in flight while the user typed "B"), the route commits the ACK'd value to `detail` (it IS persisted) but re-plans a debounced save for the newer draft. The chip transitions `saving → pending → saving → saved` without ever falsely painting "Enregistré" over a value the field has moved past. |
+| H1 source | The visible `<h1>` mirrors `detail.title` (the last-committed title), not `draftTitle` — the H1 must not re-announce at every keystroke nor misrepresent what is actually saved. The editable Field carries the live draft. |
+| Missing id rule | `update_story` on an id no longer in `stories` returns `AppError { code: "LIBRARY_INCONSISTENT" }` with `details.source = "story_missing"`. The UI surfaces it through the same `role="alert"` flow as any other save failure. |
+| Flush rule | Clicking `Retour à la bibliothèque` (or any route-level unmount) calls `flushAutoSave()`: a pending debounce is cancelled and the save is fired before the synchronous `navigate(...)`. The IPC call itself still resolves asynchronously — the UI will have unmounted before the Rust response arrives, so the save is "fire and commit in Rust, forget in UI". A success is observed on the next `/library` read; a failure after unmount is not re-surfaced to the user (the route is gone) and the prior persisted state remains the source of truth. Durable recovery of a draft that never flushed (crash, kill -9) is a separate feature and not covered by this contract. |
+| Persisted-vs-draft invariant | `detail.title` is the source of truth, refreshed from Rust on mount. `draftTitle` is the live Field value. They diverge only while `saveStatus.kind === "failed"`; any other transition reconciles them. |

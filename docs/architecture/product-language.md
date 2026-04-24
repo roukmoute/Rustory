@@ -42,6 +42,9 @@ The UI should favor these labels when they are user-visible:
 | Meaning | Preferred Label |
 | --- | --- |
 | User can keep editing locally | `brouillon local` |
+| Autosave in flight | `Enregistrement…` |
+| Autosave just succeeded | `Enregistré` |
+| Autosave failed and user must retry | `Enregistrement en échec` |
 | Validation/preflight is running | `en vérification` |
 | Action is prevented by a real blocking issue | `bloquée` |
 | Validation says the story may be sent | `présumée transférable` |

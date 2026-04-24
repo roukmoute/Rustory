@@ -73,6 +73,8 @@ La persistance locale du brouillon utilisateur repose sur SQLite embarqué (via 
 
 Le mode journal `WAL` est activé au premier `open_at`, ce qui produit deux fichiers annexes au voisinage de `rustory.sqlite` : `rustory.sqlite-wal` et `rustory.sqlite-shm`. Ces trois fichiers font partie de l'état local de l'application et doivent rester strictement dans `app_data_dir` — jamais dans le repo, jamais dans un dossier partagé entre utilisateurs.
 
+Le titre d'une histoire est modifiable depuis la route `/story/:id/edit`. Un autosave automatique (fenêtre de debounce de 500 ms après le dernier keystroke) écrit la nouvelle valeur via la commande `update_story` et avance `updated_at` à chaque succès. La structure canonique (`structure_json`) et le `content_checksum` restent invariants lors d'un update de métadonnée — aucune migration SQL n'est requise pour cette fonctionnalité. Aucun fichier nouveau n'apparaît sur disque au-delà des trois fichiers SQLite déjà documentés.
+
 ## Failure-mode guardrails
 
 Même en livraison manuelle, ne **jamais** :

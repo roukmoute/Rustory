@@ -94,7 +94,7 @@ describe("<CreateStoryDialog />", () => {
     await user.type(screen.getByLabelText(/^titre$/i), "a".repeat(121));
     expect(
       screen.getByText(
-        /création impossible: titre trop long \(120 caractères maximum\)/i,
+        /création impossible: titre trop long \(120 caractères maximum, 1 en trop\)/i,
       ),
     ).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /^créer$/i })).toHaveAttribute(

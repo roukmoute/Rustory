@@ -3,6 +3,9 @@ import { invoke } from "@tauri-apps/api/core";
 import type {
   CreateStoryInput,
   StoryCardDto,
+  StoryDetailDto,
+  UpdateStoryInput,
+  UpdateStoryOutput,
 } from "../../shared/ipc-contracts/story";
 
 /**
@@ -19,4 +22,29 @@ import type {
  */
 export function createStory(input: CreateStoryInput): Promise<StoryCardDto> {
   return invoke<StoryCardDto>("create_story", { input });
+}
+
+/**
+ * Persist a story's metadata (title only in the current MVP) through the
+ * Rust core. Synchronous bounded mutation — no timeout wrapper. Rejects
+ * with a normalized `AppError` on validation (`INVALID_STORY_TITLE`),
+ * storage (`LOCAL_STORAGE_UNAVAILABLE`) or consistency
+ * (`LIBRARY_INCONSISTENT`) failures. Callers (specifically the autosave
+ * hook) own the retry lifecycle.
+ */
+export function saveStory(input: UpdateStoryInput): Promise<UpdateStoryOutput> {
+  return invoke<UpdateStoryOutput>("update_story", { input });
+}
+
+/**
+ * Read a single story detail for the edit surface. Returns `null` when
+ * the row is absent — the route renders that as "Histoire introuvable"
+ * without treating it as an error.
+ */
+export function getStoryDetail(input: {
+  storyId: string;
+}): Promise<StoryDetailDto | null> {
+  return invoke<StoryDetailDto | null>("get_story_detail", {
+    storyId: input.storyId,
+  });
 }

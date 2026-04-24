@@ -97,8 +97,13 @@ describe("validateStoryTitle", () => {
 describe("reasonFor", () => {
   it("returns the canonical reason strings", () => {
     expect(reasonFor("empty")).toBe("Création impossible: titre requis");
+    expect(reasonFor("too-long", { charCount: 125 })).toBe(
+      "Création impossible: titre trop long (120 caractères maximum, 5 en trop)",
+    );
+    // Fallback when charCount is omitted: the reason still states at least
+    // "1 en trop" so the wording never lies about the overage.
     expect(reasonFor("too-long")).toBe(
-      "Création impossible: titre trop long (120 caractères maximum)",
+      "Création impossible: titre trop long (120 caractères maximum, 1 en trop)",
     );
     expect(reasonFor("control-chars")).toBe(
       "Création impossible: titre contient des caractères non autorisés",

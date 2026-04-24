@@ -72,14 +72,23 @@ fn is_denied_formatting_char(ch: char) -> bool {
 /// here without matching doc update is a bug — the test suite asserts the
 /// exact strings.
 pub const REASON_TITLE_REQUIRED: &str = "Création impossible: titre requis";
-pub const REASON_TITLE_TOO_LONG: &str =
-    "Création impossible: titre trop long (120 caractères maximum)";
 pub const REASON_TITLE_CONTROL_CHARS: &str =
     "Création impossible: titre contient des caractères non autorisés";
 pub const ACTION_TITLE_REQUIRED: &str = "Saisis un titre non vide pour créer l'histoire.";
 pub const ACTION_TITLE_TOO_LONG: &str = "Raccourcis le titre à 120 caractères maximum.";
 pub const ACTION_TITLE_CONTROL_CHARS: &str =
     "Supprime les sauts de ligne, tabulations et caractères invisibles.";
+
+/// Build the canonical "titre trop long" reason with the exact excess so
+/// the user sees how many code points they have to trim off. Matches the
+/// pattern documented in `docs/architecture/ui-states.md#Disabled Actions
+/// and Reasons`.
+pub fn reason_title_too_long(chars: usize) -> String {
+    let excess = chars.saturating_sub(MAX_TITLE_CHARS).max(1);
+    format!(
+        "Création impossible: titre trop long ({MAX_TITLE_CHARS} caractères maximum, {excess} en trop)"
+    )
+}
 
 /// Map a [`StoryTitleError`] to the normalized [`AppError`] surfaced by the
 /// IPC boundary. Each variant uses the canonical message documented in the
@@ -90,11 +99,12 @@ pub fn map_error(err: StoryTitleError) -> AppError {
             AppError::invalid_story_title(REASON_TITLE_REQUIRED, ACTION_TITLE_REQUIRED)
         }
         StoryTitleError::TooLong { chars } => {
-            AppError::invalid_story_title(REASON_TITLE_TOO_LONG, ACTION_TITLE_TOO_LONG)
+            AppError::invalid_story_title(reason_title_too_long(chars), ACTION_TITLE_TOO_LONG)
                 .with_details(serde_json::json!({
                     "cause": "too_long",
                     "maxChars": MAX_TITLE_CHARS,
                     "chars": chars,
+                    "excess": chars.saturating_sub(MAX_TITLE_CHARS),
                 }))
         }
         StoryTitleError::ControlChars => {
@@ -202,9 +212,15 @@ mod tests {
         let err = map_error(StoryTitleError::Empty);
         assert_eq!(err.message, REASON_TITLE_REQUIRED);
 
-        let err = map_error(StoryTitleError::TooLong { chars: 121 });
-        assert_eq!(err.message, REASON_TITLE_TOO_LONG);
-        assert_eq!(err.details.as_ref().expect("details")["chars"], 121);
+        let err = map_error(StoryTitleError::TooLong { chars: 125 });
+        assert_eq!(
+            err.message,
+            "Création impossible: titre trop long (120 caractères maximum, 5 en trop)"
+        );
+        let details = err.details.as_ref().expect("details");
+        assert_eq!(details["chars"], 125);
+        assert_eq!(details["excess"], 5);
+        assert_eq!(details["maxChars"], MAX_TITLE_CHARS);
 
         let err = map_error(StoryTitleError::ControlChars);
         assert_eq!(err.message, REASON_TITLE_CONTROL_CHARS);
