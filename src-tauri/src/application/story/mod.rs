@@ -38,7 +38,7 @@ const ISO8601_MS_CONFIG: EncodedConfig = Iso8601Config::DEFAULT
     .encode();
 const ISO8601_MS: Iso8601<ISO8601_MS_CONFIG> = Iso8601::<ISO8601_MS_CONFIG>;
 
-fn now_iso_ms() -> Result<String, AppError> {
+pub(crate) fn now_iso_ms() -> Result<String, AppError> {
     OffsetDateTime::now_utc().format(&ISO8601_MS).map_err(|_| {
         // Formatting an ISO-8601 timestamp can only fail if the system
         // clock reports a value outside the type's representable range

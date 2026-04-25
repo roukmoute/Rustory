@@ -1,0 +1,62 @@
+.export-status-surface {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin-top: 1rem;
+}
+
+/* Visually hidden polite region — kept in the DOM permanently so AT
+ * consistently picks up `exported` announcements. */
+.export-status-surface__live {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.export-status-surface__chip {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.export-status-surface__path {
+  margin: 0;
+  font-size: 0.875rem;
+  color: var(--text-secondary, #475569);
+  word-break: break-all;
+}
+
+.export-status-surface--failed {
+  padding: 1rem;
+  background: var(--surface-warning-subtle, #fef3c7);
+  border: 1px solid var(--surface-error-border, #f87171);
+  border-radius: 0.5rem;
+}
+
+.export-status-surface__alert-title {
+  margin: 0;
+  font-weight: 600;
+  color: var(--text-primary, #0f172a);
+}
+
+.export-status-surface__alert-message,
+.export-status-surface__alert-action {
+  margin: 0.25rem 0 0;
+  color: var(--text-primary, #0f172a);
+}
+
+.export-status-surface__alert-action {
+  color: var(--text-secondary, #475569);
+}
+
+.export-status-surface__actions {
+  display: flex;
+  gap: 0.5rem;
+  margin-top: 0.75rem;
+}

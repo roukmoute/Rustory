@@ -5,3 +5,6 @@ mod storage_init;
 
 #[path = "integration/story_persistence.rs"]
 mod story_persistence;
+
+#[path = "integration/story_export.rs"]
+mod story_export;

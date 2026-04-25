@@ -20,6 +20,7 @@ pub struct AppState {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let app_data_dir = infrastructure::filesystem::ensure_app_data_dir(app.handle())
                 .map_err(|err| err.to_string())?;
@@ -30,6 +31,7 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            commands::import_export::export_story_with_save_dialog,
             commands::library::get_library_overview,
             commands::story::create_story,
             commands::story::get_story_detail,

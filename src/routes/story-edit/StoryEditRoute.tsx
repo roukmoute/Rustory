@@ -2,6 +2,9 @@ import type React from "react";
 import { useMemo } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 
+import { ExportStatusSurface } from "../../features/import-export/components/ExportStatusSurface";
+import { ExportStoryButton } from "../../features/import-export/components/ExportStoryButton";
+import { useStoryExport } from "../../features/import-export/hooks/use-story-export";
 import { LibraryErrorBanner } from "../../features/library/components/LibraryErrorBanner";
 import { useStoryEditor, type SaveStatus } from "../../features/story-editor/hooks/use-story-editor";
 import {
@@ -75,6 +78,7 @@ export function StoryEditRoute(): React.JSX.Element {
   }, [rawStoryId]);
 
   const editor = useStoryEditor(storyId);
+  const exporter = useStoryExport();
   const { state } = editor;
 
   const goBack = (): void => {
@@ -223,9 +227,29 @@ export function StoryEditRoute(): React.JSX.Element {
             </Button>
           </div>
         ) : null}
-        <Button variant="quiet" onClick={goBack}>
-          Retour à la bibliothèque
-        </Button>
+        <ExportStatusSurface
+          status={exporter.status}
+          onRetry={() => {
+            void exporter.retryExport();
+          }}
+          onDismiss={exporter.dismissStatus}
+        />
+        <div className="story-edit-route__actions">
+          <ExportStoryButton
+            storyId={state.detail.id}
+            // Pass the LIVE draft title rather than the persisted one
+            // so the save-dialog suggestion reflects what the user has
+            // actually typed. The trim/NFC normalization matches the
+            // form that Rust will have persisted once `flushAutoSave`
+            // settles below.
+            storyTitle={state.draftTitle.trim().normalize("NFC")}
+            exporter={exporter}
+            onBeforeTrigger={editor.flushAutoSave}
+          />
+          <Button variant="quiet" onClick={goBack}>
+            Retour à la bibliothèque
+          </Button>
+        </div>
       </SurfacePanel>
     </main>
   );

@@ -10,6 +10,7 @@ pub enum AppErrorCode {
     LocalStorageUnavailable,
     LibraryInconsistent,
     InvalidStoryTitle,
+    ExportDestinationUnavailable,
 }
 
 /// Normalized application error crossing the IPC boundary.
@@ -75,6 +76,18 @@ impl AppError {
         }
     }
 
+    pub fn export_destination_unavailable(
+        message: impl Into<String>,
+        user_action: impl Into<String>,
+    ) -> Self {
+        Self {
+            code: AppErrorCode::ExportDestinationUnavailable,
+            message: message.into(),
+            user_action: Some(user_action.into()),
+            details: None,
+        }
+    }
+
     pub fn with_details(mut self, details: serde_json::Value) -> Self {
         self.details = Some(details);
         self
@@ -125,5 +138,31 @@ mod tests {
         assert_eq!(v["code"], "INVALID_STORY_TITLE");
         assert_eq!(v["message"], "msg");
         assert_eq!(v["userAction"], "action");
+    }
+
+    #[test]
+    fn export_destination_unavailable_serializes_with_stable_code() {
+        let err = AppError::export_destination_unavailable("msg", "action");
+        let v = serde_json::to_value(&err).expect("serialize");
+        assert_eq!(v["code"], "EXPORT_DESTINATION_UNAVAILABLE");
+        assert_eq!(v["message"], "msg");
+        assert_eq!(v["userAction"], "action");
+    }
+
+    #[test]
+    fn export_destination_unavailable_carries_user_action_and_details() {
+        let err = AppError::export_destination_unavailable(
+            "Écriture refusée par le système.",
+            "Choisis un dossier où tu as les droits en écriture.",
+        )
+        .with_details(serde_json::json!({
+            "source": "temp_create",
+            "kind": "permission_denied",
+        }));
+        let v = serde_json::to_value(&err).expect("serialize");
+        assert_eq!(v["code"], "EXPORT_DESTINATION_UNAVAILABLE");
+        assert_eq!(v["details"]["source"], "temp_create");
+        assert_eq!(v["details"]["kind"], "permission_denied");
+        assert!(v.get("user_action").is_none(), "snake_case must not leak");
     }
 }

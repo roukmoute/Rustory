@@ -15,6 +15,10 @@ vi.mock("../../ipc/commands/story", () => ({
   createStory: vi.fn(),
 }));
 
+vi.mock("../../ipc/commands/import-export", () => ({
+  exportStoryWithSaveDialog: vi.fn(),
+}));
+
 const { invalidateLibraryOverviewCacheMock } = vi.hoisted(() => ({
   invalidateLibraryOverviewCacheMock: vi.fn(),
 }));
@@ -30,6 +34,7 @@ vi.mock("../../features/library/hooks/use-library-overview", () => ({
   invalidateLibraryOverviewCache: invalidateLibraryOverviewCacheMock,
 }));
 
+import { exportStoryWithSaveDialog } from "../../ipc/commands/import-export";
 import { getStoryDetail, saveStory } from "../../ipc/commands/story";
 import type { StoryDetailDto } from "../../shared/ipc-contracts/story";
 import { LibraryRoute } from "../library/LibraryRoute";
@@ -543,5 +548,253 @@ describe("<StoryEditRoute />", () => {
     await waitFor(() =>
       expect(router.state.location.pathname).toBe("/library"),
     );
+  });
+
+  describe("export CTA", () => {
+    beforeEach(() => {
+      vi.mocked(exportStoryWithSaveDialog).mockReset();
+    });
+
+    const exportedOutcome = {
+      kind: "exported" as const,
+      destinationPath: "/tmp/histoire.rustory",
+      bytesWritten: 451,
+      contentChecksum: "a".repeat(64),
+    };
+    const cancelledOutcome = { kind: "cancelled" as const };
+
+    async function renderReadyEditWithDetail(
+      overrides: Partial<StoryDetailDto> = {},
+    ) {
+      vi.mocked(getStoryDetail).mockResolvedValueOnce(buildDetail(overrides));
+      const router = renderRoute(`/story/${STORY_ID}/edit`);
+      await screen.findByRole("heading", {
+        name: overrides.title ?? "Le soleil couchant",
+      });
+      return router;
+    }
+
+    it("renders a button labelled Exporter l'histoire in the ready state", async () => {
+      await renderReadyEditWithDetail();
+      expect(
+        screen.getByRole("button", { name: /Exporter l'histoire/i }),
+      ).toBeInTheDocument();
+    });
+
+    it("is not rendered while the route is still loading", async () => {
+      vi.mocked(getStoryDetail).mockReturnValue(new Promise(() => undefined));
+      renderRoute(`/story/${STORY_ID}/edit`);
+      // Loading surface uses role=status with the progress indicator.
+      await screen.findByRole("status");
+      expect(
+        screen.queryByRole("button", { name: /Exporter l'histoire/i }),
+      ).not.toBeInTheDocument();
+    });
+
+    it("invokes the Rust dialog-owning command with the sanitized suggested filename", async () => {
+      const user = userEvent.setup();
+      await renderReadyEditWithDetail({ title: "Un / Deux : Trois" });
+      vi.mocked(exportStoryWithSaveDialog).mockResolvedValueOnce(
+        cancelledOutcome,
+      );
+
+      await user.click(
+        screen.getByRole("button", { name: /Exporter l'histoire/i }),
+      );
+
+      expect(exportStoryWithSaveDialog).toHaveBeenCalledWith({
+        storyId: STORY_ID,
+        suggestedFilename: "Un_Deux_Trois.rustory",
+      });
+    });
+
+    it("a cancelled outcome renders no chip and no alert", async () => {
+      const user = userEvent.setup();
+      await renderReadyEditWithDetail();
+      vi.mocked(exportStoryWithSaveDialog).mockResolvedValueOnce(
+        cancelledOutcome,
+      );
+
+      await user.click(
+        screen.getByRole("button", { name: /Exporter l'histoire/i }),
+      );
+
+      expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+      // Success chip has label "Exporté" as a StateChip label, not a
+      // raw text node — the polite region renders "Exporté" only on
+      // exported; on cancelled it stays empty.
+      expect(
+        screen.queryByText(/Exportation en cours/i),
+      ).not.toBeInTheDocument();
+    });
+
+    it("renders Exporté inside a persistent polite region on success", async () => {
+      const user = userEvent.setup();
+      await renderReadyEditWithDetail();
+      vi.mocked(exportStoryWithSaveDialog).mockResolvedValueOnce(
+        exportedOutcome,
+      );
+
+      await user.click(
+        screen.getByRole("button", { name: /Exporter l'histoire/i }),
+      );
+
+      await screen.findByText(/Exporté vers \/tmp\/histoire\.rustory/);
+      const liveRegions = document.querySelectorAll(
+        "[aria-live='polite']",
+      );
+      const hasExportedRegion = Array.from(liveRegions).some((el) =>
+        el.textContent?.includes("Exporté"),
+      );
+      expect(hasExportedRegion).toBe(true);
+    });
+
+    it("renders a role=alert with message + userAction on failure", async () => {
+      const user = userEvent.setup();
+      await renderReadyEditWithDetail();
+      vi.mocked(exportStoryWithSaveDialog).mockRejectedValueOnce({
+        code: "EXPORT_DESTINATION_UNAVAILABLE",
+        message: "Écriture refusée par le système pour ce dossier.",
+        userAction: "Choisis un dossier où tu as les droits en écriture.",
+        details: null,
+      });
+
+      await user.click(
+        screen.getByRole("button", { name: /Exporter l'histoire/i }),
+      );
+
+      const alert = await screen.findByRole("alert");
+      expect(alert).toHaveTextContent(/Exportation échouée/);
+      expect(alert).toHaveTextContent(
+        /Écriture refusée par le système pour ce dossier/,
+      );
+      expect(alert).toHaveTextContent(
+        /Choisis un dossier où tu as les droits en écriture/,
+      );
+    });
+
+    it("Choisir un autre emplacement re-invokes the Rust command after a failure", async () => {
+      const user = userEvent.setup();
+      await renderReadyEditWithDetail();
+      vi.mocked(exportStoryWithSaveDialog).mockRejectedValueOnce({
+        code: "EXPORT_DESTINATION_UNAVAILABLE",
+        message: "err",
+        userAction: "act",
+        details: null,
+      });
+
+      await user.click(
+        screen.getByRole("button", { name: /Exporter l'histoire/i }),
+      );
+      await screen.findByRole("alert");
+
+      vi.mocked(exportStoryWithSaveDialog).mockResolvedValueOnce(
+        exportedOutcome,
+      );
+
+      await user.click(
+        screen.getByRole("button", { name: /Choisir un autre emplacement/i }),
+      );
+
+      await screen.findByText(/Exporté vers/);
+      expect(exportStoryWithSaveDialog).toHaveBeenCalledTimes(2);
+    });
+
+    it("never calls saveStory: export is strictly read-only on the canonical row", async () => {
+      const user = userEvent.setup();
+      await renderReadyEditWithDetail();
+      vi.mocked(exportStoryWithSaveDialog).mockResolvedValueOnce(
+        exportedOutcome,
+      );
+
+      await user.click(
+        screen.getByRole("button", { name: /Exporter l'histoire/i }),
+      );
+      await screen.findByText(/Exporté vers/);
+
+      expect(saveStory).not.toHaveBeenCalled();
+    });
+
+    it("does not invalidate the library overview cache on success", async () => {
+      invalidateLibraryOverviewCacheMock.mockReset();
+      const user = userEvent.setup();
+      await renderReadyEditWithDetail();
+      vi.mocked(exportStoryWithSaveDialog).mockResolvedValueOnce(
+        exportedOutcome,
+      );
+
+      await user.click(
+        screen.getByRole("button", { name: /Exporter l'histoire/i }),
+      );
+      await screen.findByText(/Exporté vers/);
+
+      expect(invalidateLibraryOverviewCacheMock).not.toHaveBeenCalled();
+    });
+
+    it("uses the LIVE draft title for the suggested filename (not the persisted one)", async () => {
+      const user = userEvent.setup();
+      await renderReadyEditWithDetail();
+
+      const field = screen.getByRole("textbox", {
+        name: /Titre de l'histoire/i,
+      });
+      await user.clear(field);
+      await user.type(field, "Titre en cours");
+
+      // The autosave hook's `flushAutoSave` will fire saveStory before
+      // the export command runs — mock a resolved return so the hook's
+      // `.then()` chain doesn't throw on an undefined return value.
+      vi.mocked(saveStory).mockResolvedValue({
+        id: STORY_ID,
+        title: "Titre en cours",
+        updatedAt: "2026-04-24T10:30:00.000Z",
+      });
+      vi.mocked(exportStoryWithSaveDialog).mockResolvedValueOnce(
+        cancelledOutcome,
+      );
+
+      await user.click(
+        screen.getByRole("button", { name: /Exporter l'histoire/i }),
+      );
+
+      expect(exportStoryWithSaveDialog).toHaveBeenCalledWith({
+        storyId: STORY_ID,
+        suggestedFilename: "Titre_en_cours.rustory",
+      });
+    });
+
+    it("flushes the pending autosave before invoking the export command", async () => {
+      const user = userEvent.setup();
+      await renderReadyEditWithDetail();
+
+      // Type a new title but don't wait for the 500ms debounce to fire.
+      const field = screen.getByRole("textbox", { name: /Titre de l'histoire/i });
+      await user.clear(field);
+      await user.type(field, "Titre en cours");
+
+      // saveStory must NOT have been called yet — debounce still pending.
+      expect(saveStory).not.toHaveBeenCalled();
+
+      vi.mocked(exportStoryWithSaveDialog).mockResolvedValueOnce(
+        cancelledOutcome,
+      );
+      vi.mocked(saveStory).mockResolvedValueOnce({
+        id: STORY_ID,
+        title: "Titre en cours",
+        updatedAt: "2026-04-24T10:30:00.000Z",
+      });
+
+      await user.click(
+        screen.getByRole("button", { name: /Exporter l'histoire/i }),
+      );
+
+      // flushAutoSave must have fired saveStory with the typed value
+      // BEFORE the export command is called — otherwise the artifact
+      // would capture a stale pre-debounce title.
+      expect(saveStory).toHaveBeenCalledWith({
+        id: STORY_ID,
+        title: "Titre en cours",
+      });
+    });
   });
 });
