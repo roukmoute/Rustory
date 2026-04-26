@@ -1,7 +1,9 @@
+pub mod draft;
 pub mod integrity;
 pub mod schema;
 pub mod validation;
 
+pub use draft::{RecoveryDraft, RecoveryDraftDelta};
 pub use integrity::{canonical_structure_json, content_checksum};
 pub use schema::{
     CanonicalNode, CanonicalStructure, CANONICAL_STORY_SCHEMA_VERSION, MAX_TITLE_CHARS,

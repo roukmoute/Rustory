@@ -48,6 +48,12 @@ The UI should favor these labels when they are user-visible:
 | Export in flight | `Exportation en cours…` |
 | Export just succeeded | `Exporté` |
 | Export failed and user must choose another path | `Exportation échouée` |
+| Recovery draft available for the current story | `Brouillon récupéré` |
+| Restoring the recovered draft | `Restauration en cours…` |
+| Discarding the recovered draft | `Conserver l'état enregistré` |
+| Recovery itself failed (read/write/lock) | `Récupération indisponible` |
+| Recovery banner — what the user had typed before the interruption | `Tu avais tapé` |
+| Recovery banner — last value committed to disk | `Dernier état enregistré` |
 | Validation/preflight is running | `en vérification` |
 | Action is prevented by a real blocking issue | `bloquée` |
 | Validation says the story may be sent | `présumée transférable` |

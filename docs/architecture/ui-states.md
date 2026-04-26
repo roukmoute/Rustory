@@ -101,6 +101,9 @@ Preferred patterns:
 - `Création impossible: titre contient des caractères non autorisés`
 - `Reprise indisponible: histoire introuvable`
 - `Enregistrement en échec: vérifie le disque local et réessaie.`
+- `Récupération indisponible: vérifie le disque local et réessaie.`
+- `Restauration en cours: patiente quelques instants.`
+- `Édition en attente: choisis d'abord comment reprendre cette histoire.`
 
 Error payloads that surface in the autosave alert carry a stable
 `details.source` discriminator so support can triage the cause without
@@ -289,3 +292,42 @@ time; batch export from the library is Post-MVP.
 | Default filename rule | `sanitizeFilename(persistedTitle) + ".rustory"`. Sanitization applies NFC, trims whitespace, replaces filesystem-unsafe characters (`\x00-\x1f`, `\x7f`, `/ \\ : * ? " < > |`) with `_`, collapses runs of whitespace/underscore, truncates at 80 code points, and falls back to `histoire` when the result is empty. |
 | H1 rule | The visible `<h1>` continues to mirror `detail.title` — export does NOT change the title, so the heading is unaffected regardless of export outcome. |
 | Accessibility | The success region is `aria-live="polite"` with `aria-atomic="true"`. The failure region is `role="alert"`. The "Choisir un autre emplacement" button is reachable via keyboard and appears before `Fermer` in tab order so a keyboard user can retry with one keystroke after reading the alert. |
+
+## Story Recovery Contract
+
+A buffered keystroke value can survive an unexpected app shutdown
+(crash, kill -9, power loss). On the next mount of `/story/:storyId/edit`
+the route detects the surviving draft and proposes a recovery banner
+above the editable Field. The user must commit a decision (Apply or
+Discard) before resuming editing.
+
+| Aspect | Value |
+| --- | --- |
+| Trigger rule | At every mount of `/story/:storyId/edit`, `useStoryRecovery(storyId)` calls `read_recoverable_draft({ storyId })`. The banner mounts only when the response is `{ kind: "recoverable" }`. |
+| Detection rule | At boot, `lib.rs::run().setup` queries `SELECT story_id FROM story_drafts ORDER BY draft_at DESC` and emits a single `interrupted_session_detected` event into `{app_data_dir}/diagnostics/recovery.jsonl` with the full list of story_ids. The boot probe never blocks on a log write failure. |
+| Banner UX | A `<section role="region" aria-label="Brouillon récupéré">` rendered ABOVE the `<h1>`, containing: heading `Brouillon récupéré`, two-line diff `Tu avais tapé : "X"` / `Dernier état enregistré : "Y"`, relative timestamp, two buttons `Restaurer le brouillon` (primary) and `Conserver l'état enregistré` (secondary), and a conditional `role="alert"` block on apply / discard failure. |
+| Field locking | While the banner is on screen (`kind ∈ { recoverable, applying, error }`), the title `Field` is `disabled` and the export button is soft-disabled (`aria-disabled="true"`). The user must commit a decision before resuming any editing. |
+| Apply rule | `applyRecovery({ storyId })` runs an atomic transaction in Rust: `UPDATE stories SET title = ? + DELETE FROM story_drafts WHERE story_id = ?`. The frontend receives a `UpdateStoryOutput` and patches its in-memory `useStoryEditor` snapshot via `reloadDetailFromOutput` — no follow-up `get_story_detail` round-trip is required. |
+| Discard rule | `discardDraft({ storyId })` removes the row without touching `stories`. Idempotent: a second call on an already-empty row resolves silently. |
+| Auto-clear rule | `update_story` (autosave) deletes the `story_drafts` row for the same `story_id` inside its existing `BEGIN IMMEDIATE` transaction. A successful autosave consumes the buffer; a failed autosave preserves it for the next session. |
+| Validation rule | At apply time, `validate_title(normalize_title(draft_title))` re-validates authoritatively. A draft with control chars / blank-after-trim / > 120 chars is rejected with `INVALID_STORY_TITLE`. The draft row is NOT consumed on rejection so the UI can offer Discard explicitly. |
+| Stable error categories | The recovery log produces only five categories: `interrupted_session_detected`, `recovery_draft_proposed`, `recovery_draft_applied`, `recovery_draft_discarded`, `recovery_draft_unavailable`. The category is the NFR24 stable identifier — never a localized message, never a free-form string. |
+| Persistence cadence | `useStoryEditor` schedules a `record_draft` 150 ms after each keystroke. The autosave (`update_story`) runs on a 500 ms debounce in parallel. A keystroke between the two windows is captured by the recovery buffer even though no autosave has fired yet — that is the purpose of the shorter window. |
+| Persistence cap | The `draft_title` column carries a SQLite `CHECK (length(draft_title) <= 4096)` clause. The Rust application service mirrors the cap by char count and rejects oversize inputs with `RECOVERY_DRAFT_UNAVAILABLE` (`details.source = "draft_too_long"`) before the SQL ever runs. |
+| Forbidden | No modal. No toast. No automatic recovery without user choice. No generic "Erreur de récupération" copy — the closed message table from `product-language.md` is the only allowed phrasing. |
+
+### Error payloads — recovery flow
+
+The recovery commands surface failures with a stable `details.source`
+discriminator so support can triage without parsing the user-facing
+message:
+
+- `record_draft` UPSERT fails — `RECOVERY_DRAFT_UNAVAILABLE`, `details.source = "sqlite_upsert"`. `details.kind` ∈ `busy`, `locked`, `other`.
+- `read_recoverable_draft` SELECT fails — `RECOVERY_DRAFT_UNAVAILABLE`, `details.source = "sqlite_select"`.
+- `apply_recovery` UPDATE+DELETE atomic fails — `RECOVERY_DRAFT_UNAVAILABLE`, `details.source = "sqlite_apply"`. `details.stage` ∈ `begin_transaction`, `read_draft`, `update`, `delete`, `commit`. A `constraint_violation` re-maps to `INVALID_STORY_TITLE`.
+- `discard_draft` DELETE fails — `RECOVERY_DRAFT_UNAVAILABLE`, `details.source = "sqlite_delete"`.
+- `recovery_log` write fails — `RECOVERY_DRAFT_UNAVAILABLE`, `details.source ∈ { diagnostics_dir, diagnostics_open, diagnostics_write, diagnostics_flush, diagnostics_serialize, diagnostics_app_data_dir, diagnostics_path_invalid, diagnostics_rotate }`. `details.kind` ∈ `permission_denied`, `storage_full`, `read_only_filesystem`, `not_found`, `other`.
+- Draft input exceeds 4096 chars — `RECOVERY_DRAFT_UNAVAILABLE`, `details.source = "draft_too_long"`.
+- Draft row vanished between propose and apply — `RECOVERY_DRAFT_UNAVAILABLE`, `details.source = "draft_missing_in_transaction"`.
+- Draft fails authoritative validation at apply time — `INVALID_STORY_TITLE` with `details.source = "recovery_draft_invalid"`. The draft row is preserved so Discard remains available.
+- Story disappeared (FK violation or rows_affected == 0) — `LIBRARY_INCONSISTENT` with `details.source = "story_missing"`.

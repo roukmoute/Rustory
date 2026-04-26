@@ -1,3 +1,5 @@
+pub mod recovery;
+
 use rusqlite::OptionalExtension;
 use time::format_description::well_known::iso8601::{
     Config as Iso8601Config, EncodedConfig, TimePrecision,
@@ -162,6 +164,18 @@ pub fn update_story(
         })));
     }
 
+    // A successful autosave consumes any pending recovery draft for this
+    // story: the canonical row now reflects the user's latest committed
+    // intent, so the buffered keystroke value has nothing left to recover.
+    // Running the DELETE in the same transaction keeps the invariant
+    // atomic — a failed commit rolls back both the UPDATE and the DELETE,
+    // preserving the draft so the next session can still propose it.
+    tx.execute(
+        "DELETE FROM story_drafts WHERE story_id = ?1",
+        rusqlite::params![&input.id],
+    )
+    .map_err(|err| map_update_transport_error(&err, "delete_draft", &input.id))?;
+
     tx.commit()
         .map_err(|err| map_update_transport_error(&err, "commit", &input.id))?;
 
@@ -222,7 +236,7 @@ fn map_insert_error(err: rusqlite::Error) -> AppError {
     }))
 }
 
-fn sqlite_kind_label(err: &rusqlite::Error) -> &'static str {
+pub(super) fn sqlite_kind_label(err: &rusqlite::Error) -> &'static str {
     match err {
         rusqlite::Error::SqliteFailure(code, _) => match code.code {
             rusqlite::ErrorCode::ConstraintViolation => "constraint_violation",

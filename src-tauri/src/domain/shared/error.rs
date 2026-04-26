@@ -11,6 +11,7 @@ pub enum AppErrorCode {
     LibraryInconsistent,
     InvalidStoryTitle,
     ExportDestinationUnavailable,
+    RecoveryDraftUnavailable,
 }
 
 /// Normalized application error crossing the IPC boundary.
@@ -88,6 +89,18 @@ impl AppError {
         }
     }
 
+    pub fn recovery_draft_unavailable(
+        message: impl Into<String>,
+        user_action: impl Into<String>,
+    ) -> Self {
+        Self {
+            code: AppErrorCode::RecoveryDraftUnavailable,
+            message: message.into(),
+            user_action: Some(user_action.into()),
+            details: None,
+        }
+    }
+
     pub fn with_details(mut self, details: serde_json::Value) -> Self {
         self.details = Some(details);
         self
@@ -147,6 +160,42 @@ mod tests {
         assert_eq!(v["code"], "EXPORT_DESTINATION_UNAVAILABLE");
         assert_eq!(v["message"], "msg");
         assert_eq!(v["userAction"], "action");
+    }
+
+    #[test]
+    fn recovery_draft_unavailable_serializes_with_stable_code() {
+        let err = AppError::recovery_draft_unavailable("msg", "action");
+        let v = serde_json::to_value(&err).expect("serialize");
+        assert_eq!(v["code"], "RECOVERY_DRAFT_UNAVAILABLE");
+        assert_eq!(v["message"], "msg");
+        assert_eq!(v["userAction"], "action");
+    }
+
+    #[test]
+    fn recovery_draft_unavailable_serializes_with_camel_case_user_action() {
+        let err = AppError::recovery_draft_unavailable("msg", "action");
+        let v = serde_json::to_value(&err).expect("serialize");
+        assert!(
+            v.get("userAction").is_some(),
+            "userAction must be camelCase"
+        );
+        assert!(v.get("user_action").is_none(), "snake_case must not leak");
+    }
+
+    #[test]
+    fn recovery_draft_unavailable_carries_user_action_and_details() {
+        let err = AppError::recovery_draft_unavailable(
+            "Récupération indisponible.",
+            "Vérifie le disque local et réessaie.",
+        )
+        .with_details(serde_json::json!({
+            "source": "sqlite_upsert",
+            "kind": "busy",
+        }));
+        let v = serde_json::to_value(&err).expect("serialize");
+        assert_eq!(v["code"], "RECOVERY_DRAFT_UNAVAILABLE");
+        assert_eq!(v["details"]["source"], "sqlite_upsert");
+        assert_eq!(v["details"]["kind"], "busy");
     }
 
     #[test]

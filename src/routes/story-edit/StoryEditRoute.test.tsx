@@ -9,11 +9,41 @@ import userEvent from "@testing-library/user-event";
 import { RouterProvider, createMemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-vi.mock("../../ipc/commands/story", () => ({
-  getStoryDetail: vi.fn(),
-  saveStory: vi.fn(),
-  createStory: vi.fn(),
-}));
+vi.mock("../../ipc/commands/story", () => {
+  // The recovery hook imports the drift-error classes for its
+  // `instanceof` mapping. Re-declared inline to keep them within
+  // the hoisted factory closure.
+  class ApplyRecoveryContractDriftError extends Error {
+    raw: unknown;
+    constructor(message: string, options: { raw: unknown }) {
+      super(message);
+      this.name = "ApplyRecoveryContractDriftError";
+      this.raw = options.raw;
+    }
+  }
+  class ReadRecoverableDraftContractDriftError extends Error {
+    raw: unknown;
+    constructor(message: string, options: { raw: unknown }) {
+      super(message);
+      this.name = "ReadRecoverableDraftContractDriftError";
+      this.raw = options.raw;
+    }
+  }
+  return {
+    getStoryDetail: vi.fn(),
+    saveStory: vi.fn(),
+    createStory: vi.fn(),
+    recordDraft: vi.fn().mockResolvedValue(undefined),
+    // Default: no recoverable draft for the story. Tests that exercise
+    // the recovery banner override `readRecoverableDraft` locally with
+    // `vi.mocked(readRecoverableDraft).mockResolvedValueOnce(...)`.
+    readRecoverableDraft: vi.fn().mockResolvedValue({ kind: "none" }),
+    applyRecovery: vi.fn(),
+    discardDraft: vi.fn().mockResolvedValue(undefined),
+    ApplyRecoveryContractDriftError,
+    ReadRecoverableDraftContractDriftError,
+  };
+});
 
 vi.mock("../../ipc/commands/import-export", () => ({
   exportStoryWithSaveDialog: vi.fn(),
@@ -35,7 +65,14 @@ vi.mock("../../features/library/hooks/use-library-overview", () => ({
 }));
 
 import { exportStoryWithSaveDialog } from "../../ipc/commands/import-export";
-import { getStoryDetail, saveStory } from "../../ipc/commands/story";
+import {
+  applyRecovery,
+  discardDraft,
+  getStoryDetail,
+  readRecoverableDraft,
+  recordDraft,
+  saveStory,
+} from "../../ipc/commands/story";
 import type { StoryDetailDto } from "../../shared/ipc-contracts/story";
 import { LibraryRoute } from "../library/LibraryRoute";
 import { StoryEditRoute } from "./StoryEditRoute";
@@ -76,6 +113,15 @@ describe("<StoryEditRoute />", () => {
       title: "",
       updatedAt: "2026-04-23T00:00:00.000Z",
     });
+    // Recovery flow defaults: no draft to recover. Tests that exercise
+    // the banner override `readRecoverableDraft` per-case.
+    vi.mocked(readRecoverableDraft).mockReset();
+    vi.mocked(readRecoverableDraft).mockResolvedValue({ kind: "none" });
+    vi.mocked(recordDraft).mockReset();
+    vi.mocked(recordDraft).mockResolvedValue();
+    vi.mocked(applyRecovery).mockReset();
+    vi.mocked(discardDraft).mockReset();
+    vi.mocked(discardDraft).mockResolvedValue();
     invalidateLibraryOverviewCacheMock.mockReset();
     // Silence unhandled rejections that escape the component when the mock
     // rejects synchronously and the test renders a different branch.
@@ -795,6 +841,275 @@ describe("<StoryEditRoute />", () => {
         id: STORY_ID,
         title: "Titre en cours",
       });
+    });
+  });
+
+  describe("Recovery banner", () => {
+    const RECOVERABLE = {
+      kind: "recoverable" as const,
+      storyId: STORY_ID,
+      draftTitle: "Buffered live",
+      draftAt: "2026-04-25T12:00:00.000Z",
+      persistedTitle: "Le soleil couchant",
+    };
+
+    async function renderRouteWithRecoverableDraft() {
+      vi.mocked(getStoryDetail).mockResolvedValueOnce(buildDetail());
+      vi.mocked(readRecoverableDraft).mockReset();
+      vi.mocked(readRecoverableDraft).mockResolvedValueOnce(RECOVERABLE);
+      renderRoute(`/story/${STORY_ID}/edit`);
+      // Wait for both the editor and the banner to mount.
+      await screen.findByRole("region", { name: "Brouillon récupéré" });
+    }
+
+    it("disables the Field while readRecoverableDraft is still resolving (race AC1)", async () => {
+      // A keystroke between Field mount and resolution must not
+      // schedule a recordDraft that overwrites the recoverable row.
+      let resolveLater: (
+        value:
+          | { kind: "none" }
+          | (typeof RECOVERABLE),
+      ) => void = () => {};
+      vi.mocked(getStoryDetail).mockResolvedValueOnce(buildDetail());
+      vi.mocked(readRecoverableDraft).mockReset();
+      vi.mocked(readRecoverableDraft).mockReturnValueOnce(
+        new Promise((resolve) => {
+          resolveLater = resolve;
+        }),
+      );
+      renderRoute(`/story/${STORY_ID}/edit`);
+      await screen.findByRole("heading", { name: "Le soleil couchant" });
+
+      // The Field must already be disabled — recovery is still loading.
+      const field = screen.getByRole("textbox", {
+        name: /Titre de l'histoire/i,
+      });
+      expect(field).toBeDisabled();
+
+      // Resolve as `none` and confirm the Field re-enables.
+      resolveLater({ kind: "none" });
+      await waitFor(() => {
+        expect(field).not.toBeDisabled();
+      });
+    });
+
+    it("renders the RecoveryBanner when the backend returns a recoverable draft", async () => {
+      await renderRouteWithRecoverableDraft();
+      expect(
+        screen.getByRole("region", { name: "Brouillon récupéré" }),
+      ).toBeInTheDocument();
+      expect(screen.getByText('"Buffered live"')).toBeInTheDocument();
+      expect(screen.getByText('"Le soleil couchant"')).toBeInTheDocument();
+    });
+
+    it("does not render the RecoveryBanner when the backend returns none", async () => {
+      vi.mocked(getStoryDetail).mockResolvedValueOnce(buildDetail());
+      renderRoute(`/story/${STORY_ID}/edit`);
+      await screen.findByRole("heading", { name: "Le soleil couchant" });
+      expect(
+        screen.queryByRole("region", { name: "Brouillon récupéré" }),
+      ).not.toBeInTheDocument();
+    });
+
+    it("disables the Field while the recovery banner is visible", async () => {
+      await renderRouteWithRecoverableDraft();
+      const field = screen.getByRole("textbox", {
+        name: /Titre de l'histoire/i,
+      });
+      expect(field).toBeDisabled();
+    });
+
+    it("disables the export button while the recovery banner is visible", async () => {
+      await renderRouteWithRecoverableDraft();
+      expect(
+        screen.getByRole("button", { name: /Exporter l'histoire/i }),
+      ).toHaveAttribute("aria-disabled", "true");
+    });
+
+    it("applying the recovery updates the H1 to the recovered title", async () => {
+      await renderRouteWithRecoverableDraft();
+      vi.mocked(applyRecovery).mockResolvedValueOnce({
+        id: STORY_ID,
+        title: "Buffered live",
+        updatedAt: "2026-04-25T12:00:01.000Z",
+      });
+
+      await userEvent.click(
+        screen.getByRole("button", { name: "Restaurer le brouillon" }),
+      );
+
+      await waitFor(() => {
+        expect(
+          screen.getByRole("heading", { name: "Buffered live" }),
+        ).toBeInTheDocument();
+      });
+      // Banner gone, Field re-enabled.
+      expect(
+        screen.queryByRole("region", { name: "Brouillon récupéré" }),
+      ).not.toBeInTheDocument();
+      const field = screen.getByRole("textbox", {
+        name: /Titre de l'histoire/i,
+      });
+      expect(field).not.toBeDisabled();
+    });
+
+    it("discarding the recovery clears the banner and re-enables the Field", async () => {
+      await renderRouteWithRecoverableDraft();
+      await userEvent.click(
+        screen.getByRole("button", { name: "Conserver l'état enregistré" }),
+      );
+      await waitFor(() => {
+        expect(
+          screen.queryByRole("region", { name: "Brouillon récupéré" }),
+        ).not.toBeInTheDocument();
+      });
+      const field = screen.getByRole("textbox", {
+        name: /Titre de l'histoire/i,
+      });
+      expect(field).not.toBeDisabled();
+    });
+
+    it("the recovery banner appears BEFORE the h1 in the DOM order", async () => {
+      await renderRouteWithRecoverableDraft();
+      const region = screen.getByRole("region", { name: "Brouillon récupéré" });
+      const h1 = screen.getByRole("heading", { name: "Le soleil couchant" });
+      // `compareDocumentPosition` returns a bitmask; bit 4 means
+      // `region` precedes `h1` in document order.
+      const followingMask = Node.DOCUMENT_POSITION_FOLLOWING;
+      // eslint-disable-next-line no-bitwise
+      expect(region.compareDocumentPosition(h1) & followingMask).toBe(
+        followingMask,
+      );
+    });
+
+    it('error during apply renders the role="alert" with userAction', async () => {
+      await renderRouteWithRecoverableDraft();
+      const rustError = {
+        code: "RECOVERY_DRAFT_UNAVAILABLE",
+        message: "Récupération indisponible.",
+        userAction: "Vérifie le disque local.",
+        details: null,
+      };
+      vi.mocked(applyRecovery).mockRejectedValueOnce(rustError);
+      await userEvent.click(
+        screen.getByRole("button", { name: "Restaurer le brouillon" }),
+      );
+      await screen.findByRole("alert");
+      const alert = screen.getByRole("alert");
+      expect(alert).toHaveTextContent("Récupération indisponible.");
+      expect(alert).toHaveTextContent("Vérifie le disque local.");
+    });
+
+    it("clicking Réessayer la récupération re-fires readRecoverableDraft", async () => {
+      await renderRouteWithRecoverableDraft();
+      vi.mocked(applyRecovery).mockRejectedValueOnce({
+        code: "RECOVERY_DRAFT_UNAVAILABLE",
+        message: "boom",
+        userAction: "retry",
+        details: null,
+      });
+      await userEvent.click(
+        screen.getByRole("button", { name: "Restaurer le brouillon" }),
+      );
+      await screen.findByRole("alert");
+
+      vi.mocked(readRecoverableDraft).mockResolvedValueOnce(RECOVERABLE);
+      const callsBefore = vi.mocked(readRecoverableDraft).mock.calls.length;
+      await userEvent.click(
+        screen.getByRole("button", { name: "Réessayer la récupération" }),
+      );
+      await waitFor(() => {
+        expect(vi.mocked(readRecoverableDraft).mock.calls.length).toBe(
+          callsBefore + 1,
+        );
+      });
+    });
+  });
+
+  describe("Recovery initial-read error banner (AC3)", () => {
+    async function renderRouteWithReadError() {
+      vi.mocked(getStoryDetail).mockResolvedValueOnce(buildDetail());
+      vi.mocked(readRecoverableDraft).mockReset();
+      vi.mocked(readRecoverableDraft).mockRejectedValueOnce({
+        code: "RECOVERY_DRAFT_UNAVAILABLE",
+        message: "Récupération indisponible: vérifie le disque local et réessaie.",
+        userAction: "Vérifie l'espace disque et les permissions.",
+        details: { source: "sqlite_select" },
+      });
+      renderRoute(`/story/${STORY_ID}/edit`);
+      await screen.findByRole("region", { name: "Récupération indisponible" });
+    }
+
+    it("renders the dedicated read-error banner when the initial read fails", async () => {
+      await renderRouteWithReadError();
+      const region = screen.getByRole("region", {
+        name: "Récupération indisponible",
+      });
+      expect(region).toBeInTheDocument();
+      expect(screen.getByRole("alert")).toHaveTextContent(
+        "Récupération indisponible: vérifie le disque local et réessaie.",
+      );
+    });
+
+    it("does NOT render the diff banner when the initial read fails (no draft to show)", async () => {
+      await renderRouteWithReadError();
+      expect(
+        screen.queryByRole("region", { name: "Brouillon récupéré" }),
+      ).not.toBeInTheDocument();
+    });
+
+    it("disables the Field while the read-error banner is visible", async () => {
+      await renderRouteWithReadError();
+      const field = screen.getByRole("textbox", {
+        name: /Titre de l'histoire/i,
+      });
+      expect(field).toBeDisabled();
+    });
+
+    it("Réessayer la récupération re-fires readRecoverableDraft and recovers", async () => {
+      await renderRouteWithReadError();
+      const callsBefore = vi.mocked(readRecoverableDraft).mock.calls.length;
+      vi.mocked(readRecoverableDraft).mockResolvedValueOnce({ kind: "none" });
+      await userEvent.click(
+        screen.getByRole("button", { name: "Réessayer la récupération" }),
+      );
+      await waitFor(() => {
+        expect(vi.mocked(readRecoverableDraft).mock.calls.length).toBe(
+          callsBefore + 1,
+        );
+      });
+      // After the retry succeeds with `kind:"none"`, the banner is gone
+      // and the Field is editable again.
+      await waitFor(() => {
+        expect(
+          screen.queryByRole("region", { name: "Récupération indisponible" }),
+        ).not.toBeInTheDocument();
+      });
+      const field = screen.getByRole("textbox", {
+        name: /Titre de l'histoire/i,
+      });
+      expect(field).not.toBeDisabled();
+    });
+
+    it("Conserver l'état enregistré dismisses the banner without retrying", async () => {
+      await renderRouteWithReadError();
+      const callsBefore = vi.mocked(readRecoverableDraft).mock.calls.length;
+      await userEvent.click(
+        screen.getByRole("button", { name: "Conserver l'état enregistré" }),
+      );
+      await waitFor(() => {
+        expect(
+          screen.queryByRole("region", { name: "Récupération indisponible" }),
+        ).not.toBeInTheDocument();
+      });
+      // Dismiss must NOT trigger a fresh recovery read.
+      expect(vi.mocked(readRecoverableDraft).mock.calls.length).toBe(
+        callsBefore,
+      );
+      const field = screen.getByRole("textbox", {
+        name: /Titre de l'histoire/i,
+      });
+      expect(field).not.toBeDisabled();
     });
   });
 });

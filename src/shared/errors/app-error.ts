@@ -10,6 +10,7 @@ export type AppErrorCode =
   | "LIBRARY_INCONSISTENT"
   | "INVALID_STORY_TITLE"
   | "EXPORT_DESTINATION_UNAVAILABLE"
+  | "RECOVERY_DRAFT_UNAVAILABLE"
   | "UNKNOWN";
 
 export interface AppError {

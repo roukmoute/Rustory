@@ -4,4 +4,7 @@ pub mod story;
 
 pub use import_export::{ExportStoryDialogInputDto, ExportStoryDialogOutcomeDto};
 pub use library::{LibraryOverviewDto, StoryCardDto};
-pub use story::{CreateStoryInputDto, StoryDetailDto, UpdateStoryInputDto, UpdateStoryOutputDto};
+pub use story::{
+    ApplyRecoveryInputDto, CreateStoryInputDto, DiscardDraftInputDto, RecordDraftInputDto,
+    RecoverableDraftDto, StoryDetailDto, UpdateStoryInputDto, UpdateStoryOutputDto,
+};

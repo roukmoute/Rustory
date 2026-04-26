@@ -64,13 +64,31 @@ fn stories_survive_migration_rerun() {
         .expect("count");
     assert_eq!(count, 1);
 
-    let ledger_rows: u32 = db
+    // Idempotency invariant: every declared migration version must
+    // appear at most once in the ledger, regardless of how many times
+    // `run_migrations` is invoked. The total count must equal the
+    // declared `MIGRATIONS` length, so that adding a new migration
+    // version updates this assertion in lockstep.
+    let total: u32 = db
         .conn()
         .query_row("SELECT COUNT(*) FROM schema_migrations", [], |row| {
             row.get(0)
         })
-        .expect("count ledger");
-    assert_eq!(ledger_rows, 1);
+        .expect("count ledger total");
+    let distinct: u32 = db
+        .conn()
+        .query_row(
+            "SELECT COUNT(DISTINCT version) FROM schema_migrations",
+            [],
+            |row| row.get(0),
+        )
+        .expect("count ledger distinct");
+    assert_eq!(total, distinct, "no duplicate migration versions");
+    assert_eq!(
+        total as usize,
+        db::MIGRATIONS.len(),
+        "ledger must contain exactly one row per declared migration"
+    );
 }
 
 /// An invalid title must be refused before any SQL mutation: the base

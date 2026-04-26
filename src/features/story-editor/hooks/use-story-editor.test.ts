@@ -5,6 +5,8 @@ vi.mock("../../../ipc/commands/story", () => ({
   getStoryDetail: vi.fn(),
   saveStory: vi.fn(),
   createStory: vi.fn(),
+  recordDraft: vi.fn(),
+  discardDraft: vi.fn(),
 }));
 
 vi.mock("../../library/hooks/use-library-overview", async (importOriginal) => {
@@ -18,7 +20,12 @@ vi.mock("../../library/hooks/use-library-overview", async (importOriginal) => {
   };
 });
 
-import { getStoryDetail, saveStory } from "../../../ipc/commands/story";
+import {
+  discardDraft,
+  getStoryDetail,
+  recordDraft,
+  saveStory,
+} from "../../../ipc/commands/story";
 import { invalidateLibraryOverviewCache } from "../../library/hooks/use-library-overview";
 import { useStoryEditor } from "./use-story-editor";
 import type { StoryDetailDto } from "../../../shared/ipc-contracts/story";
@@ -57,6 +64,13 @@ beforeEach(() => {
     title: "",
     updatedAt: "2026-04-23T00:00:00.000Z",
   });
+  // Default mock for `recordDraft`: silently resolve. Tests that care
+  // about the call (count, args, rejection) override with mockResolvedValueOnce
+  // or mockRejectedValueOnce.
+  vi.mocked(recordDraft).mockReset();
+  vi.mocked(recordDraft).mockResolvedValue();
+  vi.mocked(discardDraft).mockReset();
+  vi.mocked(discardDraft).mockResolvedValue();
   vi.mocked(invalidateLibraryOverviewCache).mockReset();
 });
 
@@ -846,5 +860,270 @@ describe("useStoryEditor", () => {
     });
     if (result.current.state.kind !== "ready") throw new Error("ready");
     expect(result.current.state.detail.title).toBe("Récent");
+  });
+});
+
+describe("useStoryEditor — recovery draft buffering", () => {
+  it("setDraftTitle schedules a recordDraft with debounce 150 ms", async () => {
+    vi.mocked(getStoryDetail).mockResolvedValueOnce(buildDetail());
+    const { result } = renderHook(() => useStoryEditor(STORY_ID));
+    await flushPromises();
+
+    act(() => {
+      if (result.current.state.kind !== "ready") throw new Error("ready");
+      result.current.setDraftTitle("New keystroke");
+    });
+    expect(recordDraft).not.toHaveBeenCalled();
+
+    // Advance just past the 150 ms record-draft debounce. The autosave
+    // 500 ms timer is independent and does not fire here.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(149);
+    });
+    expect(recordDraft).not.toHaveBeenCalled();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2);
+    });
+
+    expect(recordDraft).toHaveBeenCalledWith({
+      storyId: STORY_ID,
+      draftTitle: "New keystroke",
+    });
+    expect(saveStory).not.toHaveBeenCalled();
+  });
+
+  it("setDraftTitle equal to persisted title does NOT call recordDraft", async () => {
+    vi.mocked(getStoryDetail).mockResolvedValueOnce(buildDetail());
+    const { result } = renderHook(() => useStoryEditor(STORY_ID));
+    await flushPromises();
+
+    act(() => {
+      if (result.current.state.kind !== "ready") throw new Error("ready");
+      result.current.setDraftTitle("Titre initial");
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(500);
+    });
+    expect(recordDraft).not.toHaveBeenCalled();
+  });
+
+  it("recordDraft failure is silent and does not affect the autosave state machine", async () => {
+    vi.mocked(getStoryDetail).mockResolvedValueOnce(buildDetail());
+    vi.mocked(recordDraft).mockRejectedValueOnce({
+      code: "RECOVERY_DRAFT_UNAVAILABLE",
+      message: "fail",
+      userAction: "retry",
+      details: null,
+    });
+    vi.mocked(saveStory).mockResolvedValueOnce({
+      id: STORY_ID,
+      title: "Saved",
+      updatedAt: "2026-04-25T12:00:00.000Z",
+    });
+    const { result } = renderHook(() => useStoryEditor(STORY_ID));
+    await flushPromises();
+
+    act(() => {
+      if (result.current.state.kind !== "ready") throw new Error("ready");
+      result.current.setDraftTitle("Saved");
+    });
+    // Trip the record_draft failure first.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(150);
+    });
+    // Then the autosave fires and succeeds.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(400);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    if (result.current.state.kind !== "ready") throw new Error("ready");
+    // The autosave reached `saved` despite the recordDraft failure —
+    // the buffer is best-effort.
+    expect(result.current.state.saveStatus.kind === "saved").toBe(true);
+  });
+
+  it("successive keystrokes coalesce into a single recordDraft after the debounce", async () => {
+    vi.mocked(getStoryDetail).mockResolvedValueOnce(buildDetail());
+    const { result } = renderHook(() => useStoryEditor(STORY_ID));
+    await flushPromises();
+
+    act(() => {
+      if (result.current.state.kind !== "ready") throw new Error("ready");
+      result.current.setDraftTitle("a");
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(50);
+    });
+    act(() => {
+      if (result.current.state.kind !== "ready") throw new Error("ready");
+      result.current.setDraftTitle("ab");
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(50);
+    });
+    act(() => {
+      if (result.current.state.kind !== "ready") throw new Error("ready");
+      result.current.setDraftTitle("abc");
+    });
+    // 150 ms after the LAST keystroke, only one record fires with the
+    // most recent value.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(150);
+    });
+    expect(recordDraft).toHaveBeenCalledTimes(1);
+    expect(recordDraft).toHaveBeenLastCalledWith({
+      storyId: STORY_ID,
+      draftTitle: "abc",
+    });
+  });
+
+  it("typing past the debounce eventually fires the autosave AND a record per pause", async () => {
+    vi.mocked(getStoryDetail).mockResolvedValueOnce(buildDetail());
+    vi.mocked(saveStory).mockResolvedValueOnce({
+      id: STORY_ID,
+      title: "Saved",
+      updatedAt: "2026-04-25T12:00:00.000Z",
+    });
+    const { result } = renderHook(() => useStoryEditor(STORY_ID));
+    await flushPromises();
+
+    act(() => {
+      if (result.current.state.kind !== "ready") throw new Error("ready");
+      result.current.setDraftTitle("Saved");
+    });
+    // Past 150 ms: record fires.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(150);
+    });
+    expect(recordDraft).toHaveBeenCalledTimes(1);
+    // Past 500 ms total since keystroke: autosave fires.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(400);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(saveStory).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("useStoryEditor — auto-discard on return-to-persisted", () => {
+  it("fires discardDraft when the user types back to the persisted value after a record was scheduled", async () => {
+    vi.mocked(getStoryDetail).mockResolvedValueOnce(buildDetail());
+    const { result } = renderHook(() => useStoryEditor(STORY_ID));
+    await flushPromises();
+
+    // Type something different — schedules recordDraft (sets the
+    // pending-draft flag) and the autosave debounce.
+    act(() => {
+      if (result.current.state.kind !== "ready") throw new Error("ready");
+      result.current.setDraftTitle("Modifié");
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(150);
+    });
+    expect(recordDraft).toHaveBeenCalledTimes(1);
+
+    // Now type back to the persisted value BEFORE the autosave fires.
+    act(() => {
+      if (result.current.state.kind !== "ready") throw new Error("ready");
+      result.current.setDraftTitle("Titre initial");
+    });
+    // P6: discardDraft is dispatched via `queueMicrotask` to keep the
+    // setState updater pure (StrictMode double-fire safety). Drain the
+    // microtask queue once before asserting.
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(discardDraft).toHaveBeenCalledWith({ storyId: STORY_ID });
+  });
+
+  it("does NOT fire discardDraft when the user types back without ever scheduling a record", async () => {
+    vi.mocked(getStoryDetail).mockResolvedValueOnce(buildDetail());
+    const { result } = renderHook(() => useStoryEditor(STORY_ID));
+    await flushPromises();
+
+    // Same value typed again — never planned a record because the
+    // value matched the persisted truth from the start.
+    act(() => {
+      if (result.current.state.kind !== "ready") throw new Error("ready");
+      result.current.setDraftTitle("Titre initial");
+    });
+    expect(discardDraft).not.toHaveBeenCalled();
+  });
+
+  it("does NOT fire discardDraft after a successful autosave (DELETE already happened atomically in Rust)", async () => {
+    vi.mocked(getStoryDetail).mockResolvedValueOnce(buildDetail());
+    vi.mocked(saveStory).mockResolvedValueOnce({
+      id: STORY_ID,
+      title: "Saved",
+      updatedAt: "2026-04-25T12:00:00.000Z",
+    });
+    const { result } = renderHook(() => useStoryEditor(STORY_ID));
+    await flushPromises();
+
+    act(() => {
+      if (result.current.state.kind !== "ready") throw new Error("ready");
+      result.current.setDraftTitle("Saved");
+    });
+    // Let both timers (record 150 ms + autosave 500 ms) fire.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(700);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    // Now the user types back to the previously-persisted "Saved",
+    // which is the new persisted truth post-autosave. The pending-draft
+    // flag was cleared in the autosave success branch, so discardDraft
+    // must NOT fire.
+    act(() => {
+      if (result.current.state.kind !== "ready") throw new Error("ready");
+      result.current.setDraftTitle("Saved");
+    });
+    expect(discardDraft).not.toHaveBeenCalled();
+  });
+});
+
+describe("useStoryEditor — reloadDetailFromOutput", () => {
+  it("patches detail.title and resets saveStatus to idle", async () => {
+    vi.mocked(getStoryDetail).mockResolvedValueOnce(buildDetail());
+    const { result } = renderHook(() => useStoryEditor(STORY_ID));
+    await flushPromises();
+
+    act(() => {
+      if (result.current.state.kind !== "ready") throw new Error("ready");
+      result.current.reloadDetailFromOutput({
+        id: STORY_ID,
+        title: "Recovered",
+        updatedAt: "2026-04-25T12:00:00.000Z",
+      });
+    });
+
+    if (result.current.state.kind !== "ready") throw new Error("ready");
+    expect(result.current.state.detail.title).toBe("Recovered");
+    expect(result.current.state.detail.updatedAt).toBe(
+      "2026-04-25T12:00:00.000Z",
+    );
+    expect(result.current.state.draftTitle).toBe("Recovered");
+    expect(result.current.state.saveStatus.kind).toBe("idle");
+  });
+
+  it("does nothing when the output id does not match the current detail", async () => {
+    vi.mocked(getStoryDetail).mockResolvedValueOnce(buildDetail());
+    const { result } = renderHook(() => useStoryEditor(STORY_ID));
+    await flushPromises();
+
+    act(() => {
+      if (result.current.state.kind !== "ready") throw new Error("ready");
+      result.current.reloadDetailFromOutput({
+        id: "different",
+        title: "Recovered",
+        updatedAt: "2026-04-25T12:00:00.000Z",
+      });
+    });
+
+    if (result.current.state.kind !== "ready") throw new Error("ready");
+    expect(result.current.state.detail.title).toBe("Titre initial");
   });
 });

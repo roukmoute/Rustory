@@ -23,6 +23,15 @@ vi.mock("../ipc/commands/story", () => ({
   createStory: vi.fn(),
   saveStory: vi.fn(),
   getStoryDetail: (...args: unknown[]) => getStoryDetailMock(...args),
+  // T8 recovery flow: the route mounts `useStoryRecovery` so every
+  // story-edit traversal calls `read_recoverable_draft`. Default to
+  // `kind: "none"` so the banner stays hidden in router tests that
+  // do not exercise recovery; tests that care about the banner can
+  // override the mock locally.
+  readRecoverableDraft: () => Promise.resolve({ kind: "none" }),
+  recordDraft: () => Promise.resolve(),
+  applyRecovery: vi.fn(),
+  discardDraft: () => Promise.resolve(),
 }));
 
 import { createAppRouter } from "./router";

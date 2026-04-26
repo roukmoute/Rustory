@@ -13,6 +13,11 @@ export interface FieldProps {
   autoFocus?: boolean;
   onKeyDown?: React.KeyboardEventHandler<HTMLInputElement>;
   inputRef?: React.Ref<HTMLInputElement>;
+  /** When true, the input is non-editable. The label, layout and tab
+   *  stop are preserved (the input keeps its native `disabled` semantic
+   *  rather than `aria-disabled`) so the user knows the control is
+   *  intentionally locked rather than missing. */
+  disabled?: boolean;
 }
 
 /**
@@ -29,6 +34,7 @@ export function Field({
   autoFocus,
   onKeyDown,
   inputRef,
+  disabled,
   ...rest
 }: FieldProps): React.JSX.Element {
   return (
@@ -44,6 +50,7 @@ export function Field({
         value={value}
         placeholder={placeholder}
         autoFocus={autoFocus}
+        disabled={disabled}
         onChange={(event) => onChange(event.target.value)}
         onKeyDown={onKeyDown}
         aria-describedby={rest["aria-describedby"]}

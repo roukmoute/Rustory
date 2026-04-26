@@ -1,0 +1,85 @@
+.recovery-banner {
+  display: grid;
+  gap: var(--space-3);
+  padding: var(--space-4);
+  margin-bottom: var(--space-4);
+  border-left: 3px solid var(--color-accent-warning, #b88b3a);
+}
+
+.recovery-banner__title {
+  margin: 0;
+  font-size: 1.125rem;
+  font-weight: 600;
+  color: var(--color-text-primary);
+}
+
+.recovery-banner__intro {
+  margin: 0;
+  color: var(--color-text-secondary);
+}
+
+.recovery-banner__diff {
+  display: grid;
+  gap: var(--space-2);
+  margin: 0;
+  padding: var(--space-2) 0;
+  border-top: 1px solid var(--color-border-subtle);
+  border-bottom: 1px solid var(--color-border-subtle);
+}
+
+.recovery-banner__diff-row {
+  display: grid;
+  grid-template-columns: minmax(10rem, 14rem) 1fr;
+  gap: var(--space-2);
+  align-items: baseline;
+}
+
+.recovery-banner__diff-row dt {
+  font-weight: 500;
+  color: var(--color-text-secondary);
+}
+
+.recovery-banner__diff-row dd {
+  margin: 0;
+  /* Long titles must not break the layout — clamp via wrap, not
+     ellipsis: the user has to see the FULL value to make the call. */
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.recovery-banner__empty {
+  color: var(--color-text-secondary);
+  font-style: italic;
+}
+
+.recovery-banner__when {
+  margin: 0;
+  color: var(--color-text-secondary);
+  font-size: 0.875rem;
+}
+
+.recovery-banner__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.recovery-banner__alert {
+  display: grid;
+  gap: var(--space-2);
+  padding: var(--space-3);
+  margin-top: var(--space-2);
+  background: var(--color-surface-error, rgba(178, 73, 73, 0.08));
+  border-left: 3px solid var(--color-accent-error, #b24949);
+}
+
+.recovery-banner__alert-message {
+  margin: 0;
+  font-weight: 500;
+}
+
+.recovery-banner__alert-action {
+  margin: 0;
+  color: var(--color-text-secondary);
+  font-size: 0.875rem;
+}

@@ -9,7 +9,10 @@ use crate::domain::shared::AppError;
 ///
 /// The tuple layout is `(version, sql)`. Versions must be strictly ascending
 /// and unique — `run_migrations` asserts that invariant at runtime.
-pub const MIGRATIONS: &[(u32, &str)] = &[(1, include_str!("../../../migrations/0001_init.sql"))];
+pub const MIGRATIONS: &[(u32, &str)] = &[
+    (1, include_str!("../../../migrations/0001_init.sql")),
+    (2, include_str!("../../../migrations/0002_story_drafts.sql")),
+];
 
 /// Thin wrapper over a [`rusqlite::Connection`]. Exposes only the operations
 /// application services need, so the rest of the codebase never mixes raw
@@ -234,13 +237,32 @@ mod tests {
         run_migrations(&mut db).expect("first apply");
         run_migrations(&mut db).expect("second apply");
 
-        let count: u32 = db
+        // Each migration version must be recorded exactly once, regardless
+        // of how many times `run_migrations` is invoked. A second pass over
+        // the same `MIGRATIONS` slice must skip every already-applied row.
+        let total: u32 = db
             .conn()
             .query_row("SELECT COUNT(*) FROM schema_migrations", [], |row| {
                 row.get(0)
             })
             .expect("count ledger");
-        assert_eq!(count, 1, "ledger must not double-record a migration");
+        let distinct: u32 = db
+            .conn()
+            .query_row(
+                "SELECT COUNT(DISTINCT version) FROM schema_migrations",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count distinct");
+        assert_eq!(
+            total, distinct,
+            "ledger must not double-record any migration version"
+        );
+        assert_eq!(
+            total as usize,
+            MIGRATIONS.len(),
+            "ledger must contain exactly one row per declared migration"
+        );
     }
 
     #[test]
@@ -300,6 +322,156 @@ mod tests {
         assert!(
             message.contains("check"),
             "expected CHECK constraint failure, got: {message}"
+        );
+    }
+
+    /// Helper for the v2-migration tests: insert a minimal valid `stories`
+    /// row so `story_drafts` foreign-key checks have a valid parent.
+    fn insert_dummy_story(db: &DbHandle, id: &str) {
+        db.conn()
+            .execute(
+                "INSERT INTO stories (id, title, schema_version, structure_json, content_checksum, created_at, updated_at) \
+                 VALUES (?1, 'Dummy', 1, '{\"schemaVersion\":1,\"nodes\":[]}', \
+                 '0000000000000000000000000000000000000000000000000000000000000000', \
+                 '2026-04-22T00:00:00.000Z', '2026-04-22T00:00:00.000Z')",
+                rusqlite::params![id],
+            )
+            .expect("insert parent story");
+    }
+
+    #[test]
+    fn migration_v2_creates_story_drafts_table() {
+        let mut db = open_in_memory().expect("open");
+        run_migrations(&mut db).expect("migrate");
+
+        // PRAGMA table_info returns one row per column. Capture them so the
+        // assertion proves the schema, not just "table exists".
+        let mut stmt = db
+            .conn()
+            .prepare("PRAGMA table_info(story_drafts)")
+            .expect("prepare");
+        let columns: Vec<String> = stmt
+            .query_map([], |row| row.get::<_, String>(1))
+            .expect("query")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("collect");
+        assert_eq!(
+            columns,
+            vec!["story_id", "draft_title", "draft_at"],
+            "schema must match the canonical column set"
+        );
+    }
+
+    #[test]
+    fn story_drafts_primary_key_is_story_id() {
+        let mut db = open_in_memory().expect("open");
+        run_migrations(&mut db).expect("migrate");
+        insert_dummy_story(&db, "story-1");
+
+        db.conn()
+            .execute(
+                "INSERT INTO story_drafts (story_id, draft_title, draft_at) VALUES ('story-1', 'A', '2026-04-25T00:00:00.000Z')",
+                [],
+            )
+            .expect("first insert");
+        let err = db
+            .conn()
+            .execute(
+                "INSERT INTO story_drafts (story_id, draft_title, draft_at) VALUES ('story-1', 'B', '2026-04-25T00:00:01.000Z')",
+                [],
+            )
+            .expect_err("second insert with same PK must fail");
+        // SQLite reports primary-key collisions as constraint violations.
+        let message = err.to_string().to_lowercase();
+        assert!(
+            message.contains("unique") || message.contains("primary"),
+            "expected primary-key conflict, got: {message}"
+        );
+    }
+
+    #[test]
+    fn story_drafts_check_max_length_4096() {
+        let mut db = open_in_memory().expect("open");
+        run_migrations(&mut db).expect("migrate");
+        insert_dummy_story(&db, "story-too-long");
+
+        let too_long = "a".repeat(4097);
+        let err = db
+            .conn()
+            .execute(
+                "INSERT INTO story_drafts (story_id, draft_title, draft_at) VALUES (?1, ?2, '2026-04-25T00:00:00.000Z')",
+                rusqlite::params!["story-too-long", &too_long],
+            )
+            .expect_err("draft_title > 4096 must trip CHECK");
+        let message = err.to_string().to_lowercase();
+        assert!(
+            message.contains("check"),
+            "expected CHECK constraint failure, got: {message}"
+        );
+    }
+
+    #[test]
+    fn story_drafts_cascade_delete_on_story_removal() {
+        let mut db = open_in_memory().expect("open");
+        run_migrations(&mut db).expect("migrate");
+        insert_dummy_story(&db, "story-cascade");
+        db.conn()
+            .execute(
+                "INSERT INTO story_drafts (story_id, draft_title, draft_at) VALUES ('story-cascade', 'D', '2026-04-25T00:00:00.000Z')",
+                [],
+            )
+            .expect("insert draft");
+
+        db.conn()
+            .execute("DELETE FROM stories WHERE id = 'story-cascade'", [])
+            .expect("delete parent");
+
+        let count: u32 = db
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM story_drafts WHERE story_id = 'story-cascade'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count");
+        assert_eq!(
+            count, 0,
+            "FK ON DELETE CASCADE must remove the draft when the story is deleted"
+        );
+    }
+
+    #[test]
+    fn story_drafts_idx_draft_at_exists() {
+        let mut db = open_in_memory().expect("open");
+        run_migrations(&mut db).expect("migrate");
+
+        let count: u32 = db
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'idx_story_drafts__draft_at'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("query sqlite_master");
+        assert_eq!(count, 1, "draft_at index must exist after v2 migration");
+    }
+
+    #[test]
+    fn story_drafts_rejects_orphan_story_id_via_fk() {
+        let mut db = open_in_memory().expect("open");
+        run_migrations(&mut db).expect("migrate");
+        // Do NOT insert a parent story — this row should be rejected.
+        let err = db
+            .conn()
+            .execute(
+                "INSERT INTO story_drafts (story_id, draft_title, draft_at) VALUES ('orphan', 'D', '2026-04-25T00:00:00.000Z')",
+                [],
+            )
+            .expect_err("orphan story_id must be rejected by FK");
+        let message = err.to_string().to_lowercase();
+        assert!(
+            message.contains("foreign key") || message.contains("foreignkey"),
+            "expected FK constraint failure, got: {message}"
         );
     }
 }

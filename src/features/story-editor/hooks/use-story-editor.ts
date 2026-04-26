@@ -2,13 +2,26 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import { invalidateLibraryOverviewCache } from "../../library/hooks/use-library-overview";
 import { normalizeStoryTitle } from "../../library/validation/story-title";
-import { getStoryDetail, saveStory } from "../../../ipc/commands/story";
+import {
+  discardDraft,
+  getStoryDetail,
+  recordDraft,
+  saveStory,
+} from "../../../ipc/commands/story";
 import { toAppError, type AppError } from "../../../shared/errors/app-error";
-import type { StoryDetailDto } from "../../../shared/ipc-contracts/story";
+import type {
+  StoryDetailDto,
+  UpdateStoryOutput,
+} from "../../../shared/ipc-contracts/story";
 import { isStoryDetailDto } from "../../../shared/ipc-contracts/story";
 
 /** Autosave debounce window after the last keystroke, in milliseconds. */
 export const STORY_AUTOSAVE_DEBOUNCE_MS = 500;
+/** Recovery-draft buffer debounce. Shorter than the autosave so a crash
+ *  between two keystrokes still preserves the typed value: if the user
+ *  pauses ≥ 150 ms the draft has already been written to `story_drafts`
+ *  via `record_draft`, even though the autosave UPDATE has not fired yet. */
+export const STORY_DRAFT_RECORD_DEBOUNCE_MS = 150;
 /** How long the "Enregistré" chip stays visible before settling back to the
  *  quiescent "Brouillon local" label. Short enough to avoid stale reassurance
  *  while long enough for a glance to register it. */
@@ -52,11 +65,17 @@ export interface UseStoryEditor {
   /** Cancel the debounce and commit the pending save immediately. Called
    *  when the user clicks "Retour à la bibliothèque" or the route unmounts. */
   flushAutoSave: () => void;
+  /** Patch the in-memory `detail` from a successful `applyRecovery`
+   *  output without re-fetching. Aligns `draftTitle` with the new
+   *  persisted value and resets the save status to `idle`. */
+  reloadDetailFromOutput: (output: UpdateStoryOutput) => void;
 }
 
 interface UseStoryEditorOptions {
   debounceMs?: number;
   savedVisibleMs?: number;
+  /** Override the recovery-draft buffer debounce, in milliseconds. */
+  recordDraftDebounceMs?: number;
 }
 
 /**
@@ -77,6 +96,8 @@ export function useStoryEditor(
   const debounceMs = options.debounceMs ?? STORY_AUTOSAVE_DEBOUNCE_MS;
   const savedVisibleMs =
     options.savedVisibleMs ?? STORY_AUTOSAVE_SAVED_VISIBLE_MS;
+  const recordDraftDebounceMs =
+    options.recordDraftDebounceMs ?? STORY_DRAFT_RECORD_DEBOUNCE_MS;
 
   const [state, setState] = useState<StoryEditorState>(() =>
     storyId ? { kind: "loading" } : { kind: "not-found" },
@@ -95,6 +116,20 @@ export function useStoryEditor(
 
   const debounceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const savedIdleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Recovery-draft buffer timer. Independent from the autosave debounce
+  // so a fast pause writes the buffer well before the autosave would
+  // even start preparing its UPDATE.
+  const recordDraftTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
+    null,
+  );
+  // Tracks whether a `record_draft` was scheduled OR flushed for the
+  // currently-loaded detail. Used to decide whether to fire an
+  // auto-discard when the user types back to the persisted value: a
+  // residual buffered keystroke would otherwise survive the session.
+  // Cleared when the autosave succeeds (the DELETE in the same
+  // transaction already consumed the row) or when an explicit
+  // discard succeeds.
+  const hasPendingDraftRef = useRef(false);
   // Synchronous in-flight flag. `stateRef.current.saveStatus` only updates
   // at the next React render, so a second synchronous call to `retrySave`
   // or `flushAutoSave` would still see the old `failed` / `pending` value
@@ -116,6 +151,34 @@ export function useStoryEditor(
     }
   }, []);
 
+  const clearRecordDraft = useCallback(() => {
+    if (recordDraftTimerRef.current !== null) {
+      clearTimeout(recordDraftTimerRef.current);
+      recordDraftTimerRef.current = null;
+    }
+  }, []);
+
+  const scheduleRecordDraft = useCallback(
+    (storyId: string, draftTitle: string) => {
+      clearRecordDraft();
+      // Mark the buffer as "pending or flushed" the moment we schedule:
+      // a back-to-persisted setDraftTitle that lands during the 150 ms
+      // debounce must still trigger an auto-discard, because the row
+      // may have been written by a previous burst within the same
+      // session.
+      hasPendingDraftRef.current = true;
+      recordDraftTimerRef.current = setTimeout(() => {
+        recordDraftTimerRef.current = null;
+        // Best-effort: the autosave is the durable mechanism, so a
+        // record_draft failure must NOT affect the user-visible save
+        // state. The Rust side already logs the failure via the
+        // recovery_log diagnostic stream.
+        void recordDraft({ storyId, draftTitle }).catch(() => undefined);
+      }, recordDraftDebounceMs);
+    },
+    [clearRecordDraft, recordDraftDebounceMs],
+  );
+
   const load = useCallback(() => {
     if (!storyId) {
       setState({ kind: "not-found" });
@@ -124,6 +187,9 @@ export function useStoryEditor(
     const callId = ++activeCallRef.current;
     clearDebounce();
     clearSavedIdle();
+    // Fresh load: any prior buffer claim from a different storyId or a
+    // remounted hook is not ours to track anymore.
+    hasPendingDraftRef.current = false;
     setState({ kind: "loading" });
 
     getStoryDetail({ storyId })
@@ -207,6 +273,10 @@ export function useStoryEditor(
           invalidateLibraryOverviewCache();
           if (callId === activeCallRef.current) {
             saveInFlightRef.current = false;
+            // The autosave UPDATE deletes any `story_drafts` row for
+            // this story in the same SQLite transaction, so the buffer
+            // is provably empty after a confirmed success.
+            hasPendingDraftRef.current = false;
           }
           if (!mountedRef.current || callId !== activeCallRef.current) return;
           setState((prev) => {
@@ -296,6 +366,35 @@ export function useStoryEditor(
           // The user typed their way back to the persisted value. No save
           // needed — but clear any stale failure alert so the UI does not
           // keep warning about an error that no longer applies.
+          // Cancel any pending record_draft too: the canonical row
+          // already reflects the value we would buffer.
+          clearRecordDraft();
+          // If a draft buffer is still on disk from an earlier burst,
+          // drop it best-effort. The IPC call lives OUTSIDE the
+          // setState updater so React.StrictMode (which double-fires
+          // updaters in dev) does not double-fire the IPC. The state
+          // mutation we want is a side-effect-free flip of
+          // `hasPendingDraftRef`; the actual `discardDraft` is queued
+          // via a synchronous check on the ref before the setState
+          // returns. We capture the storyId locally because the ref
+          // read happens before the updater runs to completion.
+          const shouldDiscard = hasPendingDraftRef.current;
+          if (shouldDiscard) {
+            hasPendingDraftRef.current = false;
+          }
+          // We schedule the IPC AFTER React has committed the new
+          // state by using `queueMicrotask`. A direct call would still
+          // run inside the updater on the second StrictMode pass even
+          // though we cleared the ref — `queueMicrotask` defers it
+          // until after the synchronous render so only one IPC fires.
+          if (shouldDiscard) {
+            const storyIdForDiscard = prev.detail.id;
+            queueMicrotask(() => {
+              void discardDraft({ storyId: storyIdForDiscard }).catch(
+                () => undefined,
+              );
+            });
+          }
           return {
             ...prev,
             draftTitle: next,
@@ -304,6 +403,11 @@ export function useStoryEditor(
         }
 
         scheduleDebouncedSave();
+        // Plan a recovery-draft buffer in parallel with the autosave.
+        // A 150 ms debounce protects against a kill -9 between two
+        // keystrokes — the autosave alone cannot, because its 500 ms
+        // window leaves 350 ms uncovered.
+        scheduleRecordDraft(prev.detail.id, next);
 
         return {
           ...prev,
@@ -312,7 +416,7 @@ export function useStoryEditor(
         };
       });
     },
-    [clearDebounce, clearSavedIdle, scheduleDebouncedSave],
+    [clearDebounce, clearRecordDraft, clearSavedIdle, scheduleDebouncedSave, scheduleRecordDraft],
   );
 
   const retry = useCallback(() => {
@@ -346,46 +450,115 @@ export function useStoryEditor(
     fireSave(normalized);
   }, [clearDebounce, fireSave]);
 
+  /**
+   * Patch the in-memory `detail` from a successful `applyRecovery`
+   * output. Equivalent to a re-fetch but without the IPC round-trip.
+   *
+   * The recovery flow has just produced an authoritative `UPDATE` of the
+   * story, so the in-flight `detail` snapshot is stale. We:
+   * - bump `activeCallRef` so any pending save / draft timer becomes
+   *   a no-op (their `callId` no longer matches);
+   * - drop pending timers (the user just decided what to commit, we
+   *   should not re-fire an autosave for their old keystroke);
+   * - rewrite `detail.title` / `detail.updatedAt` from the output;
+   * - reset `draftTitle` to the new persisted value and the chip
+   *   to `idle`.
+   */
+  const reloadDetailFromOutput = useCallback(
+    (output: UpdateStoryOutput) => {
+      activeCallRef.current += 1;
+      saveInFlightRef.current = false;
+      clearDebounce();
+      clearSavedIdle();
+      clearRecordDraft();
+      setState((prev) => {
+        if (prev.kind !== "ready" || prev.detail.id !== output.id) return prev;
+        return {
+          kind: "ready",
+          detail: {
+            ...prev.detail,
+            title: output.title,
+            updatedAt: output.updatedAt,
+          },
+          draftTitle: output.title,
+          saveStatus: { kind: "idle" },
+        };
+      });
+    },
+    [clearDebounce, clearRecordDraft, clearSavedIdle],
+  );
+
   useEffect(() => {
     mountedRef.current = true;
     load();
     return () => {
       mountedRef.current = false;
       // Best-effort flush: if an autosave was pending but never fired, try
-      // to commit the latest value before the route disappears. Explicit
-      // recovery of an un-flushed draft after a crash is a separate
-      // feature and not handled here.
+      // to commit the latest value before the route disappears. The
+      // recovery-draft buffer is cancelled outright — its purpose is to
+      // protect against a hard kill, and a clean unmount is exactly the
+      // scenario where the autosave or the goBack flush takes over.
       if (debounceTimerRef.current !== null) {
         clearTimeout(debounceTimerRef.current);
         debounceTimerRef.current = null;
       }
+      if (recordDraftTimerRef.current !== null) {
+        clearTimeout(recordDraftTimerRef.current);
+        recordDraftTimerRef.current = null;
+      }
       const current = stateRef.current;
       if (current.kind === "ready") {
         const normalized = normalizeStoryTitle(current.draftTitle);
-        // Skip the cleanup flush when:
-        // - an in-flight save is already carrying the user's latest
-        //   value (goBack fired `flushAutoSave` synchronously and
-        //   bumped `activeCallRef`);
-        // - the last save already failed and the user did NOT click
-        //   `Réessayer l'enregistrement` — re-firing automatically
-        //   would contradict the user's implicit decision to leave the
-        //   page without retrying.
-        const skip =
-          current.saveStatus.kind === "saving" ||
-          current.saveStatus.kind === "failed";
-        if (!skip && normalized !== current.detail.title) {
-          // Fire-and-forget: the UI is unmounting so we will not observe
-          // the resolution. Rust still processes the UPDATE so the next
-          // reopen observes the latest committed value. Cache invalidation
-          // is safe because it simply drops a module-local snapshot that
-          // the next `/library` mount will refetch.
-          saveStory({ id: current.detail.id, title: normalized })
-            .then(() => invalidateLibraryOverviewCache())
-            .catch(() => {
-              // No UI to surface the failure to anymore. The prior
-              // persisted state remains intact by invariant.
-              invalidateLibraryOverviewCache();
-            });
+        const detailId = current.detail.id;
+        const liveDraftTitle = current.draftTitle;
+        // Skip the cleanup flush when an in-flight save is already
+        // carrying the user's latest value (goBack fired
+        // `flushAutoSave` synchronously and bumped `activeCallRef`).
+        const inFlightSaveCovers = current.saveStatus.kind === "saving";
+        if (!inFlightSaveCovers && normalized !== current.detail.title) {
+          // P40/D5: cleanup is sequential, never parallel.
+          //  - If the last save FAILED, do not re-fire `saveStory`
+          //    (the user implicitly chose to leave without retrying).
+          //    Persist a recovery buffer instead so the next session
+          //    can still surface the typed value.
+          //  - Otherwise, fire `saveStory` and chain a recovery-buffer
+          //    fallback in the catch path. A `saveStory` success
+          //    confirms the value is durable; the chained
+          //    `recordDraft` only fires when the save itself failed.
+          //    The two operations NEVER run in parallel — that would
+          //    let a slow-but-eventually-successful `saveStory` race
+          //    with a `recordDraft` of the same value, and the
+          //    autosave's atomic DELETE FROM story_drafts could then
+          //    drop the buffer the user just confirmed.
+          // `Promise.resolve().then(...)` indirection guards against
+          // a mocked façade that returns `undefined` instead of a
+          // Promise — the `.catch` on a non-thenable would throw and
+          // crash the unmount path under fake-timer-driven tests.
+          if (current.saveStatus.kind === "failed") {
+            void Promise.resolve()
+              .then(() =>
+                recordDraft({ storyId: detailId, draftTitle: liveDraftTitle }),
+              )
+              .catch(() => undefined);
+          } else {
+            void Promise.resolve()
+              .then(() => saveStory({ id: detailId, title: normalized }))
+              .then(() => invalidateLibraryOverviewCache())
+              .catch(() => {
+                invalidateLibraryOverviewCache();
+                // The save failed and there is no UI to surface the
+                // error anymore. Fall back to the recovery buffer so
+                // the next session can still propose the typed value.
+                return Promise.resolve()
+                  .then(() =>
+                    recordDraft({
+                      storyId: detailId,
+                      draftTitle: liveDraftTitle,
+                    }),
+                  )
+                  .catch(() => undefined);
+              });
+          }
         }
       }
       if (savedIdleTimerRef.current !== null) {
@@ -401,5 +574,6 @@ export function useStoryEditor(
     retry,
     retrySave,
     flushAutoSave,
+    reloadDetailFromOutput,
   };
 }

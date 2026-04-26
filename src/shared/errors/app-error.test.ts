@@ -16,6 +16,7 @@ const EXPECTED_RUST_CODES = [
   "INVALID_STORY_TITLE",
   "LIBRARY_INCONSISTENT",
   "LOCAL_STORAGE_UNAVAILABLE",
+  "RECOVERY_DRAFT_UNAVAILABLE",
 ] as const satisfies readonly AppErrorCode[];
 
 describe("AppErrorCode ↔ Rust mirror", () => {

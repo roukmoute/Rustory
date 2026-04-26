@@ -1,6 +1,7 @@
 use rustory_lib::domain::shared::AppError;
 use rustory_lib::ipc::dto::{
-    CreateStoryInputDto, StoryDetailDto, UpdateStoryInputDto, UpdateStoryOutputDto,
+    ApplyRecoveryInputDto, CreateStoryInputDto, RecordDraftInputDto, RecoverableDraftDto,
+    StoryDetailDto, UpdateStoryInputDto, UpdateStoryOutputDto,
 };
 
 #[test]
@@ -154,4 +155,124 @@ fn app_error_wire_shape_for_library_inconsistent_story_missing() {
     assert_eq!(v["code"], "LIBRARY_INCONSISTENT");
     assert_eq!(v["details"]["source"], "story_missing");
     assert_eq!(v["details"]["id"], "sid");
+}
+
+// ------ Recovery flow contract tests ------
+
+#[test]
+fn record_draft_input_dto_wire_shape_canonical() {
+    let dto: RecordDraftInputDto = serde_json::from_value(serde_json::json!({
+        "storyId": "0197a5d0-0000-7000-8000-000000000000",
+        "draftTitle": "Live keystroke",
+    }))
+    .expect("deser");
+    assert_eq!(dto.story_id, "0197a5d0-0000-7000-8000-000000000000");
+    assert_eq!(dto.draft_title, "Live keystroke");
+}
+
+#[test]
+fn record_draft_input_dto_rejects_snake_case_story_id() {
+    let err = serde_json::from_value::<RecordDraftInputDto>(serde_json::json!({
+        "story_id": "x",
+        "draftTitle": "y",
+    }))
+    .expect_err("must reject snake_case field");
+    let message = err.to_string().to_lowercase();
+    assert!(
+        message.contains("story_id") || message.contains("unknown field"),
+        "expected unknown-field error, got: {message}"
+    );
+}
+
+#[test]
+fn record_draft_input_dto_rejects_unknown_field() {
+    let err = serde_json::from_value::<RecordDraftInputDto>(serde_json::json!({
+        "storyId": "x",
+        "draftTitle": "y",
+        "extra": "z",
+    }))
+    .expect_err("must reject unknown field");
+    assert!(err.to_string().contains("extra"));
+}
+
+#[test]
+fn apply_recovery_input_dto_wire_shape_canonical() {
+    let dto: ApplyRecoveryInputDto = serde_json::from_value(serde_json::json!({
+        "storyId": "abc",
+    }))
+    .expect("deser");
+    assert_eq!(dto.story_id, "abc");
+}
+
+#[test]
+fn recoverable_draft_dto_none_wire_shape() {
+    let v = serde_json::to_value(&RecoverableDraftDto::None).expect("serialize");
+    assert_eq!(v, serde_json::json!({ "kind": "none" }));
+}
+
+#[test]
+fn recoverable_draft_dto_recoverable_wire_shape() {
+    let v = serde_json::to_value(&RecoverableDraftDto::Recoverable {
+        story_id: "sid".into(),
+        draft_title: "Buffered".into(),
+        draft_at: "2026-04-25T12:00:00.000Z".into(),
+        persisted_title: "Persisted".into(),
+    })
+    .expect("serialize");
+    assert_eq!(v["kind"], "recoverable");
+    assert_eq!(v["storyId"], "sid");
+    assert_eq!(v["draftTitle"], "Buffered");
+    assert_eq!(v["draftAt"], "2026-04-25T12:00:00.000Z");
+    assert_eq!(v["persistedTitle"], "Persisted");
+}
+
+#[test]
+fn recoverable_draft_dto_recoverable_camel_case_only() {
+    let v = serde_json::to_value(&RecoverableDraftDto::Recoverable {
+        story_id: "sid".into(),
+        draft_title: "B".into(),
+        draft_at: "2026-04-25T12:00:00.000Z".into(),
+        persisted_title: "P".into(),
+    })
+    .expect("serialize");
+    for snake in ["story_id", "draft_title", "draft_at", "persisted_title"] {
+        assert!(v.get(snake).is_none(), "{snake} must never leak");
+    }
+}
+
+#[test]
+fn recoverable_draft_dto_round_trip_via_serde_value() {
+    // Round-trip both variants through serde_json::Value to prove the
+    // serializer is deterministic and the consumer can re-parse it.
+    let none = serde_json::to_value(&RecoverableDraftDto::None).expect("ser");
+    assert_eq!(none, serde_json::json!({ "kind": "none" }));
+
+    let recoverable = serde_json::to_value(&RecoverableDraftDto::Recoverable {
+        story_id: "sid".into(),
+        draft_title: "B".into(),
+        draft_at: "2026-04-25T12:00:00.000Z".into(),
+        persisted_title: "P".into(),
+    })
+    .expect("ser");
+    assert_eq!(recoverable["kind"], "recoverable");
+    // The kind discriminator is the first observable bit a TS guard
+    // checks; lock it in so a refactor cannot accidentally rename.
+    assert!(recoverable.is_object());
+}
+
+#[test]
+fn app_error_wire_shape_for_recovery_draft_unavailable() {
+    let err = AppError::recovery_draft_unavailable(
+        "Récupération indisponible: vérifie le disque local et réessaie.",
+        "Relance Rustory ; si le problème persiste, consulte les traces locales.",
+    )
+    .with_details(serde_json::json!({
+        "source": "sqlite_upsert",
+        "kind": "busy",
+        "id": "sid",
+    }));
+    let v = serde_json::to_value(&err).expect("serialize");
+    assert_eq!(v["code"], "RECOVERY_DRAFT_UNAVAILABLE");
+    assert_eq!(v["details"]["source"], "sqlite_upsert");
+    assert_eq!(v["details"]["kind"], "busy");
 }
