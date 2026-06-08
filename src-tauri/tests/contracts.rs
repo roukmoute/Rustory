@@ -10,3 +10,6 @@ mod story;
 
 #[path = "contracts/device.rs"]
 mod device;
+
+#[path = "contracts/device_library.rs"]
+mod device_library;

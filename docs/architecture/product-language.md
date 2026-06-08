@@ -33,6 +33,11 @@ It exists to keep the same product concepts named the same way across:
 | Unsupported reason | `raison de non-support` | Standardized cause closed-set surfaced in the panel | `error`, `failure` (when used loosely) |
 | Device candidate | `appareil candidat` | A volume that may be a Lunii but is not yet classified | `mount`, `partition`, `drive` |
 | Refresh detection | `Réessayer la détection` | User-triggered re-scan from the library decision panel | `Refresh`, `Reload`, `Sync` |
+| Device-side library | `bibliothèque de l'appareil` / `histoires sur l'appareil` | The stories currently installed on the connected device, read live | `device library`, `remote library` |
+| Device-resident story without verified title | `histoire non reconnue` | A device story Rustory can list by its opaque identifier but cannot name without a catalog | `unknown story`, `untitled` |
+| Provenance marker (device) | `Sur l'appareil` | Marks an item as living on the device, distinct from the local library | `remote`, `external`, `cloud` |
+| Hidden device pack | `Masquée` | A device story listed as hidden by the user | `hidden`, `archived` |
+| Incomplete device pack | `Contenu incomplet` | A listed device story whose payload folder is missing/ambiguous | `corrupt`, `broken`, `orphan` |
 | Preparation step | `préparation` | Pre-transfer work needed to make the story sendable | `pipeline`, `build`, `compile assets` |
 | Send operation | `transfert` / `Envoyer vers la Lunii` | User-visible act of sending a story to the device | `deploy`, `sync job`, `push` |
 | Post-send confirmation | `vérification` | Explicit check that confirms what really happened on device | `post-check`, `validation finale` when it means something else |
@@ -71,6 +76,9 @@ The UI should favor these labels when they are user-visible:
 | Detected device but profile not allow-listed | `Profil non supporté` |
 | Multiple supported devices detected at once | `Profil ambigu — plusieurs candidats détectés` |
 | Device scan transport itself failed | `Détection indisponible` |
+| Reading the device-side library | `Lecture de la bibliothèque de l'appareil…` |
+| Connected device holds no readable story | `Aucune histoire sur l'appareil` |
+| Reading the device-side library failed | `Bibliothèque de l'appareil indisponible` |
 
 Do not alternate freely between synonyms such as `sync`, `envoi`, `upload`, or `job`.
 When a different wording is necessary in context, it must still map back to one of the preferred labels above.

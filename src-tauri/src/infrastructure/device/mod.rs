@@ -10,6 +10,7 @@
 //! reports.
 
 pub mod automount;
+pub mod library_reader;
 pub mod parser;
 pub mod scanner;
 pub mod system;
@@ -22,9 +23,10 @@ pub mod mock;
 pub use automount::{
     looks_like_lunii_candidate, try_automount_lunii_candidates, MountAttempt, MountOutcome,
 };
+pub use library_reader::{DeviceLibraryReader, SystemDeviceLibraryReader};
 pub use parser::{compute_device_identifier, parse_metadata_version, MetadataParseError};
 pub use scanner::{DeviceCandidate, DeviceScanReport, DeviceScanner};
 pub use system::{SystemDeviceScanner, EXTRA_MOUNT_ROOTS_ENV, SYSTEM_SCANNER_DEFAULT};
 
 #[cfg(test)]
-pub use mock::MockDeviceScanner;
+pub use mock::{MockDeviceLibraryReader, MockDeviceScanner};

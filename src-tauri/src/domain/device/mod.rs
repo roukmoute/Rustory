@@ -7,14 +7,20 @@
 //! converts these types into wire DTOs at the boundary.
 
 pub mod family;
+pub mod library;
 pub mod markers;
 pub mod operations;
 pub mod profile;
 
 pub use family::{DeviceFamily, LuniiFirmwareCohort};
+pub use library::{
+    format_pack_uuid, pack_short_id, parse_pack_index, DeviceLibrary, DeviceStoryEntry, PackIndex,
+    LUNII_PACK_UUID_BYTES, MAX_PACK_INDEX_BYTES,
+};
 pub use markers::{
-    LUNII_BINARY_TOKEN_MARKER, LUNII_DEVICE_ID_MARKER, LUNII_LIB_INFO_MARKER, LUNII_PRIMARY_MARKER,
-    LUNII_ROM_INFO_MARKER, MAX_METADATA_FILE_BYTES,
+    LUNII_BINARY_TOKEN_MARKER, LUNII_CONTENT_DIR, LUNII_DEVICE_ID_MARKER,
+    LUNII_HIDDEN_INDEX_MARKER, LUNII_LIB_INFO_MARKER, LUNII_PRIMARY_MARKER, LUNII_ROM_INFO_MARKER,
+    MAX_METADATA_FILE_BYTES,
 };
 pub use operations::{SupportedOperation, SupportedOperations};
 pub use profile::{classify_lunii, DeviceProfile, DeviceProfileClassification, UnsupportedReason};

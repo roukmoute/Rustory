@@ -7,6 +7,9 @@
 //! Stays Tauri-free: tests inject a [`MockDeviceScanner`] and exercise
 //! the full pipeline without any runtime dependency.
 
+pub mod library;
+
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use crate::domain::device::{
@@ -57,15 +60,41 @@ pub fn read_connected_lunii_with_attempts(
     scanner: &dyn DeviceScanner,
     budget: Duration,
 ) -> Result<(ConnectedLuniiOutcome, Vec<MountAttempt>), AppError> {
+    let resolved = resolve_connected_lunii(scanner, budget)?;
+    Ok((resolved.outcome, resolved.mount_attempts))
+}
+
+/// Richer internal result of the scan pipeline. Retains the `mount_path`
+/// of the single supported candidate — the device-library read path
+/// ([`library::read_device_library`]) needs it to open `.pi` and
+/// `.content` at the volume root. The public `read_connected_lunii*`
+/// entry points deliberately drop it so the OS mount path never leaks
+/// past the application boundary into a wire DTO.
+pub(crate) struct ResolvedScan {
+    pub(crate) outcome: ConnectedLuniiOutcome,
+    /// Present ONLY when `outcome` is `Supported` with exactly one
+    /// candidate.
+    pub(crate) supported_mount_path: Option<PathBuf>,
+    pub(crate) mount_attempts: Vec<MountAttempt>,
+}
+
+/// Run the full automount + scan + classify + aggregate pipeline,
+/// retaining the supported candidate's mount path. Shared by the
+/// detection command (which discards the path) and the library-read
+/// command (which needs it).
+pub(crate) fn resolve_connected_lunii(
+    scanner: &dyn DeviceScanner,
+    budget: Duration,
+) -> Result<ResolvedScan, AppError> {
     let started = Instant::now();
     let mount_attempts = try_automount_lunii_candidates();
-    // The 4 s wall-clock budget covers BOTH the automount D-Bus
-    // round-trips and the filesystem scan. Charging only the scan
-    // would let a misbehaving udisks2 hang the command past NFR4 even
-    // when the scan itself was instant. Deduct the automount elapsed
-    // time from the remaining budget; a zero remainder still lets the
-    // scanner produce a truncated empty report (no candidates, no
-    // panic) which the timeout branch below maps to `DeviceScanFailed`.
+    // The wall-clock budget covers BOTH the automount D-Bus round-trips
+    // and the filesystem scan. Charging only the scan would let a
+    // misbehaving udisks2 hang the command past NFR4 even when the scan
+    // itself was instant. Deduct the automount elapsed time from the
+    // remaining budget; a zero remainder still lets the scanner produce
+    // a truncated empty report (no candidates, no panic) which the
+    // timeout branch below maps to `DeviceScanFailed`.
     let scan_budget = budget.saturating_sub(started.elapsed());
     let report = scanner.scan(scan_budget)?;
 
@@ -82,10 +111,14 @@ pub fn read_connected_lunii_with_attempts(
     }
 
     if report.candidates.is_empty() {
-        return Ok((ConnectedLuniiOutcome::None, mount_attempts));
+        return Ok(ResolvedScan {
+            outcome: ConnectedLuniiOutcome::None,
+            supported_mount_path: None,
+            mount_attempts,
+        });
     }
 
-    let mut supported: Vec<DeviceProfile> = Vec::new();
+    let mut supported: Vec<(DeviceProfile, PathBuf)> = Vec::new();
     let mut unsupported: Vec<(UnsupportedReason, Option<String>)> = Vec::new();
 
     for candidate in report.candidates {
@@ -110,7 +143,9 @@ pub fn read_connected_lunii_with_attempts(
         let identifier =
             compute_device_identifier(&candidate.pi_payload, candidate.volume_serial.as_deref());
         match classify_lunii(metadata_version, true, candidate.has_bt, &identifier) {
-            DeviceProfileClassification::Supported(profile) => supported.push(profile),
+            DeviceProfileClassification::Supported(profile) => {
+                supported.push((profile, candidate.mount_path))
+            }
             DeviceProfileClassification::Unsupported {
                 reason,
                 firmware_hint,
@@ -120,26 +155,36 @@ pub fn read_connected_lunii_with_attempts(
     }
 
     if supported.len() > 1 {
-        return Ok((
-            ConnectedLuniiOutcome::Ambiguous {
+        return Ok(ResolvedScan {
+            outcome: ConnectedLuniiOutcome::Ambiguous {
                 candidate_count: supported.len() as u32,
             },
+            supported_mount_path: None,
             mount_attempts,
-        ));
+        });
     }
-    if let Some(profile) = supported.into_iter().next() {
-        return Ok((ConnectedLuniiOutcome::Supported(profile), mount_attempts));
+    if let Some((profile, mount_path)) = supported.into_iter().next() {
+        return Ok(ResolvedScan {
+            outcome: ConnectedLuniiOutcome::Supported(profile),
+            supported_mount_path: Some(mount_path),
+            mount_attempts,
+        });
     }
     if let Some((reason, hint)) = pick_priority_unsupported(unsupported) {
-        return Ok((
-            ConnectedLuniiOutcome::Unsupported {
+        return Ok(ResolvedScan {
+            outcome: ConnectedLuniiOutcome::Unsupported {
                 reason,
                 firmware_hint: hint,
             },
+            supported_mount_path: None,
             mount_attempts,
-        ));
+        });
     }
-    Ok((ConnectedLuniiOutcome::None, mount_attempts))
+    Ok(ResolvedScan {
+        outcome: ConnectedLuniiOutcome::None,
+        supported_mount_path: None,
+        mount_attempts,
+    })
 }
 
 /// Among the unsupported candidates, surface the one whose root cause is

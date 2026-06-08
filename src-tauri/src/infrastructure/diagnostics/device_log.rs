@@ -77,6 +77,25 @@ pub enum Event {
         device_class: &'static str,
         reason: &'static str,
     },
+    /// The device-side library inventory was read. Carries the opaque
+    /// (hashed) `device_identifier`, the pack COUNTS (never the raw pack
+    /// UUIDs — keeping the line PII-free and bounded regardless of
+    /// library size) and the wall-clock elapsed time.
+    DeviceLibraryRead {
+        device_identifier: String,
+        story_count: u32,
+        hidden_count: u32,
+        elapsed_ms: u64,
+    },
+    /// Reading the device-side library failed. `source` is closed-set
+    /// (e.g. `fs_read`, `pack_index`, `read_timeout`, `device_changed`,
+    /// `scan_timeout`); `kind` mirrors the upstream `details.kind` when
+    /// present. No path, no raw UUID.
+    DeviceLibraryReadFailed {
+        source: &'static str,
+        kind: Option<String>,
+        elapsed_ms: u64,
+    },
 }
 
 /// Append a single event to the device log. Production entry point —
@@ -243,6 +262,39 @@ mod tests {
         // The serialized form must not contain "PI_PAYLOAD" or a raw
         // hardware serial — only the hashed identifier.
         assert!(!line.contains("PI_PAYLOAD"));
+    }
+
+    #[test]
+    fn event_device_library_read_carries_counts_not_raw_uuids() {
+        let event = Event::DeviceLibraryRead {
+            device_identifier: "0123456789abcdef0123456789abcdef".into(),
+            story_count: 7,
+            hidden_count: 1,
+            elapsed_ms: 120,
+        };
+        let v = serde_json::to_value(&event).expect("ser");
+        assert_eq!(v["category"], "device_library_read");
+        assert_eq!(v["device_identifier"], "0123456789abcdef0123456789abcdef");
+        assert_eq!(v["story_count"], 7);
+        assert_eq!(v["hidden_count"], 1);
+        assert_eq!(v["elapsed_ms"], 120);
+        // The payload exposes only counts — no array of pack UUIDs.
+        assert!(v.get("uuids").is_none());
+        assert!(v.get("stories").is_none());
+    }
+
+    #[test]
+    fn event_device_library_read_failed_carries_typed_source_and_kind() {
+        let event = Event::DeviceLibraryReadFailed {
+            source: "fs_read",
+            kind: Some("not_found".into()),
+            elapsed_ms: 9,
+        };
+        let v = serde_json::to_value(&event).expect("ser");
+        assert_eq!(v["category"], "device_library_read_failed");
+        assert_eq!(v["source"], "fs_read");
+        assert_eq!(v["kind"], "not_found");
+        assert_eq!(v["elapsed_ms"], 9);
     }
 
     #[test]

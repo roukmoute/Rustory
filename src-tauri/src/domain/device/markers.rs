@@ -26,6 +26,20 @@ pub const LUNII_BINARY_TOKEN_MARKER: &str = ".bt";
 pub const LUNII_ROM_INFO_MARKER: &str = ".ri";
 pub const LUNII_LIB_INFO_MARKER: &str = ".li";
 
+/// Companion of `.pi` listing the packs the user marked as hidden. Same
+/// binary layout as `.pi` (16-byte UUIDs back to back). Optional: a
+/// device with no hidden pack does not ship the file. Reading the
+/// installed-pack inventory consumes BOTH `.pi` (visible) and
+/// `.pi.hidden` (hidden) — the two lists are disjoint.
+pub const LUNII_HIDDEN_INDEX_MARKER: &str = ".pi.hidden";
+
+/// Root directory holding one sub-folder per installed pack. Each
+/// sub-folder is named with the uppercase last 8 hex characters of the
+/// pack UUID (see `domain::device::library::pack_short_id`). Presence of
+/// the folder for a `.pi` UUID confirms the pack payload is actually on
+/// the volume; its absence flags an ambiguous/orphan entry (FR33).
+pub const LUNII_CONTENT_DIR: &str = ".content";
+
 /// Tight upper bound on the `.md` (and other marker) file size we are
 /// willing to read into memory during the scan. A genuine `.md` is < 1 KB;
 /// anything bigger is treated as `metadata_corrupt`. Bounded I/O on the
@@ -69,5 +83,15 @@ mod tests {
     #[test]
     fn max_metadata_file_bytes_is_4_kb() {
         assert_eq!(MAX_METADATA_FILE_BYTES, 4096);
+    }
+
+    #[test]
+    fn lunii_hidden_index_marker_is_dot_pi_hidden() {
+        assert_eq!(LUNII_HIDDEN_INDEX_MARKER, ".pi.hidden");
+    }
+
+    #[test]
+    fn lunii_content_dir_is_dot_content() {
+        assert_eq!(LUNII_CONTENT_DIR, ".content");
     }
 }

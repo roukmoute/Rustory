@@ -1,8 +1,11 @@
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use crate::domain::device::{DeviceLibrary, DeviceStoryEntry};
 use crate::domain::shared::AppError;
 
+use super::library_reader::DeviceLibraryReader;
 use super::scanner::{DeviceCandidate, DeviceScanReport, DeviceScanner};
 
 /// Programmable mock for tests. Each `scan()` call pops the next queued
@@ -132,6 +135,75 @@ impl DeviceScanner for MockDeviceScanner {
         let mut g = self.queue.lock().unwrap_or_else(|p| p.into_inner());
         if g.is_empty() {
             Ok(DeviceScanReport::empty(Duration::from_millis(1)))
+        } else {
+            g.remove(0)
+        }
+    }
+}
+
+/// Programmable mock for the device-library read path. Each
+/// `read_library()` call pops the next queued outcome (FIFO); an empty
+/// queue yields an empty library (no panic), mirroring
+/// [`MockDeviceScanner`].
+#[derive(Clone, Default)]
+pub struct MockDeviceLibraryReader {
+    queue: Arc<Mutex<Vec<Result<DeviceLibrary, AppError>>>>,
+}
+
+impl MockDeviceLibraryReader {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn enqueue(&self, outcome: Result<DeviceLibrary, AppError>) {
+        let mut g = self.queue.lock().unwrap_or_else(|p| p.into_inner());
+        g.push(outcome);
+    }
+
+    /// Queue a library with `count` synthetic visible packs, all with a
+    /// present `.content` folder. Short ids are derived from the index.
+    pub fn enqueue_library_with(&self, count: u8) {
+        let entries = (0..count)
+            .map(|i| DeviceStoryEntry {
+                uuid: format!("00000000-0000-0000-0000-0000000000{i:02x}"),
+                short_id: format!("000000{i:02X}"),
+                hidden: false,
+                content_present: true,
+            })
+            .collect();
+        self.enqueue(Ok(DeviceLibrary {
+            entries,
+            had_trailing_bytes: false,
+        }));
+    }
+
+    pub fn enqueue_empty_library(&self) {
+        self.enqueue(Ok(DeviceLibrary::default()));
+    }
+
+    /// Queue a recoverable read failure mimicking the device disappearing
+    /// mid-read (AC #3).
+    pub fn enqueue_disconnected_mid_read(&self) {
+        self.enqueue(Err(AppError::device_scan_failed(
+            "Lecture de la bibliothèque appareil indisponible: vérifie que la Lunii est branchée et réessaie.",
+            "Vérifie la connexion de la Lunii puis réessaie la lecture de la bibliothèque.",
+        )
+        .with_details(serde_json::json!({
+            "source": "fs_read",
+            "kind": "not_found",
+        }))));
+    }
+}
+
+impl DeviceLibraryReader for MockDeviceLibraryReader {
+    fn read_library(
+        &self,
+        _mount_path: &Path,
+        _budget: Duration,
+    ) -> Result<DeviceLibrary, AppError> {
+        let mut g = self.queue.lock().unwrap_or_else(|p| p.into_inner());
+        if g.is_empty() {
+            Ok(DeviceLibrary::default())
         } else {
             g.remove(0)
         }

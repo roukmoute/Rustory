@@ -18,9 +18,15 @@ pub mod ipc;
 /// command can hand it to `spawn_blocking` (which requires `'static`)
 /// without contention with the DB mutex. Production wires the
 /// `sysinfo`-backed system scanner; tests inject a mock.
+///
+/// `library_reader` is the [`infrastructure::device::DeviceLibraryReader`]
+/// used by `read_device_library` to enumerate a connected Lunii's pack
+/// inventory at its mount path. Same `Arc` + `spawn_blocking` discipline
+/// as `device_scanner`; production wires the stdlib filesystem reader.
 pub struct AppState {
     pub db: Mutex<infrastructure::db::DbHandle>,
     pub device_scanner: std::sync::Arc<dyn infrastructure::device::DeviceScanner>,
+    pub library_reader: std::sync::Arc<dyn infrastructure::device::DeviceLibraryReader>,
 }
 
 /// Read every story id that still has a pending draft row. Ordered by
@@ -136,6 +142,9 @@ pub fn run() {
                 device_scanner: std::sync::Arc::new(
                     infrastructure::device::SystemDeviceScanner::default(),
                 ),
+                library_reader: std::sync::Arc::new(
+                    infrastructure::device::SystemDeviceLibraryReader,
+                ),
             });
             Ok(())
         })
@@ -153,6 +162,7 @@ pub fn run() {
             commands::library::get_library_overview,
             commands::story::get_story_detail,
             commands::device::read_connected_lunii,
+            commands::device::read_device_library,
             commands::story::read_recoverable_draft,
             commands::story::record_draft,
             commands::story::update_story,

@@ -10,6 +10,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const mockGet = vi.fn();
 const mockDevice = vi.fn();
+const mockDeviceLibrary = vi.fn();
 
 vi.mock("../../ipc/commands/library", () => ({
   getLibraryOverview: () => ({
@@ -31,7 +32,21 @@ vi.mock("../../ipc/commands/device", async () => {
   };
 });
 
+vi.mock("../../ipc/commands/device-library", async () => {
+  const actual = await vi.importActual<
+    typeof import("../../ipc/commands/device-library")
+  >("../../ipc/commands/device-library");
+  return {
+    ...actual,
+    readDeviceLibrary: () => ({
+      promise: mockDeviceLibrary(),
+      cancel: () => {},
+    }),
+  };
+});
+
 import { invalidateConnectedLuniiCache } from "../../features/device/hooks/use-connected-lunii";
+import { invalidateDeviceLibraryCache } from "../../features/device/hooks/use-device-library";
 import { invalidateLibraryOverviewCache } from "../../features/library/hooks/use-library-overview";
 import { useLibraryShell } from "../../shell/state/library-shell-store";
 import { LibraryRoute, mapDeviceForPanel } from "./LibraryRoute";
@@ -63,10 +78,15 @@ describe("<LibraryRoute />", () => {
     // outcome override this with `mockDevice.mockResolvedValueOnce(...)`
     // before rendering.
     mockDevice.mockImplementation(() => new Promise(() => {}));
+    // Default: the device-library read resolves to "none" so the device
+    // section stays absent unless a test opts into a readable payload.
+    mockDeviceLibrary.mockReset();
+    mockDeviceLibrary.mockResolvedValue({ kind: "none" });
     // The hooks keep module-local stale-while-revalidate caches; reset
     // them between tests so no stray snapshot bleeds across cases.
     invalidateLibraryOverviewCache();
     invalidateConnectedLuniiCache();
+    invalidateDeviceLibraryCache();
     useLibraryShell.setState({
       selectedStoryIds: new Set(),
       query: "",
@@ -791,6 +811,75 @@ describe("<LibraryRoute />", () => {
     );
     expect(
       within(panel).getByText(/2 candidats détectés/i),
+    ).toBeInTheDocument();
+  });
+
+  // --- Device library (read + display) ---
+
+  const supportedV3 = {
+    kind: "supported" as const,
+    family: "lunii" as const,
+    firmwareCohort: "v3" as const,
+    metadataFormatVersion: 7,
+    deviceIdentifier: "0123456789abcdef0123456789abcdef",
+    supportedOperations: {
+      readLibrary: true,
+      inspectStory: true,
+      importStory: false,
+      writeStory: false,
+    },
+  };
+
+  it("lists the device library distinctly in the center column when a supported Lunii exposes packs", async () => {
+    mockGet.mockResolvedValueOnce({ stories: [{ id: "s1", title: "Le soleil" }] });
+    mockDevice.mockResolvedValue(supportedV3);
+    mockDeviceLibrary.mockResolvedValue({
+      kind: "readable",
+      deviceIdentifier: supportedV3.deviceIdentifier,
+      stories: [
+        { uuid: "u1", shortId: "0000ABCD", hidden: false, contentPresent: true },
+      ],
+    });
+    renderLibrary();
+
+    // The LOCAL library renders as usual.
+    await screen.findByRole("button", { name: /le soleil/i });
+
+    // The device library appears as a DISTINCT region inside the center
+    // column — never merged into the local collection.
+    const main = screen.getByRole("main", { name: /collection d'histoires/i });
+    const deviceRegion = await within(main).findByRole("region", {
+      name: /bibliothèque de l'appareil/i,
+    });
+    expect(within(deviceRegion).getByText("0000ABCD")).toBeInTheDocument();
+    expect(
+      within(deviceRegion).getAllByText(/histoire non reconnue/i).length,
+    ).toBeGreaterThan(0);
+    // The device read did not retrigger the local overview fetch.
+    expect(mockGet).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows a recoverable device-library error in the center without breaking the local library (AC #3)", async () => {
+    mockGet.mockResolvedValueOnce({ stories: [{ id: "s1", title: "Le soleil" }] });
+    mockDevice.mockResolvedValue(supportedV3);
+    mockDeviceLibrary.mockRejectedValue({
+      code: "DEVICE_SCAN_FAILED",
+      message: "Lecture de la bibliothèque appareil indisponible.",
+      userAction: "Vérifie la connexion de la Lunii puis réessaie.",
+      details: { source: "fs_read", kind: "not_found" },
+    });
+    renderLibrary();
+
+    // The local library stays intact and usable.
+    await screen.findByRole("button", { name: /le soleil/i });
+
+    // The device-library failure is surfaced IN CONTEXT (center column),
+    // recoverable, never a toast.
+    const main = screen.getByRole("main", { name: /collection d'histoires/i });
+    const alert = await within(main).findByRole("alert");
+    expect(alert).toHaveTextContent(/bibliothèque de l'appareil indisponible/i);
+    expect(
+      within(alert).getByRole("button", { name: /réessayer/i }),
     ).toBeInTheDocument();
   });
 

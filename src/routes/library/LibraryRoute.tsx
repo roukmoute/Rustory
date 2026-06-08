@@ -4,7 +4,11 @@ import { useNavigate } from "react-router-dom";
 
 import { openUrl } from "@tauri-apps/plugin-opener";
 
-import { useConnectedLunii } from "../../features/device";
+import {
+  DeviceStoryCollection,
+  useConnectedLunii,
+  useDeviceLibrary,
+} from "../../features/device";
 
 /** Public URL of the canonical device-support-profile document. Kept
  *  as a single constant so a future move (rename, monorepo, branch
@@ -123,22 +127,46 @@ export function LibraryRoute(): React.JSX.Element {
     handleOpenStory(story.id);
   };
 
-  const center = renderCenter(
-    state,
-    retry,
-    presentSelectedIds,
-    selectStory,
-    handleOpenStory,
-    query,
-    sort,
-    setQuery,
-    setSort,
-    resetFilters,
-    handleCreateStoryRequest,
-  );
-
   const { deviceState, deviceLabel, deviceReason, supportedOperations } =
     mapDeviceForPanel(device.state, device.isRefreshing);
+
+  // Derive the device whose library we may read: a supported Lunii that
+  // is read-authorized. Fall back to the cached snapshot so the device
+  // section survives a background detection refresh (SWR). `null` ⇒ the
+  // device-library hook stays idle and issues no IPC.
+  const effectiveDevice: ConnectedDeviceDto | null =
+    device.state.kind === "ready" ? device.state.device : device.cached;
+  const readableDeviceId =
+    effectiveDevice &&
+    effectiveDevice.kind === "supported" &&
+    effectiveDevice.supportedOperations.readLibrary
+      ? effectiveDevice.deviceIdentifier
+      : null;
+  const deviceLibrary = useDeviceLibrary(readableDeviceId);
+
+  const center = (
+    <>
+      {renderCenter(
+        state,
+        retry,
+        presentSelectedIds,
+        selectStory,
+        handleOpenStory,
+        query,
+        sort,
+        setQuery,
+        setSort,
+        resetFilters,
+        handleCreateStoryRequest,
+      )}
+      <DeviceStoryCollection
+        state={deviceLibrary.state}
+        isRefreshing={deviceLibrary.isRefreshing}
+        deviceLabel={deviceLabel}
+        onRetry={deviceLibrary.refresh}
+      />
+    </>
+  );
 
   return (
     <>

@@ -116,6 +116,10 @@ Preferred patterns:
 - `Profil non supporté: marqueurs appareil incomplets`
 - `Profil ambigu: {n} candidats détectés. Débranche les autres puis réessaie.`
 - `Lecture appareil indisponible: profil non autorisé`
+- `Lecture de la bibliothèque appareil indisponible: vérifie que la Lunii est branchée et réessaie.`
+- `Lecture de la bibliothèque appareil indisponible: l'index des histoires est illisible.`
+- `Lecture de la bibliothèque appareil indisponible: l'appareil met trop de temps à répondre.`
+- `Lecture de la bibliothèque appareil indisponible: l'appareil connecté a changé.`
 
 Error payloads that surface in the autosave alert carry a stable
 `details.source` discriminator so support can triage the cause without
@@ -226,10 +230,57 @@ spot slow scans approaching the NFR4 5 s budget. The closed `category`
 set is: `device_absent`, `device_detected_supported`,
 `device_detected_unsupported`, `device_scan_failed`,
 `device_automounted` (Linux only, when Rustory mounts a plugged
-Lunii via udisks2 D-Bus), and `device_automount_failed` (Linux only,
-when the D-Bus mount call is refused). Each line is one JSON object
-— `device_identifier` is always the SHA-256 hash of `.pi` + volume
-serial, never the raw payload.
+Lunii via udisks2 D-Bus), `device_automount_failed` (Linux only,
+when the D-Bus mount call is refused), `device_library_read` (the
+inventory was read — carries `story_count` and `hidden_count`, never
+the raw pack UUIDs), and `device_library_read_failed` (carries a
+closed-set `source` and the upstream `kind`). Each line is one JSON
+object — `device_identifier` is always the SHA-256 hash of `.pi` +
+volume serial, never the raw payload.
+
+## Device Library Contract
+
+After a device is detected as `supported`, Rustory may read its
+installed-story inventory and show it as a **distinct section in the
+center column**, below the local collection (separated by a rule). The
+device library is never merged into the local collection and is never
+hosted by the right decision panel (which stays "device state + send
+CTA"). This keeps local truth and device truth distinguishable at all
+times.
+
+The frontend hook `useDeviceLibrary(deviceIdentifier)` reads the
+inventory through the `read_device_library` command. It is orthogonal to
+`useLibraryOverview`: a device-read failure never alters the LOCAL
+library. There is no polling of the inventory — device PRESENCE is polled
+by `useConnectedLunii`; the heavier inventory read fires when the
+identifier changes (a different Lunii) and on a manual retry.
+
+Scope: listing only. Each entry is an opaque, unrecognized pack identity
+(`shortId`) — no title, no cover, no asserted content quality (the device
+stores none, and the offline MVP consults no catalog). Device entries are
+NOT selectable or editable here.
+
+| Internal State | Center-column rendering | Notes |
+| --- | --- | --- |
+| idle | nothing | No readable device (none / unsupported / not read-authorized). |
+| loading | `ProgressIndicator` + `Lecture de la bibliothèque de l'appareil…` | "État non encore chargé" — must never read as "aucune histoire". |
+| ready (n > 0) | list of opaque entries + count | Each entry: `Histoire non reconnue` + `Identifiant: <shortId>`. |
+| ready (n = 0) | `Aucune histoire sur l'appareil` | Distinct from the loading state. |
+| error | `LibraryErrorBanner` (`role="alert"`) titled `Bibliothèque de l'appareil indisponible` + `Réessayer` | Recoverable, in-context, never a toast. The local library stays intact. |
+
+Provenance is explicit: the section heading is `Histoires sur l'appareil`
+(plus the device label when known) with a `Sur l'appareil` chip. Per
+entry, `Masquée` (`.pi.hidden`) and `Contenu incomplet` (no
+`.content/<shortId>` folder) chips surface structural facts — all
+non-color (ASCII-glyph chips).
+
+Error payloads under the read carry a stable `details.source`:
+
+- `fs_read` — index-file read failure. `details.kind` ∈ `permission_denied`, `not_found`, `timeout`, `interrupted`, `other` (a mid-read unplug typically surfaces as `not_found`).
+- `pack_index` — the `.pi` exceeded the 64 KB inventory bound (`details.kind = "oversize"`).
+- `read_timeout` — the read budget was exhausted (`details.elapsed_ms`).
+- `device_changed` — the live re-scan no longer resolves to the requested device (swapped / unplugged-and-replaced).
+- `scan_timeout` / `os_enum` / `mount_unavailable` / `spawn_blocking_join` / `other` — re-scan transport failures, mirroring the detection set.
 
 ## UI Foundation Components
 

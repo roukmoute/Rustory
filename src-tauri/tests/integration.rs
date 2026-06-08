@@ -26,3 +26,6 @@ mod device_log;
 
 #[path = "integration/device_command.rs"]
 mod device_command;
+
+#[path = "integration/device_library.rs"]
+mod device_library;

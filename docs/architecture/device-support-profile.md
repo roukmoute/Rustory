@@ -63,6 +63,64 @@ projects AND validated against a physical Lunii V3 sample, 2026-04-26):
   + `etc/` — NO `.bt` present. This sample is the empirical proof
   that `.bt` cannot be a required marker.
 
+## Library Inventory
+
+Reading the installed-story inventory of a connected Lunii reuses the
+same volume that detection already classified — it does not re-open a
+second bridge. The `mount_path` discovered during the scan stays
+Rust-side and is handed to the inventory reader; it never crosses IPC.
+
+The `.pi` marker carries **two** readings of the same bytes:
+
+| Reading | Used by | Interpretation |
+| --- | --- | --- |
+| Opaque payload | detection | hashed (with the volume serial when available) into the `device_identifier` |
+| Pack index | inventory | an ORDERED list of installed pack UUIDs, **16 bytes each**, read back to back until EOF |
+
+`.pi.hidden` (same 16-byte layout) lists packs the user hid; it is
+optional and read best-effort. The two lists are disjoint: `.pi` =
+visible, `.pi.hidden` = hidden.
+
+Each pack owns a sub-folder under `.content/`, named with the **uppercase
+last 8 hexadecimal characters** of its UUID (the tail of the canonical
+`xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx` form). The inventory reader probes
+`.content/<SHORT_ID>` per pack: a missing folder flags an
+orphan/ambiguous entry rather than dropping it.
+
+Key properties:
+
+- **No decryption.** Enumerating the inventory touches only the index
+  files and folder names. Media ciphering is irrelevant to listing —
+  which is why `Lecture biblio` is `✅` for every supported cohort,
+  including V3 / metadata v7 (only import/write stay gated for V3).
+- **No durable mirror.** The inventory is a transient, instant truth.
+  It is held in memory for the current view and re-read on demand; it is
+  never persisted into SQLite as a device-content mirror.
+- **No on-device title.** The device stores no human-readable title or
+  cover for official packs — only the UUID. Rustory surfaces each entry
+  by its opaque short identifier and does not assert a title it has not
+  verified. Title/cover enrichment would require an external catalog,
+  which is out of the offline MVP scope.
+
+Read bounds (separate from detection):
+
+| Bound | Value | Why |
+| --- | --- | --- |
+| Detection `.md` / `.pi` cap | `4 KB` (`MAX_METADATA_FILE_BYTES`) | sized for the short marker reads on the scan path |
+| Inventory `.pi` cap | `64 KB` (`MAX_PACK_INDEX_BYTES`) | a library over 256 packs has a `.pi` bigger than 4 KB (256 × 16 = 4096); reusing the detection cap would silently truncate the inventory |
+
+> **Known ceiling.** The detection scanner still reads `.pi` under the
+> 4 KB cap to compute the identifier, so a device whose `.pi` exceeds
+> 4 KB (more than ~256 packs) is not classified as supported and never
+> reaches the inventory reader. Raising the detection cap for very large
+> libraries is deferred; realistic household libraries stay well under
+> this ceiling.
+
+References cross-checked against the same public OSS reverse-engineering
+projects as the marker set above (notably the pack-index format: 16-byte
+UUIDs in `.pi`, the `.content/<SHORT_ID>` folder convention, and the
+"listing needs no key" property).
+
 ## Refusal Reasons (closed set)
 
 When classification refuses a candidate, the wire DTO carries a

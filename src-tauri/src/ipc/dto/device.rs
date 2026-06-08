@@ -118,7 +118,7 @@ fn operations_dto(profile: &DeviceProfile) -> SupportedOperationsDto {
     }
 }
 
-fn reason_dto(r: UnsupportedReason) -> UnsupportedReasonDto {
+pub(crate) fn reason_dto(r: UnsupportedReason) -> UnsupportedReasonDto {
     match r {
         UnsupportedReason::FirmwareUnsupported => UnsupportedReasonDto::FirmwareUnsupported,
         UnsupportedReason::MetadataUnsupported => UnsupportedReasonDto::MetadataUnsupported,
