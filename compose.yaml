@@ -44,6 +44,12 @@ services:
     environment:
       DISPLAY: ${DISPLAY}
       NO_AT_BRIDGE: "1"
+      # Tell the device scanner to probe the host's USB auto-mount
+      # roots that sysinfo cannot see from inside the container's
+      # mount namespace. The scanner reads this colon-separated path
+      # list and additionally probes one level of children — so a
+      # Lunii mounted at `/media/$USER/<volume>` is picked up.
+      RUSTORY_DEVICE_MOUNT_ROOTS: /media:/run/media
     volumes:
       - .:/workspace
       - /tmp/.X11-unix:/tmp/.X11-unix:rw
@@ -56,6 +62,21 @@ services:
       # named volume keeps `rustory.sqlite` on the host Docker engine between
       # sessions while staying scoped to this service.
       - rustory-app-data:/root/.local/share
+      # Expose the host's udisks2 auto-mount roots so the device scan can
+      # see USB Mass Storage volumes (Lunii, etc.) plugged into the
+      # host. Read-only by intent: Rustory only needs to enumerate and
+      # read marker files in MVP Phase 1; any future write to the device
+      # will be revisited at Epic 3 wire-time and require an explicit
+      # rebind to `rw`.
+      #
+      # `rslave` propagation: host mount events (USB plug / unplug
+      # triggering udisks-managed mounts under /media/$USER/<volume>)
+      # propagate into the container so a Lunii unplugged and replugged
+      # after container start is detected. Without rslave the container
+      # only sees the mount tree at startup and stays blind to later
+      # plug events.
+      - /media:/media:ro,rslave
+      - /run/media:/run/media:ro,rslave
     devices:
       - /dev/dri:/dev/dri
     command: ["pnpm", "tauri", "dev"]

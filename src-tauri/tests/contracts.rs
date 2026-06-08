@@ -7,3 +7,6 @@ mod library_overview;
 
 #[path = "contracts/story.rs"]
 mod story;
+
+#[path = "contracts/device.rs"]
+mod device;

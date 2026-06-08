@@ -12,6 +12,8 @@ import { isAppError, toAppError, type AppErrorCode } from "./app-error";
  * keep alphabetical for easy cross-check.
  */
 const EXPECTED_RUST_CODES = [
+  "DEVICE_SCAN_FAILED",
+  "DEVICE_UNSUPPORTED",
   "EXPORT_DESTINATION_UNAVAILABLE",
   "INVALID_STORY_TITLE",
   "LIBRARY_INCONSISTENT",

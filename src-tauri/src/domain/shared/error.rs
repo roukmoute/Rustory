@@ -12,6 +12,8 @@ pub enum AppErrorCode {
     InvalidStoryTitle,
     ExportDestinationUnavailable,
     RecoveryDraftUnavailable,
+    DeviceScanFailed,
+    DeviceUnsupported,
 }
 
 /// Normalized application error crossing the IPC boundary.
@@ -95,6 +97,32 @@ impl AppError {
     ) -> Self {
         Self {
             code: AppErrorCode::RecoveryDraftUnavailable,
+            message: message.into(),
+            user_action: Some(user_action.into()),
+            details: None,
+        }
+    }
+
+    /// Constructed when the device scan transport itself fails (OS enum,
+    /// permission, timeout, mount disappeared between enumerate and read,
+    /// mutex poisoned). Mapped to `details.source` + `details.kind`
+    /// closed sets at the call site.
+    pub fn device_scan_failed(message: impl Into<String>, user_action: impl Into<String>) -> Self {
+        Self {
+            code: AppErrorCode::DeviceScanFailed,
+            message: message.into(),
+            user_action: Some(user_action.into()),
+            details: None,
+        }
+    }
+
+    /// Constructed when the device profile or operation is not in the
+    /// official allow-list. Used by the capability gate AND by the IPC
+    /// layer when surfacing classification failures that must not be
+    /// silently retried.
+    pub fn device_unsupported(message: impl Into<String>, user_action: impl Into<String>) -> Self {
+        Self {
+            code: AppErrorCode::DeviceUnsupported,
             message: message.into(),
             user_action: Some(user_action.into()),
             details: None,
@@ -213,5 +241,75 @@ mod tests {
         assert_eq!(v["details"]["source"], "temp_create");
         assert_eq!(v["details"]["kind"], "permission_denied");
         assert!(v.get("user_action").is_none(), "snake_case must not leak");
+    }
+
+    #[test]
+    fn device_scan_failed_serializes_with_stable_code() {
+        let err = AppError::device_scan_failed("msg", "action");
+        let v = serde_json::to_value(&err).expect("serialize");
+        assert_eq!(v["code"], "DEVICE_SCAN_FAILED");
+        assert_eq!(v["message"], "msg");
+        assert_eq!(v["userAction"], "action");
+    }
+
+    #[test]
+    fn device_unsupported_serializes_with_stable_code() {
+        let err = AppError::device_unsupported("msg", "action");
+        let v = serde_json::to_value(&err).expect("serialize");
+        assert_eq!(v["code"], "DEVICE_UNSUPPORTED");
+        assert_eq!(v["message"], "msg");
+        assert_eq!(v["userAction"], "action");
+    }
+
+    #[test]
+    fn device_scan_failed_serializes_with_camel_case_user_action() {
+        let err = AppError::device_scan_failed("msg", "action");
+        let v = serde_json::to_value(&err).expect("serialize");
+        assert!(
+            v.get("userAction").is_some(),
+            "userAction must be camelCase"
+        );
+        assert!(v.get("user_action").is_none(), "snake_case must not leak");
+    }
+
+    #[test]
+    fn device_unsupported_serializes_with_camel_case_user_action() {
+        let err = AppError::device_unsupported("msg", "action");
+        let v = serde_json::to_value(&err).expect("serialize");
+        assert!(
+            v.get("userAction").is_some(),
+            "userAction must be camelCase"
+        );
+        assert!(v.get("user_action").is_none(), "snake_case must not leak");
+    }
+
+    #[test]
+    fn device_scan_failed_carries_user_action_and_details() {
+        let err = AppError::device_scan_failed(
+            "Détection indisponible.",
+            "Vérifie que la Lunii est branchée et réessaie.",
+        )
+        .with_details(serde_json::json!({
+            "source": "fs_read",
+            "kind": "permission_denied",
+        }));
+        let v = serde_json::to_value(&err).expect("serialize");
+        assert_eq!(v["code"], "DEVICE_SCAN_FAILED");
+        assert_eq!(v["details"]["source"], "fs_read");
+        assert_eq!(v["details"]["kind"], "permission_denied");
+    }
+
+    #[test]
+    fn device_unsupported_carries_user_action_and_details() {
+        let err =
+            AppError::device_unsupported("Profil non supporté.", "Consulte le profil de support.")
+                .with_details(serde_json::json!({
+                    "source": "capability_gate",
+                    "operation": "write_story",
+                }));
+        let v = serde_json::to_value(&err).expect("serialize");
+        assert_eq!(v["code"], "DEVICE_UNSUPPORTED");
+        assert_eq!(v["details"]["source"], "capability_gate");
+        assert_eq!(v["details"]["operation"], "write_story");
     }
 }

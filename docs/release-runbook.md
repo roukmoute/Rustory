@@ -81,6 +81,53 @@ La récupération d'un brouillon après interruption s'appuie sur une table `sto
 
 **Note de sécurité** : la permission Tauri `dialog:allow-save` déclarée dans `src-tauri/capabilities/default.json` n'est **pas** une autorisation d'écriture filesystem générale accordée au renderer. La sécurité d'écriture vient du couplage dialog↔write dans le boundary Rust : le renderer ne peut pas fournir un chemin arbitraire à écrire — il peut seulement inviter l'utilisateur à choisir un emplacement via la dialog, et c'est Rust qui valide (canonicalisation parent, refus des symlinks, refus du dossier `app_data_dir` interne, extension `.rustory` obligatoire ou auto-ajoutée) puis écrit. Cette architecture doit rester intacte lors d'audits : toute commande future qui accepterait un `destination_path` en input direct depuis le renderer réouvrirait une surface d'écriture arbitraire.
 
+## Device Detection Footprint (MVP Phase 1)
+
+Rustory scans mounted USB Mass Storage volumes for the canonical Lunii
+marker set (`.md` + `.pi` at the volume root; `.bt` is observed on
+some generations but is informational only — see
+[device-support-profile.md](architecture/device-support-profile.md)).
+The frontend hook `useConnectedLunii` polls the scan silently every
+3 s so plug/unplug events surface automatically without the user
+clicking `Réessayer la détection`. The manual refresh button stays
+available as a fallback. Each scan emits one or more lines into
+`{app_data_dir}/diagnostics/device.jsonl` (rotation 10 MB, identical
+shape to `recovery.jsonl`). The scan budget is 4 seconds wall-clock
+end-to-end (NFR4 cap is 5 s; the 1 s margin absorbs IPC marshalling).
+
+Profiles authorized for read in Phase 1: Lunii Origine v1 (metadata
+v3), Lunii Mid-Gen v2 (metadata v6), Lunii V3 (metadata v7) for read
+only. Write is hard-blocked at the application capability gate
+(`application::device::check_operation_allowed`) for every profile
+until Epic 3 wires the transfer pipeline. The matrix lives at
+[`docs/architecture/device-support-profile.md`](architecture/device-support-profile.md).
+
+Security note: `.pi` payloads are SHA-256-hashed (truncated to 32 hex
+chars) before being used as a `device_identifier`. The raw `.pi`
+content NEVER leaves the Rust core or reaches the diagnostics log;
+absolute filesystem paths NEVER appear in serialized events. Two new
+dependencies were added: `sysinfo = "=0.32"` for cross-platform mount
+enumeration, and (Linux only) `zbus = "=5.16"` (blocking-api feature)
+for talking to udisks2 over D-Bus when a plugged Lunii volume needs
+to be auto-mounted.
+
+Auto-mount (Linux only): on minimal desktop sessions (no GNOME/KDE
+session daemon, locked-down polkit) udisks2 may not trigger an
+automatic mount when a Lunii is plugged in. Rustory therefore asks
+udisks2 — over D-Bus — to mount any block device matching a tight
+Lunii signature (`Drive` path contains "STM", `IdType = vfat`,
+`IdUsage = filesystem`, `MountPoints` empty). Generic USB sticks are
+filtered out by this signature so Rustory never mutates unrelated
+media. The behavior can be disabled entirely by setting
+`RUSTORY_DEVICE_AUTOMOUNT=0`. macOS / Windows do not need this path
+(OS-level auto-mount is universal) and the module compiles to a
+no-op on those platforms.
+
+The first scan on a host happens lazily, when the user opens the
+library context. A failed scan does not block the rest of the
+application: autosave, export and recovery keep running with the
+SQLite mutex available throughout — the scan never holds the DB lock.
+
 ## Failure-mode guardrails
 
 Même en livraison manuelle, ne **jamais** :

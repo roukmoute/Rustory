@@ -12,8 +12,15 @@ pub mod ipc;
 /// handle behind a synchronous mutex — SQLite serializes writers internally
 /// and reads are short-lived enough that a fine-grained async pool would
 /// be over-engineered for the current surface.
+///
+/// `device_scanner` carries the [`infrastructure::device::DeviceScanner`]
+/// trait object behind an [`Arc`] so the async `read_connected_lunii`
+/// command can hand it to `spawn_blocking` (which requires `'static`)
+/// without contention with the DB mutex. Production wires the
+/// `sysinfo`-backed system scanner; tests inject a mock.
 pub struct AppState {
     pub db: Mutex<infrastructure::db::DbHandle>,
+    pub device_scanner: std::sync::Arc<dyn infrastructure::device::DeviceScanner>,
 }
 
 /// Read every story id that still has a pending draft row. Ordered by
@@ -124,7 +131,12 @@ pub fn run() {
                 }
             }
 
-            app.manage(AppState { db: Mutex::new(db) });
+            app.manage(AppState {
+                db: Mutex::new(db),
+                device_scanner: std::sync::Arc::new(
+                    infrastructure::device::SystemDeviceScanner::default(),
+                ),
+            });
             Ok(())
         })
         // Handlers listed in flat alphabetical order on the COMMAND
@@ -140,6 +152,7 @@ pub fn run() {
             commands::import_export::export_story_with_save_dialog,
             commands::library::get_library_overview,
             commands::story::get_story_detail,
+            commands::device::read_connected_lunii,
             commands::story::read_recoverable_draft,
             commands::story::record_draft,
             commands::story::update_story,

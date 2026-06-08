@@ -11,6 +11,8 @@ export type AppErrorCode =
   | "INVALID_STORY_TITLE"
   | "EXPORT_DESTINATION_UNAVAILABLE"
   | "RECOVERY_DRAFT_UNAVAILABLE"
+  | "DEVICE_SCAN_FAILED"
+  | "DEVICE_UNSUPPORTED"
   | "UNKNOWN";
 
 export interface AppError {

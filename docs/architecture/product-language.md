@@ -29,6 +29,10 @@ It exists to keep the same product concepts named the same way across:
 | Connected hardware target | `appareil` | Connected storytelling device in generic copy | `device target`, `mount point` |
 | Specific supported family | `Lunii` | Explicit device family name when the distinction matters | generic aliases that hide the family |
 | Validated target scope | `profil d’appareil validé` | Supported family + firmware + authorized operations | `compatible target` used loosely |
+| Detected device profile | `profil détecté` | Stable description of family + firmware cohort + authorized operations | `device profile`, `compat info` |
+| Unsupported reason | `raison de non-support` | Standardized cause closed-set surfaced in the panel | `error`, `failure` (when used loosely) |
+| Device candidate | `appareil candidat` | A volume that may be a Lunii but is not yet classified | `mount`, `partition`, `drive` |
+| Refresh detection | `Réessayer la détection` | User-triggered re-scan from the library decision panel | `Refresh`, `Reload`, `Sync` |
 | Preparation step | `préparation` | Pre-transfer work needed to make the story sendable | `pipeline`, `build`, `compile assets` |
 | Send operation | `transfert` / `Envoyer vers la Lunii` | User-visible act of sending a story to the device | `deploy`, `sync job`, `push` |
 | Post-send confirmation | `vérification` | Explicit check that confirms what really happened on device | `post-check`, `validation finale` when it means something else |
@@ -62,6 +66,11 @@ The UI should favor these labels when they are user-visible:
 | End result was explicitly confirmed | `transférée et vérifiée` |
 | Failure can be retried safely | `échec récupérable` |
 | Result is incomplete and not a success | `état partiel` |
+| No device is connected | `Aucun appareil connecté` |
+| Supported device detected | `Appareil prêt — {famille} {cohort}` |
+| Detected device but profile not allow-listed | `Profil non supporté` |
+| Multiple supported devices detected at once | `Profil ambigu — plusieurs candidats détectés` |
+| Device scan transport itself failed | `Détection indisponible` |
 
 Do not alternate freely between synonyms such as `sync`, `envoi`, `upload`, or `job`.
 When a different wording is necessary in context, it must still map back to one of the preferred labels above.

@@ -2,21 +2,46 @@ import type React from "react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 
+import { openUrl } from "@tauri-apps/plugin-opener";
+
+import { useConnectedLunii } from "../../features/device";
+
+/** Public URL of the canonical device-support-profile document. Kept
+ *  as a single constant so a future move (rename, monorepo, branch
+ *  policy) is a one-line change. */
+const SUPPORT_PROFILE_URL =
+  "https://github.com/roukmoute/Rustory/blob/main/docs/architecture/device-support-profile.md";
+
+function openSupportProfile(): void {
+  // tauri-plugin-opener delegates to the OS default browser. The
+  // promise is intentionally not awaited: a failure (no network, no
+  // browser configured) does not block the UI — the user can still
+  // click again or copy the URL by hand.
+  void openUrl(SUPPORT_PROFILE_URL);
+}
 import { CreateStoryDialog } from "../../features/library/components/CreateStoryDialog";
 import { LibraryErrorBanner } from "../../features/library/components/LibraryErrorBanner";
 import { LibraryFiltersNav } from "../../features/library/components/LibraryFiltersNav";
-import { LuniiDecisionPanel } from "../../features/library/components/LuniiDecisionPanel";
+import {
+  LuniiDecisionPanel,
+  type LuniiDeviceState,
+} from "../../features/library/components/LuniiDecisionPanel";
 import { StoryCollection } from "../../features/library/components/StoryCollection";
 import {
   invalidateLibraryOverviewCache,
   useLibraryOverview,
 } from "../../features/library/hooks/use-library-overview";
+import type {
+  ConnectedDeviceDto,
+  SupportedOperationsDto,
+} from "../../shared/ipc-contracts/device";
 import type { StoryCardDto } from "../../shared/ipc-contracts/library";
 import { LibraryLayout } from "../../shell/layout/LibraryLayout";
 import { useLibraryShell } from "../../shell/state/library-shell-store";
 
 export function LibraryRoute(): React.JSX.Element {
   const { state, retry } = useLibraryOverview();
+  const device = useConnectedLunii();
   const selectedStoryIds = useLibraryShell((s) => s.selectedStoryIds);
   const selectStory = useLibraryShell((s) => s.selectStory);
   const pruneSelection = useLibraryShell((s) => s.pruneSelection);
@@ -112,6 +137,9 @@ export function LibraryRoute(): React.JSX.Element {
     handleCreateStoryRequest,
   );
 
+  const { deviceState, deviceLabel, deviceReason, supportedOperations } =
+    mapDeviceForPanel(device.state, device.isRefreshing);
+
   return (
     <>
       <LibraryLayout
@@ -119,9 +147,14 @@ export function LibraryRoute(): React.JSX.Element {
         center={center}
         rightPanel={
           <LuniiDecisionPanel
-            deviceState="absent"
+            deviceState={deviceState}
+            deviceLabel={deviceLabel}
+            deviceReason={deviceReason}
+            supportedOperations={supportedOperations}
             selectedCount={presentSelectedIds.size}
             onEdit={handleEditSelected}
+            onRefreshDevice={device.refresh}
+            onConsultSupportProfile={openSupportProfile}
           />
         }
       />
@@ -135,6 +168,110 @@ export function LibraryRoute(): React.JSX.Element {
 }
 
 type LibraryState = ReturnType<typeof useLibraryOverview>["state"];
+
+interface DevicePanelMapping {
+  deviceState: LuniiDeviceState;
+  deviceLabel?: string;
+  deviceReason?: string;
+  /** Authoritative per-profile operation matrix surfaced to the panel
+   *  so the user sees, in the device area, which capabilities the
+   *  detected Lunii actually exposes (AC1 — "affiche le profil
+   *  détecté et les opérations officiellement supportées"). */
+  supportedOperations?: SupportedOperationsDto;
+}
+
+/**
+ * Pure mapper from the `useConnectedLunii` state to the props
+ * `LuniiDecisionPanel` expects. Pure so it stays testable in isolation
+ * — the route owns no behavior beyond passing the props through.
+ *
+ * `isRefreshing` lets the route surface a transient `scanning` state
+ * even when a cached snapshot is rendered behind it: the UX rule is
+ * "show that detection is in flight even if the previous result is
+ * still visible".
+ */
+export function mapDeviceForPanel(
+  state: ReturnType<typeof useConnectedLunii>["state"],
+  isRefreshing: boolean,
+): DevicePanelMapping {
+  if (state.kind === "loading") {
+    return { deviceState: "scanning" };
+  }
+  if (state.kind === "error") {
+    return {
+      deviceState: "error",
+      deviceReason:
+        state.error.userAction ??
+        "Détection indisponible: vérifie que la Lunii est branchée et réessaie.",
+    };
+  }
+  if (isRefreshing) {
+    return { deviceState: "scanning" };
+  }
+  return mapDeviceDtoForPanel(state.device);
+}
+
+function mapDeviceDtoForPanel(dto: ConnectedDeviceDto): DevicePanelMapping {
+  switch (dto.kind) {
+    case "none":
+      return { deviceState: "absent" };
+    case "supported":
+      return {
+        deviceState: "idle",
+        deviceLabel: formatSupportedLabel(dto.firmwareCohort),
+        supportedOperations: dto.supportedOperations,
+      };
+    case "unsupported":
+      return {
+        deviceState: "unsupported",
+        deviceReason: formatUnsupportedReason(dto.reason, dto.firmwareHint),
+      };
+    case "ambiguous":
+      return {
+        deviceState: "ambiguous",
+        deviceReason: `Profil ambigu: ${dto.candidateCount} candidats détectés. Débranche les autres puis réessaie.`,
+      };
+  }
+}
+
+function formatSupportedLabel(
+  cohort: "origineV1" | "midGenV2" | "v3",
+): string {
+  switch (cohort) {
+    case "origineV1":
+      return "Lunii Origine";
+    case "midGenV2":
+      return "Lunii";
+    case "v3":
+      return "Lunii V3";
+  }
+}
+
+function formatUnsupportedReason(
+  reason: string,
+  hint: string | null,
+): string {
+  switch (reason) {
+    case "metadataUnsupported":
+      return hint
+        ? `Profil non supporté: format métadonnées ${hint.replace("metadata_v", "v")} non géré`
+        : "Profil non supporté: format métadonnées non géré";
+    case "metadataCorrupt":
+      return "Profil non supporté: marqueurs appareil incomplets";
+    case "firmwareUnsupported":
+      return hint
+        ? `Profil non supporté: firmware ${hint} non géré`
+        : "Profil non supporté: firmware non géré";
+    case "familyUnknown":
+      return "Profil non supporté: famille d'appareil non reconnue";
+    case "operationNotAuthorized":
+      return "Lecture appareil indisponible: profil non autorisé";
+    case "multipleCandidates":
+      return "Profil ambigu: plusieurs appareils candidats détectés. Débranche les autres puis réessaie.";
+    default:
+      return "Profil non supporté";
+  }
+}
 
 function renderCenter(
   state: LibraryState,

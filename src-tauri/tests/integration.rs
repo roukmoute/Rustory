@@ -17,3 +17,12 @@ mod story_drafts_recovery;
 
 #[path = "integration/recovery_log.rs"]
 mod recovery_log;
+
+#[path = "integration/device_scan.rs"]
+mod device_scan;
+
+#[path = "integration/device_log.rs"]
+mod device_log;
+
+#[path = "integration/device_command.rs"]
+mod device_command;

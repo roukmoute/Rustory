@@ -12,58 +12,12 @@
 //! no retention policy beyond that — diagnostics rooms cleans up archived
 //! files manually if needed.
 
-use std::collections::HashSet;
-use std::fs::{self, OpenOptions};
-use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
 
 use serde::Serialize;
 use tauri::{AppHandle, Manager};
 
-/// Process-wide monotonic counter used as a tie-breaker when two
-/// rotations land in the same millisecond. Without it, two `record_event`
-/// calls that both crossed the cap inside one ms would race on the same
-/// `recovery-{ts}.jsonl.archived` filename — the second `fs::rename`
-/// would clobber the first archive. Pairing the timestamp with the
-/// counter guarantees unique archive names even under tight bursts.
-static ROTATION_COUNTER: AtomicU64 = AtomicU64::new(0);
-
-/// Process-wide cache of diagnostic-directory paths we already proved
-/// writable in this run. Without it, every recovery-log event re-runs
-/// `ensure_dir_writable` — which performs a sentinel-file create+write+
-/// remove probe. That's wasted I/O on the hot path (one write per
-/// keystroke at the 150 ms record cadence is plausible). Once a path
-/// has been validated, repeated `record_event` calls on it skip the
-/// probe.
-fn ensure_dir_writable_cached(path: &Path) -> Result<(), AppError> {
-    static VERIFIED: Mutex<Option<HashSet<PathBuf>>> = Mutex::new(None);
-    {
-        let guard = VERIFIED.lock().unwrap_or_else(|p| p.into_inner());
-        if let Some(set) = guard.as_ref() {
-            if set.contains(path) {
-                return Ok(());
-            }
-        }
-    }
-    crate::infrastructure::filesystem::ensure_dir_writable(path).map_err(|err| {
-        AppError::recovery_draft_unavailable(
-            "Récupération indisponible: vérifie le disque local et réessaie.",
-            "Vérifie l'espace disque et les permissions de ton dossier utilisateur.",
-        )
-        .with_details(serde_json::json!({
-            "source": "diagnostics_dir",
-            "kind": err.details.as_ref().and_then(|d| d.get("kind").cloned()),
-        }))
-    })?;
-    let mut guard = VERIFIED.lock().unwrap_or_else(|p| p.into_inner());
-    let set = guard.get_or_insert_with(HashSet::new);
-    set.insert(path.to_path_buf());
-    Ok(())
-}
-
-use crate::application::story::now_iso_ms;
+use super::jsonl::{self, JsonlError};
 use crate::domain::shared::AppError;
 
 /// Soft cap on the live `recovery.jsonl` file. Past this size, the file
@@ -122,90 +76,19 @@ pub fn log_path_for(app_data_dir: &Path) -> PathBuf {
 /// Path-direct entry point. Exposed `pub` rather than `pub(crate)` so the
 /// integration test crate can exercise it without a Tauri runtime.
 pub fn record_event_at_path(log_path: &Path, event: Event) -> Result<(), AppError> {
-    let parent = log_path.parent().ok_or_else(|| {
-        AppError::recovery_draft_unavailable(
-            "Récupération indisponible: chemin de trace invalide.",
-            "Relance Rustory ; si le problème persiste, consulte les traces locales.",
-        )
-        .with_details(serde_json::json!({
-            "source": "diagnostics_path_invalid",
-        }))
-    })?;
-
-    // Re-tag any FS error as a recovery-log diagnostic so the UI / log
-    // consumer can tell where it actually came from. The original code
-    // is dropped on purpose: the recovery flow has its own taxonomy.
-    // Memoize the success: at the 150 ms record cadence the parent
-    // directory is checked dozens of times per minute and the sentinel
-    // probe is wasted I/O after the first proof.
-    ensure_dir_writable_cached(parent)?;
-
-    // Rotate before appending if we would cross the cap. Rotation is
-    // best-effort: on rotation failure we still try to append (better
-    // log a too-big file than lose the line).
-    if let Ok(metadata) = fs::metadata(log_path) {
-        if metadata.len() >= MAX_RECOVERY_LOG_BYTES {
-            let _ = rotate(log_path);
-        }
-    }
-
-    let line = serialize_line(&event)?;
-
-    let mut file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(log_path)
-        .map_err(|err| map_io_error(&err, "diagnostics_open"))?;
-    file.write_all(line.as_bytes())
-        .map_err(|err| map_io_error(&err, "diagnostics_write"))?;
-    file.flush()
-        .map_err(|err| map_io_error(&err, "diagnostics_flush"))?;
-    Ok(())
+    jsonl::append_event(log_path, &event, MAX_RECOVERY_LOG_BYTES, "recovery")
+        .map_err(map_jsonl_error)
 }
 
-fn rotate(log_path: &Path) -> Result<(), AppError> {
-    let parent = log_path.parent().expect("checked in record_event_at_path");
-    let now = now_iso_ms()?.replace(':', "-");
-    // Pair the timestamp with a monotonic counter so two rotations in
-    // the same millisecond produce different filenames. Wrapping is
-    // theoretical for this counter (u64 ≈ 600 years of one rotation
-    // per second), but `Ordering::Relaxed` keeps the counter cheap.
-    let seq = ROTATION_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let archived = parent.join(format!("recovery-{now}-{seq}.jsonl.archived"));
-    fs::rename(log_path, &archived).map_err(|err| map_io_error(&err, "diagnostics_rotate"))
-}
-
-fn serialize_line(event: &Event) -> Result<String, AppError> {
-    // A clock failure must NOT swallow the event category — that is the
-    // NFR24 stable identifier support relies on. If `now_iso_ms()` fails
-    // (system clock outside the formattable range), fall back to the
-    // sentinel string `"unknown-clock"` and keep the rest of the line.
-    let now = now_iso_ms().unwrap_or_else(|_| String::from("unknown-clock"));
-    let payload = serde_json::json!({
-        "ts": now,
-        "event": event,
-    });
-    let mut line = serde_json::to_string(&payload).map_err(|_| {
-        AppError::recovery_draft_unavailable(
-            "Récupération indisponible: trace illisible.",
-            "Relance Rustory ; si le problème persiste, consulte les traces locales.",
-        )
-        .with_details(serde_json::json!({
-            "source": "diagnostics_serialize",
-        }))
-    })?;
-    line.push('\n');
-    Ok(line)
-}
-
-fn map_io_error(err: &std::io::Error, source: &'static str) -> AppError {
-    use std::io::ErrorKind::*;
-    let kind = match err.kind() {
-        NotFound => "not_found",
-        PermissionDenied => "permission_denied",
-        StorageFull => "storage_full",
-        ReadOnlyFilesystem => "read_only_filesystem",
-        _ => "other",
+fn map_jsonl_error(err: JsonlError) -> AppError {
+    let (source, kind) = match &err {
+        JsonlError::DirNotWritable { kind } => ("diagnostics_dir", kind.as_str()),
+        JsonlError::PathInvalid => ("diagnostics_path_invalid", "n_a"),
+        JsonlError::Open(kind) => ("diagnostics_open", kind.as_str()),
+        JsonlError::Write(kind) => ("diagnostics_write", kind.as_str()),
+        JsonlError::Serialize => ("diagnostics_serialize", "n_a"),
+        JsonlError::SystemClock => ("diagnostics_clock", "n_a"),
+        JsonlError::Rotate(kind) => ("diagnostics_rotate", kind.as_str()),
     };
     AppError::recovery_draft_unavailable(
         "Récupération indisponible: vérifie le disque local et réessaie.",
@@ -220,6 +103,7 @@ fn map_io_error(err: &std::io::Error, source: &'static str) -> AppError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
     use tempfile::TempDir;
 
     fn read_lines(path: &Path) -> Vec<String> {

@@ -104,6 +104,18 @@ Preferred patterns:
 - `Récupération indisponible: vérifie le disque local et réessaie.`
 - `Restauration en cours: patiente quelques instants.`
 - `Édition en attente: choisis d'abord comment reprendre cette histoire.`
+- `Envoi indisponible: aucun appareil connecté`
+- `Envoi indisponible: profil non supporté`
+- `Envoi indisponible: profil ambigu`
+- `Envoi indisponible: détection en cours`
+- `Envoi indisponible: détection en échec`
+- `Envoi indisponible: transfert pas encore activé (MVP Phase 1)`
+- `Détection indisponible: vérifie que la Lunii est branchée et réessaie.`
+- `Profil non supporté: format métadonnées v{n} non géré`
+- `Profil non supporté: firmware {hint} non géré`
+- `Profil non supporté: marqueurs appareil incomplets`
+- `Profil ambigu: {n} candidats détectés. Débranche les autres puis réessaie.`
+- `Lecture appareil indisponible: profil non autorisé`
 
 Error payloads that surface in the autosave alert carry a stable
 `details.source` discriminator so support can triage the cause without
@@ -172,6 +184,52 @@ Rules:
 - Error, empty, filtered-empty and loading states all live inside the center column — never in the nav or in the panel.
 - The right-column panel stays intentionally minimal: device state + one primary CTA + a short, standardized reason when the CTA is disabled.
 - No fourth column, no collapsible drawer, no hamburger.
+
+## Device Detection Contract
+
+Drives the right-column `Lunii Decision Panel`. The Rust core scans
+mounted USB Mass Storage volumes for the canonical Lunii markers
+(`.md` + `.pi` at the volume root — `.bt` is observed on some
+generations but is **not** required, see
+[device-support-profile.md](./device-support-profile.md)); the IPC
+façade exposes a tagged-enum DTO; the panel maps each kind to one of
+the labels below.
+
+The frontend hook `useConnectedLunii` polls silently every 3 s so
+plug / unplug events surface automatically without the user clicking
+`Réessayer la détection`. The manual refresh button stays available
+as a fallback.
+
+| Internal State | Wire `kind` | Panel Label | Disabled Actions |
+| --- | --- | --- | --- |
+| no device | `none` | `Aucun appareil connecté` | Envoi |
+| supported | `supported` | `Appareil prêt — {family} {cohort}` | Envoi (Phase 1 — wired Epic 3) |
+| unsupported | `unsupported` | `Profil non supporté` + standardized reason | Envoi |
+| ambiguous | `ambiguous` | `Profil ambigu — {n} candidats` | Envoi |
+| scanning | (transient) | `Détection en cours…` | Envoi, Réessayer |
+| error | (`AppError DEVICE_SCAN_FAILED`) | `Détection indisponible` | Envoi |
+
+Error payloads under `DEVICE_SCAN_FAILED` carry a stable
+`details.source` discriminator so support can triage without parsing
+the user-facing message:
+
+- `fs_read` — per-mount filesystem read failure. `details.kind` is one of `permission_denied`, `not_found`, `timeout`, `interrupted`, `other`.
+- `os_enum` — failure to enumerate the host disk list. `details.kind` mirrors the I/O kind label set above.
+- `scan_timeout` — wall-clock budget exhausted before a candidate emerged. Carries `details.elapsed_ms`.
+- `other` — fallback when the upstream source token does not match a known set.
+
+Diagnostic events for the scan flow live in
+`{app_data_dir}/diagnostics/device.jsonl` (rotation cap 10 MB,
+identical to recovery.jsonl). Each event carries `elapsed_ms` (the
+wall-clock duration of the surrounding scan pipeline) so support can
+spot slow scans approaching the NFR4 5 s budget. The closed `category`
+set is: `device_absent`, `device_detected_supported`,
+`device_detected_unsupported`, `device_scan_failed`,
+`device_automounted` (Linux only, when Rustory mounts a plugged
+Lunii via udisks2 D-Bus), and `device_automount_failed` (Linux only,
+when the D-Bus mount call is refused). Each line is one JSON object
+— `device_identifier` is always the SHA-256 hash of `.pi` + volume
+serial, never the raw payload.
 
 ## UI Foundation Components
 

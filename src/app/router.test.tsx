@@ -34,6 +34,22 @@ vi.mock("../ipc/commands/story", () => ({
   discardDraft: () => Promise.resolve(),
 }));
 
+// Story 2.1: LibraryRoute mounts `useConnectedLunii` which calls
+// `read_connected_lunii`. Default the mock to `kind: "none"` so the
+// device panel never blocks router-level navigation tests.
+vi.mock("../ipc/commands/device", async () => {
+  const actual = await vi.importActual<
+    typeof import("../ipc/commands/device")
+  >("../ipc/commands/device");
+  return {
+    ...actual,
+    readConnectedLunii: () => ({
+      promise: Promise.resolve({ kind: "none" }),
+      cancel: () => {},
+    }),
+  };
+});
+
 import { createAppRouter } from "./router";
 
 describe("router", () => {

@@ -9,6 +9,7 @@ import {
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const mockGet = vi.fn();
+const mockDevice = vi.fn();
 
 vi.mock("../../ipc/commands/library", () => ({
   getLibraryOverview: () => ({
@@ -17,9 +18,23 @@ vi.mock("../../ipc/commands/library", () => ({
   }),
 }));
 
+vi.mock("../../ipc/commands/device", async () => {
+  const actual = await vi.importActual<
+    typeof import("../../ipc/commands/device")
+  >("../../ipc/commands/device");
+  return {
+    ...actual,
+    readConnectedLunii: () => ({
+      promise: mockDevice(),
+      cancel: () => {},
+    }),
+  };
+});
+
+import { invalidateConnectedLuniiCache } from "../../features/device/hooks/use-connected-lunii";
 import { invalidateLibraryOverviewCache } from "../../features/library/hooks/use-library-overview";
 import { useLibraryShell } from "../../shell/state/library-shell-store";
-import { LibraryRoute } from "./LibraryRoute";
+import { LibraryRoute, mapDeviceForPanel } from "./LibraryRoute";
 
 const STORY_EDIT_MARKER_TITLE = "Edit stub for";
 
@@ -42,9 +57,16 @@ function renderLibrary(options: { strict?: boolean } = {}) {
 describe("<LibraryRoute />", () => {
   beforeEach(() => {
     mockGet.mockReset();
-    // The hook keeps a module-local stale-while-revalidate cache; reset
-    // it between tests so no stray snapshot bleeds across cases.
+    mockDevice.mockReset();
+    // Default: the device probe never resolves so the panel stays in
+    // the scanning state. Tests that care about a specific device
+    // outcome override this with `mockDevice.mockResolvedValueOnce(...)`
+    // before rendering.
+    mockDevice.mockImplementation(() => new Promise(() => {}));
+    // The hooks keep module-local stale-while-revalidate caches; reset
+    // them between tests so no stray snapshot bleeds across cases.
     invalidateLibraryOverviewCache();
+    invalidateConnectedLuniiCache();
     useLibraryShell.setState({
       selectedStoryIds: new Set(),
       query: "",
@@ -244,17 +266,20 @@ describe("<LibraryRoute />", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("shows the Lunii Decision Panel with 'Aucun appareil connecté' on boot", async () => {
+  it("shows the Lunii Decision Panel with 'Aucun appareil connecté' once detection completes with kind=none", async () => {
     mockGet.mockResolvedValueOnce({ stories: [] });
+    mockDevice.mockResolvedValueOnce({ kind: "none" });
     renderLibrary();
     await screen.findByRole("heading", { name: /ta bibliothèque est vide/i });
 
     const panel = screen.getByRole("complementary", {
       name: /panneau de décision/i,
     });
-    expect(
-      within(panel).getByText(/aucun appareil connecté/i),
-    ).toBeInTheDocument();
+    await waitFor(() =>
+      expect(
+        within(panel).getAllByText(/aucun appareil connecté/i).length,
+      ).toBeGreaterThan(0),
+    );
   });
 
   it("preserves the 3-column layout when an error is surfaced — not a bare error screen", async () => {
@@ -592,5 +617,214 @@ describe("<LibraryRoute />", () => {
     expect(container.textContent ?? "").not.toMatch(
       /\bbmad\b|\bstory\s*\d\.\d|\bepic\s*\d/i,
     );
+  });
+
+  // --- Device integration ---
+
+  it("passes device state 'absent' to the panel when the scan returns kind=none", async () => {
+    mockGet.mockResolvedValueOnce({ stories: [] });
+    mockDevice.mockResolvedValueOnce({ kind: "none" });
+    renderLibrary();
+    const panel = screen.getByRole("complementary", {
+      name: /panneau de décision/i,
+    });
+    await waitFor(() =>
+      expect(
+        within(panel).getAllByText(/aucun appareil connecté/i).length,
+      ).toBeGreaterThan(0),
+    );
+  });
+
+  it("passes device state 'idle' with a deviceLabel when a supported Lunii is detected", async () => {
+    mockGet.mockResolvedValueOnce({ stories: [] });
+    mockDevice.mockResolvedValueOnce({
+      kind: "supported",
+      family: "lunii",
+      firmwareCohort: "origineV1",
+      metadataFormatVersion: 3,
+      deviceIdentifier: "abc",
+      supportedOperations: {
+        readLibrary: true,
+        inspectStory: true,
+        importStory: true,
+        writeStory: false,
+      },
+    });
+    renderLibrary();
+    const panel = screen.getByRole("complementary", {
+      name: /panneau de décision/i,
+    });
+    await waitFor(() =>
+      expect(
+        within(panel).getByText(/appareil prêt — lunii origine/i),
+      ).toBeInTheDocument(),
+    );
+  });
+
+  it("passes device state 'unsupported' with the canonical reason when an unsupported Lunii is detected", async () => {
+    mockGet.mockResolvedValueOnce({ stories: [] });
+    mockDevice.mockResolvedValueOnce({
+      kind: "unsupported",
+      reason: "metadataUnsupported",
+      firmwareHint: "metadata_v99",
+    });
+    renderLibrary();
+    const panel = screen.getByRole("complementary", {
+      name: /panneau de décision/i,
+    });
+    await waitFor(() =>
+      expect(
+        within(panel).getByText(/format métadonnées v99 non géré/i),
+      ).toBeInTheDocument(),
+    );
+  });
+
+  it("passes device state 'error' when the scan transport fails (DEVICE_SCAN_FAILED)", async () => {
+    mockGet.mockResolvedValueOnce({ stories: [] });
+    mockDevice.mockRejectedValueOnce({
+      code: "DEVICE_SCAN_FAILED",
+      message: "Détection indisponible.",
+      userAction: "Réessaie la détection.",
+      details: { source: "fs_read", kind: "permission_denied" },
+    });
+    renderLibrary();
+    const panel = screen.getByRole("complementary", {
+      name: /panneau de décision/i,
+    });
+    await waitFor(() =>
+      expect(
+        within(panel).getByText(/détection indisponible/i),
+      ).toBeInTheDocument(),
+    );
+  });
+
+  it("renders the library normally when the device scan fails (orthogonality — AC #3)", async () => {
+    mockGet.mockResolvedValueOnce({
+      stories: [{ id: "s1", title: "Le soleil" }],
+    });
+    mockDevice.mockRejectedValueOnce({
+      code: "DEVICE_SCAN_FAILED",
+      message: "Détection indisponible.",
+      userAction: "Réessaie.",
+      details: null,
+    });
+    renderLibrary();
+    // The library card must render even when the device probe failed.
+    await screen.findByRole("button", { name: /le soleil/i });
+    // And the panel surfaces the device error state in parallel.
+    const panel = screen.getByRole("complementary", {
+      name: /panneau de décision/i,
+    });
+    expect(within(panel).getByText(/détection indisponible/i)).toBeInTheDocument();
+  });
+
+  it("renders the device state when the library overview is in error (orthogonality — inverse of AC #3)", async () => {
+    mockGet.mockRejectedValueOnce({
+      code: "LOCAL_STORAGE_UNAVAILABLE",
+      message: "Le stockage local est inaccessible.",
+      userAction: "Vérifie les permissions puis relance.",
+      details: null,
+    });
+    mockDevice.mockResolvedValueOnce({ kind: "none" });
+    renderLibrary();
+    await screen.findByRole("alert");
+    const panel = screen.getByRole("complementary", {
+      name: /panneau de décision/i,
+    });
+    await waitFor(() =>
+      expect(
+        within(panel).getAllByText(/aucun appareil connecté/i).length,
+      ).toBeGreaterThan(0),
+    );
+  });
+
+  it("the refresh button in the panel re-runs the device scan only", async () => {
+    const user = userEvent.setup();
+    mockGet.mockResolvedValueOnce({ stories: [] });
+    mockDevice
+      .mockResolvedValueOnce({ kind: "none" })
+      .mockResolvedValueOnce({
+        kind: "supported",
+        family: "lunii",
+        firmwareCohort: "midGenV2",
+        metadataFormatVersion: 6,
+        deviceIdentifier: "id2",
+        supportedOperations: {
+          readLibrary: true,
+          inspectStory: true,
+          importStory: true,
+          writeStory: false,
+        },
+      });
+    renderLibrary();
+    const panel = screen.getByRole("complementary", {
+      name: /panneau de décision/i,
+    });
+    await waitFor(() =>
+      expect(
+        within(panel).getAllByText(/aucun appareil connecté/i).length,
+      ).toBeGreaterThan(0),
+    );
+
+    await user.click(
+      within(panel).getByRole("button", { name: /réessayer la détection/i }),
+    );
+
+    await waitFor(() =>
+      expect(within(panel).getByText(/appareil prêt/i)).toBeInTheDocument(),
+    );
+
+    // The library overview was fetched exactly once — refreshing the
+    // device must not retrigger it.
+    expect(mockGet).toHaveBeenCalledTimes(1);
+  });
+
+  it("passes a generic ambiguous reason when 2+ Lunii are detected", async () => {
+    mockGet.mockResolvedValueOnce({ stories: [] });
+    mockDevice.mockResolvedValueOnce({ kind: "ambiguous", candidateCount: 2 });
+    renderLibrary();
+    const panel = screen.getByRole("complementary", {
+      name: /panneau de décision/i,
+    });
+    await waitFor(() =>
+      expect(within(panel).getAllByText(/profil ambigu/i).length).toBeGreaterThan(0),
+    );
+    expect(
+      within(panel).getByText(/2 candidats détectés/i),
+    ).toBeInTheDocument();
+  });
+
+  // --- Pure mapper unit tests (mapDeviceForPanel) ---
+
+  it("mapDeviceForPanel returns 'scanning' while the hook is loading", () => {
+    expect(mapDeviceForPanel({ kind: "loading" }, true)).toMatchObject({
+      deviceState: "scanning",
+    });
+  });
+
+  it("mapDeviceForPanel returns 'scanning' when isRefreshing flips on top of a ready snapshot", () => {
+    expect(
+      mapDeviceForPanel(
+        { kind: "ready", device: { kind: "none" } },
+        true,
+      ),
+    ).toMatchObject({ deviceState: "scanning" });
+  });
+
+  it("mapDeviceForPanel forwards the underlying error.userAction as deviceReason", () => {
+    const mapped = mapDeviceForPanel(
+      {
+        kind: "error",
+        error: {
+          code: "DEVICE_SCAN_FAILED",
+          message: "Détection indisponible.",
+          userAction: "Réessaie la détection.",
+          details: null,
+        },
+      },
+      false,
+    );
+    expect(mapped.deviceState).toBe("error");
+    expect(mapped.deviceReason).toBe("Réessaie la détection.");
   });
 });

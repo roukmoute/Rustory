@@ -29,3 +29,15 @@ sha2 = "=0.10"
 time = { version = "=0.3", features = ["formatting", "parsing", "macros", "serde"] }
 unicode-normalization = "=0.1"
 tempfile = "=3.27.0"
+# Cross-platform USB Mass Storage volume enumeration for the Lunii
+# detection scan (story 2-1). Maintained by sysinfo-rs/sysinfo, widely
+# deployed, no GUI/runtime dep, no transitive C deps beyond OS APIs.
+sysinfo = "=0.32"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# Linux-only D-Bus binding used to talk to udisks2 and auto-mount a
+# plugged Lunii whose volume the desktop session did not auto-mount
+# (common with minimal DEs / lockdown polkit rules). Pinned strict.
+# `blocking-api` keeps the integration synchronous so it slots into
+# the existing scanner without forcing tokio onto the workspace.
+zbus = { version = "=5.16", default-features = false, features = ["blocking-api"] }

@@ -24,6 +24,13 @@ dist-ssr
 *.sqlite-wal
 *.sqlite-shm
 
+# Local diagnostic JSONL streams emitted by infrastructure/diagnostics
+# (recovery.jsonl, device.jsonl, …). They live in app_data_dir on a
+# real install but can appear at the cwd when a binary is launched
+# directly from the repo root (e.g. `cargo run`, `pnpm tauri dev`).
+*.jsonl
+*.jsonl.archived
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json
