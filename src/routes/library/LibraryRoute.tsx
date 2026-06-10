@@ -6,6 +6,7 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 
 import {
   DeviceStoryCollection,
+  DeviceStoryInspector,
   useConnectedLunii,
   useDeviceLibrary,
 } from "../../features/device";
@@ -144,6 +145,63 @@ export function LibraryRoute(): React.JSX.Element {
       : null;
   const deviceLibrary = useDeviceLibrary(readableDeviceId);
 
+  // Inspection is offered when the supported profile authorizes it.
+  // `inspectStory` is ✅ for every supported cohort (V3 included, unlike
+  // import), so in practice this tracks `readableDeviceId`; gating on the
+  // capability keeps the authoritative matrix the single source of truth.
+  const supportedDeviceOperations: SupportedOperationsDto | undefined =
+    effectiveDevice && effectiveDevice.kind === "supported"
+      ? effectiveDevice.supportedOperations
+      : undefined;
+  const canInspect =
+    readableDeviceId !== null &&
+    supportedDeviceOperations?.inspectStory === true;
+
+  // Device-story selection for inspection. Local UI state, intentionally
+  // SEPARATE from the library's `selectedStoryIds`: device truth and local
+  // truth never merge. Single selection, never persisted.
+  const [selectedDeviceStoryUuid, setSelectedDeviceStoryUuid] = useState<
+    string | null
+  >(null);
+
+  // Resolve the selection against the CURRENT inventory so a stale id (entry
+  // gone after a re-read, device swapped, or no longer inspect-authorized)
+  // surfaces no inspector for this render — never a frozen stale target (AC3).
+  const selectedDeviceStory =
+    canInspect &&
+    selectedDeviceStoryUuid &&
+    deviceLibrary.state.kind === "ready"
+      ? deviceLibrary.state.stories.find(
+          (s) => s.uuid === selectedDeviceStoryUuid,
+        ) ?? null
+      : null;
+
+  // Drop a selection only when it can no longer be inspected (device gone /
+  // unsupported / not authorized) OR when a FRESH authoritative inventory
+  // genuinely lacks it. A transient loading/error/refresh state keeps the
+  // selection so it survives and is restored once the entry is confirmed
+  // present again — it is never wiped on a passing state (AC3).
+  useEffect(() => {
+    if (selectedDeviceStoryUuid === null) return;
+    if (!canInspect) {
+      setSelectedDeviceStoryUuid(null);
+      return;
+    }
+    if (
+      deviceLibrary.state.kind === "ready" &&
+      !deviceLibrary.state.stories.some(
+        (s) => s.uuid === selectedDeviceStoryUuid,
+      )
+    ) {
+      setSelectedDeviceStoryUuid(null);
+    }
+  }, [canInspect, deviceLibrary.state, selectedDeviceStoryUuid]);
+
+  const handleSelectDeviceStory = (uuid: string): void => {
+    // Toggle: clicking the already-selected entry clears the inspection.
+    setSelectedDeviceStoryUuid((prev) => (prev === uuid ? null : uuid));
+  };
+
   const center = (
     <>
       {renderCenter(
@@ -163,6 +221,8 @@ export function LibraryRoute(): React.JSX.Element {
         state={deviceLibrary.state}
         isRefreshing={deviceLibrary.isRefreshing}
         deviceLabel={deviceLabel}
+        selectedUuid={canInspect ? selectedDeviceStoryUuid : null}
+        onSelectStory={canInspect ? handleSelectDeviceStory : undefined}
         onRetry={deviceLibrary.refresh}
       />
     </>
@@ -174,16 +234,22 @@ export function LibraryRoute(): React.JSX.Element {
         leftNav={<LibraryFiltersNav />}
         center={center}
         rightPanel={
-          <LuniiDecisionPanel
-            deviceState={deviceState}
-            deviceLabel={deviceLabel}
-            deviceReason={deviceReason}
-            supportedOperations={supportedOperations}
-            selectedCount={presentSelectedIds.size}
-            onEdit={handleEditSelected}
-            onRefreshDevice={device.refresh}
-            onConsultSupportProfile={openSupportProfile}
-          />
+          <>
+            <DeviceStoryInspector
+              story={selectedDeviceStory}
+              supportedOperations={supportedDeviceOperations}
+            />
+            <LuniiDecisionPanel
+              deviceState={deviceState}
+              deviceLabel={deviceLabel}
+              deviceReason={deviceReason}
+              supportedOperations={supportedOperations}
+              selectedCount={presentSelectedIds.size}
+              onEdit={handleEditSelected}
+              onRefreshDevice={device.refresh}
+              onConsultSupportProfile={openSupportProfile}
+            />
+          </>
         }
       />
       <CreateStoryDialog

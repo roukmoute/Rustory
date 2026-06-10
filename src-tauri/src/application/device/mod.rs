@@ -509,4 +509,23 @@ mod tests {
         check_operation_allowed(&mid, SupportedOperation::ImportStory)
             .expect("MidGenV2 import must be allowed");
     }
+
+    #[test]
+    fn check_operation_allowed_authorizes_inspect_story_for_every_mvp_profile() {
+        // The published support matrix lists "Inspection histoire ✅" for
+        // every supported Lunii cohort (V3 included, unlike import). The
+        // capability gate MUST agree with that policy — a matrix line with
+        // no gate test is a bug (device-support-profile.md#Capability Gate
+        // Contract). Inspection is read-only and key-free, so it is allowed
+        // wherever the library read is.
+        for (cohort, version) in [
+            (LuniiFirmwareCohort::OrigineV1, 3u8),
+            (LuniiFirmwareCohort::MidGenV2, 6),
+            (LuniiFirmwareCohort::V3, 7),
+        ] {
+            let p = build_profile(cohort, version);
+            check_operation_allowed(&p, SupportedOperation::InspectStory)
+                .expect("inspect_story must be allowed for every supported MVP profile");
+        }
+    }
 }

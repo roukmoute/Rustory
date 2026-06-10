@@ -220,7 +220,7 @@ function formatSupportedOperationLabels(
   const matrix: Array<[keyof SupportedOperationsDto, string]> = [
     ["readLibrary", "Lecture bibliothèque appareil"],
     ["inspectStory", "Inspection d'histoire"],
-    ["importStory", "Import vers la bibliothèque locale"],
+    ["importStory", "Copie dans la bibliothèque locale"],
     ["writeStory", "Transfert vers la Lunii"],
   ];
   return matrix.map(([k, label]) => `${ops[k] ? "✓" : "—"} ${label}`);

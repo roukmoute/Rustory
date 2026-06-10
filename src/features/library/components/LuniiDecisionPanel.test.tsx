@@ -209,6 +209,27 @@ describe("<LuniiDecisionPanel />", () => {
     }
   });
 
+  it("labels the device→library operation as a copy, not an import (matrix wording)", () => {
+    render(
+      <LuniiDecisionPanel
+        deviceState="idle"
+        supportedOperations={{
+          readLibrary: true,
+          inspectStory: true,
+          importStory: true,
+          writeStory: false,
+        }}
+        onEdit={noop}
+      />,
+    );
+    expect(
+      screen.getByText(/copie dans la bibliothèque locale/i),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText(/import vers la bibliothèque locale/i),
+    ).toBeNull();
+  });
+
   // --- Selection wiring (existing behavior preserved) ---
 
   it("with selectedCount=0, shows 'Aucune histoire sélectionnée' and disables Éditer with the canonical reason", () => {

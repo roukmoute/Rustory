@@ -883,6 +883,213 @@ describe("<LibraryRoute />", () => {
     ).toBeInTheDocument();
   });
 
+  // --- Device story inspection (select before import) ---
+
+  const readableTwo = {
+    kind: "readable" as const,
+    deviceIdentifier: supportedV3.deviceIdentifier,
+    stories: [
+      { uuid: "u1", shortId: "0000ABCD", hidden: false, contentPresent: true },
+      { uuid: "u2", shortId: "0000BEEF", hidden: false, contentPresent: true },
+    ],
+  };
+
+  it("selecting a device story opens the right-column inspector with its identity + provenance (AC1)", async () => {
+    const user = userEvent.setup();
+    mockGet.mockResolvedValueOnce({ stories: [{ id: "s1", title: "Le soleil" }] });
+    mockDevice.mockResolvedValue(supportedV3);
+    mockDeviceLibrary.mockResolvedValue(readableTwo);
+    renderLibrary();
+
+    const main = await screen.findByRole("main", {
+      name: /collection d'histoires/i,
+    });
+    const card = await within(main).findByRole("button", {
+      name: /identifiant 0000abcd/i,
+    });
+    // No inspector until something is selected.
+    expect(
+      screen.queryByRole("region", { name: /histoire sélectionnée/i }),
+    ).not.toBeInTheDocument();
+
+    await user.click(card);
+
+    const panel = screen.getByRole("complementary", {
+      name: /panneau de décision/i,
+    });
+    const inspector = within(panel).getByRole("region", {
+      name: /histoire sélectionnée/i,
+    });
+    expect(within(inspector).getByText("0000ABCD")).toBeInTheDocument();
+    expect(
+      within(inspector).getByText(/pas encore dans ta bibliothèque locale/i),
+    ).toBeInTheDocument();
+    expect(
+      within(main).getByRole("button", { name: /identifiant 0000abcd/i }),
+    ).toHaveAttribute("aria-pressed", "true");
+  });
+
+  it("changing the device selection updates the targeted story in the panel (AC3)", async () => {
+    const user = userEvent.setup();
+    mockGet.mockResolvedValueOnce({ stories: [] });
+    mockDevice.mockResolvedValue(supportedV3);
+    mockDeviceLibrary.mockResolvedValue(readableTwo);
+    renderLibrary();
+
+    const main = await screen.findByRole("main", {
+      name: /collection d'histoires/i,
+    });
+    await user.click(
+      await within(main).findByRole("button", {
+        name: /identifiant 0000abcd/i,
+      }),
+    );
+    const panel = screen.getByRole("complementary", {
+      name: /panneau de décision/i,
+    });
+    expect(
+      within(
+        within(panel).getByRole("region", { name: /histoire sélectionnée/i }),
+      ).getByText("0000ABCD"),
+    ).toBeInTheDocument();
+
+    await user.click(
+      within(main).getByRole("button", { name: /identifiant 0000beef/i }),
+    );
+    const inspector = within(panel).getByRole("region", {
+      name: /histoire sélectionnée/i,
+    });
+    expect(within(inspector).getByText("0000BEEF")).toBeInTheDocument();
+    expect(within(inspector).queryByText("0000ABCD")).not.toBeInTheDocument();
+  });
+
+  it("device-story selection is independent from the local selection — they never merge", async () => {
+    const user = userEvent.setup();
+    mockGet.mockResolvedValueOnce({ stories: [{ id: "s1", title: "Le soleil" }] });
+    mockDevice.mockResolvedValue(supportedV3);
+    mockDeviceLibrary.mockResolvedValue(readableTwo);
+    renderLibrary();
+
+    // Select a LOCAL story first.
+    await user.click(await screen.findByRole("button", { name: /le soleil/i }));
+    const panel = screen.getByRole("complementary", {
+      name: /panneau de décision/i,
+    });
+    expect(
+      within(panel).getByText(/^1 histoire sélectionnée$/i),
+    ).toBeInTheDocument();
+
+    // Now select a DEVICE story — the two selections coexist.
+    const main = screen.getByRole("main", { name: /collection d'histoires/i });
+    await user.click(
+      within(main).getByRole("button", { name: /identifiant 0000abcd/i }),
+    );
+
+    expect(useLibraryShell.getState().selectedStoryIds.has("s1")).toBe(true);
+    expect(
+      within(panel).getByText(/^1 histoire sélectionnée$/i),
+    ).toBeInTheDocument();
+    expect(
+      within(panel).getByRole("region", { name: /histoire sélectionnée/i }),
+    ).toBeInTheDocument();
+  });
+
+  it("clicking the selected device card again clears the inspector (explicit toggle, AC3)", async () => {
+    const user = userEvent.setup();
+    mockGet.mockResolvedValueOnce({ stories: [] });
+    mockDevice.mockResolvedValue(supportedV3);
+    mockDeviceLibrary.mockResolvedValue(readableTwo);
+    renderLibrary();
+
+    const main = await screen.findByRole("main", {
+      name: /collection d'histoires/i,
+    });
+    await user.click(
+      await within(main).findByRole("button", {
+        name: /identifiant 0000abcd/i,
+      }),
+    );
+    expect(
+      screen.getByRole("region", { name: /histoire sélectionnée/i }),
+    ).toBeInTheDocument();
+
+    await user.click(
+      within(main).getByRole("button", { name: /identifiant 0000abcd/i }),
+    );
+    expect(
+      screen.queryByRole("region", { name: /histoire sélectionnée/i }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("does not make device cards selectable when inspectStory is not authorized", async () => {
+    mockGet.mockResolvedValueOnce({ stories: [] });
+    mockDevice.mockResolvedValue({
+      ...supportedV3,
+      supportedOperations: {
+        readLibrary: true,
+        inspectStory: false,
+        importStory: false,
+        writeStory: false,
+      },
+    });
+    mockDeviceLibrary.mockResolvedValue(readableTwo);
+    renderLibrary();
+
+    const main = await screen.findByRole("main", {
+      name: /collection d'histoires/i,
+    });
+    // readLibrary=true → the inventory still lists the entries…
+    await within(main).findByText("0000ABCD");
+    // …but inspectStory=false → cards are NOT selectable and no inspector.
+    expect(
+      within(main).queryByRole("button", { name: /identifiant 0000abcd/i }),
+    ).toBeNull();
+    const panel = screen.getByRole("complementary", {
+      name: /panneau de décision/i,
+    });
+    expect(
+      within(panel).queryByRole("region", { name: /histoire sélectionnée/i }),
+    ).toBeNull();
+  });
+
+  it("clears the device-story inspection when the device goes away (purge, AC3)", async () => {
+    const user = userEvent.setup();
+    mockGet.mockResolvedValueOnce({ stories: [] });
+    mockDevice
+      .mockResolvedValueOnce(supportedV3)
+      .mockResolvedValueOnce({ kind: "none" });
+    mockDeviceLibrary.mockResolvedValue(readableTwo);
+    renderLibrary();
+
+    const main = await screen.findByRole("main", {
+      name: /collection d'histoires/i,
+    });
+    await user.click(
+      await within(main).findByRole("button", {
+        name: /identifiant 0000abcd/i,
+      }),
+    );
+    const panel = screen.getByRole("complementary", {
+      name: /panneau de décision/i,
+    });
+    expect(
+      within(panel).getByRole("region", { name: /histoire sélectionnée/i }),
+    ).toBeInTheDocument();
+
+    // The next detection finds no device → the inspection must clear, never
+    // dangle on a device that is gone.
+    await user.click(
+      within(panel).getByRole("button", { name: /réessayer la détection/i }),
+    );
+    await waitFor(() =>
+      expect(
+        within(panel).queryByRole("region", {
+          name: /histoire sélectionnée/i,
+        }),
+      ).not.toBeInTheDocument(),
+    );
+  });
+
   // --- Pure mapper unit tests (mapDeviceForPanel) ---
 
   it("mapDeviceForPanel returns 'scanning' while the hook is loading", () => {

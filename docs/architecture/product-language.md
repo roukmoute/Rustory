@@ -38,6 +38,9 @@ It exists to keep the same product concepts named the same way across:
 | Provenance marker (device) | `Sur l'appareil` | Marks an item as living on the device, distinct from the local library | `remote`, `external`, `cloud` |
 | Hidden device pack | `Masquée` | A device story listed as hidden by the user | `hidden`, `archived` |
 | Incomplete device pack | `Contenu incomplet` | A listed device story whose payload folder is missing/ambiguous | `corrupt`, `broken`, `orphan` |
+| Device story under inspection | `Histoire sélectionnée` | Heading of the right-column inspector for the device story being consulted before import | `selected item`, `current pack` |
+| Device story provenance note | `Cette histoire vit sur l'appareil, pas encore dans ta bibliothèque locale` | Reminds the user that a consulted device story is not yet a local draft | wording implying it is already imported |
+| Copy a device story into the library (action) | `Copier dans ma bibliothèque` | User-visible act of bringing a device story from the connected device into the local library | `importer` (reserved for file artifacts), `download`, `sync` |
 | Preparation step | `préparation` | Pre-transfer work needed to make the story sendable | `pipeline`, `build`, `compile assets` |
 | Send operation | `transfert` / `Envoyer vers la Lunii` | User-visible act of sending a story to the device | `deploy`, `sync job`, `push` |
 | Post-send confirmation | `vérification` | Explicit check that confirms what really happened on device | `post-check`, `validation finale` when it means something else |
@@ -79,6 +82,9 @@ The UI should favor these labels when they are user-visible:
 | Reading the device-side library | `Lecture de la bibliothèque de l'appareil…` |
 | Connected device holds no readable story | `Aucune histoire sur l'appareil` |
 | Reading the device-side library failed | `Bibliothèque de l'appareil indisponible` |
+| Device story selected for inspection before copy | `Histoire sélectionnée` |
+| Copy from a supported device not wired yet | `Copie indisponible: pas encore activée (MVP Phase 1)` |
+| Copy not allowed for this profile | `Copie indisponible: profil non supporté` |
 
 Do not alternate freely between synonyms such as `sync`, `envoi`, `upload`, or `job`.
 When a different wording is necessary in context, it must still map back to one of the preferred labels above.
@@ -87,6 +93,7 @@ When a different wording is necessary in context, it must still map back to one 
 
 - Prefer `Créer une histoire` over `Nouveau projet`.
 - Prefer `Envoyer vers la Lunii` over `Synchroniser`, unless the product is explicitly comparing and reconciling states.
+- Prefer `Copier dans ma bibliothèque` (from a device) over `Importer`; reserve `Importer` / `Exporter` for local file artifacts (`.rustory`, archives). The device pair is `Envoyer vers la Lunii` (library → device) / `Copier dans ma bibliothèque` (device → library).
 - Prefer `Reprendre` over `Restaurer la session` when the user continues a local story.
 - Prefer `Bloquée` with a short cause over a generic `Erreur`.
 - Prefer sober confirmations such as `Transférée et vérifiée` over celebratory success copy.

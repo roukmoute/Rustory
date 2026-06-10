@@ -74,10 +74,48 @@
 }
 
 .device-story-card {
+  /* Override the default SurfacePanel padding: the focusable child carries
+   * its own padding so the selection border hugs the card outline exactly
+   * and clicks on the outer ring are never lost to a non-reactive area. */
+  padding: 0;
+  min-height: 96px;
+  display: flex;
+}
+
+.device-story-card__focusable {
+  position: relative;
   display: flex;
   flex-direction: column;
   gap: var(--space-2);
-  min-height: 96px;
+  width: 100%;
+  flex: 1;
+  padding: var(--space-3);
+  /* Transparent 2px border reserves the space so selecting a card never
+   * reflows the grid; the colored border is revealed by the --selected
+   * modifier. */
+  border: 2px solid transparent;
+  border-radius: var(--radius-md);
+  outline: none;
+}
+
+/* Only the interactive (selectable) variant gets a pointer + transition. */
+.device-story-card__focusable[role="button"] {
+  cursor: pointer;
+  transition: border-color 120ms ease, background-color 120ms ease;
+}
+
+.device-story-card__focusable--selected {
+  border-color: var(--color-action-primary);
+  background: var(--color-surface-sunken);
+}
+
+.device-story-card__marker {
+  position: absolute;
+  top: var(--space-2);
+  right: var(--space-2);
+  font-weight: var(--font-weight-semibold);
+  color: var(--color-action-primary);
+  line-height: 1;
 }
 
 .device-story-card__title {

@@ -16,3 +16,8 @@ export {
   DeviceStoryCollection,
   type DeviceStoryCollectionProps,
 } from "./components/DeviceStoryCollection";
+
+export {
+  DeviceStoryInspector,
+  type DeviceStoryInspectorProps,
+} from "./components/DeviceStoryInspector";

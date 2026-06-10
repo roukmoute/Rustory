@@ -120,6 +120,8 @@ Preferred patterns:
 - `Lecture de la bibliothèque appareil indisponible: l'index des histoires est illisible.`
 - `Lecture de la bibliothèque appareil indisponible: l'appareil met trop de temps à répondre.`
 - `Lecture de la bibliothèque appareil indisponible: l'appareil connecté a changé.`
+- `Copie indisponible: profil non supporté`
+- `Copie indisponible: pas encore activée (MVP Phase 1)`
 
 Error payloads that surface in the autosave alert carry a stable
 `details.source` discriminator so support can triage the cause without
@@ -258,7 +260,9 @@ identifier changes (a different Lunii) and on a manual retry.
 Scope: listing only. Each entry is an opaque, unrecognized pack identity
 (`shortId`) — no title, no cover, no asserted content quality (the device
 stores none, and the offline MVP consults no catalog). Device entries are
-NOT selectable or editable here.
+single-selectable for inspection (see `Device Story Inspection Contract`)
+but never editable here; that selection is separate from the local
+`selectedStoryIds` and is not persisted.
 
 | Internal State | Center-column rendering | Notes |
 | --- | --- | --- |
@@ -281,6 +285,38 @@ Error payloads under the read carry a stable `details.source`:
 - `read_timeout` — the read budget was exhausted (`details.elapsed_ms`).
 - `device_changed` — the live re-scan no longer resolves to the requested device (swapped / unplugged-and-replaced).
 - `scan_timeout` / `os_enum` / `mount_unavailable` / `spawn_blocking_join` / `other` — re-scan transport failures, mirroring the detection set.
+
+## Device Story Inspection Contract
+
+A device story listed by the `Device Library Contract` can be SELECTED to
+inspect it before any import. Selection drives a contextual inspector in the
+right column. Inspection is read-only: it consults the inventory snapshot
+already in memory, never re-reads or mutates the device, and never imports
+anything (the import flow is a later story).
+
+| Aspect | Value |
+| --- | --- |
+| Source of truth | A single selected device-story `uuid`, held by `LibraryRoute` as local UI state. Separate from the local `selectedStoryIds`: selecting a device story never touches the local selection, and vice-versa. |
+| Cardinality | Single selection — inspection (and the later import) target one device story at a time. |
+| Persistence | None. Never survives a restart, and is dropped when the readable device changes or the selected entry is absent from a fresh inventory read — no silent stale target (a `uuid` that resolves to no current entry renders no inspector for that render). |
+| Capability gate | Offered only when the detected profile authorizes `inspectStory` (✅ for every supported Lunii cohort, V3 included — distinct from `importStory`, which is ❌ for V3). When `inspectStory` is false, the device cards stay non-interactive. |
+| Non-color signal | A selected device card renders a colored border, a visible `✓` prefix in the DOM and `aria-pressed="true"` — the selection survives grayscale / color-blindness, exactly like a local `Story Card`. |
+| Interaction | A selectable device card is a `role="button" aria-pressed={selected}` focus stop. Click (or `Space` / `Enter` on the focused card) toggles its selection. There is no double-click / open: a device story is not editable. |
+
+The inspector lives in the right column ABOVE the `Lunii Decision Panel`
+and renders only when a device story is selected:
+
+| Inspector element | Content |
+| --- | --- |
+| Heading | `Histoire sélectionnée`. |
+| Provenance | A `Sur l'appareil` chip plus the note `Cette histoire vit sur l'appareil, pas encore dans ta bibliothèque locale.` — keeps local truth and device truth distinguishable. |
+| Identity | `Histoire non reconnue` (no title — anti-catalog), `Identifiant: <shortId>`, `UUID: <uuid>`. Only verified facts; no asserted content quality. |
+| Ambiguity flags | `Masquée` (`.pi.hidden`) and `Contenu incomplet` (no `.content/<shortId>` folder) chips, plus a short honest note when content is missing — surfaced, never hidden, never called "corrupt". |
+| Copy affordance | A `Copier dans ma bibliothèque` button (device → local library), present but DISABLED in this phase (the copy flow lands in a later story) with a standardized, capability-aware reason: `Copie indisponible: profil non supporté` when `importStory` is false (V3), otherwise `Copie indisponible: pas encore activée (MVP Phase 1)`. The internal capability flag stays `importStory`; only the user-facing verb is `Copier` (Importer / Exporter are reserved for file artifacts). |
+
+The inspector is the only place the right column reflects a device story; it
+must never merge with the panel's local-selection layer, and the panel
+itself stays "device state + send CTA".
 
 ## UI Foundation Components
 
