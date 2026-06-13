@@ -96,6 +96,28 @@ pub enum Event {
         kind: Option<String>,
         elapsed_ms: u64,
     },
+    /// A device pack was copied into the local library. Carries the
+    /// opaque `short_id` (NEVER the full pack UUID), the created local
+    /// `story_id`, the copy size/count and the wall-clock elapsed time.
+    /// No absolute path — same PII rules as every device event.
+    DeviceStoryImported {
+        short_id: String,
+        story_id: String,
+        elapsed_ms: u64,
+        bytes_copied: u64,
+        file_count: u32,
+    },
+    /// A device-pack import failed. `source` is the closed import
+    /// taxonomy (`already_imported`, `pack_missing`, `pack_invalid`,
+    /// `pack_oversize`, `device_changed`, `fs_read`, `staging_write`,
+    /// `promote`, `db_commit`, `read_timeout`, `capability_gate`,
+    /// `spawn_blocking_join`, `other`); `kind` mirrors the upstream
+    /// `details.kind` when present.
+    DeviceStoryImportFailed {
+        source: &'static str,
+        kind: Option<String>,
+        elapsed_ms: u64,
+    },
 }
 
 /// Append a single event to the device log. Production entry point —
@@ -295,6 +317,42 @@ mod tests {
         assert_eq!(v["source"], "fs_read");
         assert_eq!(v["kind"], "not_found");
         assert_eq!(v["elapsed_ms"], 9);
+    }
+
+    #[test]
+    fn event_device_story_imported_carries_short_id_never_full_uuid() {
+        let event = Event::DeviceStoryImported {
+            short_id: "FAC5562D".into(),
+            story_id: "0197a5d0-0000-7000-8000-000000000000".into(),
+            elapsed_ms: 1200,
+            bytes_copied: 7168,
+            file_count: 8,
+        };
+        let v = serde_json::to_value(&event).expect("ser");
+        assert_eq!(v["category"], "device_story_imported");
+        assert_eq!(v["short_id"], "FAC5562D");
+        assert_eq!(v["story_id"], "0197a5d0-0000-7000-8000-000000000000");
+        assert_eq!(v["elapsed_ms"], 1200);
+        assert_eq!(v["bytes_copied"], 7168);
+        assert_eq!(v["file_count"], 8);
+        // The payload never carries the pack UUID nor a path.
+        assert!(v.get("pack_uuid").is_none());
+        assert!(v.get("uuid").is_none());
+        assert!(v.get("path").is_none());
+    }
+
+    #[test]
+    fn event_device_story_import_failed_carries_typed_source_and_kind() {
+        let event = Event::DeviceStoryImportFailed {
+            source: "staging_write",
+            kind: Some("no_space".into()),
+            elapsed_ms: 42,
+        };
+        let v = serde_json::to_value(&event).expect("ser");
+        assert_eq!(v["category"], "device_story_import_failed");
+        assert_eq!(v["source"], "staging_write");
+        assert_eq!(v["kind"], "no_space");
+        assert_eq!(v["elapsed_ms"], 42);
     }
 
     #[test]

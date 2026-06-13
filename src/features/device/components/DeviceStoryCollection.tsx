@@ -238,9 +238,11 @@ function DeviceStoryCard({
     .join(" ");
 
   // Fold the structural flags into the accessible name: a screen-reader user
-  // navigating by buttons must also hear "masquée" / "contenu incomplet" —
-  // an explicit aria-label otherwise shadows the chip text inside the card.
+  // navigating by buttons must also hear "masquée" / "contenu incomplet" /
+  // "dans ta bibliothèque" — an explicit aria-label otherwise shadows the
+  // chip text inside the card.
   const flagText = [
+    story.alreadyImported ? "dans ta bibliothèque" : null,
     story.hidden ? "masquée" : null,
     !story.contentPresent ? "contenu incomplet" : null,
   ]
@@ -277,6 +279,9 @@ function DeviceStoryCard({
           <code className="device-story-card__id-value">{story.shortId}</code>
         </p>
         <div className="device-story-card__flags">
+          {story.alreadyImported ? (
+            <StateChip tone="success" label="Dans ta bibliothèque" />
+          ) : null}
           {story.hidden ? <StateChip tone="neutral" label="Masquée" /> : null}
           {!story.contentPresent ? (
             <StateChip tone="warning" label="Contenu incomplet" />

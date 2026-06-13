@@ -8,6 +8,9 @@ use crate::domain::export::{
     ArtifactEnvelopeV1, ExportedStoryV1, RustoryArtifactV1, RUSTORY_ARTIFACT_FORMAT_VERSION,
 };
 use crate::domain::shared::AppError;
+// `details.kind` tagging is shared with the device-import flow — single
+// closed set, documented in ui-states.md.
+use crate::infrastructure::filesystem::io_error_kind_tag;
 use crate::ipc::dto::StoryDetailDto;
 
 /// Input accepted by the `export_story` application service. The detail
@@ -219,20 +222,6 @@ fn export_io_user_action(err: &std::io::Error) -> &'static str {
         ReadOnlyFilesystem => "Sélectionne un dossier autorisé en écriture.",
         NotFound => "Sélectionne un dossier existant puis relance l'export.",
         _ => "Choisis un autre emplacement puis réessaie l'export.",
-    }
-}
-
-/// Short, PII-free `details.kind` tag. Mirrors the tagging used by the
-/// app-data-dir probe so support tooling can triage with the same vocabulary.
-fn io_error_kind_tag(err: &std::io::Error) -> &'static str {
-    use std::io::ErrorKind::*;
-    match err.kind() {
-        PermissionDenied => "permission_denied",
-        StorageFull => "no_space",
-        ReadOnlyFilesystem => "read_only_filesystem",
-        NotFound => "not_found",
-        AlreadyExists => "already_exists",
-        _ => "io",
     }
 }
 

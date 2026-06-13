@@ -40,7 +40,10 @@ It exists to keep the same product concepts named the same way across:
 | Incomplete device pack | `Contenu incomplet` | A listed device story whose payload folder is missing/ambiguous | `corrupt`, `broken`, `orphan` |
 | Device story under inspection | `Histoire sélectionnée` | Heading of the right-column inspector for the device story being consulted before import | `selected item`, `current pack` |
 | Device story provenance note | `Cette histoire vit sur l'appareil, pas encore dans ta bibliothèque locale` | Reminds the user that a consulted device story is not yet a local draft | wording implying it is already imported |
+| Device story provenance note (copy exists) | `Cette histoire vit sur l'appareil et une copie existe déjà dans ta bibliothèque locale` | Variant of the provenance note once a local copy exists (`alreadyImported`) | `pas encore` wording on an already-copied story |
 | Copy a device story into the library (action) | `Copier dans ma bibliothèque` | User-visible act of bringing a device story from the connected device into the local library | `importer` (reserved for file artifacts), `download`, `sync` |
+| Device story already copied locally | `Dans ta bibliothèque` | Marker on a device story card: a local copy of this device story exists (provenance link present) | `imported`, `synced`, `duplicate` |
+| Default title of a copied device story | `Histoire de ma Lunii (XXXXXXXX)` | Title given to the local draft created by a device copy — `XXXXXXXX` is the opaque short identifier; renamable immediately in the editor | titles asserting unverified content (`Histoire non reconnue` is a device-side state, never a local title) |
 | Preparation step | `préparation` | Pre-transfer work needed to make the story sendable | `pipeline`, `build`, `compile assets` |
 | Send operation | `transfert` / `Envoyer vers la Lunii` | User-visible act of sending a story to the device | `deploy`, `sync job`, `push` |
 | Post-send confirmation | `vérification` | Explicit check that confirms what really happened on device | `post-check`, `validation finale` when it means something else |
@@ -83,8 +86,13 @@ The UI should favor these labels when they are user-visible:
 | Connected device holds no readable story | `Aucune histoire sur l'appareil` |
 | Reading the device-side library failed | `Bibliothèque de l'appareil indisponible` |
 | Device story selected for inspection before copy | `Histoire sélectionnée` |
-| Copy from a supported device not wired yet | `Copie indisponible: pas encore activée (MVP Phase 1)` |
 | Copy not allowed for this profile | `Copie indisponible: profil non supporté` |
+| Copy refused — local copy already exists | `Copie indisponible: déjà dans ta bibliothèque` |
+| Copy refused — pack payload missing on device | `Copie indisponible: contenu incomplet sur l'appareil` |
+| Device copy in flight | `Copie en cours…` |
+| Device copy just succeeded | `Histoire copiée dans ta bibliothèque` |
+| Device copy failed and user can retry | `Copie impossible` |
+| Device story with a local copy | `Dans ta bibliothèque` |
 
 Do not alternate freely between synonyms such as `sync`, `envoi`, `upload`, or `job`.
 When a different wording is necessary in context, it must still map back to one of the preferred labels above.

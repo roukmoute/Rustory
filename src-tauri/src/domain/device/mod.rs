@@ -10,6 +10,7 @@ pub mod family;
 pub mod library;
 pub mod markers;
 pub mod operations;
+pub mod pack;
 pub mod profile;
 
 pub use family::{DeviceFamily, LuniiFirmwareCohort};
@@ -23,4 +24,10 @@ pub use markers::{
     MAX_METADATA_FILE_BYTES,
 };
 pub use operations::{SupportedOperation, SupportedOperations};
+pub use pack::{
+    imported_story_title, is_os_cruft, validate_pack_inventory, PackEntry, PackEntryKind, PackFile,
+    PackManifest, PackValidationIssue, MAX_IMPORT_PACK_BYTES, MAX_IMPORT_PACK_FILES,
+    MAX_PACK_ASSET_DEPTH, OPTIONAL_PACK_FILES, OS_CRUFT_NAMES, OS_CRUFT_PREFIX, PACK_ASSET_DIRS,
+    REQUIRED_PACK_FILES,
+};
 pub use profile::{classify_lunii, DeviceProfile, DeviceProfileClassification, UnsupportedReason};

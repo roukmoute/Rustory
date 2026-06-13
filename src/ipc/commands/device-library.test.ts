@@ -19,7 +19,13 @@ const readable = {
   kind: "readable",
   deviceIdentifier: VALID_ID,
   stories: [
-    { uuid: "00000000-0000-0000-0000-00000000abcd", shortId: "0000ABCD", hidden: false, contentPresent: true },
+    {
+      uuid: "00000000-0000-0000-0000-00000000abcd",
+      shortId: "0000ABCD",
+      hidden: false,
+      contentPresent: true,
+      alreadyImported: false,
+    },
   ],
 };
 

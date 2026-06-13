@@ -31,7 +31,11 @@ fn fresh_install_applies_v2_migration() {
         .expect("query")
         .collect::<Result<Vec<_>, _>>()
         .expect("collect");
-    assert_eq!(versions, vec![1, 2], "ledger must contain v1 and v2");
+    assert_eq!(
+        versions,
+        vec![1, 2, 3],
+        "ledger must contain every declared migration"
+    );
 }
 
 #[test]
@@ -96,7 +100,11 @@ fn existing_v1_database_upgrades_to_v2() {
         .expect("query")
         .collect::<Result<Vec<_>, _>>()
         .expect("collect");
-    assert_eq!(versions, vec![1, 2], "v1 row preserved + v2 added");
+    assert_eq!(
+        versions,
+        vec![1, 2, 3],
+        "v1 row preserved + newer versions added"
+    );
 
     // The new table is usable.
     let count: u32 = db

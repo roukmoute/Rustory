@@ -14,6 +14,7 @@ pub enum AppErrorCode {
     RecoveryDraftUnavailable,
     DeviceScanFailed,
     DeviceUnsupported,
+    ImportFailed,
 }
 
 /// Normalized application error crossing the IPC boundary.
@@ -123,6 +124,19 @@ impl AppError {
     pub fn device_unsupported(message: impl Into<String>, user_action: impl Into<String>) -> Self {
         Self {
             code: AppErrorCode::DeviceUnsupported,
+            message: message.into(),
+            user_action: Some(user_action.into()),
+            details: None,
+        }
+    }
+
+    /// Constructed when a device-story import fails at any stage of the
+    /// acquisition pipeline (re-verification, copy, promotion, commit).
+    /// The stage is carried by `details.source` from the closed set
+    /// documented in `ui-states.md#Device Story Import Contract`.
+    pub fn import_failed(message: impl Into<String>, user_action: impl Into<String>) -> Self {
+        Self {
+            code: AppErrorCode::ImportFailed,
             message: message.into(),
             user_action: Some(user_action.into()),
             details: None,
@@ -297,6 +311,42 @@ mod tests {
         assert_eq!(v["code"], "DEVICE_SCAN_FAILED");
         assert_eq!(v["details"]["source"], "fs_read");
         assert_eq!(v["details"]["kind"], "permission_denied");
+    }
+
+    #[test]
+    fn import_failed_serializes_with_stable_code() {
+        let err = AppError::import_failed("msg", "action");
+        let v = serde_json::to_value(&err).expect("serialize");
+        assert_eq!(v["code"], "IMPORT_FAILED");
+        assert_eq!(v["message"], "msg");
+        assert_eq!(v["userAction"], "action");
+    }
+
+    #[test]
+    fn import_failed_serializes_with_camel_case_user_action() {
+        let err = AppError::import_failed("msg", "action");
+        let v = serde_json::to_value(&err).expect("serialize");
+        assert!(
+            v.get("userAction").is_some(),
+            "userAction must be camelCase"
+        );
+        assert!(v.get("user_action").is_none(), "snake_case must not leak");
+    }
+
+    #[test]
+    fn import_failed_carries_user_action_and_details() {
+        let err = AppError::import_failed(
+            "Copie impossible: lecture de l'appareil interrompue.",
+            "Vérifie la connexion de la Lunii puis réessaie la copie.",
+        )
+        .with_details(serde_json::json!({
+            "source": "fs_read",
+            "kind": "not_found",
+        }));
+        let v = serde_json::to_value(&err).expect("serialize");
+        assert_eq!(v["code"], "IMPORT_FAILED");
+        assert_eq!(v["details"]["source"], "fs_read");
+        assert_eq!(v["details"]["kind"], "not_found");
     }
 
     #[test]

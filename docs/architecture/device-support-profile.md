@@ -121,6 +121,72 @@ projects as the marker set above (notably the pack-index format: 16-byte
 UUIDs in `.pi`, the `.content/<SHORT_ID>` folder convention, and the
 "listing needs no key" property).
 
+## Story Import Contract
+
+Importing a device story ("Copier dans ma bibliothèque") is a **raw,
+structurally validated acquisition without decryption**: Rustory copies
+the pack bytes as-is from `.content/<SHORT_ID>` into its managed local
+storage and never interprets the ciphered content. This prolongs the
+"No decryption" property above — decoding (XXTEA, `ni/li/ri/si` parsing,
+media) is the transfer/edition scope of later phases, not the import.
+
+The import is **all-or-nothing per pack**. The declared supported subset
+is a closed set of entry names at the pack root:
+
+| Entry | Status | Rule |
+| --- | --- | --- |
+| `ni`, `li`, `ri`, `si` | required | must exist as non-empty regular files |
+| `nm`, `bt` | optional | copied when present (regular files) |
+| `rf/`, `sf/` | optional asset trees | regular files only, depth ≤ 2 below the tree root |
+| `Thumbs.db`, `.DS_Store`, `._*` | OS cruft ignore-list | silently skipped, never copied |
+| anything else | refused | unknown entry ⇒ explicit `pack_invalid` refusal, no blind copy |
+
+Bounds (validated before and during the copy):
+
+| Bound | Value | Why |
+| --- | --- | --- |
+| `MAX_IMPORT_PACK_BYTES` | 2 GiB | a pack beyond this is outside any observed real library |
+| `MAX_IMPORT_PACK_FILES` | 4096 | bounds enumeration and manifest size |
+| `MAX_PACK_ASSET_DEPTH` | 2 | `rf/` and `sf/` trees are flat in practice (`rf/000/…`) |
+| File kind | regular files only | symlinks and special files are refused (`symlink_metadata`) |
+
+Atomicity & provenance:
+
+- Sequence: staging copy (`{app_data_dir}/imports/.staging/`) →
+  structural validation → atomic `rename` promotion to
+  `{app_data_dir}/imports/<story_id>/` → SQLite commit (canonical
+  `stories` row + `story_imports` provenance row). Files first, DB
+  second: a DB row must never reference files that are not known to
+  exist and be valid. Any intermediate failure cleans the staging and
+  leaves no DB row and no orphan folder.
+- Provenance is persisted in `story_imports` (link `pack_uuid ↔
+  story_id`, source device identifier, timestamp, file count, total
+  bytes, aggregate SHA-256 checksum). The link is UNIQUE on
+  `pack_uuid`: re-importing the same pack is refused
+  (`already_imported`) while the link exists — even across devices,
+  the pack UUID is the content identity.
+- The device mount is **never written** (read-only end to end), and
+  the import never blocks the UI (async command, bounded budget).
+- The wall-clock budget (300 s) is enforced **cooperatively**: the
+  deadline is checked between files and between copy chunks. A single
+  `read`/`write` syscall blocked by a stalled mount (dying USB bridge,
+  hung FUSE) cannot be interrupted mid-call — an accepted MVP residual.
+  The copy runs on a background worker, so the UI stays responsive
+  regardless; a physically yanked device surfaces as a kernel I/O error
+  on the next call. Hard per-syscall bounding is deferred to the
+  transfer job contract (post-MVP), which will own cancellable I/O.
+- After the atomic promotion, the promoted directory tree AND its
+  parent are fsynced BEFORE the SQLite commit, so a post-commit crash
+  cannot leave a committed row pointing at directory entries the
+  filesystem never persisted (files-first invariant holds across power
+  loss).
+- A hidden pack (`.pi.hidden`) is importable: hidden is a device-side
+  display state, not a content defect.
+
+V3 (metadata v7) stays ❌ for import — the matrix above is unchanged
+and the capability gate (`check_operation_allowed(ImportStory)`) is
+consulted before any acquisition.
+
 ## Refusal Reasons (closed set)
 
 When classification refuses a candidate, the wire DTO carries a

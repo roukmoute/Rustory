@@ -1,5 +1,5 @@
 import { StrictMode } from "react";
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import {
   RouterProvider,
@@ -11,6 +11,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const mockGet = vi.fn();
 const mockDevice = vi.fn();
 const mockDeviceLibrary = vi.fn();
+const mockImport = vi.fn();
 
 vi.mock("../../ipc/commands/library", () => ({
   getLibraryOverview: () => ({
@@ -42,6 +43,16 @@ vi.mock("../../ipc/commands/device-library", async () => {
       promise: mockDeviceLibrary(),
       cancel: () => {},
     }),
+  };
+});
+
+vi.mock("../../ipc/commands/device-import", async () => {
+  const actual = await vi.importActual<
+    typeof import("../../ipc/commands/device-import")
+  >("../../ipc/commands/device-import");
+  return {
+    ...actual,
+    importDeviceStory: (input: unknown) => mockImport(input),
   };
 });
 
@@ -82,6 +93,7 @@ describe("<LibraryRoute />", () => {
     // section stays absent unless a test opts into a readable payload.
     mockDeviceLibrary.mockReset();
     mockDeviceLibrary.mockResolvedValue({ kind: "none" });
+    mockImport.mockReset();
     // The hooks keep module-local stale-while-revalidate caches; reset
     // them between tests so no stray snapshot bleeds across cases.
     invalidateLibraryOverviewCache();
@@ -837,7 +849,13 @@ describe("<LibraryRoute />", () => {
       kind: "readable",
       deviceIdentifier: supportedV3.deviceIdentifier,
       stories: [
-        { uuid: "u1", shortId: "0000ABCD", hidden: false, contentPresent: true },
+        {
+          uuid: "u1",
+          shortId: "0000ABCD",
+          hidden: false,
+          contentPresent: true,
+          alreadyImported: false,
+        },
       ],
     });
     renderLibrary();
@@ -889,8 +907,20 @@ describe("<LibraryRoute />", () => {
     kind: "readable" as const,
     deviceIdentifier: supportedV3.deviceIdentifier,
     stories: [
-      { uuid: "u1", shortId: "0000ABCD", hidden: false, contentPresent: true },
-      { uuid: "u2", shortId: "0000BEEF", hidden: false, contentPresent: true },
+      {
+        uuid: "u1",
+        shortId: "0000ABCD",
+        hidden: false,
+        contentPresent: true,
+        alreadyImported: false,
+      },
+      {
+        uuid: "u2",
+        shortId: "0000BEEF",
+        hidden: false,
+        contentPresent: true,
+        alreadyImported: false,
+      },
     ],
   };
 
@@ -1088,6 +1118,301 @@ describe("<LibraryRoute />", () => {
         }),
       ).not.toBeInTheDocument(),
     );
+  });
+
+  // --- Device story import (Copier dans ma bibliothèque) ---
+
+  const supportedOrigine = {
+    kind: "supported" as const,
+    family: "lunii" as const,
+    firmwareCohort: "origineV1" as const,
+    metadataFormatVersion: 3,
+    deviceIdentifier: "0123456789abcdef0123456789abcdef",
+    supportedOperations: {
+      readLibrary: true,
+      inspectStory: true,
+      importStory: true,
+      writeStory: false,
+    },
+  };
+
+  const importOutcome = {
+    story: { id: "local-1", title: "Histoire de ma Lunii (0000ABCD)" },
+    packShortId: "0000ABCD",
+    importedAt: "2026-06-10T12:00:00.000Z",
+  };
+
+  it("keeps the copy CTA soft-disabled with the profile reason when importStory is gated off (V3)", async () => {
+    const user = userEvent.setup();
+    mockGet.mockResolvedValueOnce({ stories: [] });
+    mockDevice.mockResolvedValue(supportedV3); // importStory: false
+    mockDeviceLibrary.mockResolvedValue(readableTwo);
+    renderLibrary();
+
+    const main = await screen.findByRole("main", {
+      name: /collection d'histoires/i,
+    });
+    await user.click(
+      await within(main).findByRole("button", {
+        name: /identifiant 0000abcd/i,
+      }),
+    );
+    const inspector = screen.getByRole("region", {
+      name: /histoire sélectionnée/i,
+    });
+    const cta = within(inspector).getByRole("button", {
+      name: /copier dans ma bibliothèque/i,
+    });
+    expect(cta).toHaveAttribute("aria-disabled", "true");
+    expect(within(inspector).getByText(/profil non supporté/i)).toBeInTheDocument();
+
+    // A soft-disabled CTA swallows the activation — no IPC fires.
+    await user.click(cta);
+    expect(mockImport).not.toHaveBeenCalled();
+  });
+
+  it("copies a device story: authoritative re-reads on both sides, preserved selection, flipped CTA (AC1+AC2)", async () => {
+    const user = userEvent.setup();
+    mockGet.mockResolvedValue({ stories: [] });
+    mockDevice.mockResolvedValue(supportedOrigine);
+    const refreshedInventory = {
+      ...readableTwo,
+      stories: [
+        { ...readableTwo.stories[0], alreadyImported: true },
+        readableTwo.stories[1],
+      ],
+    };
+    mockDeviceLibrary
+      .mockResolvedValueOnce(readableTwo)
+      .mockResolvedValue(refreshedInventory);
+    mockImport.mockResolvedValue(importOutcome);
+    renderLibrary();
+
+    const main = await screen.findByRole("main", {
+      name: /collection d'histoires/i,
+    });
+    await user.click(
+      await within(main).findByRole("button", {
+        name: /identifiant 0000abcd/i,
+      }),
+    );
+    const inspector = screen.getByRole("region", {
+      name: /histoire sélectionnée/i,
+    });
+    const overviewCallsBefore = mockGet.mock.calls.length;
+    const inventoryCallsBefore = mockDeviceLibrary.mock.calls.length;
+
+    await user.click(
+      within(inspector).getByRole("button", {
+        name: /copier dans ma bibliothèque/i,
+      }),
+    );
+
+    // The command received exactly the two identifiers the route holds.
+    expect(mockImport).toHaveBeenCalledWith({
+      deviceIdentifier: supportedOrigine.deviceIdentifier,
+      packUuid: "u1",
+    });
+
+    // Sober in-context success with the created title.
+    // Twice by design: the always-mounted polite region + the visible chip.
+    expect(
+      await screen.findAllByText("Histoire copiée dans ta bibliothèque"),
+    ).toHaveLength(2);
+    expect(
+      screen.getByText("Histoire de ma Lunii (0000ABCD)"),
+    ).toBeInTheDocument();
+
+    // Both authoritative re-reads fired (local overview + device inventory).
+    await waitFor(() =>
+      expect(mockGet.mock.calls.length).toBeGreaterThan(overviewCallsBefore),
+    );
+    await waitFor(() =>
+      expect(mockDeviceLibrary.mock.calls.length).toBeGreaterThan(
+        inventoryCallsBefore,
+      ),
+    );
+
+    // The device card now carries the local-copy marker, stays SELECTED
+    // (a copy is not a move), and the CTA flips to the new reason.
+    await waitFor(() =>
+      expect(
+        within(main).getByRole("button", { name: /identifiant 0000abcd/i }),
+      ).toHaveAttribute("aria-pressed", "true"),
+    );
+    expect(
+      within(main).getAllByText("Dans ta bibliothèque").length,
+    ).toBeGreaterThan(0);
+    await waitFor(() =>
+      expect(
+        within(inspector).getByRole("button", {
+          name: /copier dans ma bibliothèque/i,
+        }),
+      ).toHaveAttribute("aria-disabled", "true"),
+    );
+    expect(
+      within(inspector).getByText("Copie indisponible: déjà dans ta bibliothèque"),
+    ).toBeInTheDocument();
+    // The provenance note follows the local truth too (F4): never
+    // "pas encore" on a story whose copy exists.
+    expect(
+      within(inspector).getByText(
+        /vit sur l'appareil et une copie existe déjà/i,
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("keeps the import status attached to the copied pack — never on another card", async () => {
+    const user = userEvent.setup();
+    mockGet.mockResolvedValue({ stories: [] });
+    mockDevice.mockResolvedValue(supportedOrigine);
+    mockDeviceLibrary.mockResolvedValue(readableTwo);
+    mockImport.mockResolvedValue(importOutcome);
+    renderLibrary();
+
+    const main = await screen.findByRole("main", {
+      name: /collection d'histoires/i,
+    });
+    // Copy pack A.
+    await user.click(
+      await within(main).findByRole("button", {
+        name: /identifiant 0000abcd/i,
+      }),
+    );
+    const inspector = screen.getByRole("region", {
+      name: /histoire sélectionnée/i,
+    });
+    await user.click(
+      within(inspector).getByRole("button", {
+        name: /copier dans ma bibliothèque/i,
+      }),
+    );
+    expect(
+      await screen.findAllByText("Histoire copiée dans ta bibliothèque"),
+    ).toHaveLength(2);
+
+    // Select pack B: ITS status is idle — A's success must not follow.
+    await user.click(
+      within(main).getByRole("button", { name: /identifiant 0000beef/i }),
+    );
+    expect(
+      screen.queryByText("Histoire copiée dans ta bibliothèque"),
+    ).not.toBeInTheDocument();
+
+    // Re-select pack A: its status surfaces again (still held by the hook).
+    await user.click(
+      within(main).getByRole("button", { name: /identifiant 0000abcd/i }),
+    );
+    expect(
+      screen.getAllByText("Histoire copiée dans ta bibliothèque"),
+    ).toHaveLength(2);
+  });
+
+  it("never attaches A's success to B when B is clicked while A's copy is still in flight", async () => {
+    const user = userEvent.setup();
+    mockGet.mockResolvedValue({ stories: [] });
+    mockDevice.mockResolvedValue(supportedOrigine);
+    mockDeviceLibrary.mockResolvedValue(readableTwo);
+    // Hold A's copy in flight so the second click lands during the copy.
+    let resolveA!: (value: typeof importOutcome) => void;
+    mockImport.mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveA = resolve;
+      }),
+    );
+    renderLibrary();
+
+    const main = await screen.findByRole("main", {
+      name: /collection d'histoires/i,
+    });
+    // Start copying pack A.
+    await user.click(
+      await within(main).findByRole("button", {
+        name: /identifiant 0000abcd/i,
+      }),
+    );
+    await user.click(
+      within(
+        screen.getByRole("region", { name: /histoire sélectionnée/i }),
+      ).getByRole("button", { name: /copier dans ma bibliothèque/i }),
+    );
+
+    // While A is still copying, select B and click its (active) CTA: the
+    // hook swallows the re-entrant trigger and the target stays on A.
+    await user.click(
+      within(main).getByRole("button", { name: /identifiant 0000beef/i }),
+    );
+    await user.click(
+      within(
+        screen.getByRole("region", { name: /histoire sélectionnée/i }),
+      ).getByRole("button", { name: /copier dans ma bibliothèque/i }),
+    );
+    expect(mockImport).toHaveBeenCalledTimes(1);
+
+    // A resolves. B is still the selected card — its inspector must NOT
+    // inherit A's success (that was the mis-attachment bug).
+    await act(async () => {
+      resolveA(importOutcome);
+    });
+    expect(
+      screen.queryByText("Histoire copiée dans ta bibliothèque"),
+    ).not.toBeInTheDocument();
+
+    // Re-select A: its success is the one that surfaces.
+    await user.click(
+      within(main).getByRole("button", { name: /identifiant 0000abcd/i }),
+    );
+    expect(
+      await screen.findAllByText("Histoire copiée dans ta bibliothèque"),
+    ).toHaveLength(2);
+  });
+
+  it("surfaces a copy failure in-context with Réessayer, local library intact (AC3)", async () => {
+    const user = userEvent.setup();
+    mockGet.mockResolvedValue({ stories: [{ id: "s1", title: "Le soleil" }] });
+    mockDevice.mockResolvedValue(supportedOrigine);
+    mockDeviceLibrary.mockResolvedValue(readableTwo);
+    mockImport.mockRejectedValueOnce({
+      code: "IMPORT_FAILED",
+      message: "Copie impossible: lecture de l'appareil interrompue.",
+      userAction: "Vérifie la connexion de la Lunii puis réessaie la copie.",
+      details: { source: "fs_read", kind: "not_found" },
+    });
+    renderLibrary();
+
+    const main = await screen.findByRole("main", {
+      name: /collection d'histoires/i,
+    });
+    await user.click(
+      await within(main).findByRole("button", {
+        name: /identifiant 0000abcd/i,
+      }),
+    );
+    const inspector = screen.getByRole("region", {
+      name: /histoire sélectionnée/i,
+    });
+    await user.click(
+      within(inspector).getByRole("button", {
+        name: /copier dans ma bibliothèque/i,
+      }),
+    );
+
+    const alert = await within(inspector).findByRole("alert");
+    expect(alert).toHaveTextContent("Copie impossible");
+    expect(alert).toHaveTextContent(/lecture de l'appareil interrompue/i);
+    // Réessayer re-enters the boundary with the same identifiers.
+    mockImport.mockResolvedValueOnce(importOutcome);
+    await user.click(within(alert).getByRole("button", { name: /réessayer/i }));
+    // Twice by design: the always-mounted polite region + the visible chip.
+    expect(
+      await screen.findAllByText("Histoire copiée dans ta bibliothèque"),
+    ).toHaveLength(2);
+    expect(mockImport).toHaveBeenCalledTimes(2);
+
+    // The LOCAL library stayed intact and usable throughout.
+    expect(
+      screen.getByRole("button", { name: /le soleil/i }),
+    ).toBeInTheDocument();
   });
 
   // --- Pure mapper unit tests (mapDeviceForPanel) ---

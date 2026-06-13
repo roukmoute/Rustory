@@ -9,6 +9,7 @@ import {
   DeviceStoryInspector,
   useConnectedLunii,
   useDeviceLibrary,
+  useDeviceStoryImport,
 } from "../../features/device";
 
 /** Public URL of the canonical device-support-profile document. Kept
@@ -40,12 +41,13 @@ import type {
   ConnectedDeviceDto,
   SupportedOperationsDto,
 } from "../../shared/ipc-contracts/device";
+import type { DeviceStoryDto } from "../../shared/ipc-contracts/device-library";
 import type { StoryCardDto } from "../../shared/ipc-contracts/library";
 import { LibraryLayout } from "../../shell/layout/LibraryLayout";
 import { useLibraryShell } from "../../shell/state/library-shell-store";
 
 export function LibraryRoute(): React.JSX.Element {
-  const { state, retry } = useLibraryOverview();
+  const { state, retry, invalidate } = useLibraryOverview();
   const device = useConnectedLunii();
   const selectedStoryIds = useLibraryShell((s) => s.selectedStoryIds);
   const selectStory = useLibraryShell((s) => s.selectStory);
@@ -202,6 +204,43 @@ export function LibraryRoute(): React.JSX.Element {
     setSelectedDeviceStoryUuid((prev) => (prev === uuid ? null : uuid));
   };
 
+  // Device-story copy flow. On success, BOTH sides re-read their
+  // authoritative truth: the local overview (the new card appears) and
+  // the device inventory (the `alreadyImported` stamp flips the chip and
+  // the CTA). The device selection is intentionally NOT touched — the
+  // story still lives on the device, a copy is not a move; the resilient
+  // purge above keeps it across the transient refresh states.
+  const deviceImport = useDeviceStoryImport({
+    onImported: () => {
+      invalidate();
+      deviceLibrary.refresh();
+    },
+  });
+
+  // Mirror of the Rust capability gate: the CTA handler is wired only
+  // when the authoritative matrix POSITIVELY allows the copy. Rust stays
+  // the authority — this gate only shapes the affordance.
+  const canImportDeviceStory =
+    canInspect && supportedDeviceOperations?.importStory === true;
+
+  const handleImportDeviceStory = (story: DeviceStoryDto): void => {
+    if (!readableDeviceId) return;
+    void deviceImport.triggerImport(readableDeviceId, story.uuid);
+  };
+
+  // The import status belongs to ONE pack — the one the hook actually
+  // started a copy for (`targetPackUuid`, set past its re-entrancy
+  // guard). Selecting another card shows THAT card's (idle) status,
+  // never the previous card's success; re-selecting the copied card
+  // surfaces its status again. A second "Copier" clicked while a copy is
+  // in flight is swallowed by the hook AND leaves the target untouched,
+  // so the status can never follow the wrong card.
+  const selectedDeviceImportState =
+    selectedDeviceStoryUuid !== null &&
+    selectedDeviceStoryUuid === deviceImport.targetPackUuid
+      ? deviceImport.status
+      : undefined;
+
   const center = (
     <>
       {renderCenter(
@@ -238,6 +277,14 @@ export function LibraryRoute(): React.JSX.Element {
             <DeviceStoryInspector
               story={selectedDeviceStory}
               supportedOperations={supportedDeviceOperations}
+              importState={selectedDeviceImportState}
+              onImport={
+                canImportDeviceStory ? handleImportDeviceStory : undefined
+              }
+              onRetryImport={() => {
+                void deviceImport.retryImport();
+              }}
+              onDismissImportStatus={deviceImport.dismissStatus}
             />
             <LuniiDecisionPanel
               deviceState={deviceState}

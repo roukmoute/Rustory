@@ -12,6 +12,10 @@ use crate::domain::shared::AppError;
 pub const MIGRATIONS: &[(u32, &str)] = &[
     (1, include_str!("../../../migrations/0001_init.sql")),
     (2, include_str!("../../../migrations/0002_story_drafts.sql")),
+    (
+        3,
+        include_str!("../../../migrations/0003_story_imports.sql"),
+    ),
 ];
 
 /// Thin wrapper over a [`rusqlite::Connection`]. Exposes only the operations

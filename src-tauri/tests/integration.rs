@@ -12,6 +12,9 @@ mod story_export;
 #[path = "integration/story_drafts_migration.rs"]
 mod story_drafts_migration;
 
+#[path = "integration/story_imports_migration.rs"]
+mod story_imports_migration;
+
 #[path = "integration/story_drafts_recovery.rs"]
 mod story_drafts_recovery;
 
@@ -29,3 +32,6 @@ mod device_command;
 
 #[path = "integration/device_library.rs"]
 mod device_library;
+
+#[path = "integration/device_import.rs"]
+mod device_import;

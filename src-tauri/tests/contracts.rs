@@ -13,3 +13,6 @@ mod device;
 
 #[path = "contracts/device_library.rs"]
 mod device_library;
+
+#[path = "contracts/device_import.rs"]
+mod device_import;

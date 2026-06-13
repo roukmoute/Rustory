@@ -1,13 +1,17 @@
+use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Manager, State};
 
+use crate::application::device::import::ImportDeviceStoryRequest;
 use crate::application::device::library::DeviceLibraryOutcome;
 use crate::application::device::{self, ConnectedLuniiOutcome};
 use crate::domain::shared::AppError;
 use crate::infrastructure::device::{MountAttempt, MountOutcome};
 use crate::infrastructure::diagnostics::device_log;
-use crate::ipc::dto::{ConnectedDeviceDto, DeviceLibraryDto};
+use crate::ipc::dto::{
+    ConnectedDeviceDto, DeviceLibraryDto, ImportDeviceStoryInputDto, ImportDeviceStoryOutcomeDto,
+};
 use crate::AppState;
 
 /// Wall-clock budget for the device scan. Sized below the NFR4 budget
@@ -21,6 +25,13 @@ pub const DEVICE_SCAN_BUDGET: Duration = Duration::from_millis(4000);
 /// margin under the front-end timer so the two cooperate without
 /// flapping.
 pub const DEVICE_LIBRARY_READ_BUDGET: Duration = Duration::from_millis(5000);
+
+/// Wall-clock budget for a device-story import. A pack can weigh
+/// hundreds of MB on a slow USB bus, so this budget is deliberately
+/// orders of magnitude above the read budgets. The frontend sets NO
+/// timer of its own (Rust owns the bound, like the export flow); the
+/// deadline is re-checked between files and between copy chunks.
+pub const IMPORT_DEVICE_STORY_BUDGET: Duration = Duration::from_secs(300);
 
 /// Read the currently-connected supported device (Lunii, MVP).
 ///
@@ -199,6 +210,12 @@ pub async fn read_device_library(
     let started = Instant::now();
     let requested = device_identifier;
 
+    // Local provenance truth, read under a SCOPED lock BEFORE the device
+    // I/O and released immediately — the device read must never hold the
+    // DB mutex. Rust composes local truth + device truth right here; the
+    // frontend never recomposes `alreadyImported`.
+    let imported_uuids = read_imported_pack_uuids(&state)?;
+
     let outcome = tauri::async_runtime::spawn_blocking(move || {
         device::library::read_device_library(
             scanner.as_ref(),
@@ -243,7 +260,201 @@ pub async fn read_device_library(
         let _ = device_log::record_event(&app, ev);
     }
 
-    outcome.map(DeviceLibraryDto::from_outcome)
+    outcome.map(|o| DeviceLibraryDto::from_outcome(o, &imported_uuids))
+}
+
+/// Read the set of already-imported pack UUIDs (`story_imports`) under a
+/// scoped DB lock. Fail-closed: a provenance read failure surfaces as a
+/// recoverable error rather than silently stamping `alreadyImported:
+/// false` — lying about local truth would invite a duplicate copy flow.
+fn read_imported_pack_uuids(state: &State<'_, AppState>) -> Result<HashSet<String>, AppError> {
+    let provenance_unavailable = |stage: &'static str| {
+        AppError::local_storage_unavailable(
+            "Lecture de la bibliothèque appareil indisponible: vérifie le disque local et réessaie.",
+            "Réessaie la lecture ; si le problème persiste, consulte les traces locales.",
+        )
+        .with_details(serde_json::json!({
+            "source": "story_imports_read",
+            "stage": stage,
+        }))
+    };
+    let db = state
+        .db
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut stmt = db
+        .conn()
+        .prepare("SELECT pack_uuid FROM story_imports")
+        .map_err(|_| provenance_unavailable("prepare"))?;
+    let rows = stmt
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(|_| provenance_unavailable("query"))?;
+    rows.collect::<Result<HashSet<_>, _>>()
+        .map_err(|_| provenance_unavailable("collect"))
+}
+
+/// Copy the device story identified by `packUuid` from the connected
+/// supported Lunii identified by `deviceIdentifier` into the local
+/// library ("Copier dans ma bibliothèque").
+///
+/// Async + `spawn_blocking` like every device command: the whole
+/// acquisition sequence (re-scan, index re-read, bounded copy, atomic
+/// promotion, canonical commit) runs on a blocking worker that owns
+/// Arc handles — the DB mutex is locked in SCOPED sections inside the
+/// service, never across device I/O, and never across an await.
+///
+/// The command receives exactly two identifiers; Rust re-resolves the
+/// mount path, the short id and every other detail itself. No path
+/// crosses the IPC boundary in either direction.
+#[tauri::command]
+pub async fn import_device_story(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    input: ImportDeviceStoryInputDto,
+) -> Result<ImportDeviceStoryOutcomeDto, AppError> {
+    validate_import_input(&input)?;
+
+    let db = state.db.clone();
+    let scanner = state.device_scanner.clone();
+    let library_reader = state.library_reader.clone();
+    let pack_reader = state.pack_reader.clone();
+    let app_data_dir = app.path().app_data_dir().map_err(|_| {
+        AppError::import_failed(
+            "Copie impossible: stockage local introuvable.",
+            "Vérifie les permissions de ton dossier utilisateur puis relance Rustory.",
+        )
+        .with_details(serde_json::json!({
+            "source": "other",
+            "cause": "app_data_dir",
+        }))
+    })?;
+    let request = ImportDeviceStoryRequest {
+        device_identifier: input.device_identifier,
+        pack_uuid: input.pack_uuid,
+    };
+    let started = Instant::now();
+
+    let outcome = tauri::async_runtime::spawn_blocking(move || {
+        device::import::import_device_story(
+            &db,
+            scanner.as_ref(),
+            library_reader.as_ref(),
+            pack_reader.as_ref(),
+            &app_data_dir,
+            &request,
+            IMPORT_DEVICE_STORY_BUDGET,
+        )
+    })
+    .await
+    .map_err(|_| {
+        AppError::import_failed(
+            "Copie impossible: tâche interrompue.",
+            "Réessaie la copie ; si le problème persiste, redémarre Rustory.",
+        )
+        .with_details(serde_json::json!({
+            "source": "spawn_blocking_join",
+        }))
+    })?;
+
+    let elapsed_ms = started.elapsed().as_millis() as u64;
+    let event = match &outcome {
+        Ok(imported) => device_log::Event::DeviceStoryImported {
+            short_id: imported.pack_short_id.clone(),
+            story_id: imported.story.id.clone(),
+            elapsed_ms,
+            bytes_copied: imported.pack_total_bytes,
+            file_count: imported.pack_file_count,
+        },
+        Err(err) => device_log::Event::DeviceStoryImportFailed {
+            source: import_failure_source(err),
+            kind: scan_failure_kind(err),
+            elapsed_ms,
+        },
+    };
+    let _ = device_log::record_event(&app, event);
+
+    outcome.map(ImportDeviceStoryOutcomeDto::from_outcome)
+}
+
+/// Strict boundary validation of the import input. Both values normally
+/// originate from Rust itself (detection + inventory DTOs), so a
+/// malformed value is a frontend bug — refused explicitly, never
+/// "best-effort matched" against the device.
+fn validate_import_input(input: &ImportDeviceStoryInputDto) -> Result<(), AppError> {
+    if !is_32_lowercase_hex(&input.device_identifier) {
+        return Err(invalid_import_input("invalid_device_identifier"));
+    }
+    if !is_canonical_lowercase_uuid(&input.pack_uuid) {
+        return Err(invalid_import_input("invalid_pack_uuid"));
+    }
+    Ok(())
+}
+
+fn invalid_import_input(cause: &'static str) -> AppError {
+    AppError::import_failed(
+        "Copie impossible: requête invalide.",
+        "Relance la lecture de la bibliothèque de l'appareil puis réessaie.",
+    )
+    .with_details(serde_json::json!({
+        "source": "other",
+        "kind": "invalid_input",
+        "cause": cause,
+    }))
+}
+
+fn is_32_lowercase_hex(value: &str) -> bool {
+    value.len() == 32
+        && value
+            .chars()
+            .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c))
+}
+
+/// Canonical lowercase hyphenated UUID (8-4-4-4-12), the exact shape
+/// `format_pack_uuid` emits.
+fn is_canonical_lowercase_uuid(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    if bytes.len() != 36 {
+        return false;
+    }
+    for (i, b) in bytes.iter().enumerate() {
+        match i {
+            8 | 13 | 18 | 23 => {
+                if *b != b'-' {
+                    return false;
+                }
+            }
+            _ => {
+                if !(b.is_ascii_digit() || (b'a'..=b'f').contains(b)) {
+                    return false;
+                }
+            }
+        }
+    }
+    true
+}
+
+/// Closed-set mapping of the import failure `source` for the diagnostic
+/// event. Mirrors the wire taxonomy; anything unmapped folds to `other`.
+fn import_failure_source(err: &AppError) -> &'static str {
+    err.details
+        .as_ref()
+        .and_then(|d| d.get("source").and_then(|s| s.as_str()))
+        .map(|s| match s {
+            "already_imported" => "already_imported",
+            "pack_missing" => "pack_missing",
+            "pack_invalid" => "pack_invalid",
+            "pack_oversize" => "pack_oversize",
+            "device_changed" => "device_changed",
+            "fs_read" => "fs_read",
+            "staging_write" => "staging_write",
+            "promote" => "promote",
+            "db_commit" => "db_commit",
+            "read_timeout" => "read_timeout",
+            "capability_gate" => "capability_gate",
+            "spawn_blocking_join" => "spawn_blocking_join",
+            _ => "other",
+        })
+        .unwrap_or("other")
 }
 
 /// Closed-set mapping of the device-library read failure `source` so the

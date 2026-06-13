@@ -43,9 +43,9 @@ describe("<DeviceStoryCollection />", () => {
         kind: "ready",
         deviceIdentifier: "0123456789abcdef0123456789abcdef",
         stories: [
-          { uuid: "u1", shortId: "0000ABCD", hidden: false, contentPresent: true },
-          { uuid: "u2", shortId: "0000BEEF", hidden: true, contentPresent: true },
-          { uuid: "u3", shortId: "0000F00D", hidden: false, contentPresent: false },
+          { uuid: "u1", shortId: "0000ABCD", hidden: false, contentPresent: true, alreadyImported: false },
+          { uuid: "u2", shortId: "0000BEEF", hidden: true, contentPresent: true, alreadyImported: false },
+          { uuid: "u3", shortId: "0000F00D", hidden: false, contentPresent: false, alreadyImported: false },
         ],
       },
       { deviceLabel: "Lunii V3" },
@@ -116,7 +116,7 @@ describe("<DeviceStoryCollection />", () => {
       {
         kind: "ready",
         deviceIdentifier: "0123456789abcdef0123456789abcdef",
-        stories: [{ uuid: "u1", shortId: "0000ABCD", hidden: false, contentPresent: true }],
+        stories: [{ uuid: "u1", shortId: "0000ABCD", hidden: false, contentPresent: true, alreadyImported: false }],
       },
       { isRefreshing: true },
     );
@@ -129,8 +129,8 @@ describe("<DeviceStoryCollection />", () => {
     kind: "ready",
     deviceIdentifier: "0123456789abcdef0123456789abcdef",
     stories: [
-      { uuid: "u1", shortId: "0000ABCD", hidden: false, contentPresent: true },
-      { uuid: "u2", shortId: "0000BEEF", hidden: false, contentPresent: true },
+      { uuid: "u1", shortId: "0000ABCD", hidden: false, contentPresent: true, alreadyImported: false },
+      { uuid: "u2", shortId: "0000BEEF", hidden: false, contentPresent: true, alreadyImported: false },
     ],
   };
 
@@ -240,7 +240,7 @@ describe("<DeviceStoryCollection />", () => {
           kind: "ready",
           deviceIdentifier: "0123456789abcdef0123456789abcdef",
           stories: [
-            { uuid: "u9", shortId: "0000F00D", hidden: true, contentPresent: false },
+            { uuid: "u9", shortId: "0000F00D", hidden: true, contentPresent: false, alreadyImported: false },
           ],
         }}
         isRefreshing={false}
@@ -253,6 +253,42 @@ describe("<DeviceStoryCollection />", () => {
     expect(
       screen.getByRole("button", {
         name: /identifiant 0000f00d, masquée, contenu incomplet/i,
+      }),
+    ).toBeInTheDocument();
+  });
+
+  it("marks an already-imported entry with the 'Dans ta bibliothèque' chip", () => {
+    renderState({
+      kind: "ready",
+      deviceIdentifier: "0123456789abcdef0123456789abcdef",
+      stories: [
+        { uuid: "u1", shortId: "0000ABCD", hidden: false, contentPresent: true, alreadyImported: true },
+        { uuid: "u2", shortId: "0000BEEF", hidden: false, contentPresent: true, alreadyImported: false },
+      ],
+    });
+    // Exactly one card carries the local-copy marker.
+    expect(screen.getAllByText("Dans ta bibliothèque")).toHaveLength(1);
+  });
+
+  it("folds the already-imported marker into the card accessible name", () => {
+    render(
+      <DeviceStoryCollection
+        state={{
+          kind: "ready",
+          deviceIdentifier: "0123456789abcdef0123456789abcdef",
+          stories: [
+            { uuid: "u8", shortId: "0000CAFE", hidden: false, contentPresent: true, alreadyImported: true },
+          ],
+        }}
+        isRefreshing={false}
+        selectedUuid={null}
+        onSelectStory={() => {}}
+        onRetry={() => {}}
+      />,
+    );
+    expect(
+      screen.getByRole("button", {
+        name: /identifiant 0000cafe, dans ta bibliothèque/i,
       }),
     ).toBeInTheDocument();
   });
@@ -279,7 +315,7 @@ describe("<DeviceStoryCollection />", () => {
           kind: "ready",
           deviceIdentifier: "0123456789abcdef0123456789abcdef",
           stories: [
-            { uuid: "u2", shortId: "0000BEEF", hidden: false, contentPresent: true },
+            { uuid: "u2", shortId: "0000BEEF", hidden: false, contentPresent: true, alreadyImported: false },
           ],
         }}
         isRefreshing={false}

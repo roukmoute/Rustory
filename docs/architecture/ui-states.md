@@ -121,7 +121,8 @@ Preferred patterns:
 - `Lecture de la bibliothèque appareil indisponible: l'appareil met trop de temps à répondre.`
 - `Lecture de la bibliothèque appareil indisponible: l'appareil connecté a changé.`
 - `Copie indisponible: profil non supporté`
-- `Copie indisponible: pas encore activée (MVP Phase 1)`
+- `Copie indisponible: déjà dans ta bibliothèque`
+- `Copie indisponible: contenu incomplet sur l'appareil`
 
 Error payloads that surface in the autosave alert carry a stable
 `details.source` discriminator so support can triage the cause without
@@ -235,10 +236,16 @@ set is: `device_absent`, `device_detected_supported`,
 Lunii via udisks2 D-Bus), `device_automount_failed` (Linux only,
 when the D-Bus mount call is refused), `device_library_read` (the
 inventory was read — carries `story_count` and `hidden_count`, never
-the raw pack UUIDs), and `device_library_read_failed` (carries a
-closed-set `source` and the upstream `kind`). Each line is one JSON
-object — `device_identifier` is always the SHA-256 hash of `.pi` +
-volume serial, never the raw payload.
+the raw pack UUIDs), `device_library_read_failed` (carries a
+closed-set `source` and the upstream `kind`),
+`device_story_imported` (a device pack was copied into the local
+library — carries `short_id`, `story_id`, `elapsed_ms`,
+`bytes_copied` and `file_count`; NEVER the full pack UUID nor any
+absolute path), and `device_story_import_failed` (carries the
+closed-set `source` from the import taxonomy and the upstream
+`kind`). Each line is one JSON object — `device_identifier` is
+always the SHA-256 hash of `.pi` + volume serial, never the raw
+payload.
 
 ## Device Library Contract
 
@@ -309,14 +316,86 @@ and renders only when a device story is selected:
 | Inspector element | Content |
 | --- | --- |
 | Heading | `Histoire sélectionnée`. |
-| Provenance | A `Sur l'appareil` chip plus the note `Cette histoire vit sur l'appareil, pas encore dans ta bibliothèque locale.` — keeps local truth and device truth distinguishable. |
+| Provenance | A `Sur l'appareil` chip plus the note `Cette histoire vit sur l'appareil, pas encore dans ta bibliothèque locale.` — or, when `alreadyImported`, `Cette histoire vit sur l'appareil et une copie existe déjà dans ta bibliothèque locale.` (the note must never claim "pas encore" about a story whose local copy exists). Keeps local truth and device truth distinguishable. |
 | Identity | `Histoire non reconnue` (no title — anti-catalog), `Identifiant: <shortId>`, `UUID: <uuid>`. Only verified facts; no asserted content quality. |
 | Ambiguity flags | `Masquée` (`.pi.hidden`) and `Contenu incomplet` (no `.content/<shortId>` folder) chips, plus a short honest note when content is missing — surfaced, never hidden, never called "corrupt". |
-| Copy affordance | A `Copier dans ma bibliothèque` button (device → local library), present but DISABLED in this phase (the copy flow lands in a later story) with a standardized, capability-aware reason: `Copie indisponible: profil non supporté` when `importStory` is false (V3), otherwise `Copie indisponible: pas encore activée (MVP Phase 1)`. The internal capability flag stays `importStory`; only the user-facing verb is `Copier` (Importer / Exporter are reserved for file artifacts). |
+| Copy affordance | A `Copier dans ma bibliothèque` button (device → local library), ACTIVE when `importStory === true && contentPresent && !alreadyImported` and the device is readable (see `Device Story Import Contract`). Otherwise it stays soft-disabled with a standardized, capability-aware reason picked fail-closed in this priority order: (1) `story.alreadyImported` ⇒ `Copie indisponible: déjà dans ta bibliothèque` (the most useful fact — no copy is needed); (2) `importStory !== true` or operations matrix absent ⇒ `Copie indisponible: profil non supporté` (fail-closed default, V3 included); (3) `!story.contentPresent` ⇒ `Copie indisponible: contenu incomplet sur l'appareil`. The internal capability flag stays `importStory`; only the user-facing verb is `Copier` (Importer / Exporter are reserved for file artifacts). |
 
 The inspector is the only place the right column reflects a device story; it
 must never merge with the panel's local-selection layer, and the panel
 itself stays "device state + send CTA".
+
+## Device Story Import Contract
+
+Activating the `Copier dans ma bibliothèque` affordance starts a raw,
+structurally validated acquisition of the selected device pack into the
+local library (see
+[device-support-profile.md#Story Import Contract](./device-support-profile.md)).
+This contract is **distinct from the `Post-MVP Import State Contract`**
+(local structured imports, Epic 4): the `reconnu` / `partiel` / `à
+revoir` labels MUST NOT be reused here — a device copy either fully
+succeeds or explicitly fails.
+
+UI state machine (owned by `useDeviceStoryImport`, surfaced in the
+inspector):
+
+| State | Rendering | Announcement |
+| --- | --- | --- |
+| `idle` | no status content | none (the polite region stays mounted, empty) |
+| `importing` | indeterminate `ProgressIndicator` labelled `Copie en cours…` (calm, neutral), CTA soft-disabled + `aria-busy` | deliberately NOT announced (ephemeral noise) |
+| `imported` | `Histoire copiée dans ta bibliothèque` (success chip) + the created local title + explicit `Fermer` dismiss | `aria-live="polite"` region, mounted permanently, `aria-atomic` |
+| `failed` | `Copie impossible` block with the canonical `message` + `userAction`, buttons `Réessayer` THEN `Fermer` in tab order | `role="alert"` |
+
+Surface rules:
+
+- All import feedback lives in the inspector (right column). Never a
+  toast for the failure, never a tunnel modal, never a navigation.
+- No pre-copy confirmation dialog: the copy is non-destructive (the
+  device is read-only end to end).
+- The success does not auto-hide — dismiss is explicit, the user reads
+  the outcome at their own pace.
+- The `failed` state is never wiped IMPLICITLY (no auto-hide, no
+  navigation side effect) — but the alert's own explicit `Fermer`
+  button DOES dismiss it back to idle, exactly like `Réessayer` or a
+  fresh copy trigger leave it. An inoperative close button is a bug,
+  not a preservation feature.
+- The status surface is attached to the pack that was copied: selecting
+  another device story shows THAT story's (idle) status, never the
+  previous card's success or failure; re-selecting the copied story
+  surfaces its status again.
+
+Post-success traces (AC: trace on BOTH sides):
+
+- Local: `invalidateLibraryOverviewCache()` + authoritative overview
+  re-read — the new story card appears, titled `Histoire de ma Lunii
+  (XXXXXXXX)` (the provenance is carried by the title).
+- Device: `deviceLibrary.refresh()` re-reads the inventory; the device
+  card now renders a `Dans ta bibliothèque` chip (tone success, glyph,
+  folded into the card's `aria-label`) and the inspector CTA flips back
+  to soft-disabled with `Copie indisponible: déjà dans ta bibliothèque`.
+- The device selection (and keyboard focus) is PRESERVED across the
+  re-read: the story still lives on the device — a copy is not a move.
+
+Error taxonomy — rejections cross the boundary as `AppError { code:
+"IMPORT_FAILED" }` with a stable `details.source` from this closed set:
+
+- `already_imported` — a `story_imports` row already links this `pack_uuid` to a local story.
+- `pack_missing` — the pack UUID is no longer in the device index, or its `.content/<SHORT_ID>` folder is absent.
+- `pack_invalid` — the pack content violates the declared supported subset (missing/empty required entry, unknown entry, non-regular file, depth exceeded).
+- `pack_oversize` — the pack exceeds `MAX_IMPORT_PACK_BYTES` or `MAX_IMPORT_PACK_FILES`.
+- `device_changed` — the live re-scan no longer resolves to the requested device (swapped / unplugged), or no supported device answers.
+- `fs_read` — reading the pack from the device failed mid-copy. `details.kind` reuses the export I/O set (`permission_denied`, `no_space`, `read_only_filesystem`, `not_found`, `already_exists`, `io`).
+- `staging_write` — writing into the local staging area failed (same `details.kind` set).
+- `promote` — the atomic staging → `imports/<story_id>` rename failed.
+- `db_commit` — the final SQLite transaction failed; the promoted folder is removed by compensation.
+- `read_timeout` — the import budget (300 s) was exhausted. Carries `details.elapsed_ms`.
+- `spawn_blocking_join` — the worker task could not be joined.
+- `other` — fallback for unmapped causes.
+
+A `DEVICE_UNSUPPORTED` rejection with `details.source =
+"capability_gate"` (V3 profile) and the `DEVICE_SCAN_FAILED` re-scan
+failures keep their existing taxonomies — the UI branches on `code` +
+`details.source`, never on free-form strings.
 
 ## UI Foundation Components
 

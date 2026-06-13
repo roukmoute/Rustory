@@ -11,7 +11,10 @@ pub mod ipc;
 /// Application-wide state managed by Tauri. Holds the long-lived database
 /// handle behind a synchronous mutex — SQLite serializes writers internally
 /// and reads are short-lived enough that a fine-grained async pool would
-/// be over-engineered for the current surface.
+/// be over-engineered for the current surface. The mutex itself sits in an
+/// [`Arc`] so a `spawn_blocking` worker (which requires `'static`) can own
+/// a handle for the duration of a long device import while every other
+/// command keeps locking through `state.db` unchanged (Deref).
 ///
 /// `device_scanner` carries the [`infrastructure::device::DeviceScanner`]
 /// trait object behind an [`Arc`] so the async `read_connected_lunii`
@@ -23,10 +26,15 @@ pub mod ipc;
 /// used by `read_device_library` to enumerate a connected Lunii's pack
 /// inventory at its mount path. Same `Arc` + `spawn_blocking` discipline
 /// as `device_scanner`; production wires the stdlib filesystem reader.
+///
+/// `pack_reader` is the [`infrastructure::device::DevicePackReader`] used
+/// by `import_device_story` to acquire a pack's bytes into the local
+/// staging area. Same discipline; production wires the stdlib copier.
 pub struct AppState {
-    pub db: Mutex<infrastructure::db::DbHandle>,
+    pub db: std::sync::Arc<Mutex<infrastructure::db::DbHandle>>,
     pub device_scanner: std::sync::Arc<dyn infrastructure::device::DeviceScanner>,
     pub library_reader: std::sync::Arc<dyn infrastructure::device::DeviceLibraryReader>,
+    pub pack_reader: std::sync::Arc<dyn infrastructure::device::DevicePackReader>,
 }
 
 /// Read every story id that still has a pending draft row. Ordered by
@@ -137,13 +145,23 @@ pub fn run() {
                 }
             }
 
+            // Boot-time sweep of import residues: stale staging entries
+            // (crash mid-acquisition) and promoted folders without their
+            // provenance row (crash between promotion and commit).
+            // Best-effort by contract — a sweep failure never blocks the
+            // boot; the residues are retried at the next launch.
+            let _ = application::device::import::sweep_import_artifacts(&db, &app_data_dir);
+
             app.manage(AppState {
-                db: Mutex::new(db),
+                db: std::sync::Arc::new(Mutex::new(db)),
                 device_scanner: std::sync::Arc::new(
                     infrastructure::device::SystemDeviceScanner::default(),
                 ),
                 library_reader: std::sync::Arc::new(
                     infrastructure::device::SystemDeviceLibraryReader,
+                ),
+                pack_reader: std::sync::Arc::new(
+                    infrastructure::device::SystemDevicePackReader,
                 ),
             });
             Ok(())
@@ -161,6 +179,7 @@ pub fn run() {
             commands::import_export::export_story_with_save_dialog,
             commands::library::get_library_overview,
             commands::story::get_story_detail,
+            commands::device::import_device_story,
             commands::device::read_connected_lunii,
             commands::device::read_device_library,
             commands::story::read_recoverable_draft,

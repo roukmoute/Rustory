@@ -13,6 +13,7 @@ export type AppErrorCode =
   | "RECOVERY_DRAFT_UNAVAILABLE"
   | "DEVICE_SCAN_FAILED"
   | "DEVICE_UNSUPPORTED"
+  | "IMPORT_FAILED"
   | "UNKNOWN";
 
 export interface AppError {

@@ -23,6 +23,10 @@ export interface DeviceStoryDto {
   /** A `.content/<shortId>` payload folder exists; `false` flags an
    *  orphan/ambiguous entry. */
   contentPresent: boolean;
+  /** A local copy of this pack already exists (provenance link present).
+   *  Stamped by RUST — local truth and device truth are composed at the
+   *  boundary, never recomposed by the frontend. */
+  alreadyImported: boolean;
 }
 
 export type DeviceLibraryDto =
@@ -57,6 +61,7 @@ const ALLOWED_STORY_KEYS: ReadonlySet<string> = new Set([
   "shortId",
   "hidden",
   "contentPresent",
+  "alreadyImported",
 ]);
 
 function hasOnlyAllowedKeys(
@@ -80,6 +85,7 @@ function isDeviceStoryDto(value: unknown): value is DeviceStoryDto {
   if (typeof s.shortId !== "string" || s.shortId.length === 0) return false;
   if (typeof s.hidden !== "boolean") return false;
   if (typeof s.contentPresent !== "boolean") return false;
+  if (typeof s.alreadyImported !== "boolean") return false;
   return true;
 }
 

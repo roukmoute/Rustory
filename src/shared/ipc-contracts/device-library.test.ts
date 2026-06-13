@@ -10,6 +10,7 @@ function story(overrides: Record<string, unknown> = {}): Record<string, unknown>
     shortId: "0000ABCD",
     hidden: false,
     contentPresent: true,
+    alreadyImported: false,
     ...overrides,
   };
 }
@@ -118,6 +119,35 @@ describe("isDeviceLibraryDto", () => {
         stories: [story({ contentPresent: 1 })],
       }),
     ).toBe(false);
+    expect(
+      isDeviceLibraryDto({
+        kind: "readable",
+        deviceIdentifier: VALID_ID,
+        stories: [story({ alreadyImported: "yes" })],
+      }),
+    ).toBe(false);
+  });
+
+  it("rejects a story missing the alreadyImported stamp (Rust composes it)", () => {
+    const incomplete = story();
+    delete (incomplete as Record<string, unknown>).alreadyImported;
+    expect(
+      isDeviceLibraryDto({
+        kind: "readable",
+        deviceIdentifier: VALID_ID,
+        stories: [incomplete],
+      }),
+    ).toBe(false);
+  });
+
+  it("accepts a story stamped alreadyImported: true", () => {
+    expect(
+      isDeviceLibraryDto({
+        kind: "readable",
+        deviceIdentifier: VALID_ID,
+        stories: [story({ alreadyImported: true })],
+      }),
+    ).toBe(true);
   });
 
   it("rejects an unsupported reason outside the closed set", () => {

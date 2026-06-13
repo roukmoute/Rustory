@@ -2,10 +2,12 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use crate::domain::device::pack::{PackFile, PackManifest};
 use crate::domain::device::{DeviceLibrary, DeviceStoryEntry};
 use crate::domain::shared::AppError;
 
 use super::library_reader::DeviceLibraryReader;
+use super::pack_reader::{AcquiredPack, DevicePackReader};
 use super::scanner::{DeviceCandidate, DeviceScanReport, DeviceScanner};
 
 /// Programmable mock for tests. Each `scan()` call pops the next queued
@@ -206,6 +208,140 @@ impl DeviceLibraryReader for MockDeviceLibraryReader {
             Ok(DeviceLibrary::default())
         } else {
             g.remove(0)
+        }
+    }
+}
+
+/// One scripted outcome of [`MockDevicePackReader`]. Beyond the result,
+/// each script can stage files into the caller-provided `staging_dir` so
+/// the import service has something real to promote — or a partial
+/// residue proving the cleanup paths (AC #3).
+enum PackAcquisitionScript {
+    /// Write a plausible staged pack and succeed.
+    Success,
+    /// Write a PARTIAL residue into the staging dir, then fail — models
+    /// a device unplugged mid-copy.
+    FailMidCopy,
+    /// Fail without touching the staging dir (structural refusal).
+    FailValidation(AppError),
+}
+
+/// Programmable mock for the pack-acquisition path. Each `acquire_pack()`
+/// call pops the next scripted outcome (FIFO); an empty queue acts as
+/// [`PackAcquisitionScript::Success`], mirroring the permissive defaults
+/// of the sibling mocks.
+#[derive(Clone, Default)]
+pub struct MockDevicePackReader {
+    queue: Arc<Mutex<Vec<PackAcquisitionScript>>>,
+}
+
+impl MockDevicePackReader {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn enqueue_success(&self) {
+        let mut g = self.queue.lock().unwrap_or_else(|p| p.into_inner());
+        g.push(PackAcquisitionScript::Success);
+    }
+
+    /// Script a mid-copy interruption: a partial file lands in staging,
+    /// then the acquisition fails with a recoverable `fs_read` error.
+    pub fn enqueue_interrupted_mid_copy(&self) {
+        let mut g = self.queue.lock().unwrap_or_else(|p| p.into_inner());
+        g.push(PackAcquisitionScript::FailMidCopy);
+    }
+
+    /// Script a structural refusal (`pack_invalid`), staging nothing.
+    pub fn enqueue_pack_invalid(&self) {
+        let mut g = self.queue.lock().unwrap_or_else(|p| p.into_inner());
+        g.push(PackAcquisitionScript::FailValidation(
+            AppError::import_failed(
+                "Copie impossible: le contenu de l'histoire n'est pas dans un format supporté.",
+                "Consulte le profil de support pour les contenus pris en charge.",
+            )
+            .with_details(serde_json::json!({
+                "source": "pack_invalid",
+                "cause": "unknown_entry",
+            })),
+        ));
+    }
+
+    /// The deterministic staged shape produced by a `Success` script.
+    pub fn staged_manifest() -> PackManifest {
+        let files = vec![
+            PackFile {
+                rel_path: "li".into(),
+                size: 2,
+            },
+            PackFile {
+                rel_path: "ni".into(),
+                size: 4,
+            },
+            PackFile {
+                rel_path: "rf/000/AAAAAAAA".into(),
+                size: 8,
+            },
+            PackFile {
+                rel_path: "ri".into(),
+                size: 2,
+            },
+            PackFile {
+                rel_path: "si".into(),
+                size: 2,
+            },
+        ];
+        let total_bytes = files.iter().map(|f| f.size).sum();
+        PackManifest { files, total_bytes }
+    }
+
+    fn stage_success_files(staging_dir: &Path) {
+        std::fs::write(staging_dir.join("ni"), b"NINI").expect("stage ni");
+        std::fs::write(staging_dir.join("li"), b"LI").expect("stage li");
+        std::fs::write(staging_dir.join("ri"), b"RI").expect("stage ri");
+        std::fs::write(staging_dir.join("si"), b"SI").expect("stage si");
+        let rf = staging_dir.join("rf").join("000");
+        std::fs::create_dir_all(&rf).expect("stage rf/000");
+        std::fs::write(rf.join("AAAAAAAA"), b"ASSETDAT").expect("stage asset");
+    }
+}
+
+impl DevicePackReader for MockDevicePackReader {
+    fn acquire_pack(
+        &self,
+        _mount_path: &Path,
+        _short_id: &str,
+        staging_dir: &Path,
+        _budget: Duration,
+    ) -> Result<AcquiredPack, AppError> {
+        let script = {
+            let mut g = self.queue.lock().unwrap_or_else(|p| p.into_inner());
+            if g.is_empty() {
+                PackAcquisitionScript::Success
+            } else {
+                g.remove(0)
+            }
+        };
+        match script {
+            PackAcquisitionScript::Success => {
+                Self::stage_success_files(staging_dir);
+                Ok(AcquiredPack {
+                    manifest: Self::staged_manifest(),
+                    checksum: "ab".repeat(32),
+                })
+            }
+            PackAcquisitionScript::FailMidCopy => {
+                std::fs::write(staging_dir.join("ni"), b"PART").expect("stage partial");
+                Err(AppError::import_failed(
+                    "Copie impossible: lecture de l'appareil interrompue.",
+                    "Vérifie la connexion de la Lunii puis réessaie la copie.",
+                )
+                .with_details(serde_json::json!({
+                    "source": "fs_read",
+                    "kind": "not_found",
+                })))
+            }
+            PackAcquisitionScript::FailValidation(err) => Err(err),
         }
     }
 }

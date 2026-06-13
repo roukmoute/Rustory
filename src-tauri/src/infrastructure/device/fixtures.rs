@@ -107,3 +107,35 @@ pub fn temp_lunii_mount_with_library(
 
     (dir, root)
 }
+
+/// Fill `pack_dir` with a complete, plausible pack honoring the declared
+/// supported subset: non-empty required files (`ni/li/ri/si`), optionals
+/// (`nm`, `bt`) and one asset per tree (`rf/000/…`, `sf/000/…`).
+pub fn write_plausible_pack(pack_dir: &std::path::Path) {
+    fs::create_dir_all(pack_dir).expect("mkdir pack dir");
+    fs::write(pack_dir.join("ni"), vec![0x4E; 512]).expect("write ni");
+    fs::write(pack_dir.join("li"), vec![0x4C; 256]).expect("write li");
+    fs::write(pack_dir.join("ri"), vec![0x52; 128]).expect("write ri");
+    fs::write(pack_dir.join("si"), vec![0x53; 128]).expect("write si");
+    fs::write(pack_dir.join("nm"), vec![0x6E; 32]).expect("write nm");
+    fs::write(pack_dir.join("bt"), vec![0x62; 64]).expect("write bt");
+    let rf = pack_dir.join("rf").join("000");
+    fs::create_dir_all(&rf).expect("mkdir rf/000");
+    fs::write(rf.join("AAAAAAAA"), vec![0xAA; 2048]).expect("write rf asset");
+    let sf = pack_dir.join("sf").join("000");
+    fs::create_dir_all(&sf).expect("mkdir sf/000");
+    fs::write(sf.join("BBBBBBBB"), vec![0xBB; 4096]).expect("write sf asset");
+}
+
+/// Build a Lunii mount whose `.pi` lists exactly `pack_uuid` and whose
+/// `.content/<SHORT_ID>` carries a complete plausible pack (see
+/// [`write_plausible_pack`]). Returns `(TempDir guard, mount path)`.
+pub fn temp_lunii_mount_with_pack_content(
+    metadata_version: u8,
+    pack_uuid: [u8; 16],
+) -> (tempfile::TempDir, PathBuf) {
+    let (dir, root) = temp_lunii_mount_with_library(metadata_version, &[(pack_uuid, true)], &[]);
+    let pack_dir = root.join(LUNII_CONTENT_DIR).join(pack_short_id(&pack_uuid));
+    write_plausible_pack(&pack_dir);
+    (dir, root)
+}

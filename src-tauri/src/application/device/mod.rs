@@ -7,6 +7,7 @@
 //! Stays Tauri-free: tests inject a [`MockDeviceScanner`] and exercise
 //! the full pipeline without any runtime dependency.
 
+pub mod import;
 pub mod library;
 
 use std::path::PathBuf;

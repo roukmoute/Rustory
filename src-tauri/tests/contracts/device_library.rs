@@ -6,6 +6,7 @@ fn story(short_id: &str, hidden: bool, content_present: bool) -> DeviceStoryDto 
         short_id: short_id.into(),
         hidden,
         content_present,
+        already_imported: false,
     }
 }
 
@@ -39,12 +40,14 @@ fn device_library_readable_round_trip_wire_shape() {
                     "shortId": "0000ABCD",
                     "hidden": false,
                     "contentPresent": true,
+                    "alreadyImported": false,
                 },
                 {
                     "uuid": "00000000-0000-0000-0000-00000000BEEF",
                     "shortId": "0000BEEF",
                     "hidden": true,
                     "contentPresent": false,
+                    "alreadyImported": false,
                 },
             ],
         })
@@ -84,18 +87,40 @@ fn device_identifier_field_is_string_not_object() {
 fn device_story_uses_camel_case_only() {
     let v = serde_json::to_value(readable_dto()).expect("ser");
     let first = &v["stories"][0];
-    for camel in ["uuid", "shortId", "hidden", "contentPresent"] {
+    for camel in [
+        "uuid",
+        "shortId",
+        "hidden",
+        "contentPresent",
+        "alreadyImported",
+    ] {
         assert!(
             first.get(camel).is_some(),
             "missing camelCase field: {camel}"
         );
     }
-    for snake in ["short_id", "content_present"] {
+    for snake in ["short_id", "content_present", "already_imported"] {
         assert!(
             first.get(snake).is_none(),
             "snake_case must not leak: {snake}"
         );
     }
+}
+
+#[test]
+fn device_story_already_imported_serializes_true_when_stamped() {
+    let dto = DeviceLibraryDto::Readable {
+        device_identifier: "0123456789abcdef0123456789abcdef".into(),
+        stories: vec![DeviceStoryDto {
+            uuid: "00000000-0000-0000-0000-00000000abcd".into(),
+            short_id: "0000ABCD".into(),
+            hidden: false,
+            content_present: true,
+            already_imported: true,
+        }],
+    };
+    let v = serde_json::to_value(&dto).expect("ser");
+    assert_eq!(v["stories"][0]["alreadyImported"], true);
 }
 
 #[test]
