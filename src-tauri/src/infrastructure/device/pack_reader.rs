@@ -427,6 +427,32 @@ mod tests {
         tempfile::tempdir().expect("staging tempdir")
     }
 
+    /// Discipline: every pack-read refusal constructor must be ACTIONABLE
+    /// — a non-empty cause AND a non-empty next gesture — so the import UI
+    /// never surfaces an opaque refusal (AC1). Locks the canonical fr copy
+    /// without adding any new error code / `details.source`.
+    #[test]
+    fn every_pack_read_refusal_constructor_is_actionable() {
+        let refusals = [
+            pack_missing_error(),
+            pack_invalid_error("missing_required"),
+            pack_oversize_error(),
+            fs_read_error("io"),
+            staging_write_error("io"),
+            read_timeout_error(Duration::from_secs(1)),
+        ];
+        for err in &refusals {
+            assert_eq!(
+                err.code,
+                crate::domain::shared::AppErrorCode::ImportFailed,
+                "{err:?}"
+            );
+            assert!(!err.message.is_empty(), "refusal needs a cause: {err:?}");
+            let action = err.user_action.as_deref().unwrap_or("");
+            assert!(!action.is_empty(), "refusal needs a next gesture: {err:?}");
+        }
+    }
+
     #[test]
     fn acquires_a_plausible_pack_into_staging_with_deterministic_checksum() {
         let pack_uuid = uuid([0xFA, 0xC5, 0x56, 0x2D]);

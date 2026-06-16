@@ -1415,6 +1415,170 @@ describe("<LibraryRoute />", () => {
     ).toBeInTheDocument();
   });
 
+  const importFailure = {
+    code: "IMPORT_FAILED" as const,
+    message: "Copie impossible: lecture de l'appareil interrompue.",
+    userAction: "Vérifie la connexion de la Lunii puis réessaie la copie.",
+    details: { source: "fs_read", kind: "not_found" },
+  };
+
+  it("keeps a copy failure attached to its pack across selection changes (AC3)", async () => {
+    const user = userEvent.setup();
+    mockGet.mockResolvedValue({ stories: [] });
+    mockDevice.mockResolvedValue(supportedOrigine);
+    mockDeviceLibrary.mockResolvedValue(readableTwo);
+    mockImport.mockRejectedValueOnce(importFailure);
+    renderLibrary();
+
+    const main = await screen.findByRole("main", {
+      name: /collection d'histoires/i,
+    });
+    // Copy pack A → it fails in-context.
+    await user.click(
+      await within(main).findByRole("button", {
+        name: /identifiant 0000abcd/i,
+      }),
+    );
+    let inspector = screen.getByRole("region", {
+      name: /histoire sélectionnée/i,
+    });
+    await user.click(
+      within(inspector).getByRole("button", {
+        name: /copier dans ma bibliothèque/i,
+      }),
+    );
+    expect(await within(inspector).findByRole("alert")).toHaveTextContent(
+      "Copie impossible",
+    );
+
+    // Select pack B: its status is idle — A's failure must NOT follow it.
+    await user.click(
+      within(main).getByRole("button", { name: /identifiant 0000beef/i }),
+    );
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+
+    // Re-select pack A: its failure surfaces again (held, attached to the pack).
+    await user.click(
+      within(main).getByRole("button", { name: /identifiant 0000abcd/i }),
+    );
+    inspector = screen.getByRole("region", { name: /histoire sélectionnée/i });
+    expect(within(inspector).getByRole("alert")).toHaveTextContent(
+      "Copie impossible",
+    );
+  });
+
+  it("dismisses a copy failure only on an explicit Fermer, never on a selection change (AC3)", async () => {
+    const user = userEvent.setup();
+    mockGet.mockResolvedValue({ stories: [] });
+    mockDevice.mockResolvedValue(supportedOrigine);
+    mockDeviceLibrary.mockResolvedValue(readableTwo);
+    mockImport.mockRejectedValueOnce(importFailure);
+    renderLibrary();
+
+    const main = await screen.findByRole("main", {
+      name: /collection d'histoires/i,
+    });
+    await user.click(
+      await within(main).findByRole("button", {
+        name: /identifiant 0000abcd/i,
+      }),
+    );
+    let inspector = screen.getByRole("region", {
+      name: /histoire sélectionnée/i,
+    });
+    await user.click(
+      within(inspector).getByRole("button", {
+        name: /copier dans ma bibliothèque/i,
+      }),
+    );
+    await within(inspector).findByRole("alert");
+
+    // A→B→A: the alert survives the round-trip (a selection change never wipes it).
+    await user.click(
+      within(main).getByRole("button", { name: /identifiant 0000beef/i }),
+    );
+    await user.click(
+      within(main).getByRole("button", { name: /identifiant 0000abcd/i }),
+    );
+    inspector = screen.getByRole("region", { name: /histoire sélectionnée/i });
+    expect(within(inspector).getByRole("alert")).toBeInTheDocument();
+
+    // The explicit Fermer DOES dismiss it…
+    await user.click(within(inspector).getByRole("button", { name: /fermer/i }));
+    expect(within(inspector).queryByRole("alert")).not.toBeInTheDocument();
+
+    // …and it stays gone after another A→B→A (now genuinely idle).
+    await user.click(
+      within(main).getByRole("button", { name: /identifiant 0000beef/i }),
+    );
+    await user.click(
+      within(main).getByRole("button", { name: /identifiant 0000abcd/i }),
+    );
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("never surfaces a copy failure in a toast — only an in-context alert (AC3 / UX-DR15)", async () => {
+    const user = userEvent.setup();
+    mockGet.mockResolvedValue({ stories: [] });
+    mockDevice.mockResolvedValue(supportedOrigine);
+    mockDeviceLibrary.mockResolvedValue(readableTwo);
+    mockImport.mockRejectedValueOnce(importFailure);
+    renderLibrary();
+
+    const main = await screen.findByRole("main", {
+      name: /collection d'histoires/i,
+    });
+    await user.click(
+      await within(main).findByRole("button", {
+        name: /identifiant 0000abcd/i,
+      }),
+    );
+    const inspector = screen.getByRole("region", {
+      name: /histoire sélectionnée/i,
+    });
+    await user.click(
+      within(inspector).getByRole("button", {
+        name: /copier dans ma bibliothèque/i,
+      }),
+    );
+    const alert = await within(inspector).findByRole("alert");
+    expect(alert).toHaveTextContent("Copie impossible");
+    // The critical error lives in an alert, never a polite toast (role=status).
+    screen
+      .queryAllByRole("status")
+      .forEach((s) => expect(s).not.toHaveTextContent(/copie impossible/i));
+  });
+
+  it("offers the support-profile next gesture in the inspector when a V3 copy is gated off (AC1)", async () => {
+    const user = userEvent.setup();
+    mockGet.mockResolvedValue({ stories: [] });
+    mockDevice.mockResolvedValue(supportedV3);
+    mockDeviceLibrary.mockResolvedValue(readableTwo);
+    renderLibrary();
+
+    const main = await screen.findByRole("main", {
+      name: /collection d'histoires/i,
+    });
+    await user.click(
+      await within(main).findByRole("button", {
+        name: /identifiant 0000abcd/i,
+      }),
+    );
+    const inspector = screen.getByRole("region", {
+      name: /histoire sélectionnée/i,
+    });
+    // The copy is gated off for V3 with the canonical reason…
+    expect(
+      within(inspector).getByText(/copie indisponible: profil non supporté/i),
+    ).toBeInTheDocument();
+    // …and the inspector exposes the next gesture (parity with the panel).
+    expect(
+      within(inspector).getByRole("button", {
+        name: /consulter le profil de support officiel/i,
+      }),
+    ).toBeInTheDocument();
+  });
+
   // --- Pure mapper unit tests (mapDeviceForPanel) ---
 
   it("mapDeviceForPanel returns 'scanning' while the hook is loading", () => {

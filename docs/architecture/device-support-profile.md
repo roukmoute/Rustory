@@ -213,6 +213,13 @@ Reasons`.
   family: "<tag>", firmware_cohort: "<tag>" }`.
 - MUST be called BEFORE any device write attempt. NFR17 + NFR18
   fail-closed.
+- Its refusal is actionable, never opaque: the `message` and
+  `userAction` are both non-empty. The `import_story` refusal (the V3
+  case: inspectable but not importable) is surfaced in the device-story
+  inspector as `Copie indisponible: profil non supporté` plus a
+  `Consulter le profil de support` next gesture — parity with the
+  detection panel (see
+  [ui-states.md#Device Story Inspection Contract](./ui-states.md)).
 
 Adding a new operation:
 

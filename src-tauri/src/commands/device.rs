@@ -318,16 +318,10 @@ pub async fn import_device_story(
     let scanner = state.device_scanner.clone();
     let library_reader = state.library_reader.clone();
     let pack_reader = state.pack_reader.clone();
-    let app_data_dir = app.path().app_data_dir().map_err(|_| {
-        AppError::import_failed(
-            "Copie impossible: stockage local introuvable.",
-            "Vérifie les permissions de ton dossier utilisateur puis relance Rustory.",
-        )
-        .with_details(serde_json::json!({
-            "source": "other",
-            "cause": "app_data_dir",
-        }))
-    })?;
+    let app_data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|_| import_app_data_unavailable_error())?;
     let request = ImportDeviceStoryRequest {
         device_identifier: input.device_identifier,
         pack_uuid: input.pack_uuid,
@@ -346,15 +340,7 @@ pub async fn import_device_story(
         )
     })
     .await
-    .map_err(|_| {
-        AppError::import_failed(
-            "Copie impossible: tâche interrompue.",
-            "Réessaie la copie ; si le problème persiste, redémarre Rustory.",
-        )
-        .with_details(serde_json::json!({
-            "source": "spawn_blocking_join",
-        }))
-    })?;
+    .map_err(|_| import_join_error())?;
 
     let elapsed_ms = started.elapsed().as_millis() as u64;
     let event = match &outcome {
@@ -399,6 +385,33 @@ fn invalid_import_input(cause: &'static str) -> AppError {
         "source": "other",
         "kind": "invalid_input",
         "cause": cause,
+    }))
+}
+
+/// `app_data_dir` could not be resolved — the local store has no home to
+/// copy into. Mapped to the `other` fallback source. Named (not inline)
+/// so the actionability discipline test can assert its copy.
+fn import_app_data_unavailable_error() -> AppError {
+    AppError::import_failed(
+        "Copie impossible: stockage local introuvable.",
+        "Vérifie les permissions de ton dossier utilisateur puis relance Rustory.",
+    )
+    .with_details(serde_json::json!({
+        "source": "other",
+        "cause": "app_data_dir",
+    }))
+}
+
+/// The blocking acquisition worker could not be joined (panicked or
+/// cancelled). Mapped to the `spawn_blocking_join` source. Named (not
+/// inline) so the actionability discipline test can assert its copy.
+fn import_join_error() -> AppError {
+    AppError::import_failed(
+        "Copie impossible: tâche interrompue.",
+        "Réessaie la copie ; si le problème persiste, redémarre Rustory.",
+    )
+    .with_details(serde_json::json!({
+        "source": "spawn_blocking_join",
     }))
 }
 
@@ -477,4 +490,33 @@ fn library_failure_source(err: &AppError) -> &'static str {
             _ => "other",
         })
         .unwrap_or("other")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Discipline: the command-layer import-refusal fallbacks must be
+    /// ACTIONABLE — a non-empty cause AND a non-empty next gesture — like
+    /// every other refusal (AC1, ui-states.md → actionability rule). No
+    /// new error code / `details.source` is introduced; this only locks
+    /// the canonical fr copy the existing constructors carry.
+    #[test]
+    fn command_layer_import_refusals_are_actionable() {
+        let refusals = [
+            import_app_data_unavailable_error(),
+            import_join_error(),
+            invalid_import_input("invalid_pack_uuid"),
+        ];
+        for err in &refusals {
+            assert_eq!(
+                err.code,
+                crate::domain::shared::AppErrorCode::ImportFailed,
+                "{err:?}"
+            );
+            assert!(!err.message.is_empty(), "refusal needs a cause: {err:?}");
+            let action = err.user_action.as_deref().unwrap_or("");
+            assert!(!action.is_empty(), "refusal needs a next gesture: {err:?}");
+        }
+    }
 }

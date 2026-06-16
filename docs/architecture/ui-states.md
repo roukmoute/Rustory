@@ -318,8 +318,10 @@ and renders only when a device story is selected:
 | Heading | `Histoire sélectionnée`. |
 | Provenance | A `Sur l'appareil` chip plus the note `Cette histoire vit sur l'appareil, pas encore dans ta bibliothèque locale.` — or, when `alreadyImported`, `Cette histoire vit sur l'appareil et une copie existe déjà dans ta bibliothèque locale.` (the note must never claim "pas encore" about a story whose local copy exists). Keeps local truth and device truth distinguishable. |
 | Identity | `Histoire non reconnue` (no title — anti-catalog), `Identifiant: <shortId>`, `UUID: <uuid>`. Only verified facts; no asserted content quality. |
+| Honest triage (before any copy) | The verified facts from the in-memory inventory snapshot are grouped under three honest headers so nothing is imported blindly (no device re-read, no catalog lookup): **`Ce que Rustory reconnaît`** — the identifiers and, when `contentPresent`, a `Contenu présent` chip; **`Ce qui bloque la copie`** — `Contenu incomplet` (`!contentPresent`) and `Dans ta bibliothèque` (`alreadyImported`), each with a short honest note; **`À revoir avant de copier`** — `Masquée` (`hidden`). A group is shown only when it has a fact. Fail-closed: a fact that is absent/unknown is never asserted positively. These headers are distinct from the Post-MVP `reconnu` / `partiel` / `à revoir` import-state labels — a device copy is binary (full success or `IMPORT_FAILED`), so this triage is a pre-decision, never a partial-import report. |
 | Ambiguity flags | `Masquée` (`.pi.hidden`) and `Contenu incomplet` (no `.content/<shortId>` folder) chips, plus a short honest note when content is missing — surfaced, never hidden, never called "corrupt". |
 | Copy affordance | A `Copier dans ma bibliothèque` button (device → local library), ACTIVE when `importStory === true && contentPresent && !alreadyImported` and the device is readable (see `Device Story Import Contract`). Otherwise it stays soft-disabled with a standardized, capability-aware reason picked fail-closed in this priority order: (1) `story.alreadyImported` ⇒ `Copie indisponible: déjà dans ta bibliothèque` (the most useful fact — no copy is needed); (2) `importStory !== true` or operations matrix absent ⇒ `Copie indisponible: profil non supporté` (fail-closed default, V3 included); (3) `!story.contentPresent` ⇒ `Copie indisponible: contenu incomplet sur l'appareil`. The internal capability flag stays `importStory`; only the user-facing verb is `Copier` (Importer / Exporter are reserved for file artifacts). |
+| Next gesture on a profile refusal | When the copy is refused for an unsupported profile (the V3 case: inspectable but not importable), the inspector shows a discreet `Consulter le profil de support` affordance (`Button variant="quiet"`, `aria-label="Consulter le profil de support officiel"`) wired to the same `openSupportProfile` action as the detection panel — so a refusal carries a next gesture, never an opaque grayed-out CTA. The affordance is shown ONLY for the profile refusal: not for `déjà dans ta bibliothèque` (a copy is simply not needed) nor `contenu incomplet` (the honest note already tells the user to check the device), and it is hidden entirely in listing/inspection-only contexts where the route wires no handler. |
 
 The inspector is the only place the right column reflects a device story; it
 must never merge with the panel's local-selection layer, and the panel
@@ -344,7 +346,7 @@ inspector):
 | `idle` | no status content | none (the polite region stays mounted, empty) |
 | `importing` | indeterminate `ProgressIndicator` labelled `Copie en cours…` (calm, neutral), CTA soft-disabled + `aria-busy` | deliberately NOT announced (ephemeral noise) |
 | `imported` | `Histoire copiée dans ta bibliothèque` (success chip) + the created local title + explicit `Fermer` dismiss | `aria-live="polite"` region, mounted permanently, `aria-atomic` |
-| `failed` | `Copie impossible` block with the canonical `message` + `userAction`, buttons `Réessayer` THEN `Fermer` in tab order | `role="alert"` |
+| `failed` | `Copie impossible` block with the canonical `message` + `userAction`, buttons `Réessayer` THEN `Fermer` in tab order. EXCEPTION: a profile refusal (`DEVICE_UNSUPPORTED` — the live device turned out non-importable, e.g. after a stale snapshot) is not retryable, so the alert offers `Consulter le profil de support` in place of `Réessayer` (parity with the pre-click affordance), THEN `Fermer` | `role="alert"` |
 
 Surface rules:
 
@@ -363,6 +365,22 @@ Surface rules:
   another device story shows THAT story's (idle) status, never the
   previous card's success or failure; re-selecting the copied story
   surfaces its status again.
+- A critical copy failure NEVER lives only in a toast (UX-DR15): the
+  `failed` alert is `role="alert"` inside the inspector, and the `Toast`
+  primitive excludes the `error` tone at the type level so the compiler
+  refuses an error-only toast. The failure stays consultable as long as
+  the user is on the library, re-displayed by re-selecting its pack.
+- Residual limit (assumed for the MVP): the `failed` alert lives in
+  route-local state (the hook + the selected-pack gate). It survives
+  selection changes WITHIN the library (re-displayed by re-selecting its
+  pack), but NOT a full departure from the library context — leaving the
+  route unmounts the hook and the alert is gone on return (the pack shows
+  idle again). The canonical state stays coherent regardless (Rust
+  finished or refused the copy, the overview cache is reconciled), so a
+  fresh copy trigger on return simply re-surfaces the honest refusal
+  (e.g. `already_imported`). A global, cross-route notifier that would
+  carry the failure across a route departure is a deliberately deferred,
+  separate concern.
 
 Post-success traces (AC: trace on BOTH sides):
 
@@ -375,6 +393,17 @@ Post-success traces (AC: trace on BOTH sides):
   to soft-disabled with `Copie indisponible: déjà dans ta bibliothèque`.
 - The device selection (and keyboard focus) is PRESERVED across the
   re-read: the story still lives on the device — a copy is not a move.
+
+Actionability rule (never an opaque refusal): EVERY `IMPORT_FAILED`
+`details.source` below — AND the `DEVICE_UNSUPPORTED` /
+`capability_gate` copy refusal (V3) — carries a non-empty `message`
+(cause + impact) AND a non-empty `userAction` (the next gesture). The
+Rust side is the authority for both strings; the frontend renders them
+verbatim (it branches on `code` + `details.source` only to choose the
+surface/affordance, never to compose the text). Backend tests lock this
+invariant per refusal constructor; the inspector adds the
+`Consulter le profil de support` next gesture for the profile refusal
+(see `Device Story Inspection Contract`).
 
 Error taxonomy — rejections cross the boundary as `AppError { code:
 "IMPORT_FAILED" }` with a stable `details.source` from this closed set:

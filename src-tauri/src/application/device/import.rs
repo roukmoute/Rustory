@@ -585,6 +585,35 @@ mod tests {
         }
     }
 
+    /// Discipline: every import-refusal constructor must be ACTIONABLE —
+    /// a non-empty cause AND a non-empty next gesture — so the UI never
+    /// surfaces an opaque refusal (AC1, ui-states.md#Device Story Import
+    /// Contract → actionability rule). No new error code / source: this
+    /// only locks the canonical fr copy the existing constructors carry.
+    #[test]
+    fn every_import_refusal_constructor_is_actionable() {
+        let io_err = std::io::Error::from(std::io::ErrorKind::PermissionDenied);
+        let sqlite_err = rusqlite::Error::QueryReturnedNoRows;
+        let refusals = [
+            already_imported_error(),
+            device_changed_error("identifier_mismatch"),
+            pack_missing_error(),
+            staging_create_error(&io_err),
+            promote_error(&io_err),
+            db_commit_error(&sqlite_err, "stories"),
+        ];
+        for err in &refusals {
+            assert_eq!(
+                err.code,
+                crate::domain::shared::AppErrorCode::ImportFailed,
+                "{err:?}"
+            );
+            assert!(!err.message.is_empty(), "refusal needs a cause: {err:?}");
+            let action = err.user_action.as_deref().unwrap_or("");
+            assert!(!action.is_empty(), "refusal needs a next gesture: {err:?}");
+        }
+    }
+
     #[test]
     fn imports_a_device_story_end_to_end() {
         let h = Harness::new();

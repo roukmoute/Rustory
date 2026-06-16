@@ -38,6 +38,26 @@
   line-height: var(--line-height-tight);
 }
 
+/* Honest triage group ("Ce que Rustory reconnaît" / "Ce qui bloque la
+ * copie" / "À revoir avant de copier"). Each is a quiet, headed block —
+ * a heading for screen-reader structure, NOT a landmark region, so the
+ * inspector keeps exactly one region (the SurfacePanel). */
+.device-inspector__group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.device-inspector__group-title {
+  margin: 0;
+  font-size: var(--font-size-meta);
+  font-weight: var(--font-weight-semibold);
+  color: var(--color-text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  line-height: var(--line-height-tight);
+}
+
 .device-inspector__facts {
   margin: 0;
   display: flex;

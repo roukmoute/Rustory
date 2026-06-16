@@ -285,6 +285,7 @@ export function LibraryRoute(): React.JSX.Element {
                 void deviceImport.retryImport();
               }}
               onDismissImportStatus={deviceImport.dismissStatus}
+              onConsultSupportProfile={openSupportProfile}
             />
             <LuniiDecisionPanel
               deviceState={deviceState}

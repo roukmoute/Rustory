@@ -27,6 +27,13 @@ const importError: AppError = {
   details: { source: "fs_read" },
 };
 
+const profileRefusalError: AppError = {
+  code: "DEVICE_UNSUPPORTED",
+  message: "Opération non autorisée pour ce profil d'appareil.",
+  userAction: "Consulte le profil de support pour comprendre ce qui est permis.",
+  details: { source: "capability_gate", operation: "import_story" },
+};
+
 function copyButton(): HTMLElement {
   return screen.getByRole("button", {
     name: /copier dans ma bibliothèque/i,
@@ -253,6 +260,265 @@ describe("<DeviceStoryInspector />", () => {
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: /fermer/i }));
     expect(onDismiss).toHaveBeenCalledTimes(1);
+  });
+
+  function supportAffordance(): HTMLElement | null {
+    return screen.queryByRole("button", {
+      name: /consulter le profil de support officiel/i,
+    });
+  }
+
+  it("offers 'Consulter le profil de support' on a profile refusal and fires it (AC1)", async () => {
+    const user = userEvent.setup();
+    const onConsult = vi.fn();
+    render(
+      <DeviceStoryInspector
+        story={baseStory}
+        supportedOperations={{ ...importableOps, importStory: false }}
+        onImport={vi.fn()}
+        onConsultSupportProfile={onConsult}
+      />,
+    );
+    // The canonical disabled reason is unchanged…
+    const reason = document.getElementById(
+      copyButton().getAttribute("aria-describedby") as string,
+    );
+    expect(reason).toHaveTextContent(/profil non supporté/i);
+    // …and a next gesture is offered instead of an opaque grayed-out CTA.
+    const consult = supportAffordance();
+    expect(consult).toBeInTheDocument();
+    await user.click(consult as HTMLElement);
+    expect(onConsult).toHaveBeenCalledTimes(1);
+  });
+
+  it("does NOT offer the support affordance when the copy is refused as 'déjà dans ta bibliothèque'", () => {
+    render(
+      <DeviceStoryInspector
+        story={{ ...baseStory, alreadyImported: true }}
+        supportedOperations={importableOps}
+        onImport={vi.fn()}
+        onConsultSupportProfile={vi.fn()}
+      />,
+    );
+    expect(supportAffordance()).not.toBeInTheDocument();
+  });
+
+  it("does NOT offer the support affordance for an incomplete-content refusal (has its own note)", () => {
+    render(
+      <DeviceStoryInspector
+        story={{ ...baseStory, contentPresent: false }}
+        supportedOperations={importableOps}
+        onImport={vi.fn()}
+        onConsultSupportProfile={vi.fn()}
+      />,
+    );
+    expect(supportAffordance()).not.toBeInTheDocument();
+  });
+
+  it("hides the support affordance entirely in inspection-only contexts (no handler wired)", () => {
+    render(
+      <DeviceStoryInspector
+        story={baseStory}
+        supportedOperations={{ ...importableOps, importStory: false }}
+        onImport={vi.fn()}
+      />,
+    );
+    expect(supportAffordance()).not.toBeInTheDocument();
+  });
+
+  it("does NOT offer the support affordance when only the handler is unwired (profile allows the copy)", () => {
+    // importStory === true, content present, not imported, but no onImport:
+    // the CTA is fail-closed to 'profil non supporté', yet the profile
+    // genuinely allows the copy — consulting support would be misleading.
+    render(
+      <DeviceStoryInspector
+        story={baseStory}
+        supportedOperations={importableOps}
+        onConsultSupportProfile={vi.fn()}
+      />,
+    );
+    const reason = document.getElementById(
+      copyButton().getAttribute("aria-describedby") as string,
+    );
+    expect(reason).toHaveTextContent(/profil non supporté/i);
+    expect(supportAffordance()).not.toBeInTheDocument();
+  });
+
+  it("offers the support gesture INSTEAD of a futile Réessayer on a runtime profile refusal (AC1)", async () => {
+    const user = userEvent.setup();
+    const onConsult = vi.fn();
+    render(
+      <DeviceStoryInspector
+        story={baseStory}
+        supportedOperations={importableOps}
+        onImport={vi.fn()}
+        importState={{ kind: "failed", error: profileRefusalError }}
+        onRetryImport={vi.fn()}
+        onConsultSupportProfile={onConsult}
+      />,
+    );
+    const alert = screen.getByRole("alert");
+    expect(alert).toHaveTextContent(/opération non autorisée/i);
+    // A profile refusal is not retryable — Réessayer is replaced.
+    expect(
+      within(alert).queryByRole("button", { name: /réessayer/i }),
+    ).not.toBeInTheDocument();
+    const consult = within(alert).getByRole("button", {
+      name: /consulter le profil de support officiel/i,
+    });
+    await user.click(consult);
+    expect(onConsult).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps Réessayer (and no support gesture) on a non-profile copy failure", () => {
+    render(
+      <DeviceStoryInspector
+        story={baseStory}
+        supportedOperations={importableOps}
+        onImport={vi.fn()}
+        importState={{ kind: "failed", error: importError }}
+        onRetryImport={vi.fn()}
+        onConsultSupportProfile={vi.fn()}
+      />,
+    );
+    const alert = screen.getByRole("alert");
+    expect(
+      within(alert).getByRole("button", { name: /réessayer/i }),
+    ).toBeInTheDocument();
+    expect(
+      within(alert).queryByRole("button", {
+        name: /consulter le profil de support officiel/i,
+      }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("renders a SINGLE support gesture when a runtime profile refusal coincides with a V3 reclassification", async () => {
+    const user = userEvent.setup();
+    const onConsult = vi.fn();
+    // The device turned out non-importable at runtime (failed
+    // DEVICE_UNSUPPORTED) AND the snapshot reclassified to V3
+    // (importStory=false) → the pre-click affordance must stay suppressed
+    // so only the failure surface carries the next gesture. No duplicate
+    // button with the same accessible name in the region.
+    render(
+      <DeviceStoryInspector
+        story={baseStory}
+        supportedOperations={{ ...importableOps, importStory: false }}
+        onImport={vi.fn()}
+        importState={{ kind: "failed", error: profileRefusalError }}
+        onRetryImport={vi.fn()}
+        onConsultSupportProfile={onConsult}
+      />,
+    );
+    const consultButtons = screen.getAllByRole("button", {
+      name: /consulter le profil de support officiel/i,
+    });
+    expect(consultButtons).toHaveLength(1);
+    // The single gesture lives in the failure alert, not the pre-click body.
+    const alert = screen.getByRole("alert");
+    expect(
+      within(alert).getByRole("button", {
+        name: /consulter le profil de support officiel/i,
+      }),
+    ).toBe(consultButtons[0]);
+    await user.click(consultButtons[0]);
+    expect(onConsult).toHaveBeenCalledTimes(1);
+  });
+
+  it("never shows the support affordance when the copy is allowed", () => {
+    render(
+      <DeviceStoryInspector
+        story={baseStory}
+        supportedOperations={importableOps}
+        onImport={vi.fn()}
+        onConsultSupportProfile={vi.fn()}
+      />,
+    );
+    expect(supportAffordance()).not.toBeInTheDocument();
+  });
+
+  it("groups a fully-copyable story under 'Ce que Rustory reconnaît' only (AC2)", () => {
+    render(
+      <DeviceStoryInspector
+        story={baseStory}
+        supportedOperations={importableOps}
+        onImport={vi.fn()}
+      />,
+    );
+    const region = screen.getByRole("region", {
+      name: /histoire sélectionnée/i,
+    });
+    expect(
+      within(region).getByText(/ce que rustory reconnaît/i),
+    ).toBeInTheDocument();
+    expect(within(region).getByText("Contenu présent")).toBeInTheDocument();
+    // No blocker, nothing to review → those headers stay absent.
+    expect(
+      within(region).queryByText(/ce qui bloque la copie/i),
+    ).not.toBeInTheDocument();
+    expect(
+      within(region).queryByText(/à revoir avant de copier/i),
+    ).not.toBeInTheDocument();
+    // Anti-catalog: the only name shown is the honest placeholder.
+    expect(
+      within(region).getByText(/histoire non reconnue/i),
+    ).toBeInTheDocument();
+  });
+
+  it("classifies incomplete content as blocking, never as 'Contenu présent' (fail-closed, AC2)", () => {
+    render(
+      <DeviceStoryInspector
+        story={{ ...baseStory, contentPresent: false }}
+        supportedOperations={importableOps}
+        onImport={vi.fn()}
+      />,
+    );
+    const region = screen.getByRole("region", {
+      name: /histoire sélectionnée/i,
+    });
+    expect(
+      within(region).getByText(/ce qui bloque la copie/i),
+    ).toBeInTheDocument();
+    expect(within(region).getByText("Contenu incomplet")).toBeInTheDocument();
+    expect(within(region).queryByText("Contenu présent")).not.toBeInTheDocument();
+  });
+
+  it("classifies an already-copied story as blocking under 'Ce qui bloque la copie' (AC2)", () => {
+    render(
+      <DeviceStoryInspector
+        story={{ ...baseStory, alreadyImported: true }}
+        supportedOperations={importableOps}
+        onImport={vi.fn()}
+      />,
+    );
+    const region = screen.getByRole("region", {
+      name: /histoire sélectionnée/i,
+    });
+    expect(
+      within(region).getByText(/ce qui bloque la copie/i),
+    ).toBeInTheDocument();
+    expect(within(region).getByText("Dans ta bibliothèque")).toBeInTheDocument();
+  });
+
+  it("classifies a hidden story under 'À revoir avant de copier' (AC2)", () => {
+    render(
+      <DeviceStoryInspector
+        story={{ ...baseStory, hidden: true }}
+        supportedOperations={importableOps}
+        onImport={vi.fn()}
+      />,
+    );
+    const region = screen.getByRole("region", {
+      name: /histoire sélectionnée/i,
+    });
+    expect(
+      within(region).getByText(/à revoir avant de copier/i),
+    ).toBeInTheDocument();
+    expect(within(region).getByText("Masquée")).toBeInTheDocument();
+    // Hidden alone does not block: content is present, so no blocker group.
+    expect(
+      within(region).queryByText(/ce qui bloque la copie/i),
+    ).not.toBeInTheDocument();
   });
 
   it("renders the failure as an in-context alert with Réessayer before Fermer", async () => {

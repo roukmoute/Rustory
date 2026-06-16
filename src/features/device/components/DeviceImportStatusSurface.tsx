@@ -9,6 +9,12 @@ export interface DeviceImportStatusSurfaceProps {
   status: DeviceStoryImportStatus;
   onRetry: () => void;
   onDismiss: () => void;
+  /** Open the official device-support profile. When a runtime refusal is
+   *  a profile refusal (`DEVICE_UNSUPPORTED` — e.g. the live device turned
+   *  out non-importable after a stale snapshot), the alert offers this
+   *  next gesture INSTEAD of a futile `Réessayer`, mirroring the pre-click
+   *  affordance in the inspector. Omitted ⇒ the button is hidden. */
+  onConsultSupportProfile?: () => void;
 }
 
 /**
@@ -29,7 +35,16 @@ export function DeviceImportStatusSurface({
   status,
   onRetry,
   onDismiss,
+  onConsultSupportProfile,
 }: DeviceImportStatusSurfaceProps): React.JSX.Element {
+  // A profile refusal is not retryable (the live device simply does not
+  // allow the copy) — offer the support consultation as the next gesture,
+  // never a `Réessayer` that would hit the same wall.
+  const isProfileRefusal =
+    status.kind === "failed" && status.error.code === "DEVICE_UNSUPPORTED";
+  const showSupportProfile =
+    isProfileRefusal && onConsultSupportProfile !== undefined;
+
   return (
     <div className="device-import-status">
       {/* Polite region mounted in ALL states with an atomic update so
@@ -75,9 +90,21 @@ export function DeviceImportStatusSurface({
             </p>
           ) : null}
           <div className="device-import-status__actions">
-            <Button variant="secondary" onClick={onRetry}>
-              Réessayer
-            </Button>
+            {isProfileRefusal ? (
+              showSupportProfile ? (
+                <Button
+                  variant="secondary"
+                  onClick={onConsultSupportProfile}
+                  aria-label="Consulter le profil de support officiel"
+                >
+                  Consulter le profil de support
+                </Button>
+              ) : null
+            ) : (
+              <Button variant="secondary" onClick={onRetry}>
+                Réessayer
+              </Button>
+            )}
             <Button variant="quiet" onClick={onDismiss}>
               Fermer
             </Button>

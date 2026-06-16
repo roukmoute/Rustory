@@ -44,6 +44,11 @@ It exists to keep the same product concepts named the same way across:
 | Copy a device story into the library (action) | `Copier dans ma bibliothèque` | User-visible act of bringing a device story from the connected device into the local library | `importer` (reserved for file artifacts), `download`, `sync` |
 | Device story already copied locally | `Dans ta bibliothèque` | Marker on a device story card: a local copy of this device story exists (provenance link present) | `imported`, `synced`, `duplicate` |
 | Default title of a copied device story | `Histoire de ma Lunii (XXXXXXXX)` | Title given to the local draft created by a device copy — `XXXXXXXX` is the opaque short identifier; renamable immediately in the editor | titles asserting unverified content (`Histoire non reconnue` is a device-side state, never a local title) |
+| Complete device pack | `Contenu présent` | A listed device story whose payload folder is present on the device — a verified fact about the folder, never a claim about content quality | `valid`, `complete`, `ok`, asserting content quality |
+| Recognized device-story facts (inspector group) | `Ce que Rustory reconnaît` | Inspector header grouping the verified facts Rustory can vouch for before a copy (identifiers, content present) | `infos`, `metadata`, anything implying a recognized title |
+| Copy-blocking device-story facts (inspector group) | `Ce qui bloque la copie` | Inspector header grouping the verified facts that prevent a copy (incomplete content, copy already exists) | `erreurs`, `problèmes`, `blockers` |
+| Device-story facts to review (inspector group) | `À revoir avant de copier` | Inspector header grouping the verified facts to weigh before copying (hidden). Distinct from the Post-MVP `à revoir` import-state chip | `warnings`, `alertes`, reusing the Post-MVP `à revoir` chip |
+| Consult the official support profile (action) | `Consulter le profil de support` | Affordance opening the official device-support profile; shown on the detection panel and, on a profile-based copy refusal, in the device-story inspector | `aide`, `docs`, `support`, `FAQ` |
 | Preparation step | `préparation` | Pre-transfer work needed to make the story sendable | `pipeline`, `build`, `compile assets` |
 | Send operation | `transfert` / `Envoyer vers la Lunii` | User-visible act of sending a story to the device | `deploy`, `sync job`, `push` |
 | Post-send confirmation | `vérification` | Explicit check that confirms what really happened on device | `post-check`, `validation finale` when it means something else |
@@ -93,6 +98,7 @@ The UI should favor these labels when they are user-visible:
 | Device copy just succeeded | `Histoire copiée dans ta bibliothèque` |
 | Device copy failed and user can retry | `Copie impossible` |
 | Device story with a local copy | `Dans ta bibliothèque` |
+| Device story whose payload folder is present | `Contenu présent` |
 
 Do not alternate freely between synonyms such as `sync`, `envoi`, `upload`, or `job`.
 When a different wording is necessary in context, it must still map back to one of the preferred labels above.
