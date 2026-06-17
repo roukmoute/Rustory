@@ -35,6 +35,10 @@ pub struct AppState {
     pub device_scanner: std::sync::Arc<dyn infrastructure::device::DeviceScanner>,
     pub library_reader: std::sync::Arc<dyn infrastructure::device::DeviceLibraryReader>,
     pub pack_reader: std::sync::Arc<dyn infrastructure::device::DevicePackReader>,
+    /// Source of the official catalog for the EXPLICIT fetch (story 2-6,
+    /// Phase C). Behind an `Arc` + `spawn_blocking` like the other device
+    /// I/O. The only networked component; never invoked implicitly.
+    pub catalog_source: std::sync::Arc<dyn infrastructure::device::OfficialCatalogSource>,
 }
 
 /// Read every story id that still has a pending draft row. Ordered by
@@ -163,6 +167,9 @@ pub fn run() {
                 pack_reader: std::sync::Arc::new(
                     infrastructure::device::SystemDevicePackReader,
                 ),
+                catalog_source: std::sync::Arc::new(
+                    infrastructure::device::LuniiHttpCatalogSource::default(),
+                ),
             });
             Ok(())
         })
@@ -178,12 +185,17 @@ pub fn run() {
             commands::story::discard_draft,
             commands::import_export::export_story_with_save_dialog,
             commands::library::get_library_overview,
+            commands::catalog::get_official_catalog_status,
             commands::story::get_story_detail,
+            commands::catalog::import_official_catalog,
             commands::device::import_device_story,
             commands::device::read_connected_lunii,
             commands::device::read_device_library,
+            commands::catalog::read_pack_cover,
             commands::story::read_recoverable_draft,
+            commands::catalog::refresh_official_catalog,
             commands::story::record_draft,
+            commands::device::set_device_story_title,
             commands::story::update_story,
         ])
         .run(tauri::generate_context!())

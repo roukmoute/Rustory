@@ -1,3 +1,4 @@
+pub mod catalog;
 pub mod device;
 pub mod import_export;
 pub mod library;

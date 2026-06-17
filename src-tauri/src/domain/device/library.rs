@@ -109,6 +109,32 @@ pub fn format_pack_uuid(bytes: &[u8; LUNII_PACK_UUID_BYTES]) -> String {
     out
 }
 
+/// True when `value` is a canonical lowercase hyphenated UUID (8-4-4-4-12),
+/// the exact shape [`format_pack_uuid`] emits. The single source of truth
+/// for "is this a well-formed pack UUID?" at every boundary that accepts
+/// one (import input, manual-title input), so the rule never drifts.
+pub fn is_canonical_pack_uuid(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    if bytes.len() != 36 {
+        return false;
+    }
+    for (i, b) in bytes.iter().enumerate() {
+        match i {
+            8 | 13 | 18 | 23 => {
+                if *b != b'-' {
+                    return false;
+                }
+            }
+            _ => {
+                if !(b.is_ascii_digit() || (b'a'..=b'f').contains(b)) {
+                    return false;
+                }
+            }
+        }
+    }
+    true
+}
+
 /// Derive the `.content` sub-folder name: the uppercase hex of the last
 /// four UUID bytes (= the last 8 characters of the canonical string).
 /// This mirrors the device's own folder-naming convention.
@@ -207,5 +233,37 @@ mod tests {
         let lib = DeviceLibrary::default();
         assert!(lib.entries.is_empty());
         assert!(!lib.had_trailing_bytes);
+    }
+
+    #[test]
+    fn is_canonical_pack_uuid_accepts_the_format_pack_uuid_output() {
+        let bytes = [
+            0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf0, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66,
+            0x77, 0x88,
+        ];
+        assert!(is_canonical_pack_uuid(&format_pack_uuid(&bytes)));
+    }
+
+    #[test]
+    fn is_canonical_pack_uuid_rejects_malformed_shapes() {
+        assert!(!is_canonical_pack_uuid("")); // empty
+        assert!(!is_canonical_pack_uuid(
+            "12345678-9abc-def0-1122-33445566778"
+        )); // too short
+        assert!(!is_canonical_pack_uuid(
+            "12345678-9abc-def0-1122-3344556677889"
+        )); // too long
+        assert!(!is_canonical_pack_uuid(
+            "12345678-9ABC-def0-1122-334455667788"
+        )); // uppercase
+        assert!(!is_canonical_pack_uuid(
+            "123456789abcdef0112233445566778800"
+        )); // no hyphens
+        assert!(!is_canonical_pack_uuid(
+            "12345678_9abc_def0_1122_334455667788"
+        )); // wrong sep
+        assert!(!is_canonical_pack_uuid(
+            "g2345678-9abc-def0-1122-334455667788"
+        )); // non-hex
     }
 }

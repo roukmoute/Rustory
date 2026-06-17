@@ -1,7 +1,12 @@
 pub mod app_paths;
+pub mod catalog_covers;
 pub mod import_store;
 
 pub use app_paths::{ensure_app_data_dir, ensure_dir_writable, resolve_db_path, DB_FILENAME};
+pub use catalog_covers::{
+    clear_catalog_covers, ensure_catalog_covers_dir, read_catalog_cover,
+    resolve_catalog_covers_dir, write_catalog_cover, MAX_COVER_BYTES,
+};
 pub use import_store::{
     ensure_import_store, resolve_import_story_dir, resolve_imports_dir,
     resolve_imports_staging_dir, IMPORTS_DIR_NAME, IMPORTS_STAGING_DIR_NAME,

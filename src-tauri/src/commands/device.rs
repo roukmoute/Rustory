@@ -1,16 +1,19 @@
-use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
 use tauri::{AppHandle, Manager, State};
 
 use crate::application::device::import::ImportDeviceStoryRequest;
 use crate::application::device::library::DeviceLibraryOutcome;
+use crate::application::device::title::{resolve_local_truth, set_user_title, LocalTruth};
 use crate::application::device::{self, ConnectedLuniiOutcome};
+use crate::domain::device::is_canonical_pack_uuid;
+use crate::domain::device::title::PackTitle;
 use crate::domain::shared::AppError;
 use crate::infrastructure::device::{MountAttempt, MountOutcome};
 use crate::infrastructure::diagnostics::device_log;
 use crate::ipc::dto::{
-    ConnectedDeviceDto, DeviceLibraryDto, ImportDeviceStoryInputDto, ImportDeviceStoryOutcomeDto,
+    ConnectedDeviceDto, DeviceLibraryDto, DeviceStoryTitleDto, ImportDeviceStoryInputDto,
+    ImportDeviceStoryOutcomeDto, SetDeviceStoryTitleInputDto,
 };
 use crate::AppState;
 
@@ -210,12 +213,6 @@ pub async fn read_device_library(
     let started = Instant::now();
     let requested = device_identifier;
 
-    // Local provenance truth, read under a SCOPED lock BEFORE the device
-    // I/O and released immediately — the device read must never hold the
-    // DB mutex. Rust composes local truth + device truth right here; the
-    // frontend never recomposes `alreadyImported`.
-    let imported_uuids = read_imported_pack_uuids(&state)?;
-
     let outcome = tauri::async_runtime::spawn_blocking(move || {
         device::library::read_device_library(
             scanner.as_ref(),
@@ -260,37 +257,44 @@ pub async fn read_device_library(
         let _ = device_log::record_event(&app, ev);
     }
 
-    outcome.map(|o| DeviceLibraryDto::from_outcome(o, &imported_uuids))
+    let outcome = outcome?;
+
+    // Compose local truth onto the device inventory AFTER the device I/O:
+    // which packs are already imported, and the recognized title + provenance
+    // of each. The scoped DB lock is taken here, once the device read has
+    // returned — never held across the I/O — and the query is bounded to the
+    // device's own pack UUIDs. Fail-closed: a local-store read failure
+    // surfaces a recoverable error rather than lying about local truth (which
+    // would invite a duplicate copy and hide the user's own stories).
+    let local_truth = match &outcome {
+        DeviceLibraryOutcome::Readable { library, .. } => {
+            let uuids: Vec<String> = library.entries.iter().map(|e| e.uuid.clone()).collect();
+            resolve_device_local_truth(&state, &uuids)?
+        }
+        DeviceLibraryOutcome::None | DeviceLibraryOutcome::Unsupported { .. } => {
+            LocalTruth::default()
+        }
+    };
+
+    Ok(DeviceLibraryDto::from_outcome(
+        outcome,
+        &local_truth.imported,
+        &local_truth.titles,
+    ))
 }
 
-/// Read the set of already-imported pack UUIDs (`story_imports`) under a
-/// scoped DB lock. Fail-closed: a provenance read failure surfaces as a
-/// recoverable error rather than silently stamping `alreadyImported:
-/// false` — lying about local truth would invite a duplicate copy flow.
-fn read_imported_pack_uuids(state: &State<'_, AppState>) -> Result<HashSet<String>, AppError> {
-    let provenance_unavailable = |stage: &'static str| {
-        AppError::local_storage_unavailable(
-            "Lecture de la bibliothèque appareil indisponible: vérifie le disque local et réessaie.",
-            "Réessaie la lecture ; si le problème persiste, consulte les traces locales.",
-        )
-        .with_details(serde_json::json!({
-            "source": "story_imports_read",
-            "stage": stage,
-        }))
-    };
+/// Resolve the already-imported set and the recognized titles for the given
+/// device pack UUIDs under a scoped DB lock. Thin wrapper that owns the lock
+/// so the application service stays Tauri-free and testable.
+fn resolve_device_local_truth(
+    state: &State<'_, AppState>,
+    uuids: &[String],
+) -> Result<LocalTruth, AppError> {
     let db = state
         .db
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let mut stmt = db
-        .conn()
-        .prepare("SELECT pack_uuid FROM story_imports")
-        .map_err(|_| provenance_unavailable("prepare"))?;
-    let rows = stmt
-        .query_map([], |row| row.get::<_, String>(0))
-        .map_err(|_| provenance_unavailable("query"))?;
-    rows.collect::<Result<HashSet<_>, _>>()
-        .map_err(|_| provenance_unavailable("collect"))
+    resolve_local_truth(&db, uuids)
 }
 
 /// Copy the device story identified by `packUuid` from the connected
@@ -362,6 +366,28 @@ pub async fn import_device_story(
     outcome.map(ImportDeviceStoryOutcomeDto::from_outcome)
 }
 
+/// Name (or rename) a device story that no catalog recognizes.
+///
+/// Synchronous: a single bounded SQLite write, no device I/O. Reuses the
+/// local-story title rules (NFC + trim + denylist + ≤120) and stores the
+/// title with `source = User`, so the resolution order guarantees it is
+/// never silently overwritten by a later official/community recognition.
+/// The UI re-reads the device library afterwards to surface the new title
+/// from the single Rust-owned resolution.
+#[tauri::command]
+pub fn set_device_story_title(
+    _app: AppHandle,
+    state: State<'_, AppState>,
+    input: SetDeviceStoryTitleInputDto,
+) -> Result<DeviceStoryTitleDto, AppError> {
+    let mut db = state
+        .db
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let stored: PackTitle = set_user_title(&mut db, &input.pack_uuid, &input.title)?;
+    Ok(DeviceStoryTitleDto::from_pack_title(stored))
+}
+
 /// Strict boundary validation of the import input. Both values normally
 /// originate from Rust itself (detection + inventory DTOs), so a
 /// malformed value is a frontend bug — refused explicitly, never
@@ -370,7 +396,7 @@ fn validate_import_input(input: &ImportDeviceStoryInputDto) -> Result<(), AppErr
     if !is_32_lowercase_hex(&input.device_identifier) {
         return Err(invalid_import_input("invalid_device_identifier"));
     }
-    if !is_canonical_lowercase_uuid(&input.pack_uuid) {
+    if !is_canonical_pack_uuid(&input.pack_uuid) {
         return Err(invalid_import_input("invalid_pack_uuid"));
     }
     Ok(())
@@ -420,30 +446,6 @@ fn is_32_lowercase_hex(value: &str) -> bool {
         && value
             .chars()
             .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c))
-}
-
-/// Canonical lowercase hyphenated UUID (8-4-4-4-12), the exact shape
-/// `format_pack_uuid` emits.
-fn is_canonical_lowercase_uuid(value: &str) -> bool {
-    let bytes = value.as_bytes();
-    if bytes.len() != 36 {
-        return false;
-    }
-    for (i, b) in bytes.iter().enumerate() {
-        match i {
-            8 | 13 | 18 | 23 => {
-                if *b != b'-' {
-                    return false;
-                }
-            }
-            _ => {
-                if !(b.is_ascii_digit() || (b'a'..=b'f').contains(b)) {
-                    return false;
-                }
-            }
-        }
-    }
-    true
 }
 
 /// Closed-set mapping of the import failure `source` for the diagnostic

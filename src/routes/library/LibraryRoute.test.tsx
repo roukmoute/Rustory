@@ -12,6 +12,9 @@ const mockGet = vi.fn();
 const mockDevice = vi.fn();
 const mockDeviceLibrary = vi.fn();
 const mockImport = vi.fn();
+const mockCatalogStatus = vi.fn();
+const mockCatalogRefresh = vi.fn();
+const mockCatalogImport = vi.fn();
 
 vi.mock("../../ipc/commands/library", () => ({
   getLibraryOverview: () => ({
@@ -56,6 +59,13 @@ vi.mock("../../ipc/commands/device-import", async () => {
   };
 });
 
+vi.mock("../../ipc/commands/device-catalog", () => ({
+  getOfficialCatalogStatus: () => mockCatalogStatus(),
+  refreshOfficialCatalog: () => mockCatalogRefresh(),
+  importOfficialCatalog: () => mockCatalogImport(),
+  readPackCover: () => Promise.resolve(null),
+}));
+
 import { invalidateConnectedLuniiCache } from "../../features/device/hooks/use-connected-lunii";
 import { invalidateDeviceLibraryCache } from "../../features/device/hooks/use-device-library";
 import { invalidateLibraryOverviewCache } from "../../features/library/hooks/use-library-overview";
@@ -94,6 +104,14 @@ describe("<LibraryRoute />", () => {
     mockDeviceLibrary.mockReset();
     mockDeviceLibrary.mockResolvedValue({ kind: "none" });
     mockImport.mockReset();
+    // Default: the official-catalog status reads as an empty cache so the
+    // panel renders without hitting the real IPC bridge.
+    mockCatalogStatus.mockReset();
+    mockCatalogStatus.mockResolvedValue({ count: 0 });
+    mockCatalogRefresh.mockReset();
+    mockCatalogRefresh.mockResolvedValue({ count: 0 });
+    mockCatalogImport.mockReset();
+    mockCatalogImport.mockResolvedValue({ kind: "cancelled" });
     // The hooks keep module-local stale-while-revalidate caches; reset
     // them between tests so no stray snapshot bleeds across cases.
     invalidateLibraryOverviewCache();
@@ -855,6 +873,9 @@ describe("<LibraryRoute />", () => {
           hidden: false,
           contentPresent: true,
           alreadyImported: false,
+          title: null,
+          titleSource: null,
+          thumbnail: null,
         },
       ],
     });
@@ -913,6 +934,9 @@ describe("<LibraryRoute />", () => {
         hidden: false,
         contentPresent: true,
         alreadyImported: false,
+        title: null,
+        titleSource: null,
+        thumbnail: null,
       },
       {
         uuid: "u2",
@@ -920,6 +944,9 @@ describe("<LibraryRoute />", () => {
         hidden: false,
         contentPresent: true,
         alreadyImported: false,
+        title: null,
+        titleSource: null,
+        thumbnail: null,
       },
     ],
   };

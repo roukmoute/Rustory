@@ -11,6 +11,9 @@ function story(overrides: Record<string, unknown> = {}): Record<string, unknown>
     hidden: false,
     contentPresent: true,
     alreadyImported: false,
+    title: null,
+    titleSource: null,
+    thumbnail: null,
     ...overrides,
   };
 }
@@ -82,7 +85,7 @@ describe("isDeviceLibraryDto", () => {
       isDeviceLibraryDto({
         kind: "readable",
         deviceIdentifier: VALID_ID,
-        stories: [story({ title: "leak" })],
+        stories: [story({ unexpected: "leak" })],
       }),
     ).toBe(false);
   });
@@ -148,6 +151,74 @@ describe("isDeviceLibraryDto", () => {
         stories: [story({ alreadyImported: true })],
       }),
     ).toBe(true);
+  });
+
+  // --- Title recognition fields (story 2.6) ---
+
+  it("accepts a recognized title with a known provenance and a cover", () => {
+    expect(
+      isDeviceLibraryDto({
+        kind: "readable",
+        deviceIdentifier: VALID_ID,
+        stories: [
+          story({
+            title: "Le Loup",
+            titleSource: "official",
+            thumbnail: "cover.png",
+          }),
+        ],
+      }),
+    ).toBe(true);
+  });
+
+  it("accepts a recognized title with a null cover (user / local-library)", () => {
+    expect(
+      isDeviceLibraryDto({
+        kind: "readable",
+        deviceIdentifier: VALID_ID,
+        stories: [story({ title: "Mon histoire", titleSource: "user" })],
+      }),
+    ).toBe(true);
+  });
+
+  it("rejects a title without a provenance (coupling: both null or both set)", () => {
+    expect(
+      isDeviceLibraryDto({
+        kind: "readable",
+        deviceIdentifier: VALID_ID,
+        stories: [story({ title: "Orphan", titleSource: null })],
+      }),
+    ).toBe(false);
+  });
+
+  it("rejects a provenance without a title (coupling)", () => {
+    expect(
+      isDeviceLibraryDto({
+        kind: "readable",
+        deviceIdentifier: VALID_ID,
+        stories: [story({ title: null, titleSource: "official" })],
+      }),
+    ).toBe(false);
+  });
+
+  it("rejects an unknown provenance token", () => {
+    expect(
+      isDeviceLibraryDto({
+        kind: "readable",
+        deviceIdentifier: VALID_ID,
+        stories: [story({ title: "X", titleSource: "community" })],
+      }),
+    ).toBe(false);
+  });
+
+  it("rejects a cover on an unrecognized pack (no title)", () => {
+    expect(
+      isDeviceLibraryDto({
+        kind: "readable",
+        deviceIdentifier: VALID_ID,
+        stories: [story({ thumbnail: "cover.png" })],
+      }),
+    ).toBe(false);
   });
 
   it("rejects an unsupported reason outside the closed set", () => {

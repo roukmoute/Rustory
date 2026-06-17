@@ -35,3 +35,6 @@ mod device_library;
 
 #[path = "integration/device_import.rs"]
 mod device_import;
+
+#[path = "integration/device_titles.rs"]
+mod device_titles;

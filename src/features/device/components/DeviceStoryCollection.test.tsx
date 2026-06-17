@@ -2,8 +2,33 @@ import { fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
+// Covers are resolved from the LOCAL cache via a Tauri command; mock the hook
+// so the component test stays offline and deterministic. Honors `hasCover`
+// so a pack without a cached cover renders no image.
+vi.mock("../hooks/use-pack-cover", () => ({
+  usePackCover: (_uuid: string, hasCover: boolean) =>
+    hasCover ? "data:image/png;base64,COVER" : null,
+}));
+
 import { DeviceStoryCollection } from "./DeviceStoryCollection";
 import type { DeviceLibraryState } from "../hooks/use-device-library";
+import type { DeviceStoryDto } from "../../../shared/ipc-contracts/device-library";
+
+/** Build a device story with unrecognized-by-default recognition fields, so
+ *  each test only states the facts it cares about. */
+function makeStory(overrides: Partial<DeviceStoryDto> = {}): DeviceStoryDto {
+  return {
+    uuid: "u1",
+    shortId: "0000ABCD",
+    hidden: false,
+    contentPresent: true,
+    alreadyImported: false,
+    title: null,
+    titleSource: null,
+    thumbnail: null,
+    ...overrides,
+  };
+}
 
 function renderState(
   state: DeviceLibraryState,
@@ -43,9 +68,9 @@ describe("<DeviceStoryCollection />", () => {
         kind: "ready",
         deviceIdentifier: "0123456789abcdef0123456789abcdef",
         stories: [
-          { uuid: "u1", shortId: "0000ABCD", hidden: false, contentPresent: true, alreadyImported: false },
-          { uuid: "u2", shortId: "0000BEEF", hidden: true, contentPresent: true, alreadyImported: false },
-          { uuid: "u3", shortId: "0000F00D", hidden: false, contentPresent: false, alreadyImported: false },
+          makeStory({ uuid: "u1", shortId: "0000ABCD" }),
+          makeStory({ uuid: "u2", shortId: "0000BEEF", hidden: true }),
+          makeStory({ uuid: "u3", shortId: "0000F00D", contentPresent: false }),
         ],
       },
       { deviceLabel: "Lunii V3" },
@@ -62,7 +87,7 @@ describe("<DeviceStoryCollection />", () => {
     ).toBeInTheDocument();
     expect(within(region).getAllByText(/sur l'appareil/i).length).toBeGreaterThan(0);
 
-    // No asserted title — each entry is an opaque, unrecognized identity.
+    // Unrecognized packs keep the opaque "non reconnue" label + identifier.
     expect(
       within(region).getAllByText(/histoire non reconnue/i),
     ).toHaveLength(3);
@@ -72,6 +97,64 @@ describe("<DeviceStoryCollection />", () => {
     // Per-entry flags.
     expect(within(region).getByText(/masquée/i)).toBeInTheDocument();
     expect(within(region).getByText(/contenu incomplet/i)).toBeInTheDocument();
+  });
+
+  it("shows the real title + provenance chip for recognized packs (AC1)", () => {
+    renderState({
+      kind: "ready",
+      deviceIdentifier: "0123456789abcdef0123456789abcdef",
+      stories: [
+        makeStory({
+          uuid: "u-off",
+          shortId: "0000OFFI",
+          title: "Suzanne et Gaston",
+          titleSource: "official",
+        }),
+        makeStory({
+          uuid: "u-usr",
+          shortId: "0000USER",
+          title: "Mon histoire",
+          titleSource: "user",
+        }),
+        makeStory({
+          uuid: "u-unk",
+          shortId: "0000UNKN",
+        }),
+      ],
+    });
+    const region = screen.getByRole("region", {
+      name: /bibliothèque de l'appareil/i,
+    });
+    // Real titles surface; the unknown one stays "non reconnue".
+    expect(within(region).getByText("Suzanne et Gaston")).toBeInTheDocument();
+    expect(within(region).getByText("Mon histoire")).toBeInTheDocument();
+    expect(within(region).getAllByText(/histoire non reconnue/i)).toHaveLength(1);
+    // Provenance is shown honestly and distinctly — official vs saisi.
+    expect(within(region).getByText("Titre officiel")).toBeInTheDocument();
+    expect(within(region).getByText("Titre saisi")).toBeInTheDocument();
+  });
+
+  it("renders the cached cover for a recognized pack that has one", () => {
+    const { container } = renderState({
+      kind: "ready",
+      deviceIdentifier: "0123456789abcdef0123456789abcdef",
+      stories: [
+        makeStory({
+          uuid: "u-cover",
+          shortId: "0000COVR",
+          title: "Avec couverture",
+          titleSource: "official",
+          thumbnail: "u-cover.png",
+        }),
+        makeStory({ uuid: "u-none", shortId: "0000NONE" }),
+      ],
+    });
+    const covers = container.querySelectorAll<HTMLImageElement>(
+      ".device-story-card__cover",
+    );
+    // Exactly the pack with a thumbnail gets a cover, served as a data: URL.
+    expect(covers).toHaveLength(1);
+    expect(covers[0].src).toContain("data:image/png;base64,COVER");
   });
 
   it("distinguishes the empty device from the not-yet-loaded state", () => {
@@ -116,7 +199,7 @@ describe("<DeviceStoryCollection />", () => {
       {
         kind: "ready",
         deviceIdentifier: "0123456789abcdef0123456789abcdef",
-        stories: [{ uuid: "u1", shortId: "0000ABCD", hidden: false, contentPresent: true, alreadyImported: false }],
+        stories: [makeStory({ uuid: "u1", shortId: "0000ABCD" })],
       },
       { isRefreshing: true },
     );
@@ -129,8 +212,8 @@ describe("<DeviceStoryCollection />", () => {
     kind: "ready",
     deviceIdentifier: "0123456789abcdef0123456789abcdef",
     stories: [
-      { uuid: "u1", shortId: "0000ABCD", hidden: false, contentPresent: true, alreadyImported: false },
-      { uuid: "u2", shortId: "0000BEEF", hidden: false, contentPresent: true, alreadyImported: false },
+      makeStory({ uuid: "u1", shortId: "0000ABCD" }),
+      makeStory({ uuid: "u2", shortId: "0000BEEF" }),
     ],
   };
 
@@ -240,7 +323,12 @@ describe("<DeviceStoryCollection />", () => {
           kind: "ready",
           deviceIdentifier: "0123456789abcdef0123456789abcdef",
           stories: [
-            { uuid: "u9", shortId: "0000F00D", hidden: true, contentPresent: false, alreadyImported: false },
+            makeStory({
+              uuid: "u9",
+              shortId: "0000F00D",
+              hidden: true,
+              contentPresent: false,
+            }),
           ],
         }}
         isRefreshing={false}
@@ -257,13 +345,41 @@ describe("<DeviceStoryCollection />", () => {
     ).toBeInTheDocument();
   });
 
+  it("folds the recognized title + provenance into the card accessible name", () => {
+    render(
+      <DeviceStoryCollection
+        state={{
+          kind: "ready",
+          deviceIdentifier: "0123456789abcdef0123456789abcdef",
+          stories: [
+            makeStory({
+              uuid: "u-off",
+              shortId: "0000OFFI",
+              title: "Le Loup",
+              titleSource: "official",
+            }),
+          ],
+        }}
+        isRefreshing={false}
+        selectedUuid={null}
+        onSelectStory={() => {}}
+        onRetry={() => {}}
+      />,
+    );
+    expect(
+      screen.getByRole("button", {
+        name: /le loup, titre officiel, identifiant 0000offi/i,
+      }),
+    ).toBeInTheDocument();
+  });
+
   it("marks an already-imported entry with the 'Dans ta bibliothèque' chip", () => {
     renderState({
       kind: "ready",
       deviceIdentifier: "0123456789abcdef0123456789abcdef",
       stories: [
-        { uuid: "u1", shortId: "0000ABCD", hidden: false, contentPresent: true, alreadyImported: true },
-        { uuid: "u2", shortId: "0000BEEF", hidden: false, contentPresent: true, alreadyImported: false },
+        makeStory({ uuid: "u1", shortId: "0000ABCD", alreadyImported: true }),
+        makeStory({ uuid: "u2", shortId: "0000BEEF" }),
       ],
     });
     // Exactly one card carries the local-copy marker.
@@ -277,7 +393,11 @@ describe("<DeviceStoryCollection />", () => {
           kind: "ready",
           deviceIdentifier: "0123456789abcdef0123456789abcdef",
           stories: [
-            { uuid: "u8", shortId: "0000CAFE", hidden: false, contentPresent: true, alreadyImported: true },
+            makeStory({
+              uuid: "u8",
+              shortId: "0000CAFE",
+              alreadyImported: true,
+            }),
           ],
         }}
         isRefreshing={false}
@@ -314,9 +434,7 @@ describe("<DeviceStoryCollection />", () => {
         state={{
           kind: "ready",
           deviceIdentifier: "0123456789abcdef0123456789abcdef",
-          stories: [
-            { uuid: "u2", shortId: "0000BEEF", hidden: false, contentPresent: true, alreadyImported: false },
-          ],
+          stories: [makeStory({ uuid: "u2", shortId: "0000BEEF" })],
         }}
         isRefreshing={false}
         selectedUuid="u1"

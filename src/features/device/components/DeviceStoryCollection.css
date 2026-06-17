@@ -118,6 +118,14 @@
   line-height: 1;
 }
 
+.device-story-card__cover {
+  width: 100%;
+  max-width: 96px;
+  height: auto;
+  border-radius: var(--radius-2, 8px);
+  margin-bottom: var(--space-2);
+}
+
 .device-story-card__title {
   margin: 0;
   font-size: var(--font-size-h3);

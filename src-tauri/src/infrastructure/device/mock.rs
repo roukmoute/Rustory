@@ -6,6 +6,7 @@ use crate::domain::device::pack::{PackFile, PackManifest};
 use crate::domain::device::{DeviceLibrary, DeviceStoryEntry};
 use crate::domain::shared::AppError;
 
+use super::catalog_source::OfficialCatalogSource;
 use super::library_reader::DeviceLibraryReader;
 use super::pack_reader::{AcquiredPack, DevicePackReader};
 use super::scanner::{DeviceCandidate, DeviceScanReport, DeviceScanner};
@@ -343,5 +344,80 @@ impl DevicePackReader for MockDevicePackReader {
             }
             PackAcquisitionScript::FailValidation(err) => Err(err),
         }
+    }
+}
+
+/// Programmable mock for the official-catalog network source. Pops the next
+/// queued raw-body result (FIFO); an empty queue returns an empty JSON
+/// object (parses to zero entries) so a forgetful test fails on assertion,
+/// not panic. Also records how many times `fetch` was called — used to prove
+/// the read path NEVER hits the network (offline-first).
+#[derive(Clone, Default)]
+pub struct MockOfficialCatalogSource {
+    queue: Arc<Mutex<Vec<Result<String, AppError>>>>,
+    calls: Arc<Mutex<u32>>,
+    cover_calls: Arc<Mutex<u32>>,
+    fail_covers: Arc<Mutex<bool>>,
+}
+
+/// Smallest valid PNG header the cover store's magic-sniff accepts.
+const MOCK_PNG: &[u8] = &[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 0, 0, 0, 0];
+
+impl MockOfficialCatalogSource {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn enqueue_body(&self, body: impl Into<String>) {
+        self.queue
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .push(Ok(body.into()));
+    }
+
+    pub fn enqueue_failure(&self, err: AppError) {
+        self.queue
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .push(Err(err));
+    }
+
+    /// Number of times `fetch` was invoked — `0` proves no network call.
+    pub fn fetch_count(&self) -> u32 {
+        *self.calls.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    /// Number of times `fetch_cover` was invoked.
+    pub fn cover_fetch_count(&self) -> u32 {
+        *self.cover_calls.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    /// Make every subsequent `fetch_cover` fail — exercises the best-effort
+    /// "a failed cover never sinks the catalog" path.
+    pub fn fail_all_covers(&self) {
+        *self.fail_covers.lock().unwrap_or_else(|p| p.into_inner()) = true;
+    }
+}
+
+impl OfficialCatalogSource for MockOfficialCatalogSource {
+    fn fetch(&self, _locale: &str, _budget: Duration) -> Result<String, AppError> {
+        *self.calls.lock().unwrap_or_else(|p| p.into_inner()) += 1;
+        let mut g = self.queue.lock().unwrap_or_else(|p| p.into_inner());
+        if g.is_empty() {
+            Ok("{}".to_string())
+        } else {
+            g.remove(0)
+        }
+    }
+
+    fn fetch_cover(&self, _url: &str, _budget: Duration) -> Result<Vec<u8>, AppError> {
+        *self.cover_calls.lock().unwrap_or_else(|p| p.into_inner()) += 1;
+        if *self.fail_covers.lock().unwrap_or_else(|p| p.into_inner()) {
+            return Err(AppError::official_catalog_unavailable(
+                "cover offline",
+                "retry",
+            ));
+        }
+        Ok(MOCK_PNG.to_vec())
     }
 }

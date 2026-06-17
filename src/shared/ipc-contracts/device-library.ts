@@ -12,11 +12,16 @@
 
 import type { UnsupportedReasonDto } from "./device";
 
+/** Provenance of a recognized device-story title. Mirrors the Rust
+ *  `PackTitleSource`; the UI uses it to show "officiel / non-officiel /
+ *  saisi" and to NEVER present a user/community title as official. */
+export type PackTitleSource = "user" | "official" | "unofficial";
+
 export interface DeviceStoryDto {
   /** Canonical lowercase pack UUID (public content identifier). */
   uuid: string;
-  /** Uppercase last 8 hex characters — the opaque label shown to the
-   *  user and the `.content` folder name. */
+  /** Uppercase last 8 hex characters — the `.content` folder name and the
+   *  fallback label shown when the pack is not recognized. */
   shortId: string;
   /** Listed in `.pi.hidden` rather than `.pi`. */
   hidden: boolean;
@@ -27,6 +32,17 @@ export interface DeviceStoryDto {
    *  Stamped by RUST — local truth and device truth are composed at the
    *  boundary, never recomposed by the frontend. */
   alreadyImported: boolean;
+  /** Recognized title, or `null` when no index covers this pack ("non
+   *  reconnue"). Composed by RUST from the local UUID→title index. */
+  title: string | null;
+  /** Provenance of `title`. `null` exactly when `title` is `null`. */
+  titleSource: PackTitleSource | null;
+  /** Presence flag for a cached cover: an OPAQUE local cache reference (a
+   *  file name), or `null` when there is none. NEVER a remote URL and NEVER
+   *  rendered directly — the UI loads the image via the `read_pack_cover`
+   *  command (a local read returning a `data:` URL), keeping offline-first.
+   *  `null` for user / local-library titles and for unrecognized packs. */
+  thumbnail: string | null;
 }
 
 export type DeviceLibraryDto =
@@ -62,6 +78,15 @@ const ALLOWED_STORY_KEYS: ReadonlySet<string> = new Set([
   "hidden",
   "contentPresent",
   "alreadyImported",
+  "title",
+  "titleSource",
+  "thumbnail",
+]);
+
+const TITLE_SOURCES: ReadonlySet<string> = new Set([
+  "user",
+  "official",
+  "unofficial",
 ]);
 
 function hasOnlyAllowedKeys(
@@ -86,6 +111,24 @@ function isDeviceStoryDto(value: unknown): value is DeviceStoryDto {
   if (typeof s.hidden !== "boolean") return false;
   if (typeof s.contentPresent !== "boolean") return false;
   if (typeof s.alreadyImported !== "boolean") return false;
+
+  // Recognition fields. `title` is either null (unrecognized) or a
+  // non-empty string; `titleSource` must be null exactly when `title` is
+  // null (the coupling Rust guarantees), and otherwise a known token. A
+  // cover may only ride along a recognized title.
+  const hasTitle = typeof s.title === "string" && s.title.length > 0;
+  if (!hasTitle && s.title !== null) return false;
+  if (hasTitle) {
+    if (typeof s.titleSource !== "string" || !TITLE_SOURCES.has(s.titleSource)) {
+      return false;
+    }
+    if (s.thumbnail !== null && (typeof s.thumbnail !== "string" || s.thumbnail.length === 0)) {
+      return false;
+    }
+  } else {
+    if (s.titleSource !== null) return false;
+    if (s.thumbnail !== null) return false;
+  }
   return true;
 }
 

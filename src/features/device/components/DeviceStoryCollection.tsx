@@ -5,6 +5,11 @@ import { LibraryErrorBanner } from "../../library/components/LibraryErrorBanner"
 import { ProgressIndicator, StateChip, SurfacePanel } from "../../../shared/ui";
 import type { DeviceStoryDto } from "../../../shared/ipc-contracts/device-library";
 import type { DeviceLibraryState } from "../hooks/use-device-library";
+import { usePackCover } from "../hooks/use-pack-cover";
+import {
+  titleProvenanceChip,
+  titleProvenancePhrase,
+} from "../title-provenance";
 
 import "./DeviceStoryCollection.css";
 
@@ -189,12 +194,14 @@ interface DeviceStoryCardProps {
 }
 
 /**
- * One opaque device-story entry. With `onSelect`, the card is a
- * `role="button" aria-pressed` focus stop whose activation (click, Space or
- * Enter) toggles its selection. The selected state is signaled redundantly
- * (border + visible `✓` prefix + `aria-pressed`) so it survives grayscale
- * and color-blindness — never color-only. There is no open/edit affordance:
- * a device story is not editable.
+ * One device-story entry. When a local index recognizes the pack, the card
+ * shows the real title + a provenance chip (officiel / non-officiel / saisi);
+ * otherwise it falls back to "Histoire non reconnue" — reserved for genuinely
+ * unknown packs (AC1). With `onSelect`, the card is a `role="button"
+ * aria-pressed` focus stop whose activation (click, Space or Enter) toggles
+ * its selection, signaled redundantly (border + visible `✓` prefix +
+ * `aria-pressed`) so it survives grayscale and color-blindness. There is no
+ * open/edit affordance here; naming happens in the inspector.
  */
 function DeviceStoryCard({
   story,
@@ -202,6 +209,21 @@ function DeviceStoryCard({
   onSelect,
 }: DeviceStoryCardProps): React.JSX.Element {
   const interactive = onSelect !== undefined;
+
+  // Reserve "Histoire non reconnue" for genuinely unknown packs: a resolved
+  // title is shown verbatim with its provenance chip.
+  const recognized = story.title !== null;
+  const displayTitle = recognized ? story.title : "Histoire non reconnue";
+  const provenance = story.titleSource
+    ? titleProvenanceChip(story.titleSource)
+    : null;
+  const nameForAria =
+    recognized && story.titleSource
+      ? `${story.title}, ${titleProvenancePhrase(story.titleSource)}`
+      : "Histoire non reconnue";
+  // Cover from the LOCAL cache only (no network). Decorative — the title
+  // carries the accessible name, so the image is aria-hidden.
+  const coverUrl = usePackCover(story.uuid, story.thumbnail !== null);
 
   const handleClick = (): void => {
     onSelect?.(story.uuid);
@@ -249,8 +271,8 @@ function DeviceStoryCard({
     .filter(Boolean)
     .join(", ");
   const ariaLabel = flagText
-    ? `Histoire non reconnue, identifiant ${story.shortId}, ${flagText}`
-    : `Histoire non reconnue, identifiant ${story.shortId}`;
+    ? `${nameForAria}, identifiant ${story.shortId}, ${flagText}`
+    : `${nameForAria}, identifiant ${story.shortId}`;
 
   const interactiveProps = interactive
     ? {
@@ -271,7 +293,15 @@ function DeviceStoryCard({
             ✓
           </span>
         ) : null}
-        <h3 className="device-story-card__title">Histoire non reconnue</h3>
+        {coverUrl ? (
+          <img
+            className="device-story-card__cover"
+            src={coverUrl}
+            alt=""
+            aria-hidden="true"
+          />
+        ) : null}
+        <h3 className="device-story-card__title">{displayTitle}</h3>
         <p className="device-story-card__id">
           <span className="device-story-card__id-label">
             Identifiant&nbsp;:
@@ -279,6 +309,9 @@ function DeviceStoryCard({
           <code className="device-story-card__id-value">{story.shortId}</code>
         </p>
         <div className="device-story-card__flags">
+          {provenance ? (
+            <StateChip tone={provenance.tone} label={provenance.label} />
+          ) : null}
           {story.alreadyImported ? (
             <StateChip tone="success" label="Dans ta bibliothèque" />
           ) : null}

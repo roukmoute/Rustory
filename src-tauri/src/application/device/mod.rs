@@ -7,8 +7,10 @@
 //! Stays Tauri-free: tests inject a [`MockDeviceScanner`] and exercise
 //! the full pipeline without any runtime dependency.
 
+pub mod catalog;
 pub mod import;
 pub mod library;
+pub mod title;
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};

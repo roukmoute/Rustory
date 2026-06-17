@@ -104,3 +104,40 @@
   font-size: var(--font-size-meta);
   color: var(--color-text-muted);
 }
+
+/* Recognized cover (official catalog), served from the local cache as a
+ * data: URL. Decorative (aria-hidden); the title carries the meaning. */
+.device-inspector__cover {
+  width: 100%;
+  max-width: 160px;
+  height: auto;
+  border-radius: var(--radius-2, 8px);
+  align-self: flex-start;
+}
+
+/* Provenance badge under the recognized title (officiel / non-officiel /
+ * saisi) — kept on its own row so it never reads as part of the title. */
+.device-inspector__provenance-chip {
+  display: flex;
+  align-items: flex-start;
+}
+
+/* Inline naming editor ("Nommer" / "Renommer"). A quiet block under the
+ * name; the field + actions stack so it stays readable in the narrow column. */
+.device-inspector__naming {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.device-inspector__name-counter {
+  margin: 0;
+  font-size: var(--font-size-meta);
+  color: var(--color-text-muted);
+}
+
+.device-inspector__naming-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}

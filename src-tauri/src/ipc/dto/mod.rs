@@ -1,6 +1,8 @@
 pub mod device;
+pub mod device_catalog;
 pub mod device_import;
 pub mod device_library;
+pub mod device_title;
 pub mod import_export;
 pub mod library;
 pub mod story;
@@ -9,8 +11,10 @@ pub use device::{
     ConnectedDeviceDto, FirmwareCohortDto, SupportedFamilyDto, SupportedOperationsDto,
     UnsupportedReasonDto,
 };
+pub use device_catalog::{CatalogStatusDto, ImportOfficialCatalogOutcomeDto, PackCoverDto};
 pub use device_import::{ImportDeviceStoryInputDto, ImportDeviceStoryOutcomeDto};
-pub use device_library::{DeviceLibraryDto, DeviceStoryDto};
+pub use device_library::{DeviceLibraryDto, DeviceStoryDto, PackTitleSourceDto};
+pub use device_title::{DeviceStoryTitleDto, SetDeviceStoryTitleInputDto};
 pub use import_export::{ExportStoryDialogInputDto, ExportStoryDialogOutcomeDto};
 pub use library::{LibraryOverviewDto, StoryCardDto};
 pub use story::{

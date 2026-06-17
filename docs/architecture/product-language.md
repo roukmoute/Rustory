@@ -99,6 +99,16 @@ The UI should favor these labels when they are user-visible:
 | Device copy failed and user can retry | `Copie impossible` |
 | Device story with a local copy | `Dans ta bibliothèque` |
 | Device story whose payload folder is present | `Contenu présent` |
+| Device story not covered by any local index | `Histoire non reconnue` |
+| Recognized title from the official commercial catalog | `Titre officiel` |
+| Recognized title inferred from the local library / community | `Titre non-officiel` |
+| Title the user typed for a device story | `Titre saisi` |
+| Name an unrecognized device story | `Nommer cette histoire` |
+| Edit a name the user typed earlier | `Renommer cette histoire` |
+| Official-catalog cache management area | `Catalogue officiel` |
+| Fetch / refresh the official catalog (explicit, networked) | `Récupérer / mettre à jour` |
+| Import the official catalog from a local file (offline) | `Importer depuis un fichier` |
+| Official-catalog action failed (chip header; the actionable text is the alert's `message` + `userAction`) | `Catalogue indisponible` |
 
 Do not alternate freely between synonyms such as `sync`, `envoi`, `upload`, or `job`.
 When a different wording is necessary in context, it must still map back to one of the preferred labels above.

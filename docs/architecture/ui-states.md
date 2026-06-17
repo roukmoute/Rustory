@@ -264,9 +264,11 @@ library. There is no polling of the inventory — device PRESENCE is polled
 by `useConnectedLunii`; the heavier inventory read fires when the
 identifier changes (a different Lunii) and on a manual retry.
 
-Scope: listing only. Each entry is an opaque, unrecognized pack identity
-(`shortId`) — no title, no cover, no asserted content quality (the device
-stores none, and the offline MVP consults no catalog). Device entries are
+Scope: listing + recognition. Each entry shows its recognized `title` when a
+local index covers the pack (composed Rust-side — see
+[device-support-profile.md#Title Recognition & Catalog Policy](./device-support-profile.md)),
+otherwise the opaque `shortId` under `Histoire non reconnue`. No asserted
+content quality (the device stores none). Device entries are
 single-selectable for inspection (see `Device Story Inspection Contract`)
 but never editable here; that selection is separate from the local
 `selectedStoryIds` and is not persisted.
@@ -275,15 +277,17 @@ but never editable here; that selection is separate from the local
 | --- | --- | --- |
 | idle | nothing | No readable device (none / unsupported / not read-authorized). |
 | loading | `ProgressIndicator` + `Lecture de la bibliothèque de l'appareil…` | "État non encore chargé" — must never read as "aucune histoire". |
-| ready (n > 0) | list of opaque entries + count | Each entry: `Histoire non reconnue` + `Identifiant: <shortId>`. |
+| ready (n > 0) | list of entries + count | Each entry: the recognized `title` (or `Histoire non reconnue`) + `Identifiant: <shortId>` + a provenance chip when recognized. |
 | ready (n = 0) | `Aucune histoire sur l'appareil` | Distinct from the loading state. |
 | error | `LibraryErrorBanner` (`role="alert"`) titled `Bibliothèque de l'appareil indisponible` + `Réessayer` | Recoverable, in-context, never a toast. The local library stays intact. |
 
 Provenance is explicit: the section heading is `Histoires sur l'appareil`
 (plus the device label when known) with a `Sur l'appareil` chip. Per
-entry, `Masquée` (`.pi.hidden`) and `Contenu incomplet` (no
-`.content/<shortId>` folder) chips surface structural facts — all
-non-color (ASCII-glyph chips).
+entry, a title-provenance chip (`Titre officiel` / `Titre non-officiel` /
+`Titre saisi`) when recognized, plus `Masquée` (`.pi.hidden`) and `Contenu
+incomplet` (no `.content/<shortId>` folder) chips surface structural facts —
+all non-color (ASCII-glyph chips). The recognized title and its provenance
+are also folded into each card's accessible name.
 
 Error payloads under the read carry a stable `details.source`:
 
@@ -317,7 +321,9 @@ and renders only when a device story is selected:
 | --- | --- |
 | Heading | `Histoire sélectionnée`. |
 | Provenance | A `Sur l'appareil` chip plus the note `Cette histoire vit sur l'appareil, pas encore dans ta bibliothèque locale.` — or, when `alreadyImported`, `Cette histoire vit sur l'appareil et une copie existe déjà dans ta bibliothèque locale.` (the note must never claim "pas encore" about a story whose local copy exists). Keeps local truth and device truth distinguishable. |
-| Identity | `Histoire non reconnue` (no title — anti-catalog), `Identifiant: <shortId>`, `UUID: <uuid>`. Only verified facts; no asserted content quality. |
+| Identity | The recognized `title` when a local index covers the pack, otherwise `Histoire non reconnue`; always `Identifiant: <shortId>` and `UUID: <uuid>`. No asserted content quality. |
+| Title provenance | When recognized, a provenance chip states the source honestly: `Titre officiel` (info tone), `Titre non-officiel` (neutral), `Titre saisi` (neutral). A user-typed or community title is NEVER labelled "officiel". Resolution priority (Rust-owned): `user > official > unofficial > none`. |
+| Naming | For a genuinely unrecognized pack, a `Nommer cette histoire` action opens an inline editor (same title rules as a local story: NFC + trim + denylist + ≤120, Rust-authoritative). A name the user typed earlier can be edited via `Renommer cette histoire`. A user title is `source = user`, so it is never silently overwritten by a later official/community match; it survives unplug/replug. Naming is not offered for official/community titles (not the user's to overwrite here). A rejected title surfaces in-context next to the field, never as a toast. |
 | Honest triage (before any copy) | The verified facts from the in-memory inventory snapshot are grouped under three honest headers so nothing is imported blindly (no device re-read, no catalog lookup): **`Ce que Rustory reconnaît`** — the identifiers and, when `contentPresent`, a `Contenu présent` chip; **`Ce qui bloque la copie`** — `Contenu incomplet` (`!contentPresent`) and `Dans ta bibliothèque` (`alreadyImported`), each with a short honest note; **`À revoir avant de copier`** — `Masquée` (`hidden`). A group is shown only when it has a fact. Fail-closed: a fact that is absent/unknown is never asserted positively. These headers are distinct from the Post-MVP `reconnu` / `partiel` / `à revoir` import-state labels — a device copy is binary (full success or `IMPORT_FAILED`), so this triage is a pre-decision, never a partial-import report. |
 | Ambiguity flags | `Masquée` (`.pi.hidden`) and `Contenu incomplet` (no `.content/<shortId>` folder) chips, plus a short honest note when content is missing — surfaced, never hidden, never called "corrupt". |
 | Copy affordance | A `Copier dans ma bibliothèque` button (device → local library), ACTIVE when `importStory === true && contentPresent && !alreadyImported` and the device is readable (see `Device Story Import Contract`). Otherwise it stays soft-disabled with a standardized, capability-aware reason picked fail-closed in this priority order: (1) `story.alreadyImported` ⇒ `Copie indisponible: déjà dans ta bibliothèque` (the most useful fact — no copy is needed); (2) `importStory !== true` or operations matrix absent ⇒ `Copie indisponible: profil non supporté` (fail-closed default, V3 included); (3) `!story.contentPresent` ⇒ `Copie indisponible: contenu incomplet sur l'appareil`. The internal capability flag stays `importStory`; only the user-facing verb is `Copier` (Importer / Exporter are reserved for file artifacts). |
@@ -425,6 +431,37 @@ A `DEVICE_UNSUPPORTED` rejection with `details.source =
 "capability_gate"` (V3 profile) and the `DEVICE_SCAN_FAILED` re-scan
 failures keep their existing taxonomies — the UI branches on `code` +
 `details.source`, never on free-form strings.
+
+## Official Catalog Contract
+
+The right column hosts a quiet `Catalogue officiel` panel that manages the
+local commercial-catalog cache used for title recognition (see
+[device-support-profile.md#Title Recognition & Catalog Policy](./device-support-profile.md)).
+It is global, not device-specific — caching the catalog recognizes packs even
+before a device is plugged in.
+
+| Panel element | Content / behavior |
+| --- | --- |
+| Status | `N titre(s) officiel(s) en cache` (or `Aucun titre officiel en cache`). Read on mount via `get_official_catalog_status` — the ONLY automatic call (a bounded count query, no network). |
+| Offline-first note | States plainly that Rustory contacts no server without a deliberate action. |
+| `Récupérer / mettre à jour` | The ONLY networked action: guest auth → catalog download → EAGER cover download into the local cache, on explicit click. Soft-disabled + `aria-busy` while in flight. |
+| `Importer depuis un fichier` | 100%-offline alternative: a native open-file dialog picks a catalog file Rust reads/parses/caches (titles only — no cover download on the offline path). A cancelled dialog is a silent no-op. |
+| Failure | An in-context `role="alert"` (never a toast) with the normalized message + next gesture and an explicit `Fermer`. |
+
+Covers are cached LOCALLY during the refresh and rendered from that cache:
+a recognized entry's `thumbnail` carries the local cache file name (never a
+remote URL), and the UI loads the image through the `read_pack_cover` command
+(a local read returning a `data:` URL — no network on display). Covers are
+decorative (`aria-hidden`); the title carries the accessible name. The offline
+file import caches no cover.
+
+Catalog failures carry `code = OFFICIAL_CATALOG_UNAVAILABLE` with
+`details.source` ∈ `network` (stage `auth_request` / `packs_request` /
+`auth_token` / …), `parse` (stage `json` / `shape` / `empty` / …), `import`
+(stage `metadata` / `oversize` / `read` / …), `cover` (stage `not_an_image` /
+`oversize` / …) or `storage`. The UI branches on `code`, never on free-form
+strings. A missing cover is NOT an error — `read_pack_cover` resolves `null`
+and the title shows alone.
 
 ## UI Foundation Components
 

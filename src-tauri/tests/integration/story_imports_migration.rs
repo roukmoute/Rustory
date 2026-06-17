@@ -231,7 +231,11 @@ fn existing_v2_database_upgrades_to_v3() {
         .expect("query")
         .collect::<Result<Vec<_>, _>>()
         .expect("collect");
-    assert_eq!(versions, vec![1, 2, 3], "v1+v2 preserved, v3 added");
+    assert_eq!(
+        versions,
+        vec![1, 2, 3, 4],
+        "v1+v2 preserved, v3 added (and later migrations recorded)"
+    );
 
     insert_story(&db, "story-upgraded");
     insert_import(&db, "story-upgraded", PACK_UUID).expect("table usable after upgrade");

@@ -33,6 +33,12 @@ tempfile = "=3.27.0"
 # detection scan (story 2-1). Maintained by sysinfo-rs/sysinfo, widely
 # deployed, no GUI/runtime dep, no transitive C deps beyond OS APIs.
 sysinfo = "=0.32"
+# Blocking HTTP client for the EXPLICIT official-catalog fetch (story 2-6,
+# Phase C). `native-tls` links the system OpenSSL (CI installs libssl-dev;
+# no cmake needed, unlike the rustls/aws-lc backend). The fetch only ever
+# runs on a deliberate user action (offline-first guardrail) and is driven
+# on a `spawn_blocking` worker behind the `OfficialCatalogSource` trait.
+reqwest = { version = "=0.12.9", default-features = false, features = ["blocking", "native-tls"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # Linux-only D-Bus binding used to talk to udisks2 and auto-mount a

@@ -97,10 +97,10 @@ Key properties:
   It is held in memory for the current view and re-read on demand; it is
   never persisted into SQLite as a device-content mirror.
 - **No on-device title.** The device stores no human-readable title or
-  cover for official packs — only the UUID. Rustory surfaces each entry
-  by its opaque short identifier and does not assert a title it has not
-  verified. Title/cover enrichment would require an external catalog,
-  which is out of the offline MVP scope.
+  cover for official packs — only the UUID. The inventory reader surfaces
+  each entry by its opaque short identifier; the human title is composed
+  on top by the title-recognition layer (see below), never asserted by the
+  reader itself.
 
 Read bounds (separate from detection):
 
@@ -120,6 +120,58 @@ References cross-checked against the same public OSS reverse-engineering
 projects as the marker set above (notably the pack-index format: 16-byte
 UUIDs in `.pi`, the `.content/<SHORT_ID>` folder convention, and the
 "listing needs no key" property).
+
+## Title Recognition & Catalog Policy
+
+The device exposes only UUIDs, so recognizing a story means looking its
+UUID up in a LOCAL `UUID → title` index. Resolution is Rust-authoritative
+and applies a fixed priority; the wire DTO carries the resolved `title` +
+`titleSource`, and the frontend never recomposes the truth.
+
+| Priority | Source (`titleSource`) | Origin | Trust |
+| --- | --- | --- | --- |
+| 1 | `user` | a name the user typed for the pack | highest — never silently overwritten |
+| 2 | `official` | Lunii's commercial catalog, cached locally | verified — the only label shown as "officiel" |
+| 3 | `unofficial` | inferred offline from a local story linked to the pack (import provenance) | local-library truth |
+| — | (none) | no index covers the pack | shown as "non reconnue" |
+
+The `user > official > unofficial` order is enforced once, in the
+application layer; the persistence table (`pack_metadata`) holds one row per
+`(pack_uuid, source)` so a user title and an official title can coexist for
+the same pack without collision.
+
+**Catalog policy (offline-first / anti-catalog).**
+
+- The official catalog is fetched ONLY on an explicit user action ("Récupérer
+  / mettre à jour"). There is no implicit network traffic and never any fetch
+  during a device read. A 100%-offline alternative imports the catalog from a
+  user-provided file.
+- The official cache is **disposable**: a refresh replaces every `official`
+  row wholesale and never touches `user` rows.
+- A downloaded or imported catalog is **untrusted input**: every title is
+  normalized + validated with the local-story title rules (NFC + trim +
+  denylist + ≤120), every UUID must be canonical; invalid entries are
+  skipped, never executed.
+- A refresh that parses to **zero** recognized entries is refused (the
+  previous cache is kept) so a server blip / wrong-shaped response can never
+  silently wipe good titles. Network reads are byte-bounded; the whole
+  auth + packs + covers cycle shares one wall-clock budget.
+- Honesty: a user-typed or community title is NEVER presented as "officiel".
+
+**Covers.** The catalog references covers as RELATIVE paths
+(`/public/images/packs/…`) under a CDN host. Offline-first forbids fetching
+them on display, so covers are downloaded EAGERLY during the explicit network
+refresh into a disposable local cache (`{app_data}/catalog-covers/<uuid>.<ext>`):
+downloaded bytes are validated by image magic-bytes and bounded, the path is a
+fixed `<uuid>.<ext>` (no traversal), and `pack_metadata.thumbnail` stores ONLY
+the local file name — never a remote URL. The UI loads a cover via the
+`read_pack_cover` command (a local read returning a `data:` URL, no network).
+Cover download is best-effort (a failure leaves a pack cover-less, never fails
+the catalog); the offline FILE import path caches no cover (that would be
+network).
+
+The `unofficial` source is also reserved for a future opt-in community index;
+its governance/licensing is out of current scope.
 
 ## Story Import Contract
 

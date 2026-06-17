@@ -15,6 +15,7 @@ pub enum AppErrorCode {
     DeviceScanFailed,
     DeviceUnsupported,
     ImportFailed,
+    OfficialCatalogUnavailable,
 }
 
 /// Normalized application error crossing the IPC boundary.
@@ -137,6 +138,23 @@ impl AppError {
     pub fn import_failed(message: impl Into<String>, user_action: impl Into<String>) -> Self {
         Self {
             code: AppErrorCode::ImportFailed,
+            message: message.into(),
+            user_action: Some(user_action.into()),
+            details: None,
+        }
+    }
+
+    /// Constructed when the EXPLICIT official-catalog action fails: the
+    /// network fetch (offline, server error, auth), an imported catalog
+    /// file (unreadable, oversize, malformed), or the parse. The specific
+    /// stage is carried by `details.source`. Never produced implicitly —
+    /// the catalog is only ever touched on a deliberate user action.
+    pub fn official_catalog_unavailable(
+        message: impl Into<String>,
+        user_action: impl Into<String>,
+    ) -> Self {
+        Self {
+            code: AppErrorCode::OfficialCatalogUnavailable,
             message: message.into(),
             user_action: Some(user_action.into()),
             details: None,
@@ -347,6 +365,29 @@ mod tests {
         assert_eq!(v["code"], "IMPORT_FAILED");
         assert_eq!(v["details"]["source"], "fs_read");
         assert_eq!(v["details"]["kind"], "not_found");
+    }
+
+    #[test]
+    fn official_catalog_unavailable_serializes_with_stable_code() {
+        let err = AppError::official_catalog_unavailable("msg", "action");
+        let v = serde_json::to_value(&err).expect("serialize");
+        assert_eq!(v["code"], "OFFICIAL_CATALOG_UNAVAILABLE");
+        assert_eq!(v["message"], "msg");
+        assert_eq!(v["userAction"], "action");
+        assert!(v.get("user_action").is_none(), "snake_case must not leak");
+    }
+
+    #[test]
+    fn official_catalog_unavailable_carries_source_details() {
+        let err = AppError::official_catalog_unavailable(
+            "Catalogue indisponible.",
+            "Réessaie plus tard.",
+        )
+        .with_details(serde_json::json!({ "source": "network", "stage": "fetch" }));
+        let v = serde_json::to_value(&err).expect("serialize");
+        assert_eq!(v["code"], "OFFICIAL_CATALOG_UNAVAILABLE");
+        assert_eq!(v["details"]["source"], "network");
+        assert_eq!(v["details"]["stage"], "fetch");
     }
 
     #[test]

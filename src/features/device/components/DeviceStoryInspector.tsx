@@ -1,16 +1,27 @@
 import type React from "react";
-import { useId } from "react";
+import { useEffect, useId, useMemo, useState } from "react";
 
 import type { SupportedOperationsDto } from "../../../shared/ipc-contracts/device";
 import type { DeviceStoryDto } from "../../../shared/ipc-contracts/device-library";
-import { Button, StateChip, SurfacePanel } from "../../../shared/ui";
+import { Button, Field, StateChip, SurfacePanel } from "../../../shared/ui";
+import {
+  MAX_STORY_TITLE_CHARS,
+  normalizeStoryTitle,
+  reasonFor,
+  validateStoryTitle,
+  type StoryTitleIssue,
+} from "../../library/validation/story-title";
 
 import { DeviceImportStatusSurface } from "./DeviceImportStatusSurface";
 import type { DeviceStoryImportStatus } from "../hooks/use-device-story-import";
+import type { SetDeviceStoryTitleStatus } from "../hooks/use-device-story-title";
+import { usePackCover } from "../hooks/use-pack-cover";
+import { titleProvenanceChip } from "../title-provenance";
 
 import "./DeviceStoryInspector.css";
 
 const IDLE_IMPORT_STATUS: DeviceStoryImportStatus = { kind: "idle" };
+const IDLE_TITLE_STATUS: SetDeviceStoryTitleStatus = { kind: "idle" };
 
 export interface DeviceStoryInspectorProps {
   /** The device story currently selected for inspection, or null when none
@@ -35,6 +46,17 @@ export interface DeviceStoryInspectorProps {
    *  same action as `LuniiDecisionPanel`; when absent (listing /
    *  inspection-only contexts) the support affordance is hidden. */
   onConsultSupportProfile?: () => void;
+  /** Persist a user-typed title for the inspected pack. Wired by the route
+   *  only where naming is offered; when absent, the naming affordance is
+   *  hidden (listing/inspection-only contexts). Returns `true` when the
+   *  write committed so the editor can close. */
+  onSetTitle?: (packUuid: string, title: string) => Promise<boolean>;
+  /** Status of the naming write for the inspected pack (saving/failed).
+   *  Defaults to idle. */
+  titleState?: SetDeviceStoryTitleStatus;
+  /** Clear a previous naming failure (route-owned). Called when the user
+   *  edits, cancels or reopens the editor so a stale error never lingers. */
+  onDismissTitleError?: () => void;
 }
 
 /**
@@ -64,9 +86,42 @@ export function DeviceStoryInspector({
   onRetryImport,
   onDismissImportStatus,
   onConsultSupportProfile,
+  onSetTitle,
+  titleState,
+  onDismissTitleError,
 }: DeviceStoryInspectorProps): React.JSX.Element | null {
   const titleId = useId();
   const copyReasonId = useId();
+  const nameFieldId = useId();
+  const nameReasonId = useId();
+  const nameErrorId = useId();
+
+  // Naming editor state (hooks must precede the early return). The draft is
+  // reset whenever the inspected pack changes so one story's draft never
+  // bleeds into another's.
+  const storyUuid = story?.uuid ?? null;
+  const [isEditingName, setIsEditingName] = useState(false);
+  const [nameDraft, setNameDraft] = useState("");
+  useEffect(() => {
+    setIsEditingName(false);
+    setNameDraft("");
+  }, [storyUuid]);
+
+  const normalizedDraft = useMemo(
+    () => normalizeStoryTitle(nameDraft),
+    [nameDraft],
+  );
+  const nameIssue = useMemo<StoryTitleIssue | null>(
+    () => validateStoryTitle(normalizedDraft),
+    [normalizedDraft],
+  );
+  const nameCharCount = useMemo(
+    () => Array.from(normalizedDraft).length,
+    [normalizedDraft],
+  );
+
+  // Cover from the LOCAL cache (no network); decorative, so aria-hidden.
+  const coverUrl = usePackCover(storyUuid ?? "", Boolean(story?.thumbnail));
 
   if (!story) {
     return null;
@@ -117,6 +172,68 @@ export function DeviceStoryInspector({
     onImport?.(story);
   };
 
+  // Recognition: show the real title + its provenance when an index covers
+  // the pack; otherwise keep "Histoire non reconnue" (AC1).
+  const recognized = story.title !== null;
+  const provenance = story.titleSource
+    ? titleProvenanceChip(story.titleSource)
+    : null;
+
+  // Naming affordance (AC2): offered for a genuinely unrecognized pack
+  // ("Nommer cette histoire") and to edit a name the user typed earlier
+  // ("Renommer"). Not offered for official/community titles — those are not
+  // the user's to overwrite from here. Hidden entirely when the route wires
+  // no handler (listing/inspection-only contexts).
+  const nameStatus = titleState ?? IDLE_TITLE_STATUS;
+  const isSavingName = nameStatus.kind === "saving";
+  const nameError = nameStatus.kind === "failed" ? nameStatus.error : null;
+  const namingOffered =
+    onSetTitle !== undefined && (!recognized || story.titleSource === "user");
+  const canSaveName = nameIssue === null && !isSavingName;
+
+  const handleStartNaming = (): void => {
+    // Clear any stale failure from a previous attempt on (re)open.
+    if (nameError) onDismissTitleError?.();
+    setNameDraft(story.title ?? "");
+    setIsEditingName(true);
+  };
+
+  const handleCancelNaming = (): void => {
+    if (isSavingName) return;
+    if (nameError) onDismissTitleError?.();
+    setIsEditingName(false);
+    setNameDraft("");
+  };
+
+  const handleNameChange = (next: string): void => {
+    setNameDraft(next);
+    // Editing after a rejection means the user is correcting it — drop the
+    // stale error so the alert doesn't keep shouting about an old value.
+    if (nameError) onDismissTitleError?.();
+  };
+
+  const handleSaveName = async (): Promise<void> => {
+    if (!onSetTitle || isSavingName) return;
+    // Don't submit a locally-invalid title: the inline reason is already
+    // shown, and the client wrapper would otherwise reject a blank/oversize
+    // value as an opaque UNKNOWN instead of the canonical reason.
+    if (nameIssue !== null) return;
+    const committed = await onSetTitle(story.uuid, normalizeStoryTitle(nameDraft));
+    if (committed) {
+      setIsEditingName(false);
+      setNameDraft("");
+    }
+  };
+
+  const handleNameKeyDown = (
+    event: React.KeyboardEvent<HTMLInputElement>,
+  ): void => {
+    if (event.key === "Enter" && !isSavingName) {
+      event.preventDefault();
+      void handleSaveName();
+    }
+  };
+
   return (
     <SurfacePanel
       elevation={1}
@@ -137,7 +254,91 @@ export function DeviceStoryInspector({
         </p>
       </div>
 
-      <h3 className="device-inspector__name">Histoire non reconnue</h3>
+      {coverUrl ? (
+        <img
+          className="device-inspector__cover"
+          src={coverUrl}
+          alt=""
+          aria-hidden="true"
+        />
+      ) : null}
+      <h3 className="device-inspector__name">
+        {recognized ? story.title : "Histoire non reconnue"}
+      </h3>
+      {provenance ? (
+        <div className="device-inspector__provenance-chip">
+          <StateChip tone={provenance.tone} label={provenance.label} />
+        </div>
+      ) : null}
+
+      {namingOffered ? (
+        <div className="device-inspector__naming">
+          {isEditingName ? (
+            <>
+              <Field
+                id={nameFieldId}
+                label="Titre de l'histoire"
+                value={nameDraft}
+                onChange={handleNameChange}
+                placeholder="Le soleil couchant…"
+                autoFocus
+                disabled={isSavingName}
+                onKeyDown={handleNameKeyDown}
+                aria-describedby={
+                  [
+                    nameIssue !== null ? nameReasonId : null,
+                    nameError !== null ? nameErrorId : null,
+                  ]
+                    .filter(Boolean)
+                    .join(" ") || undefined
+                }
+              />
+              <p className="device-inspector__name-counter" aria-live="polite">
+                {nameCharCount} / {MAX_STORY_TITLE_CHARS} caractères
+              </p>
+              {nameIssue !== null && !isSavingName ? (
+                <p id={nameReasonId} className="device-inspector__reason">
+                  {reasonFor(nameIssue, { charCount: nameCharCount })}
+                </p>
+              ) : null}
+              {nameError !== null ? (
+                <p
+                  id={nameErrorId}
+                  className="device-inspector__reason"
+                  role="alert"
+                >
+                  {nameError.message}
+                  {nameError.userAction ? ` ${nameError.userAction}` : ""}
+                </p>
+              ) : null}
+              <div className="device-inspector__naming-actions">
+                <Button
+                  variant="secondary"
+                  onClick={handleCancelNaming}
+                  aria-disabled={isSavingName || undefined}
+                >
+                  Annuler
+                </Button>
+                <Button
+                  variant="primary"
+                  aria-disabled={!canSaveName || undefined}
+                  aria-busy={isSavingName || undefined}
+                  aria-describedby={
+                    nameIssue !== null ? nameReasonId : undefined
+                  }
+                  onClick={() => void handleSaveName()}
+                >
+                  Enregistrer
+                </Button>
+              </div>
+            </>
+          ) : (
+            <Button variant="secondary" onClick={handleStartNaming}>
+              {recognized ? "Renommer cette histoire" : "Nommer cette histoire"}
+            </Button>
+          )}
+        </div>
+      ) : null}
 
       {/* Honest triage of the verified facts, BEFORE any copy. Each group
           renders only when it carries a fact (anti-catalog: only the

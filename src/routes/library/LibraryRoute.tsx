@@ -5,11 +5,15 @@ import { useNavigate } from "react-router-dom";
 import { openUrl } from "@tauri-apps/plugin-opener";
 
 import {
+  CatalogPanel,
   DeviceStoryCollection,
   DeviceStoryInspector,
+  invalidatePackCoverCache,
   useConnectedLunii,
   useDeviceLibrary,
   useDeviceStoryImport,
+  useDeviceStoryTitle,
+  useOfficialCatalog,
 } from "../../features/device";
 
 /** Public URL of the canonical device-support-profile document. Kept
@@ -228,6 +232,42 @@ export function LibraryRoute(): React.JSX.Element {
     void deviceImport.triggerImport(readableDeviceId, story.uuid);
   };
 
+  // Device-story naming flow (Phase B). A purely local write keyed by pack
+  // UUID; on success the device inventory re-reads so the new title surfaces
+  // from the single Rust-owned resolution (a user title outranks any later
+  // recognition). No device capability gates it — it is local, not a device
+  // operation — but the inspector only renders for a selected device story.
+  const deviceTitle = useDeviceStoryTitle({
+    onTitled: () => {
+      deviceLibrary.refresh();
+    },
+  });
+  const handleSetDeviceStoryTitle = (
+    packUuid: string,
+    title: string,
+  ): Promise<boolean> => deviceTitle.setTitle(packUuid, title);
+  // Scope the naming status to the card it actually belongs to, exactly like
+  // the import status (`targetPackUuid`).
+  const selectedDeviceTitleState =
+    selectedDeviceStoryUuid !== null &&
+    selectedDeviceStoryUuid === deviceTitle.targetPackUuid
+      ? deviceTitle.status
+      : undefined;
+
+  // Official-catalog management (Phase C). Global (not device-specific):
+  // caching the commercial index recognizes packs even before a device is
+  // plugged in. Offline-first — only the on-mount count read runs without a
+  // deliberate user action. On a cache change, re-read the displayed device
+  // inventory so freshly recognized titles appear immediately.
+  const officialCatalog = useOfficialCatalog({
+    onChanged: () => {
+      // Covers may have changed too — drop the cover cache so the re-read
+      // resolves the fresh covers from the local cache.
+      invalidatePackCoverCache();
+      deviceLibrary.refresh();
+    },
+  });
+
   // The import status belongs to ONE pack — the one the hook actually
   // started a copy for (`targetPackUuid`, set past its re-entrancy
   // guard). Selecting another card shows THAT card's (idle) status,
@@ -286,6 +326,9 @@ export function LibraryRoute(): React.JSX.Element {
               }}
               onDismissImportStatus={deviceImport.dismissStatus}
               onConsultSupportProfile={openSupportProfile}
+              onSetTitle={handleSetDeviceStoryTitle}
+              titleState={selectedDeviceTitleState}
+              onDismissTitleError={deviceTitle.reset}
             />
             <LuniiDecisionPanel
               deviceState={deviceState}
@@ -297,6 +340,7 @@ export function LibraryRoute(): React.JSX.Element {
               onRefreshDevice={device.refresh}
               onConsultSupportProfile={openSupportProfile}
             />
+            <CatalogPanel catalog={officialCatalog} />
           </>
         }
       />

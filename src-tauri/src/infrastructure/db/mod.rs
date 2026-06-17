@@ -16,6 +16,10 @@ pub const MIGRATIONS: &[(u32, &str)] = &[
         3,
         include_str!("../../../migrations/0003_story_imports.sql"),
     ),
+    (
+        4,
+        include_str!("../../../migrations/0004_pack_metadata.sql"),
+    ),
 ];
 
 /// Thin wrapper over a [`rusqlite::Connection`]. Exposes only the operations
@@ -458,6 +462,95 @@ mod tests {
             )
             .expect("query sqlite_master");
         assert_eq!(count, 1, "draft_at index must exist after v2 migration");
+    }
+
+    #[test]
+    fn migration_v4_creates_pack_metadata_table() {
+        let mut db = open_in_memory().expect("open");
+        run_migrations(&mut db).expect("migrate");
+
+        let mut stmt = db
+            .conn()
+            .prepare("PRAGMA table_info(pack_metadata)")
+            .expect("prepare");
+        let columns: Vec<String> = stmt
+            .query_map([], |row| row.get::<_, String>(1))
+            .expect("query")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("collect");
+        assert_eq!(
+            columns,
+            vec!["pack_uuid", "source", "title", "thumbnail", "updated_at"],
+            "schema must match the canonical column set"
+        );
+    }
+
+    #[test]
+    fn pack_metadata_allows_user_and_official_rows_for_the_same_uuid() {
+        let mut db = open_in_memory().expect("open");
+        run_migrations(&mut db).expect("migrate");
+        let uuid = "abababab-abab-abab-abab-ababfac5562d";
+
+        for source in ["user", "official"] {
+            db.conn()
+                .execute(
+                    "INSERT INTO pack_metadata (pack_uuid, source, title, thumbnail, updated_at) \
+                     VALUES (?1, ?2, 'Titre', NULL, '2026-06-16T00:00:00.000Z')",
+                    rusqlite::params![uuid, source],
+                )
+                .unwrap_or_else(|err| panic!("insert {source} must succeed: {err}"));
+        }
+
+        // The SAME (pack_uuid, source) pair must collide on the PK.
+        let err = db
+            .conn()
+            .execute(
+                "INSERT INTO pack_metadata (pack_uuid, source, title, thumbnail, updated_at) \
+                 VALUES (?1, 'user', 'Autre', NULL, '2026-06-16T00:00:01.000Z')",
+                rusqlite::params![uuid],
+            )
+            .expect_err("duplicate (uuid, source) must trip the PK");
+        let message = err.to_string().to_lowercase();
+        assert!(
+            message.contains("unique") || message.contains("primary"),
+            "expected primary-key conflict, got: {message}"
+        );
+    }
+
+    #[test]
+    fn pack_metadata_rejects_unknown_source_and_blank_title() {
+        let mut db = open_in_memory().expect("open");
+        run_migrations(&mut db).expect("migrate");
+        let uuid = "abababab-abab-abab-abab-ababfac5562d";
+
+        let bad_source = db.conn().execute(
+            "INSERT INTO pack_metadata (pack_uuid, source, title, thumbnail, updated_at) \
+             VALUES (?1, 'community', 'Titre', NULL, '2026-06-16T00:00:00.000Z')",
+            rusqlite::params![uuid],
+        );
+        assert!(bad_source.is_err(), "unknown source must trip the CHECK");
+
+        let blank_title = db.conn().execute(
+            "INSERT INTO pack_metadata (pack_uuid, source, title, thumbnail, updated_at) \
+             VALUES (?1, 'user', '   ', NULL, '2026-06-16T00:00:00.000Z')",
+            rusqlite::params![uuid],
+        );
+        assert!(blank_title.is_err(), "blank title must trip the CHECK");
+    }
+
+    #[test]
+    fn pack_metadata_source_index_exists() {
+        let mut db = open_in_memory().expect("open");
+        run_migrations(&mut db).expect("migrate");
+        let count: u32 = db
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'idx_pack_metadata__source'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("query sqlite_master");
+        assert_eq!(count, 1, "source index must exist after v4 migration");
     }
 
     #[test]

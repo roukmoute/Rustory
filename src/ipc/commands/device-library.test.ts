@@ -25,6 +25,9 @@ const readable = {
       hidden: false,
       contentPresent: true,
       alreadyImported: false,
+      title: null,
+      titleSource: null,
+      thumbnail: null,
     },
   ],
 };

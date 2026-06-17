@@ -14,6 +14,7 @@ export type AppErrorCode =
   | "DEVICE_SCAN_FAILED"
   | "DEVICE_UNSUPPORTED"
   | "IMPORT_FAILED"
+  | "OFFICIAL_CATALOG_UNAVAILABLE"
   | "UNKNOWN";
 
 export interface AppError {

@@ -2,15 +2,24 @@ import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
+vi.mock("../hooks/use-pack-cover", () => ({
+  usePackCover: (_uuid: string, hasCover: boolean) =>
+    hasCover ? "data:image/png;base64,COVER" : null,
+}));
+
 import type { AppError } from "../../../shared/errors/app-error";
+import type { DeviceStoryDto } from "../../../shared/ipc-contracts/device-library";
 import { DeviceStoryInspector } from "./DeviceStoryInspector";
 
-const baseStory = {
+const baseStory: DeviceStoryDto = {
   uuid: "0a1b2c3d-4e5f-6071-8293-a4b5c6d7e8f9",
   shortId: "A4B5C6D7",
   hidden: false,
   contentPresent: true,
   alreadyImported: false,
+  title: null,
+  titleSource: null,
+  thumbnail: null,
 };
 
 const importableOps = {
@@ -543,5 +552,173 @@ describe("<DeviceStoryInspector />", () => {
     expect(buttons[1]).toHaveTextContent(/fermer/i);
     await user.click(buttons[0]);
     expect(onRetry).toHaveBeenCalledTimes(1);
+  });
+
+  // --- Title recognition + naming (story 2.6 — AC1, AC2) ---
+
+  const officialStory: DeviceStoryDto = {
+    ...baseStory,
+    title: "Suzanne et Gaston",
+    titleSource: "official",
+  };
+
+  it("shows the recognized title + provenance instead of 'non reconnue' (AC1)", () => {
+    render(
+      <DeviceStoryInspector
+        story={officialStory}
+        supportedOperations={importableOps}
+      />,
+    );
+    const region = screen.getByRole("region", {
+      name: /histoire sélectionnée/i,
+    });
+    expect(within(region).getByText("Suzanne et Gaston")).toBeInTheDocument();
+    expect(within(region).getByText("Titre officiel")).toBeInTheDocument();
+    expect(
+      within(region).queryByText(/histoire non reconnue/i),
+    ).not.toBeInTheDocument();
+  });
+
+  it("renders the cached cover when the recognized pack has one", () => {
+    const { container } = render(
+      <DeviceStoryInspector
+        story={{ ...officialStory, thumbnail: "cover.png" }}
+        supportedOperations={importableOps}
+      />,
+    );
+    const cover = container.querySelector<HTMLImageElement>(
+      ".device-inspector__cover",
+    );
+    expect(cover).not.toBeNull();
+    expect(cover?.src).toContain("data:image/png;base64,COVER");
+  });
+
+  it("never labels a user-typed title as official (honesty, AC1)", () => {
+    render(
+      <DeviceStoryInspector
+        story={{ ...baseStory, title: "Mon titre", titleSource: "user" }}
+        onSetTitle={vi.fn()}
+      />,
+    );
+    const region = screen.getByRole("region", {
+      name: /histoire sélectionnée/i,
+    });
+    expect(within(region).getByText("Titre saisi")).toBeInTheDocument();
+    expect(within(region).queryByText("Titre officiel")).not.toBeInTheDocument();
+  });
+
+  it("offers 'Nommer cette histoire' for an unrecognized pack and saves the typed title (AC2)", async () => {
+    const user = userEvent.setup();
+    const onSetTitle = vi.fn().mockResolvedValue(true);
+    render(<DeviceStoryInspector story={baseStory} onSetTitle={onSetTitle} />);
+
+    await user.click(
+      screen.getByRole("button", { name: /nommer cette histoire/i }),
+    );
+    const input = screen.getByLabelText(/titre de l'histoire/i);
+    await user.type(input, "Le château de cartes");
+    await user.click(screen.getByRole("button", { name: /enregistrer/i }));
+
+    expect(onSetTitle).toHaveBeenCalledWith(
+      baseStory.uuid,
+      "Le château de cartes",
+    );
+  });
+
+  it("offers 'Renommer' for a user title and prefills the editor with it (AC2)", async () => {
+    const user = userEvent.setup();
+    render(
+      <DeviceStoryInspector
+        story={{ ...baseStory, title: "Ancien nom", titleSource: "user" }}
+        onSetTitle={vi.fn().mockResolvedValue(true)}
+      />,
+    );
+    await user.click(
+      screen.getByRole("button", { name: /renommer cette histoire/i }),
+    );
+    const input = screen.getByLabelText<HTMLInputElement>(
+      /titre de l'histoire/i,
+    );
+    expect(input.value).toBe("Ancien nom");
+  });
+
+  it("does NOT offer naming for an official title (not the user's to overwrite here)", () => {
+    render(
+      <DeviceStoryInspector story={officialStory} onSetTitle={vi.fn()} />,
+    );
+    expect(
+      screen.queryByRole("button", { name: /nommer cette histoire/i }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /renommer cette histoire/i }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("hides the naming affordance entirely when no handler is wired", () => {
+    render(<DeviceStoryInspector story={baseStory} />);
+    expect(
+      screen.queryByRole("button", { name: /nommer cette histoire/i }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("does not submit a locally-invalid title on Enter (no opaque UNKNOWN)", async () => {
+    const user = userEvent.setup();
+    const onSetTitle = vi.fn().mockResolvedValue(true);
+    render(<DeviceStoryInspector story={baseStory} onSetTitle={onSetTitle} />);
+    await user.click(
+      screen.getByRole("button", { name: /nommer cette histoire/i }),
+    );
+    const input = screen.getByLabelText(/titre de l'histoire/i);
+    await user.type(input, "a".repeat(121)); // > 120 → locally invalid
+    await user.keyboard("{Enter}");
+    await user.click(screen.getByRole("button", { name: /enregistrer/i }));
+    // The invalid title is never sent — the inline reason guards it.
+    expect(onSetTitle).not.toHaveBeenCalled();
+  });
+
+  it("clears a stale naming error when the user reopens the editor (AC2)", async () => {
+    const user = userEvent.setup();
+    const onDismissTitleError = vi.fn();
+    const titleError: AppError = {
+      code: "INVALID_STORY_TITLE",
+      message: "Création impossible: titre trop long.",
+      userAction: "Raccourcis le titre.",
+      details: null,
+    };
+    render(
+      <DeviceStoryInspector
+        story={baseStory}
+        onSetTitle={vi.fn().mockResolvedValue(false)}
+        titleState={{ kind: "failed", error: titleError }}
+        onDismissTitleError={onDismissTitleError}
+      />,
+    );
+    await user.click(
+      screen.getByRole("button", { name: /nommer cette histoire/i }),
+    );
+    expect(onDismissTitleError).toHaveBeenCalled();
+  });
+
+  it("surfaces a naming failure in-context as an alert (e.g. a rejected title)", async () => {
+    const user = userEvent.setup();
+    const titleError: AppError = {
+      code: "INVALID_STORY_TITLE",
+      message: "Création impossible: titre trop long (120 caractères maximum).",
+      userAction: "Raccourcis le titre à 120 caractères maximum.",
+      details: null,
+    };
+    render(
+      <DeviceStoryInspector
+        story={baseStory}
+        onSetTitle={vi.fn().mockResolvedValue(false)}
+        titleState={{ kind: "failed", error: titleError }}
+      />,
+    );
+    // Open the editor so the in-context error region renders.
+    await user.click(
+      screen.getByRole("button", { name: /nommer cette histoire/i }),
+    );
+    const alert = screen.getByRole("alert");
+    expect(alert).toHaveTextContent(/titre trop long/i);
   });
 });

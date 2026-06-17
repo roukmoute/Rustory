@@ -1,4 +1,6 @@
-use rustory_lib::ipc::dto::{DeviceLibraryDto, DeviceStoryDto, UnsupportedReasonDto};
+use rustory_lib::ipc::dto::{
+    DeviceLibraryDto, DeviceStoryDto, PackTitleSourceDto, UnsupportedReasonDto,
+};
 
 fn story(short_id: &str, hidden: bool, content_present: bool) -> DeviceStoryDto {
     DeviceStoryDto {
@@ -7,6 +9,9 @@ fn story(short_id: &str, hidden: bool, content_present: bool) -> DeviceStoryDto 
         hidden,
         content_present,
         already_imported: false,
+        title: None,
+        title_source: None,
+        thumbnail: None,
     }
 }
 
@@ -41,6 +46,9 @@ fn device_library_readable_round_trip_wire_shape() {
                     "hidden": false,
                     "contentPresent": true,
                     "alreadyImported": false,
+                    "title": null,
+                    "titleSource": null,
+                    "thumbnail": null,
                 },
                 {
                     "uuid": "00000000-0000-0000-0000-00000000BEEF",
@@ -48,6 +56,9 @@ fn device_library_readable_round_trip_wire_shape() {
                     "hidden": true,
                     "contentPresent": false,
                     "alreadyImported": false,
+                    "title": null,
+                    "titleSource": null,
+                    "thumbnail": null,
                 },
             ],
         })
@@ -93,13 +104,21 @@ fn device_story_uses_camel_case_only() {
         "hidden",
         "contentPresent",
         "alreadyImported",
+        "title",
+        "titleSource",
+        "thumbnail",
     ] {
         assert!(
             first.get(camel).is_some(),
             "missing camelCase field: {camel}"
         );
     }
-    for snake in ["short_id", "content_present", "already_imported"] {
+    for snake in [
+        "short_id",
+        "content_present",
+        "already_imported",
+        "title_source",
+    ] {
         assert!(
             first.get(snake).is_none(),
             "snake_case must not leak: {snake}"
@@ -117,10 +136,50 @@ fn device_story_already_imported_serializes_true_when_stamped() {
             hidden: false,
             content_present: true,
             already_imported: true,
+            title: None,
+            title_source: None,
+            thumbnail: None,
         }],
     };
     let v = serde_json::to_value(&dto).expect("ser");
     assert_eq!(v["stories"][0]["alreadyImported"], true);
+}
+
+#[test]
+fn device_story_recognized_title_serializes_with_provenance_and_cover() {
+    let dto = DeviceLibraryDto::Readable {
+        device_identifier: "0123456789abcdef0123456789abcdef".into(),
+        stories: vec![DeviceStoryDto {
+            uuid: "00000000-0000-0000-0000-00000000abcd".into(),
+            short_id: "0000ABCD".into(),
+            hidden: false,
+            content_present: true,
+            already_imported: false,
+            title: Some("Le Loup".into()),
+            title_source: Some(PackTitleSourceDto::Official),
+            thumbnail: Some("cover.png".into()),
+        }],
+    };
+    let v = serde_json::to_value(&dto).expect("ser");
+    assert_eq!(v["stories"][0]["title"], "Le Loup");
+    assert_eq!(v["stories"][0]["titleSource"], "official");
+    assert_eq!(v["stories"][0]["thumbnail"], "cover.png");
+}
+
+#[test]
+fn pack_title_source_tokens_are_stable_lowercase() {
+    assert_eq!(
+        serde_json::to_value(PackTitleSourceDto::User).expect("ser"),
+        serde_json::json!("user")
+    );
+    assert_eq!(
+        serde_json::to_value(PackTitleSourceDto::Official).expect("ser"),
+        serde_json::json!("official")
+    );
+    assert_eq!(
+        serde_json::to_value(PackTitleSourceDto::Unofficial).expect("ser"),
+        serde_json::json!("unofficial")
+    );
 }
 
 #[test]
