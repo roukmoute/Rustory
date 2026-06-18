@@ -1,8 +1,14 @@
 import type React from "react";
 import { useId } from "react";
 
+import type { AppError } from "../../../shared/errors/app-error";
 import type { SupportedOperationsDto } from "../../../shared/ipc-contracts/device";
-import { Button, StateChip, SurfacePanel } from "../../../shared/ui";
+import {
+  Button,
+  ProgressIndicator,
+  StateChip,
+  SurfacePanel,
+} from "../../../shared/ui";
 
 import "./LuniiDecisionPanel.css";
 
@@ -13,6 +19,25 @@ export type LuniiDeviceState =
   | "ambiguous"
   | "scanning"
   | "error";
+
+/**
+ * Read-only pre-transfer comparison, composed by Rust and only PRESENTED
+ * here. `none` is the sober "nothing to compare yet" state (no single local
+ * selection, or no readable device); `ready` carries the device membership
+ * (`onDevice` ⇒ a send would replace) and how many other device stories stay
+ * untouched. No size metric — there is no decisional volume before media
+ * preparation.
+ */
+/** Why no comparison can be shown — each maps to a distinct, actionable
+ *  hint so the user knows exactly what to do next (select a story, narrow to
+ *  one, or plug a readable Lunii). */
+export type NoComparisonReason = "no-selection" | "multi-selection" | "no-device";
+
+export type TransferComparisonView =
+  | { kind: "none"; reason: NoComparisonReason }
+  | { kind: "loading" }
+  | { kind: "ready"; onDevice: boolean; unchangedCount: number }
+  | { kind: "error"; error: AppError };
 
 export interface LuniiDecisionPanelProps {
   /** Authoritative device state derived from `useConnectedLunii`. */
@@ -32,6 +57,15 @@ export interface LuniiDecisionPanelProps {
   /** Number of selected stories in the library. Drives the Éditer
    *  CTA's enabled state. */
   selectedCount?: number;
+  /** Read-only pre-transfer comparison. When omitted, the comparison
+   *  section is not rendered at all (used by tests/storybook that do not
+   *  exercise it). When provided, it renders between the selection and the
+   *  device regions — never as the panel's visual center. */
+  comparison?: TransferComparisonView;
+  /** Retry trigger for a failed comparison — wired by the route to
+   *  `useTransferPreview.refresh`. Makes the "Réessaie la comparaison" copy
+   *  actionable. When omitted, the error shows its text without a button. */
+  onRetryComparison?: () => void;
   /** Required when the panel may expose an active Éditer CTA. */
   onEdit: () => void;
   /** Optional refresh trigger — wired by the route to
@@ -63,6 +97,8 @@ export function LuniiDecisionPanel({
   deviceReason,
   supportedOperations,
   selectedCount = 0,
+  comparison,
+  onRetryComparison,
   onEdit,
   onRefreshDevice,
   onConsultSupportProfile,
@@ -123,6 +159,16 @@ export function LuniiDecisionPanel({
         )}
       </section>
 
+      {comparison && (
+        <section
+          className="lunii-panel__comparison"
+          aria-label="Comparaison avant envoi"
+          aria-live="polite"
+        >
+          {renderComparison(comparison, onRetryComparison)}
+        </section>
+      )}
+
       <section className="lunii-panel__device" aria-label="État de l'appareil">
         <StateChip tone={deviceChipTone} label={deviceChipLabel} />
         {deviceState === "idle" && supportedOperations && (
@@ -162,6 +208,81 @@ export function LuniiDecisionPanel({
       </section>
     </SurfacePanel>
   );
+}
+
+function renderComparison(
+  view: TransferComparisonView,
+  onRetryComparison?: () => void,
+): React.JSX.Element {
+  switch (view.kind) {
+    case "none":
+      // Distinct hint per cause so the next gesture is unambiguous.
+      return (
+        <p className="lunii-panel__reason">
+          {formatNoComparisonHint(view.reason)}
+        </p>
+      );
+    case "loading":
+      return (
+        <ProgressIndicator mode="indeterminate" label="Comparaison en cours…" />
+      );
+    case "ready":
+      return (
+        <>
+          <StateChip
+            tone={view.onDevice ? "warning" : "info"}
+            label={
+              view.onDevice
+                ? "Déjà présente sur l'appareil"
+                : "Nouvelle sur l'appareil"
+            }
+          />
+          <p className="lunii-panel__comparison-verdict">
+            {view.onDevice
+              ? "Déjà présente sur l'appareil — un envoi la remplacerait."
+              : "Cette histoire serait ajoutée à l'appareil."}
+          </p>
+          <p className="lunii-panel__reason">
+            {formatUnchanged(view.unchangedCount)}
+          </p>
+        </>
+      );
+    case "error":
+      // Critical feedback IN CONTEXT (role="alert"), never a toast (UX-DR15).
+      // The "Réessaie la comparaison" copy is made actionable by a retry CTA.
+      return (
+        <div role="alert" className="lunii-panel__comparison-error">
+          <p>{view.error.message}</p>
+          {view.error.userAction && <p>{view.error.userAction}</p>}
+          {onRetryComparison && (
+            <Button
+              variant="quiet"
+              onClick={onRetryComparison}
+              aria-label="Réessayer la comparaison"
+            >
+              Réessayer
+            </Button>
+          )}
+        </div>
+      );
+  }
+}
+
+function formatNoComparisonHint(reason: NoComparisonReason): string {
+  switch (reason) {
+    case "no-selection":
+      return "Sélectionne une histoire locale pour comparer avant l'envoi.";
+    case "multi-selection":
+      return "Sélectionne une seule histoire locale pour comparer (le transfert multiple n'est pas encore disponible).";
+    case "no-device":
+      return "Branche une Lunii lisible pour comparer l'histoire sélectionnée avant l'envoi.";
+  }
+}
+
+function formatUnchanged(count: number): string {
+  if (count <= 0) return "Aucune autre histoire de l'appareil ne sera modifiée.";
+  if (count === 1) return "1 autre histoire de l'appareil restera inchangée.";
+  return `${count} autres histoires de l'appareil resteront inchangées.`;
 }
 
 function formatSelectionLabel(count: number): string {

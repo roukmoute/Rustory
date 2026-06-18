@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
@@ -310,5 +310,202 @@ describe("<LuniiDecisionPanel />", () => {
     expect(document.getElementById(reasonId as string)).toHaveTextContent(
       /vérifie le câble usb/i,
     );
+  });
+
+  // --- Pre-transfer comparison (AC1, AC2, AC3) ---
+
+  it("does not render the comparison section when no comparison prop is given", () => {
+    render(<LuniiDecisionPanel deviceState="idle" onEdit={noop} />);
+    expect(
+      screen.queryByRole("region", { name: /comparaison avant envoi/i }),
+    ).toBeNull();
+  });
+
+  it("renders a distinct sober hint per no-comparison reason", () => {
+    const cases: Array<["no-selection" | "multi-selection" | "no-device", RegExp]> = [
+      ["no-selection", /sélectionne une histoire locale pour comparer/i],
+      ["multi-selection", /sélectionne une seule histoire locale/i],
+      ["no-device", /branche une lunii lisible/i],
+    ];
+    for (const [reason, expected] of cases) {
+      const { unmount } = render(
+        <LuniiDecisionPanel
+          deviceState="idle"
+          comparison={{ kind: "none", reason }}
+          onEdit={noop}
+        />,
+      );
+      const region = screen.getByRole("region", {
+        name: /comparaison avant envoi/i,
+      });
+      expect(region).toHaveTextContent(expected);
+      // The three reasons must not collapse into the same wording.
+      const others = cases
+        .filter(([r]) => r !== reason)
+        .map(([, rx]) => rx);
+      for (const otherRx of others) {
+        expect(region).not.toHaveTextContent(otherRx);
+      }
+      unmount();
+    }
+  });
+
+  it("wires an actionable retry CTA on a comparison error", async () => {
+    const user = userEvent.setup();
+    const onRetryComparison = vi.fn();
+    render(
+      <LuniiDecisionPanel
+        deviceState="idle"
+        comparison={{
+          kind: "error",
+          error: {
+            code: "DEVICE_SCAN_FAILED",
+            message: "Comparaison indisponible: l'appareil connecté a changé.",
+            userAction: "Rebranche la Lunii souhaitée puis réessaie.",
+            details: null,
+          },
+        }}
+        onRetryComparison={onRetryComparison}
+        onEdit={noop}
+      />,
+    );
+    const region = screen.getByRole("region", {
+      name: /comparaison avant envoi/i,
+    });
+    const retry = within(region).getByRole("button", {
+      name: /réessayer la comparaison/i,
+    });
+    await user.click(retry);
+    expect(onRetryComparison).toHaveBeenCalledTimes(1);
+  });
+
+  it("renders a progressbar while the comparison loads", () => {
+    render(
+      <LuniiDecisionPanel
+        deviceState="idle"
+        comparison={{ kind: "loading" }}
+        onEdit={noop}
+      />,
+    );
+    const region = screen.getByRole("region", {
+      name: /comparaison avant envoi/i,
+    });
+    expect(within(region).getByRole("progressbar")).toBeInTheDocument();
+    expect(region).toHaveTextContent(/comparaison en cours/i);
+  });
+
+  it("renders the 'new' verdict with a textual (non-color) chip", () => {
+    render(
+      <LuniiDecisionPanel
+        deviceState="idle"
+        comparison={{ kind: "ready", onDevice: false, unchangedCount: 2 }}
+        onEdit={noop}
+      />,
+    );
+    const region = screen.getByRole("region", {
+      name: /comparaison avant envoi/i,
+    });
+    // The verdict is conveyed in words, never by color alone (UX-DR32).
+    expect(region).toHaveTextContent(/nouvelle sur l'appareil/i);
+    expect(region).toHaveTextContent(/serait ajoutée à l'appareil/i);
+    expect(region).toHaveTextContent(
+      /2 autres histoires de l'appareil resteront inchangées/i,
+    );
+  });
+
+  it("renders the 'replace' verdict", () => {
+    render(
+      <LuniiDecisionPanel
+        deviceState="idle"
+        comparison={{ kind: "ready", onDevice: true, unchangedCount: 1 }}
+        onEdit={noop}
+      />,
+    );
+    const region = screen.getByRole("region", {
+      name: /comparaison avant envoi/i,
+    });
+    expect(region).toHaveTextContent(/déjà présente sur l'appareil/i);
+    expect(region).toHaveTextContent(/un envoi la remplacerait/i);
+    expect(region).toHaveTextContent(
+      /1 autre histoire de l'appareil restera inchangée/i,
+    );
+  });
+
+  it("pluralizes the unchanged-count line (0 / 1 / many)", () => {
+    const cases: Array<[number, RegExp]> = [
+      [0, /aucune autre histoire de l'appareil ne sera modifiée/i],
+      [1, /1 autre histoire de l'appareil restera inchangée/i],
+      [3, /3 autres histoires de l'appareil resteront inchangées/i],
+    ];
+    for (const [count, expected] of cases) {
+      const { unmount } = render(
+        <LuniiDecisionPanel
+          deviceState="idle"
+          comparison={{ kind: "ready", onDevice: false, unchangedCount: count }}
+          onEdit={noop}
+        />,
+      );
+      expect(
+        screen.getByRole("region", { name: /comparaison avant envoi/i }),
+      ).toHaveTextContent(expected);
+      unmount();
+    }
+  });
+
+  it("renders a comparison error in-context (role=alert), never a toast", () => {
+    render(
+      <LuniiDecisionPanel
+        deviceState="idle"
+        comparison={{
+          kind: "error",
+          error: {
+            code: "DEVICE_SCAN_FAILED",
+            message: "Comparaison indisponible: l'appareil connecté a changé.",
+            userAction: "Rebranche la Lunii souhaitée puis réessaie.",
+            details: null,
+          },
+        }}
+        onEdit={noop}
+      />,
+    );
+    const alert = screen.getByRole("alert");
+    expect(alert).toHaveTextContent(/l'appareil connecté a changé/i);
+    expect(alert).toHaveTextContent(/rebranche la lunii/i);
+    // No polite status region carries the critical comparison error.
+    screen
+      .queryAllByRole("status")
+      .forEach((s) => expect(s).not.toHaveTextContent(/comparaison indisponible/i));
+  });
+
+  it("keeps the send CTA disabled even when the comparison is ready (AC2)", () => {
+    render(
+      <LuniiDecisionPanel
+        deviceState="idle"
+        comparison={{ kind: "ready", onDevice: false, unchangedCount: 0 }}
+        onEdit={noop}
+      />,
+    );
+    const cta = screen.getByRole("button", { name: /envoyer vers la lunii/i });
+    expect(cta).toHaveAttribute("aria-disabled", "true");
+    const reasonId = cta.getAttribute("aria-describedby");
+    expect(document.getElementById(reasonId as string)).toHaveTextContent(
+      /transfert pas encore activé/i,
+    );
+  });
+
+  it("announces the verdict in a polite live region so it is vocalized on async arrival", () => {
+    render(
+      <LuniiDecisionPanel
+        deviceState="idle"
+        comparison={{ kind: "ready", onDevice: false, unchangedCount: 2 }}
+        onEdit={noop}
+      />,
+    );
+    const region = screen.getByRole("region", {
+      name: /comparaison avant envoi/i,
+    });
+    // The loading→ready verdict must live in a live region (UX-DR21/UX-DR32).
+    expect(region).toHaveAttribute("aria-live", "polite");
+    expect(region).toHaveTextContent(/nouvelle sur l'appareil/i);
   });
 });

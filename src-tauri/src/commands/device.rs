@@ -13,7 +13,8 @@ use crate::infrastructure::device::{MountAttempt, MountOutcome};
 use crate::infrastructure::diagnostics::device_log;
 use crate::ipc::dto::{
     ConnectedDeviceDto, DeviceLibraryDto, DeviceStoryTitleDto, ImportDeviceStoryInputDto,
-    ImportDeviceStoryOutcomeDto, SetDeviceStoryTitleInputDto,
+    ImportDeviceStoryOutcomeDto, ReadTransferPreviewInputDto, SetDeviceStoryTitleInputDto,
+    TransferPreviewDto,
 };
 use crate::AppState;
 
@@ -295,6 +296,78 @@ fn resolve_device_local_truth(
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     resolve_local_truth(&db, uuids)
+}
+
+/// Compose the read-only pre-transfer comparison for the selected local
+/// story against the connected supported Lunii.
+///
+/// Async + `spawn_blocking` like every device command: it re-scans the
+/// device, reads its inventory and composes the local↔device pack membership
+/// — all blocking I/O kept off the async runtime so the UI keeps painting.
+/// The DB mutex is taken in a SCOPED section INSIDE the service, AFTER the
+/// device I/O, never held across it. Read-only: nothing is written, and no
+/// `mount_path` crosses the IPC boundary.
+#[tauri::command]
+pub async fn read_transfer_preview(
+    state: State<'_, AppState>,
+    input: ReadTransferPreviewInputDto,
+) -> Result<TransferPreviewDto, AppError> {
+    // Both identifiers normally originate from Rust DTOs (selection + detection);
+    // a malformed value is a frontend bug, refused explicitly rather than
+    // "best-effort matched" against the device.
+    crate::commands::shared::validate_story_id(&input.story_id)?;
+    if !is_32_lowercase_hex(&input.device_identifier) {
+        return Err(invalid_transfer_preview_device_identifier());
+    }
+
+    let db = state.db.clone();
+    let scanner = state.device_scanner.clone();
+    let reader = state.library_reader.clone();
+    let story_id = input.story_id;
+    let requested = input.device_identifier;
+
+    let outcome = tauri::async_runtime::spawn_blocking(move || {
+        device::transfer::read_transfer_preview(
+            &db,
+            scanner.as_ref(),
+            reader.as_ref(),
+            &story_id,
+            &requested,
+            DEVICE_LIBRARY_READ_BUDGET,
+        )
+    })
+    .await
+    .map_err(|_| transfer_preview_join_error())?;
+
+    outcome.map(TransferPreviewDto::from_outcome)
+}
+
+/// The renderer sent a `device_identifier` that is not 32 lowercase hex — a
+/// frontend bug (the value always originates from a Rust detection DTO).
+/// Refused with the recoverable scan-failed category so the UI folds the
+/// comparison and re-detects.
+fn invalid_transfer_preview_device_identifier() -> AppError {
+    AppError::device_scan_failed(
+        "Comparaison impossible: identifiant d'appareil invalide.",
+        "Relance la détection de l'appareil puis réessaie.",
+    )
+    .with_details(serde_json::json!({
+        "source": "other",
+        "kind": "invalid_input",
+        "cause": "invalid_device_identifier",
+    }))
+}
+
+/// The blocking comparison worker could not be joined (panicked or
+/// cancelled). Mapped to the `spawn_blocking_join` source.
+fn transfer_preview_join_error() -> AppError {
+    AppError::device_scan_failed(
+        "Comparaison indisponible: tâche interrompue.",
+        "Réessaie ; si le problème persiste, redémarre Rustory.",
+    )
+    .with_details(serde_json::json!({
+        "source": "spawn_blocking_join",
+    }))
 }
 
 /// Copy the device story identified by `packUuid` from the connected

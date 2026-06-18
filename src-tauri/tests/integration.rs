@@ -38,3 +38,6 @@ mod device_import;
 
 #[path = "integration/device_titles.rs"]
 mod device_titles;
+
+#[path = "integration/transfer_preview.rs"]
+mod transfer_preview;

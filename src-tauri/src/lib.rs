@@ -193,6 +193,7 @@ pub fn run() {
             commands::device::read_device_library,
             commands::catalog::read_pack_cover,
             commands::story::read_recoverable_draft,
+            commands::device::read_transfer_preview,
             commands::catalog::refresh_official_catalog,
             commands::story::record_draft,
             commands::device::set_device_story_title,

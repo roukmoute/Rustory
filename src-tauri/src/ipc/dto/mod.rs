@@ -6,6 +6,7 @@ pub mod device_title;
 pub mod import_export;
 pub mod library;
 pub mod story;
+pub mod transfer_preview;
 
 pub use device::{
     ConnectedDeviceDto, FirmwareCohortDto, SupportedFamilyDto, SupportedOperationsDto,
@@ -20,4 +21,7 @@ pub use library::{LibraryOverviewDto, StoryCardDto};
 pub use story::{
     ApplyRecoveryInputDto, CreateStoryInputDto, DiscardDraftInputDto, RecordDraftInputDto,
     RecoverableDraftDto, StoryDetailDto, UpdateStoryInputDto, UpdateStoryOutputDto,
+};
+pub use transfer_preview::{
+    ReadTransferPreviewInputDto, TransferPreviewDto, TransferPreviewStoryDto,
 };

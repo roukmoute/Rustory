@@ -12,6 +12,7 @@ const mockGet = vi.fn();
 const mockDevice = vi.fn();
 const mockDeviceLibrary = vi.fn();
 const mockImport = vi.fn();
+const mockTransferPreview = vi.fn();
 const mockCatalogStatus = vi.fn();
 const mockCatalogRefresh = vi.fn();
 const mockCatalogImport = vi.fn();
@@ -59,6 +60,19 @@ vi.mock("../../ipc/commands/device-import", async () => {
   };
 });
 
+vi.mock("../../ipc/commands/transfer-preview", async () => {
+  const actual = await vi.importActual<
+    typeof import("../../ipc/commands/transfer-preview")
+  >("../../ipc/commands/transfer-preview");
+  return {
+    ...actual,
+    readTransferPreview: () => ({
+      promise: mockTransferPreview(),
+      cancel: () => {},
+    }),
+  };
+});
+
 vi.mock("../../ipc/commands/device-catalog", () => ({
   getOfficialCatalogStatus: () => mockCatalogStatus(),
   refreshOfficialCatalog: () => mockCatalogRefresh(),
@@ -70,7 +84,11 @@ import { invalidateConnectedLuniiCache } from "../../features/device/hooks/use-c
 import { invalidateDeviceLibraryCache } from "../../features/device/hooks/use-device-library";
 import { invalidateLibraryOverviewCache } from "../../features/library/hooks/use-library-overview";
 import { useLibraryShell } from "../../shell/state/library-shell-store";
-import { LibraryRoute, mapDeviceForPanel } from "./LibraryRoute";
+import {
+  LibraryRoute,
+  mapDeviceForPanel,
+  mapTransferPreviewToComparison,
+} from "./LibraryRoute";
 
 const STORY_EDIT_MARKER_TITLE = "Edit stub for";
 
@@ -104,6 +122,10 @@ describe("<LibraryRoute />", () => {
     mockDeviceLibrary.mockReset();
     mockDeviceLibrary.mockResolvedValue({ kind: "none" });
     mockImport.mockReset();
+    // Default: the transfer-preview read folds away (noDevice) so the
+    // comparison stays sober unless a test opts into a readable comparison.
+    mockTransferPreview.mockReset();
+    mockTransferPreview.mockResolvedValue({ kind: "noDevice" });
     // Default: the official-catalog status reads as an empty cache so the
     // panel renders without hitting the real IPC bridge.
     mockCatalogStatus.mockReset();
@@ -1604,6 +1626,246 @@ describe("<LibraryRoute />", () => {
         name: /consulter le profil de support officiel/i,
       }),
     ).toBeInTheDocument();
+  });
+
+  // --- Pre-transfer comparison (read-only, AC1 + AC2 + AC3) ---
+
+  const readyNew = {
+    kind: "ready" as const,
+    deviceIdentifier: supportedV3.deviceIdentifier,
+    story: { id: "s1", title: "Le soleil" },
+    onDevice: false,
+    unchangedCount: 2,
+    transferable: false,
+  };
+
+  it("renders the pre-send comparison when one local story is selected against a readable device (AC1)", async () => {
+    const user = userEvent.setup();
+    mockGet.mockResolvedValueOnce({ stories: [{ id: "s1", title: "Le soleil" }] });
+    mockDevice.mockResolvedValue(supportedV3);
+    mockTransferPreview.mockResolvedValue(readyNew);
+    renderLibrary();
+
+    // No comparison before a single local story is selected.
+    const panel = screen.getByRole("complementary", {
+      name: /panneau de décision/i,
+    });
+    const comparison = within(panel).getByRole("region", {
+      name: /comparaison avant envoi/i,
+    });
+    expect(comparison).toHaveTextContent(/sélectionne une histoire locale/i);
+
+    await user.click(await screen.findByRole("button", { name: /le soleil/i }));
+
+    await waitFor(() =>
+      expect(comparison).toHaveTextContent(/nouvelle sur l'appareil/i),
+    );
+    expect(comparison).toHaveTextContent(/serait ajoutée à l'appareil/i);
+    expect(comparison).toHaveTextContent(/2 autres histoires.*resteront inchangées/i);
+  });
+
+  it("shows the replacement verdict when the selected story's pack is on the device (AC1)", async () => {
+    const user = userEvent.setup();
+    mockGet.mockResolvedValueOnce({ stories: [{ id: "s1", title: "Le soleil" }] });
+    mockDevice.mockResolvedValue(supportedV3);
+    mockTransferPreview.mockResolvedValue({
+      ...readyNew,
+      onDevice: true,
+      unchangedCount: 1,
+    });
+    renderLibrary();
+
+    await user.click(await screen.findByRole("button", { name: /le soleil/i }));
+
+    const comparison = within(
+      screen.getByRole("complementary", { name: /panneau de décision/i }),
+    ).getByRole("region", { name: /comparaison avant envoi/i });
+    await waitFor(() =>
+      expect(comparison).toHaveTextContent(/déjà présente sur l'appareil/i),
+    );
+    expect(comparison).toHaveTextContent(/un envoi la remplacerait/i);
+    expect(comparison).toHaveTextContent(/1 autre histoire.*restera inchangée/i);
+  });
+
+  it("keeps the send CTA disabled even when the comparison is ready (AC2)", async () => {
+    const user = userEvent.setup();
+    mockGet.mockResolvedValueOnce({ stories: [{ id: "s1", title: "Le soleil" }] });
+    mockDevice.mockResolvedValue(supportedV3);
+    mockTransferPreview.mockResolvedValue(readyNew);
+    renderLibrary();
+
+    await user.click(await screen.findByRole("button", { name: /le soleil/i }));
+    const panel = screen.getByRole("complementary", {
+      name: /panneau de décision/i,
+    });
+    await waitFor(() =>
+      expect(
+        within(panel).getByRole("region", { name: /comparaison avant envoi/i }),
+      ).toHaveTextContent(/nouvelle sur l'appareil/i),
+    );
+
+    const send = within(panel).getByRole("button", {
+      name: /envoyer vers la lunii/i,
+    });
+    expect(send).toHaveAttribute("aria-disabled", "true");
+  });
+
+  it("shows no comparison without exactly one local selection (AC3 sober state)", async () => {
+    const user = userEvent.setup();
+    mockGet.mockResolvedValueOnce({
+      stories: [
+        { id: "s1", title: "Le soleil" },
+        { id: "s2", title: "La lune" },
+      ],
+    });
+    mockDevice.mockResolvedValue(supportedV3);
+    mockTransferPreview.mockResolvedValue(readyNew);
+    renderLibrary();
+
+    const panel = screen.getByRole("complementary", {
+      name: /panneau de décision/i,
+    });
+    const comparison = within(panel).getByRole("region", {
+      name: /comparaison avant envoi/i,
+    });
+    // 0 selections → sober hint, never a verdict.
+    expect(comparison).toHaveTextContent(/sélectionne une histoire locale/i);
+
+    // Select two → still no verdict (multi-transfer is out of scope), with a
+    // distinct "narrow to one" hint.
+    await user.click(await screen.findByRole("button", { name: /le soleil/i }));
+    await user.keyboard("{Control>}");
+    await user.click(screen.getByRole("button", { name: /la lune/i }));
+    await user.keyboard("{/Control}");
+
+    expect(comparison).toHaveTextContent(/sélectionne une seule histoire locale/i);
+    expect(comparison).not.toHaveTextContent(/nouvelle sur l'appareil/i);
+    expect(comparison).not.toHaveTextContent(/déjà présente sur l'appareil/i);
+  });
+
+  it("distinguishes the no-device hint when one story is selected but no readable device (AC3)", async () => {
+    const user = userEvent.setup();
+    mockGet.mockResolvedValueOnce({ stories: [{ id: "s1", title: "Le soleil" }] });
+    // Device present but NOT read-authorized → no readable device id.
+    mockDevice.mockResolvedValue({
+      ...supportedV3,
+      supportedOperations: {
+        readLibrary: false,
+        inspectStory: false,
+        importStory: false,
+        writeStory: false,
+      },
+    });
+    renderLibrary();
+
+    await user.click(await screen.findByRole("button", { name: /le soleil/i }));
+    const comparison = within(
+      screen.getByRole("complementary", { name: /panneau de décision/i }),
+    ).getByRole("region", { name: /comparaison avant envoi/i });
+    expect(comparison).toHaveTextContent(/branche une lunii lisible/i);
+    // The preview must not have fired without a readable device.
+    expect(mockTransferPreview).not.toHaveBeenCalled();
+  });
+
+  it("surfaces a comparison failure in-context without breaking the local library (AC3)", async () => {
+    const user = userEvent.setup();
+    mockGet.mockResolvedValueOnce({ stories: [{ id: "s1", title: "Le soleil" }] });
+    mockDevice.mockResolvedValue(supportedV3);
+    mockTransferPreview.mockRejectedValue({
+      code: "DEVICE_SCAN_FAILED",
+      message: "Comparaison indisponible: l'appareil connecté a changé.",
+      userAction: "Rebranche la Lunii souhaitée puis réessaie.",
+      details: { source: "device_changed" },
+    });
+    renderLibrary();
+
+    // The LOCAL library stays intact and usable.
+    await user.click(await screen.findByRole("button", { name: /le soleil/i }));
+    expect(
+      screen.getByRole("button", { name: /le soleil/i }),
+    ).toBeInTheDocument();
+
+    // The comparison failure is in-context (role="alert" inside the panel),
+    // never a toast.
+    const panel = screen.getByRole("complementary", {
+      name: /panneau de décision/i,
+    });
+    const comparison = within(panel).getByRole("region", {
+      name: /comparaison avant envoi/i,
+    });
+    const alert = await within(comparison).findByRole("alert");
+    expect(alert).toHaveTextContent(/l'appareil connecté a changé/i);
+
+    // The "Réessaie la comparaison" copy is actionable: a retry CTA re-reads.
+    mockTransferPreview.mockResolvedValue(readyNew);
+    await user.click(
+      within(comparison).getByRole("button", {
+        name: /réessayer la comparaison/i,
+      }),
+    );
+    await waitFor(() =>
+      expect(comparison).toHaveTextContent(/nouvelle sur l'appareil/i),
+    );
+  });
+
+  it("shows a recoverable device-changed comparison (not the no-device hint) when a readable device folds (AC1)", async () => {
+    const user = userEvent.setup();
+    mockGet.mockResolvedValueOnce({ stories: [{ id: "s1", title: "Le soleil" }] });
+    mockDevice.mockResolvedValue(supportedV3); // a readable device IS detected…
+    mockTransferPreview.mockResolvedValue({ kind: "noDevice" }); // …but the re-read folds
+    renderLibrary();
+
+    await user.click(await screen.findByRole("button", { name: /le soleil/i }));
+    const comparison = within(
+      screen.getByRole("complementary", { name: /panneau de décision/i }),
+    ).getByRole("region", { name: /comparaison avant envoi/i });
+
+    const alert = await within(comparison).findByRole("alert");
+    expect(alert).toHaveTextContent(
+      /l'appareil a changé pendant la comparaison/i,
+    );
+    // It must NOT fall back to the misleading "plug a Lunii" hint.
+    expect(comparison).not.toHaveTextContent(/branche une lunii lisible/i);
+    // …and the retry CTA is offered (reuses the wired refresh).
+    expect(
+      within(comparison).getByRole("button", {
+        name: /réessayer la comparaison/i,
+      }),
+    ).toBeInTheDocument();
+  });
+
+  // --- Pure mapper unit tests (mapTransferPreviewToComparison) ---
+
+  it("mapTransferPreviewToComparison maps a folded idle to the no-device hint", () => {
+    expect(mapTransferPreviewToComparison({ kind: "idle" })).toEqual({
+      kind: "none",
+      reason: "no-device",
+    });
+  });
+
+  it("mapTransferPreviewToComparison forwards onDevice + unchangedCount on ready", () => {
+    expect(
+      mapTransferPreviewToComparison({
+        kind: "ready",
+        onDevice: true,
+        unchangedCount: 3,
+        storyTitle: "X",
+        transferable: false,
+      }),
+    ).toEqual({ kind: "ready", onDevice: true, unchangedCount: 3 });
+  });
+
+  it("mapTransferPreviewToComparison forwards the error on error", () => {
+    const error = {
+      code: "LIBRARY_INCONSISTENT" as const,
+      message: "Histoire introuvable.",
+      userAction: "Recharge.",
+      details: null,
+    };
+    expect(mapTransferPreviewToComparison({ kind: "error", error })).toEqual({
+      kind: "error",
+      error,
+    });
   });
 
   // --- Pure mapper unit tests (mapDeviceForPanel) ---

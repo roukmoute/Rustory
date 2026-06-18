@@ -432,6 +432,68 @@ A `DEVICE_UNSUPPORTED` rejection with `details.source =
 failures keep their existing taxonomies — the UI branches on `code` +
 `details.source`, never on free-form strings.
 
+## Transfer Decision / Comparison Contract
+
+Before any send, the right-column decision panel shows a **read-only**
+comparison between the selected local story and the live device inventory,
+so the user understands the impact of a transfer *before* launching one.
+The comparison is **composed in Rust** (command `read_transfer_preview`,
+returning a `TransferPreviewDto`) and only **presented** by the panel — the
+frontend never recomputes device truth. It is a snapshot read: the device is
+re-scanned authoritatively at the moment of the decision, never mirrored.
+
+The comparison block lives **inside** the decision panel, in a
+`<section aria-label="Comparaison avant envoi" aria-live="polite">` between the
+`Sélection courante` and `État de l'appareil` regions. The polite live region
+lets the async `loading`→`ready` verdict be announced to screen readers (the
+`error` case additionally carries `role="alert"`). It never competes with the
+center-column collection as the main work surface, and it never hosts the
+device library (which stays a distinct center-column section).
+
+Each "no comparison" cause renders a **distinct, actionable** hint — the panel
+never collapses them into one generic line. The route owns the cause (the hook
+cannot tell a selection gap from a missing device apart):
+
+| Comparison state | When | Panel rendering |
+| --- | --- | --- |
+| no comparison — no selection | No local story selected | `Sélectionne une histoire locale pour comparer avant l'envoi.` |
+| no comparison — multi selection | More than one local story selected (multi-transfer is out of scope) | `Sélectionne une seule histoire locale pour comparer (le transfert multiple n'est pas encore disponible).` |
+| no comparison — no readable device | Exactly one story selected, but no read-authorized device is connected | `Branche une Lunii lisible pour comparer l'histoire sélectionnée avant l'envoi.` |
+| loading | The preview read is in flight | `ProgressIndicator` (calm) + `Comparaison en cours…` |
+| ready — new | The selected story's pack is NOT on the device (no `pack_uuid`, or `pack_uuid` absent from the inventory) | `Nouvelle sur l'appareil` chip + `Cette histoire serait ajoutée à l'appareil.` + the unchanged-count line |
+| ready — replace | The selected story's pack IS on the device (`pack_uuid` present in the inventory) | `Déjà présente sur l'appareil` chip + `Déjà présente sur l'appareil — un envoi la remplacerait.` + the unchanged-count line |
+| device changed during comparison | A readable device WAS detected, but the authoritative re-read no longer resolves to it (unplugged / swapped, or the `ready` payload's identifiers don't match the request) | Recoverable `role="alert"` — `L'appareil a changé pendant la comparaison.` + next gesture + a `Réessayer` CTA. NOT the "branche une Lunii" hint, which would contradict the just-detected device. |
+| error | The preview read failed (FS error, timeout, local store unavailable, selected story vanished) | In-context message (cause + impact + next gesture), `role="alert"` + `Réessayer`, **never a toast**. The local library and the device section stay intact. |
+
+The unchanged-count line states what stays untouched:
+`Aucune autre histoire de l'appareil ne sera modifiée.` (0),
+`1 autre histoire de l'appareil restera inchangée.` (1), or
+`{n} autres histoires de l'appareil resteront inchangées.` (n > 1).
+
+Rules:
+
+- The comparison is keyed on the pack identity (`pack_uuid`, the
+  `story_imports` join key), never on the title or the device identifier — the
+  same pack seen from another Lunii resolves to the same identity.
+- It shows ONLY what changes the decision. **No size / volume metric** is
+  shown in this contract (UX-DR37 — there is no decisional volume before the
+  media-preparation step). A useful size reappears later, when preparation
+  produces one.
+- The send CTA (`Envoyer vers la Lunii`) stays **disabled with the standardized
+  reason** `Envoi indisponible: transfert pas encore activé (MVP Phase 1)` in
+  every state — the comparison informs, it never enables a write. The send
+  capability is governed by the `WriteStory` gate (always `false` in MVP).
+- The comparison never asserts a validation verdict: a local story remains a
+  `brouillon local`. The `présumée transférable` / `bloquée` states belong to
+  the compatibility-validation flow, not to this comparison.
+- Errors carry the same closed `details.source` taxonomy as the device-library
+  read it reuses (`device_changed`, `fs_read`, `pack_index`, `read_timeout`,
+  `scan_timeout`, `os_enum`, `mount_unavailable`, `spawn_blocking_join`,
+  `other`), plus `transfer_preview` for the local-store / missing-story cases
+  (`LIBRARY_INCONSISTENT` when the selected story vanished,
+  `LOCAL_STORAGE_UNAVAILABLE` on a local read failure). No new error code is
+  introduced.
+
 ## Official Catalog Contract
 
 The right column hosts a quiet `Catalogue officiel` panel that manages the

@@ -16,3 +16,6 @@ mod device_library;
 
 #[path = "contracts/device_import.rs"]
 mod device_import;
+
+#[path = "contracts/transfer_preview.rs"]
+mod transfer_preview;

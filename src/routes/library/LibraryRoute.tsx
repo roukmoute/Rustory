@@ -14,6 +14,7 @@ import {
   useDeviceStoryImport,
   useDeviceStoryTitle,
   useOfficialCatalog,
+  useTransferPreview,
 } from "../../features/device";
 
 /** Public URL of the canonical device-support-profile document. Kept
@@ -35,6 +36,7 @@ import { LibraryFiltersNav } from "../../features/library/components/LibraryFilt
 import {
   LuniiDecisionPanel,
   type LuniiDeviceState,
+  type TransferComparisonView,
 } from "../../features/library/components/LuniiDecisionPanel";
 import { StoryCollection } from "../../features/library/components/StoryCollection";
 import {
@@ -150,6 +152,28 @@ export function LibraryRoute(): React.JSX.Element {
       ? effectiveDevice.deviceIdentifier
       : null;
   const deviceLibrary = useDeviceLibrary(readableDeviceId);
+
+  // Pre-transfer comparison (read-only). Composed in Rust and only presented:
+  // trigger it ONLY for a single local selection against a readable device;
+  // the hook stays idle (no IPC) otherwise. Keyed on the selected story id and
+  // the device identifier, so a selection change or a device swap re-reads.
+  const singleSelectedStoryId =
+    presentSelectedIds.size === 1 ? [...presentSelectedIds][0] : null;
+  const transferPreview = useTransferPreview(
+    singleSelectedStoryId,
+    readableDeviceId,
+  );
+  // Distinguish WHY there is no comparison so the hint is actionable: the
+  // route knows the cause (no/multi selection, or no readable device) that
+  // the hook's `idle` cannot tell apart.
+  const transferComparison: TransferComparisonView =
+    presentSelectedIds.size === 0
+      ? { kind: "none", reason: "no-selection" }
+      : presentSelectedIds.size > 1
+        ? { kind: "none", reason: "multi-selection" }
+        : readableDeviceId === null
+          ? { kind: "none", reason: "no-device" }
+          : mapTransferPreviewToComparison(transferPreview.state);
 
   // Inspection is offered when the supported profile authorizes it.
   // `inspectStory` is ✅ for every supported cohort (V3 included, unlike
@@ -336,6 +360,8 @@ export function LibraryRoute(): React.JSX.Element {
               deviceReason={deviceReason}
               supportedOperations={supportedOperations}
               selectedCount={presentSelectedIds.size}
+              comparison={transferComparison}
+              onRetryComparison={transferPreview.refresh}
               onEdit={handleEditSelected}
               onRefreshDevice={device.refresh}
               onConsultSupportProfile={openSupportProfile}
@@ -395,6 +421,32 @@ export function mapDeviceForPanel(
     return { deviceState: "scanning" };
   }
   return mapDeviceDtoForPanel(state.device);
+}
+
+/**
+ * Pure mapper from the `useTransferPreview` state to the `comparison` prop
+ * `LuniiDecisionPanel` expects. Pure so it stays testable in isolation. Only
+ * reached when a single story is selected against a readable device; `idle`
+ * therefore means the live re-read folded away (`noDevice` / `unsupported`)
+ * — surfaced as the sober `no-device` hint, never an error.
+ */
+export function mapTransferPreviewToComparison(
+  state: ReturnType<typeof useTransferPreview>["state"],
+): TransferComparisonView {
+  switch (state.kind) {
+    case "idle":
+      return { kind: "none", reason: "no-device" };
+    case "loading":
+      return { kind: "loading" };
+    case "ready":
+      return {
+        kind: "ready",
+        onDevice: state.onDevice,
+        unchangedCount: state.unchangedCount,
+      };
+    case "error":
+      return { kind: "error", error: state.error };
+  }
 }
 
 function mapDeviceDtoForPanel(dto: ConnectedDeviceDto): DevicePanelMapping {

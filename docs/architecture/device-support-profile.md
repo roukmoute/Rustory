@@ -273,6 +273,18 @@ Reasons`.
   detection panel (see
   [ui-states.md#Device Story Inspection Contract](./ui-states.md)).
 
+Read vs. write coherence (transfer preview): the pre-send comparison
+(`read_transfer_preview`, see
+[ui-states.md#Transfer Decision / Comparison Contract](./ui-states.md)) is a
+**read-only** snapshot. It passes the `ReadLibrary` gate (allowed for every
+supported MVP cohort) to enumerate the device inventory; it never attempts a
+write. The transfer CTA it sits beside is governed by the `WriteStory`
+operation, which is hard-coded `false` for every cohort in MVP Phase 1 — so the
+preview can show *what would change* while the send stays disabled with its
+standardized reason. The preview therefore reports `transferable = false` for
+every supported profile, mirroring the gate; Epic 3 wires the real
+`WriteStory` gate.
+
 Adding a new operation:
 
 1. Add a boolean field on `SupportedOperations`.

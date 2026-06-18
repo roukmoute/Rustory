@@ -11,6 +11,7 @@ pub mod catalog;
 pub mod import;
 pub mod library;
 pub mod title;
+pub mod transfer;
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};

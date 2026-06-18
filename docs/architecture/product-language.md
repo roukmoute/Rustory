@@ -49,6 +49,10 @@ It exists to keep the same product concepts named the same way across:
 | Copy-blocking device-story facts (inspector group) | `Ce qui bloque la copie` | Inspector header grouping the verified facts that prevent a copy (incomplete content, copy already exists) | `erreurs`, `problèmes`, `blockers` |
 | Device-story facts to review (inspector group) | `À revoir avant de copier` | Inspector header grouping the verified facts to weigh before copying (hidden). Distinct from the Post-MVP `à revoir` import-state chip | `warnings`, `alertes`, reusing the Post-MVP `à revoir` chip |
 | Consult the official support profile (action) | `Consulter le profil de support` | Affordance opening the official device-support profile; shown on the detection panel and, on a profile-based copy refusal, in the device-story inspector | `aide`, `docs`, `support`, `FAQ` |
+| Pre-send comparison (panel section) | `Comparaison avant envoi` | Read-only comparison of the selected local story against the live device inventory, shown before any transfer | `diff`, `preview`, `dry-run` |
+| Selected story is not yet on the device | `Nouvelle sur l'appareil` | Comparison verdict: a send would ADD this story to the device | `nouvelle` used loosely, `à transférer`, `manquante` |
+| Selected story already lives on the device | `Déjà présente sur l'appareil` | Comparison verdict: a send would REPLACE the copy already on the device | `existe`, `doublon`, `déjà transférée` (asserts a past send) |
+| Other device stories left untouched by a send | `resteront inchangées` | Reassurance that a transfer touches only the selected story, not the rest of the device library | `non affectées`, `safe`, technical counts without the verb |
 | Preparation step | `préparation` | Pre-transfer work needed to make the story sendable | `pipeline`, `build`, `compile assets` |
 | Send operation | `transfert` / `Envoyer vers la Lunii` | User-visible act of sending a story to the device | `deploy`, `sync job`, `push` |
 | Post-send confirmation | `vérification` | Explicit check that confirms what really happened on device | `post-check`, `validation finale` when it means something else |
@@ -91,6 +95,15 @@ The UI should favor these labels when they are user-visible:
 | Connected device holds no readable story | `Aucune histoire sur l'appareil` |
 | Reading the device-side library failed | `Bibliothèque de l'appareil indisponible` |
 | Device story selected for inspection before copy | `Histoire sélectionnée` |
+| Pre-send comparison is in flight | `Comparaison en cours…` |
+| Selected local story is absent from the device | `Nouvelle sur l'appareil` |
+| Selected local story already on the device | `Déjà présente sur l'appareil` |
+| A send would replace the on-device copy | `Déjà présente sur l'appareil — un envoi la remplacerait.` |
+| A send would add the story to the device | `Cette histoire serait ajoutée à l'appareil.` |
+| No comparison — no local story selected | `Sélectionne une histoire locale pour comparer avant l'envoi.` |
+| No comparison — more than one story selected | `Sélectionne une seule histoire locale pour comparer (le transfert multiple n'est pas encore disponible).` |
+| No comparison — no readable device connected | `Branche une Lunii lisible pour comparer l'histoire sélectionnée avant l'envoi.` |
+| Device changed while comparing (recoverable) | `L'appareil a changé pendant la comparaison.` |
 | Copy not allowed for this profile | `Copie indisponible: profil non supporté` |
 | Copy refused — local copy already exists | `Copie indisponible: déjà dans ta bibliothèque` |
 | Copy refused — pack payload missing on device | `Copie indisponible: contenu incomplet sur l'appareil` |

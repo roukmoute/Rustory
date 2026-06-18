@@ -20,6 +20,12 @@ export {
 } from "./hooks/use-device-story-import";
 
 export {
+  useTransferPreview,
+  type TransferPreviewState,
+  type UseTransferPreview,
+} from "./hooks/use-transfer-preview";
+
+export {
   useDeviceStoryTitle,
   type SetDeviceStoryTitleStatus,
   type UseDeviceStoryTitle,
