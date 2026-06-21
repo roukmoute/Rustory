@@ -27,6 +27,7 @@ These are the minimum user-visible states for `MVP Phase 1`.
 | Local canonical draft exists | `brouillon local` | Story exists locally and is editable/resumable | Present on device |
 | Validation/preflight running | `en vérification` | Compatibility or safety checks are actively running | Transfer already started |
 | Real blocking issue exists | `bloquée` | A required condition prevents the next action | Generic inconvenience or unknown state |
+| Fixable blocking issue exists | `à corriger` | A detected issue blocks the send but the user can repair it (e.g. an invalid title) | A hard unrecoverable block, or a mere warning |
 | Validation passed for send | `présumée transférable` | Rust has not found a real block yet | Transfer already succeeded |
 | Preparation running | `en préparation` | Media/artifact preparation is in progress | Device write in progress |
 | Device write running | `en transfert` | Rust has accepted and is executing a write operation | Verified success |
@@ -41,6 +42,7 @@ The transfer contract is part of the MVP and should map internal state to UI lab
 | Internal Contract State | UI Label | Notes |
 | --- | --- | --- |
 | `blocked` | `bloquée` | Show the blocking reason and the next useful action |
+| `to_fix` | `à corriger` | A repairable block (e.g. an invalid title); show the cause + the fixing action |
 | `presumed_transferable` | `présumée transférable` | Valid for decision surfaces before send |
 | `preparing` | `en préparation` | May coexist with preserved local work |
 | `transferring` | `en transfert` | Must stay visibly in-context in the library |
@@ -63,7 +65,8 @@ These states are for post-MVP local structured import flows and must not be mist
 ## State Transition Rules
 
 - `brouillon local` may lead to `en vérification` or remain local.
-- `en vérification` may lead to `bloquée` or `présumée transférable`.
+- `en vérification` may lead to `bloquée`, `à corriger`, or `présumée transférable`.
+- `à corriger` may lead back to `en vérification` after the user repairs the flagged issue (e.g. renames the story).
 - `présumée transférable` may lead to `en préparation` or directly to `en transfert`, depending on the flow.
 - `en transfert` may lead to `transférée et vérifiée`, `état partiel`, or `échec récupérable`.
 - `échec récupérable` may lead back to `en vérification`, `en préparation`, or `en transfert` through an explicit user action such as `Relancer`.
@@ -493,6 +496,117 @@ Rules:
   (`LIBRARY_INCONSISTENT` when the selected story vanished,
   `LOCAL_STORAGE_UNAVAILABLE` on a local read failure). No new error code is
   introduced.
+
+## Story Validation / Preflight Contract
+
+Before any send, the right-column decision panel can run a **read-only**
+`preflight` that composes a per-story validation verdict, so the user learns
+whether an issue must be fixed *before* a transfer is attempted. Like the
+comparison above, the verdict is **composed in Rust** (command
+`read_story_validation`, returning a `StoryValidationDto`) and only
+**presented** by the panel — the frontend never decides "valide / prête /
+bloquée". It is an authoritative snapshot: the device profile is re-read at the
+moment of the decision, never mirrored, and nothing is persisted (no
+`validation_status` row — freshness beats caching on a decision surface).
+
+**Two orthogonal axes (AC1).** The verdict distinguishes:
+
+- **Rustory canonical validity** — is the LOCAL data sound? (axes `structure` /
+  `media` / `filesystem`)
+- **Lunii compatibility** — would the detected device profile accept this
+  story? (axis `deviceProfile`)
+
+Each blocker carries its `axis`, so the panel groups blockers under the two
+headers (canonical vs Lunii) and the AC1 distinction stays visible.
+
+**Verdict (a successful read, never an error).** The verdict is one of:
+
+| Internal verdict | UI Label | Chip tone | Meaning |
+| --- | --- | --- | --- |
+| `presumed_transferable` | `présumée transférable` | success | No real block found (canonically valid + a recognized, supported profile). NOT a transfer success. |
+| `to_fix` | `à corriger` | warning | A repairable block was found (e.g. an invalid title) — fixable before send. |
+| `blocked` | `bloquée` | error | A hard canonical block was found (corrupt structure, checksum mismatch, unsupported schema). |
+
+The verdict is derived in Rust: `bloquée` if any `Blocking` cause exists, else
+`à corriger` if any `Fixable` cause exists, else `présumée transférable`. An
+empty-`nodes` story is canonically valid (the v1 canonical form) and is never a
+block.
+
+**Closed taxonomy `axis × cause` (AC2).** Every blocker is a closed
+`(axis, cause)` PAIR — never a free-form string, never an independent axis and
+cause, never two wordings for one cause. The runtime guard validates the pair
+against this closed set (an impossible couple like `deviceProfile ×
+checksumMismatch` is rejected, not grouped under the wrong heading). Severity is
+a fixed property of the cause, and the verdict is DERIVED from the blockers
+(blocking > fixable > none) — the guard also rejects a verdict that contradicts
+its blockers (e.g. `bloquée` with no blocker). Each cause maps to one canonical
+`message` (cause + impact) and one `userAction` (the next gesture); Rust owns
+both strings, React renders them verbatim.
+
+| Axis | Cause | Severity | Canonical `message` | Canonical `userAction` |
+| --- | --- | --- | --- | --- |
+| `structure` | `titleInvalid` | fixable | Le titre enregistré de l'histoire n'est pas valide. | Renomme l'histoire avec un titre valide puis relance la vérification. |
+| `structure` | `schemaUnsupported` | blocking | Cette histoire utilise un format plus récent que celui pris en charge par cette version de Rustory. | Mets à jour Rustory pour transférer cette histoire. |
+| `structure` | `structureCorrupt` | blocking | La structure interne de l'histoire est illisible ou incohérente. | Restaure une version saine de l'histoire puis relance la vérification. |
+| `structure` | `checksumMismatch` | blocking | Les données locales de l'histoire ont changé de façon inattendue (corruption détectée). | Restaure une sauvegarde saine de l'histoire avant de la transférer. |
+| `deviceProfile` | `metadataUnsupported` | blocking | Le profil de la Lunii connectée n'est pas pris en charge. | Consulte le profil de support pour voir les Lunii compatibles. |
+| `deviceProfile` | `metadataCorrupt` | blocking | Les marqueurs de la Lunii connectée sont incomplets ou illisibles. | Rebranche la Lunii puis relance la vérification. |
+| `deviceProfile` | `familyUnknown` | blocking | La famille de l'appareil connecté n'est pas reconnue. | Branche une Lunii prise en charge puis relance la vérification. |
+| `deviceProfile` | `multipleCandidates` | blocking | Plusieurs Lunii compatibles sont connectées en même temps. | Ne garde qu'une seule Lunii branchée puis relance la vérification. |
+| `deviceProfile` | `firmwareUnsupported` | blocking | Le firmware de la Lunii connectée n'est pas pris en charge. | Consulte le profil de support pour les firmwares compatibles. |
+| `deviceProfile` | `operationNotAuthorized` | blocking | Le profil détecté n'autorise pas la lecture de la bibliothèque de l'appareil. | Consulte le profil de support pour comprendre ce qui est permis. |
+
+**`media`, `filesystem` AND `deviceProfile` are declared but have NO live
+emitter in MVP Phase 1** (the `deviceProfile` causes above are part of the
+closed wire taxonomy, ready for a future device-format validation). The reasons:
+media validation arrives with the media-preparation step; filesystem failures
+surface as transport `AppError`s; and the `deviceProfile` axis only ever applies
+to a CONFIRMED readable supported device — which is compatible by construction in
+MVP (a supported profile passes by definition, see
+[device-support-profile.md](./device-support-profile.md)). A verdict is composed
+ONLY when the live re-scan resolves to the requested readable supported device
+(its identity matched). If the re-scan finds no device, an unsupported device, or
+more than one (ambiguous), the present device's identity cannot be confirmed as
+the one the UI asked about, so the read surfaces a recoverable `device_changed`
+(see "No new error code") rather than a compatibility verdict on an unconfirmed
+device — never false coverage, never a stale verdict. So in MVP only the
+`structure` axis carries live blockers.
+
+**Verdict ⟂ send gate.** The verdict answers "did this story pass the canonical
++ profile checks?"; it is INDEPENDENT of whether a transfer is enabled. The
+send CTA (`Envoyer vers la Lunii`) stays disabled with its standardized phase
+reason `Envoi indisponible: transfert pas encore activé (MVP Phase 1)` in EVERY
+verdict — even `présumée transférable` — because the send capability is
+governed by the `WriteStory` gate (always `false` in MVP), never by the
+verdict. Folding the gate into the verdict would make every story `bloquée` and
+`présumée transférable` unreachable. A `bloquée` verdict does NOT change the CTA
+reason: the gate reason is about the phase, while the verdict's block is
+surfaced in the validation section itself.
+
+**Surface.** The validation block lives **inside** the decision panel, in a
+`<section aria-label="Validation avant envoi" aria-live="polite">`, sibling to
+`Comparaison avant envoi`. The polite live region announces the async
+`loading`→verdict transition; a transport `error` additionally carries
+`role="alert"` and a `Réessayer` CTA, never a toast. The panel renders:
+`loading` → a calm `ProgressIndicator`; a verdict → the verdict `StateChip`
+(glyph + text, never color alone) + the blockers grouped by axis (`Validité
+Rustory` / `Compatibilité Lunii`), each showing its cause copy and `userAction`;
+`error` → the in-context recoverable message. Transitions follow the
+`State Transition Rules`: `brouillon local → en vérification → {bloquée | à
+corriger | présumée transférable}`.
+
+**No new error code.** The verdict is a successful read (`Ok`, a tagged union).
+Only transport failures become `AppError`: the selected story vanished
+(`LIBRARY_INCONSISTENT`, `details.source = "story_validation"`), the local store
+read failed (`LOCAL_STORAGE_UNAVAILABLE`, same source), or the device changed /
+became unreadable mid-read (`DEVICE_SCAN_FAILED`, `details.source =
+"device_changed"` and the rest of the device-library read taxonomy). The
+`device_changed` case ALSO covers a re-scan that resolves to an unsupported or
+ambiguous device (the requested readable device is no longer confirmable). The
+only non-error read outcomes are `noDevice` (no device at all — the hook folds it
+to the same recoverable "device changed" surface) and `ready` (the verdict). The
+triggering command is `read_story_validation`; it emits no `device_log` event (a
+light read-only snapshot).
 
 ## Official Catalog Contract
 

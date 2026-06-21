@@ -13,8 +13,8 @@ use crate::infrastructure::device::{MountAttempt, MountOutcome};
 use crate::infrastructure::diagnostics::device_log;
 use crate::ipc::dto::{
     ConnectedDeviceDto, DeviceLibraryDto, DeviceStoryTitleDto, ImportDeviceStoryInputDto,
-    ImportDeviceStoryOutcomeDto, ReadTransferPreviewInputDto, SetDeviceStoryTitleInputDto,
-    TransferPreviewDto,
+    ImportDeviceStoryOutcomeDto, ReadStoryValidationInputDto, ReadTransferPreviewInputDto,
+    SetDeviceStoryTitleInputDto, StoryValidationDto, TransferPreviewDto,
 };
 use crate::AppState;
 
@@ -370,6 +370,82 @@ fn transfer_preview_join_error() -> AppError {
     }))
 }
 
+/// Compose the read-only pre-transfer validation verdict for the selected local
+/// story against the connected supported Lunii.
+///
+/// Async + `spawn_blocking` like every device command: it re-scans the device,
+/// reads the local canonical facts and composes the per-story verdict
+/// (`présumée transférable` / `à corriger` / `bloquée`) — all blocking I/O kept
+/// off the async runtime so the UI keeps painting. The DB mutex is taken in a
+/// SCOPED section INSIDE the service, AFTER the device I/O, never held across
+/// it. Read-only: nothing is written, no `validation_status` is persisted, and
+/// no `mount_path` crosses the IPC boundary. The verdict is ORTHOGONAL to the
+/// `WriteStory` gate — the send CTA stays disabled in MVP regardless.
+#[tauri::command]
+pub async fn read_story_validation(
+    state: State<'_, AppState>,
+    input: ReadStoryValidationInputDto,
+) -> Result<StoryValidationDto, AppError> {
+    // Both identifiers normally originate from Rust DTOs (selection + detection);
+    // a malformed value is a frontend bug, refused explicitly rather than
+    // "best-effort matched" against the device.
+    crate::commands::shared::validate_story_id(&input.story_id)?;
+    if !is_32_lowercase_hex(&input.device_identifier) {
+        return Err(invalid_story_validation_device_identifier());
+    }
+
+    let db = state.db.clone();
+    let scanner = state.device_scanner.clone();
+    let reader = state.library_reader.clone();
+    let story_id = input.story_id;
+    let requested = input.device_identifier;
+
+    let outcome = tauri::async_runtime::spawn_blocking(move || {
+        device::preflight::read_story_validation(
+            &db,
+            scanner.as_ref(),
+            reader.as_ref(),
+            &story_id,
+            &requested,
+            DEVICE_LIBRARY_READ_BUDGET,
+        )
+    })
+    .await
+    .map_err(|_| story_validation_join_error())?;
+
+    outcome.map(StoryValidationDto::from_outcome)
+}
+
+/// The renderer sent a `device_identifier` that is not 32 lowercase hex — a
+/// frontend bug (the value always originates from a Rust detection DTO).
+/// Refused with the recoverable scan-failed category so the UI folds the
+/// validation and re-detects. Named (not inline) so the actionability
+/// discipline test can assert its copy.
+fn invalid_story_validation_device_identifier() -> AppError {
+    AppError::device_scan_failed(
+        "Validation impossible: identifiant d'appareil invalide.",
+        "Relance la détection de l'appareil puis réessaie.",
+    )
+    .with_details(serde_json::json!({
+        "source": "other",
+        "kind": "invalid_input",
+        "cause": "invalid_device_identifier",
+    }))
+}
+
+/// The blocking validation worker could not be joined (panicked or cancelled).
+/// Mapped to the `spawn_blocking_join` source. Named (not inline) so the
+/// actionability discipline test can assert its copy.
+fn story_validation_join_error() -> AppError {
+    AppError::device_scan_failed(
+        "Validation indisponible: tâche interrompue.",
+        "Réessaie ; si le problème persiste, redémarre Rustory.",
+    )
+    .with_details(serde_json::json!({
+        "source": "spawn_blocking_join",
+    }))
+}
+
 /// Copy the device story identified by `packUuid` from the connected
 /// supported Lunii identified by `deviceIdentifier` into the local
 /// library ("Copier dans ma bibliothèque").
@@ -587,6 +663,27 @@ mod tests {
             assert_eq!(
                 err.code,
                 crate::domain::shared::AppErrorCode::ImportFailed,
+                "{err:?}"
+            );
+            assert!(!err.message.is_empty(), "refusal needs a cause: {err:?}");
+            let action = err.user_action.as_deref().unwrap_or("");
+            assert!(!action.is_empty(), "refusal needs a next gesture: {err:?}");
+        }
+    }
+
+    /// Same discipline for the story-validation command-layer refusals: a
+    /// non-empty cause AND a non-empty next gesture, with the recoverable
+    /// `DEVICE_SCAN_FAILED` category (no new error code introduced).
+    #[test]
+    fn command_layer_story_validation_refusals_are_actionable() {
+        let refusals = [
+            invalid_story_validation_device_identifier(),
+            story_validation_join_error(),
+        ];
+        for err in &refusals {
+            assert_eq!(
+                err.code,
+                crate::domain::shared::AppErrorCode::DeviceScanFailed,
                 "{err:?}"
             );
             assert!(!err.message.is_empty(), "refusal needs a cause: {err:?}");

@@ -285,6 +285,25 @@ standardized reason. The preview therefore reports `transferable = false` for
 every supported profile, mirroring the gate; Epic 3 wires the real
 `WriteStory` gate.
 
+Read vs. write coherence (story validation / preflight): the per-story
+validation (`read_story_validation`, see
+[ui-states.md#Story Validation / Preflight Contract](./ui-states.md)) is
+also a **read-only** snapshot. Its Lunii-compatibility axis reuses
+`read_device_library` (the `ReadLibrary` gate + `classify_lunii`): a verdict is
+composed ONLY for a CONFIRMED readable supported device (the `Readable`
+outcome, whose identity matched the request), which is compatible by
+construction — so no `deviceProfile` blocker is ever emitted in MVP. A re-scan
+that no longer resolves to that device (none / unsupported / ambiguous) cannot
+prove the present device is the requested one, so it surfaces a recoverable
+`device_changed` (a `DEVICE_SCAN_FAILED` transport error), never a compatibility
+verdict on an unconfirmed device. The `deviceProfile` axis and its
+`UnsupportedReason`-derived causes stay DECLARED in the closed wire taxonomy
+(ready for a future device-format validation) but have no live emitter in MVP
+Phase 1 — exactly like the `media` / `filesystem` axes. The validation verdict
+NEVER consults `WriteStory` — transfer activation stays governed by that gate
+(`false` for every cohort in MVP Phase 1) and is orthogonal to the verdict, so a
+`présumée transférable` story still sits beside a disabled send CTA.
+
 Adding a new operation:
 
 1. Add a boolean field on `SupportedOperations`.

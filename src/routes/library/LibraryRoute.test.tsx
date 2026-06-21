@@ -13,6 +13,7 @@ const mockDevice = vi.fn();
 const mockDeviceLibrary = vi.fn();
 const mockImport = vi.fn();
 const mockTransferPreview = vi.fn();
+const mockStoryValidation = vi.fn();
 const mockCatalogStatus = vi.fn();
 const mockCatalogRefresh = vi.fn();
 const mockCatalogImport = vi.fn();
@@ -73,6 +74,19 @@ vi.mock("../../ipc/commands/transfer-preview", async () => {
   };
 });
 
+vi.mock("../../ipc/commands/story-validation", async () => {
+  const actual = await vi.importActual<
+    typeof import("../../ipc/commands/story-validation")
+  >("../../ipc/commands/story-validation");
+  return {
+    ...actual,
+    readStoryValidation: () => ({
+      promise: mockStoryValidation(),
+      cancel: () => {},
+    }),
+  };
+});
+
 vi.mock("../../ipc/commands/device-catalog", () => ({
   getOfficialCatalogStatus: () => mockCatalogStatus(),
   refreshOfficialCatalog: () => mockCatalogRefresh(),
@@ -87,6 +101,7 @@ import { useLibraryShell } from "../../shell/state/library-shell-store";
 import {
   LibraryRoute,
   mapDeviceForPanel,
+  mapStoryValidationToView,
   mapTransferPreviewToComparison,
 } from "./LibraryRoute";
 
@@ -126,6 +141,10 @@ describe("<LibraryRoute />", () => {
     // comparison stays sober unless a test opts into a readable comparison.
     mockTransferPreview.mockReset();
     mockTransferPreview.mockResolvedValue({ kind: "noDevice" });
+    // Default: the story-validation read folds away (noDevice) so the
+    // validation stays sober unless a test opts into a verdict.
+    mockStoryValidation.mockReset();
+    mockStoryValidation.mockResolvedValue({ kind: "noDevice" });
     // Default: the official-catalog status reads as an empty cache so the
     // panel renders without hitting the real IPC bridge.
     mockCatalogStatus.mockReset();
@@ -1832,6 +1851,196 @@ describe("<LibraryRoute />", () => {
         name: /réessayer la comparaison/i,
       }),
     ).toBeInTheDocument();
+  });
+
+  // --- Pre-transfer validation verdict (read-only, AC1 + AC2 + AC3) ---
+
+  const blockedValidation = {
+    kind: "ready" as const,
+    deviceIdentifier: supportedV3.deviceIdentifier,
+    story: { id: "s1", title: "Le soleil" },
+    verdict: "blocked" as const,
+    blockers: [
+      {
+        axis: "structure" as const,
+        cause: "checksumMismatch" as const,
+        message: "Les données locales de l'histoire ont changé.",
+        userAction: "Restaure une sauvegarde saine de l'histoire.",
+      },
+    ],
+  };
+
+  it("renders the validation verdict when one local story is selected against a readable device (AC1)", async () => {
+    const user = userEvent.setup();
+    mockGet.mockResolvedValueOnce({ stories: [{ id: "s1", title: "Le soleil" }] });
+    mockDevice.mockResolvedValue(supportedV3);
+    mockStoryValidation.mockResolvedValue(blockedValidation);
+    renderLibrary();
+
+    const panel = screen.getByRole("complementary", {
+      name: /panneau de décision/i,
+    });
+    const validation = within(panel).getByRole("region", {
+      name: /validation avant envoi/i,
+    });
+    // Sober before a single local story is selected.
+    expect(validation).toHaveTextContent(
+      /vérifier la compatibilité avant l'envoi/i,
+    );
+
+    await user.click(await screen.findByRole("button", { name: /le soleil/i }));
+
+    await waitFor(() => expect(validation).toHaveTextContent(/bloquée/i));
+    // The blocker's message + next gesture are rendered verbatim (AC2).
+    expect(validation).toHaveTextContent(
+      /les données locales de l'histoire ont changé/i,
+    );
+    expect(validation).toHaveTextContent(/restaure une sauvegarde saine/i);
+  });
+
+  it("keeps the send CTA disabled even when the verdict is présumée transférable (AC3/FR34)", async () => {
+    const user = userEvent.setup();
+    mockGet.mockResolvedValueOnce({ stories: [{ id: "s1", title: "Le soleil" }] });
+    mockDevice.mockResolvedValue(supportedV3);
+    mockStoryValidation.mockResolvedValue({
+      ...blockedValidation,
+      verdict: "presumedTransferable",
+      blockers: [],
+    });
+    renderLibrary();
+
+    await user.click(await screen.findByRole("button", { name: /le soleil/i }));
+    const panel = screen.getByRole("complementary", {
+      name: /panneau de décision/i,
+    });
+    await waitFor(() =>
+      expect(
+        within(panel).getByRole("region", { name: /validation avant envoi/i }),
+      ).toHaveTextContent(/présumée transférable/i),
+    );
+    const send = within(panel).getByRole("button", {
+      name: /envoyer vers la lunii/i,
+    });
+    expect(send).toHaveAttribute("aria-disabled", "true");
+  });
+
+  it("shows no validation without exactly one local selection (AC3 sober state)", async () => {
+    const user = userEvent.setup();
+    mockGet.mockResolvedValueOnce({
+      stories: [
+        { id: "s1", title: "Le soleil" },
+        { id: "s2", title: "La lune" },
+      ],
+    });
+    mockDevice.mockResolvedValue(supportedV3);
+    mockStoryValidation.mockResolvedValue(blockedValidation);
+    renderLibrary();
+
+    const panel = screen.getByRole("complementary", {
+      name: /panneau de décision/i,
+    });
+    const validation = within(panel).getByRole("region", {
+      name: /validation avant envoi/i,
+    });
+    expect(validation).toHaveTextContent(/vérifier la compatibilité/i);
+
+    // Two selected → still sober (multi-transfer is out of scope), no verdict.
+    await user.click(await screen.findByRole("button", { name: /le soleil/i }));
+    await user.keyboard("{Control>}");
+    await user.click(screen.getByRole("button", { name: /la lune/i }));
+    await user.keyboard("{/Control}");
+
+    expect(validation).toHaveTextContent(/vérifier la compatibilité/i);
+    expect(validation).not.toHaveTextContent(/bloquée/i);
+  });
+
+  it("does not fire validation without a readable device (AC3)", async () => {
+    const user = userEvent.setup();
+    mockGet.mockResolvedValueOnce({ stories: [{ id: "s1", title: "Le soleil" }] });
+    mockDevice.mockResolvedValue({
+      ...supportedV3,
+      supportedOperations: {
+        readLibrary: false,
+        inspectStory: false,
+        importStory: false,
+        writeStory: false,
+      },
+    });
+    renderLibrary();
+
+    await user.click(await screen.findByRole("button", { name: /le soleil/i }));
+    const validation = within(
+      screen.getByRole("complementary", { name: /panneau de décision/i }),
+    ).getByRole("region", { name: /validation avant envoi/i });
+    expect(validation).toHaveTextContent(/vérifier la compatibilité/i);
+    expect(mockStoryValidation).not.toHaveBeenCalled();
+  });
+
+  it("surfaces a validation failure in-context without breaking the local library (orthogonality, AC3)", async () => {
+    const user = userEvent.setup();
+    mockGet.mockResolvedValueOnce({ stories: [{ id: "s1", title: "Le soleil" }] });
+    mockDevice.mockResolvedValue(supportedV3);
+    mockStoryValidation.mockRejectedValue({
+      code: "DEVICE_SCAN_FAILED",
+      message: "L'appareil a changé pendant la validation.",
+      userAction: "Vérifie que la Lunii est branchée puis réessaie.",
+      details: { source: "device_changed" },
+    });
+    renderLibrary();
+
+    await user.click(await screen.findByRole("button", { name: /le soleil/i }));
+    const validation = within(
+      screen.getByRole("complementary", { name: /panneau de décision/i }),
+    ).getByRole("region", { name: /validation avant envoi/i });
+
+    const alert = await within(validation).findByRole("alert");
+    expect(alert).toHaveTextContent(
+      /l'appareil a changé pendant la validation/i,
+    );
+    // Orthogonality: the LOCAL library stays intact and usable.
+    expect(
+      screen.getByRole("button", { name: /le soleil/i }),
+    ).toBeInTheDocument();
+  });
+
+  // --- Pure mapper unit tests (mapStoryValidationToView) ---
+
+  it("mapStoryValidationToView maps a folded idle to the sober none state", () => {
+    expect(mapStoryValidationToView({ kind: "idle" })).toEqual({
+      kind: "none",
+    });
+  });
+
+  it("mapStoryValidationToView forwards the verdict + blockers on ready", () => {
+    const blockers = [
+      {
+        axis: "deviceProfile" as const,
+        cause: "metadataUnsupported" as const,
+        message: "Profil non pris en charge.",
+        userAction: "Consulte le profil de support.",
+      },
+    ];
+    expect(
+      mapStoryValidationToView({
+        kind: "ready",
+        verdict: "blocked",
+        blockers,
+        storyTitle: "X",
+      }),
+    ).toEqual({ kind: "ready", verdict: "blocked", blockers });
+  });
+
+  it("mapStoryValidationToView forwards the error on error", () => {
+    const error = {
+      code: "DEVICE_SCAN_FAILED" as const,
+      message: "L'appareil a changé.",
+      userAction: "Réessaie.",
+      details: null,
+    };
+    expect(mapStoryValidationToView({ kind: "error", error })).toEqual({
+      kind: "error",
+      error,
+    });
   });
 
   // --- Pure mapper unit tests (mapTransferPreviewToComparison) ---

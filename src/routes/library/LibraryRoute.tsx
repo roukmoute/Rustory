@@ -14,6 +14,7 @@ import {
   useDeviceStoryImport,
   useDeviceStoryTitle,
   useOfficialCatalog,
+  useStoryValidation,
   useTransferPreview,
 } from "../../features/device";
 
@@ -36,6 +37,7 @@ import { LibraryFiltersNav } from "../../features/library/components/LibraryFilt
 import {
   LuniiDecisionPanel,
   type LuniiDeviceState,
+  type StoryValidationView,
   type TransferComparisonView,
 } from "../../features/library/components/LuniiDecisionPanel";
 import { StoryCollection } from "../../features/library/components/StoryCollection";
@@ -174,6 +176,19 @@ export function LibraryRoute(): React.JSX.Element {
         : readableDeviceId === null
           ? { kind: "none", reason: "no-device" }
           : mapTransferPreviewToComparison(transferPreview.state);
+
+  // Pre-transfer validation verdict (read-only). Composed in Rust and only
+  // presented. Same gating as the comparison: trigger ONLY for a single local
+  // selection against a readable device; the hook stays idle (no IPC) otherwise.
+  // The verdict is ORTHOGONAL to the send gate — the CTA stays disabled below.
+  const storyValidation = useStoryValidation(
+    singleSelectedStoryId,
+    readableDeviceId,
+  );
+  const validationView: StoryValidationView =
+    singleSelectedStoryId === null || readableDeviceId === null
+      ? { kind: "none" }
+      : mapStoryValidationToView(storyValidation.state);
 
   // Inspection is offered when the supported profile authorizes it.
   // `inspectStory` is ✅ for every supported cohort (V3 included, unlike
@@ -362,6 +377,8 @@ export function LibraryRoute(): React.JSX.Element {
               selectedCount={presentSelectedIds.size}
               comparison={transferComparison}
               onRetryComparison={transferPreview.refresh}
+              validation={validationView}
+              onRetryValidation={storyValidation.refresh}
               onEdit={handleEditSelected}
               onRefreshDevice={device.refresh}
               onConsultSupportProfile={openSupportProfile}
@@ -443,6 +460,32 @@ export function mapTransferPreviewToComparison(
         kind: "ready",
         onDevice: state.onDevice,
         unchangedCount: state.unchangedCount,
+      };
+    case "error":
+      return { kind: "error", error: state.error };
+  }
+}
+
+/**
+ * Pure mapper from the `useStoryValidation` state to the `validation` prop
+ * `LuniiDecisionPanel` expects. Pure so it stays testable in isolation. Only
+ * reached when a single story is selected against a readable device; `idle`
+ * therefore means the live re-read folded away — surfaced as the sober `none`
+ * state, never an error.
+ */
+export function mapStoryValidationToView(
+  state: ReturnType<typeof useStoryValidation>["state"],
+): StoryValidationView {
+  switch (state.kind) {
+    case "idle":
+      return { kind: "none" };
+    case "loading":
+      return { kind: "loading" };
+    case "ready":
+      return {
+        kind: "ready",
+        verdict: state.verdict,
+        blockers: state.blockers,
       };
     case "error":
       return { kind: "error", error: state.error };

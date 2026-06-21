@@ -19,3 +19,6 @@ mod device_import;
 
 #[path = "contracts/transfer_preview.rs"]
 mod transfer_preview;
+
+#[path = "contracts/story_validation.rs"]
+mod story_validation;

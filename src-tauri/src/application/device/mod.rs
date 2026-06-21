@@ -10,6 +10,7 @@
 pub mod catalog;
 pub mod import;
 pub mod library;
+pub mod preflight;
 pub mod title;
 pub mod transfer;
 

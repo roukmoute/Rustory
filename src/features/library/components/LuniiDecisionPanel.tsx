@@ -3,6 +3,10 @@ import { useId } from "react";
 
 import type { AppError } from "../../../shared/errors/app-error";
 import type { SupportedOperationsDto } from "../../../shared/ipc-contracts/device";
+import type {
+  ValidationBlocker,
+  ValidationVerdict,
+} from "../../../shared/ipc-contracts/story-validation";
 import {
   Button,
   ProgressIndicator,
@@ -39,6 +43,19 @@ export type TransferComparisonView =
   | { kind: "ready"; onDevice: boolean; unchangedCount: number }
   | { kind: "error"; error: AppError };
 
+/**
+ * Read-only pre-transfer validation verdict, composed by Rust and only
+ * PRESENTED here (AC1/AC2/AC3). `none` is the sober "nothing to validate yet"
+ * state; `ready` carries the verdict + the closed `axis × cause` blockers the
+ * panel groups by axis (canonical validity vs Lunii compatibility). The verdict
+ * is ORTHOGONAL to the send gate — the CTA stays disabled regardless.
+ */
+export type StoryValidationView =
+  | { kind: "none" }
+  | { kind: "loading" }
+  | { kind: "ready"; verdict: ValidationVerdict; blockers: ValidationBlocker[] }
+  | { kind: "error"; error: AppError };
+
 export interface LuniiDecisionPanelProps {
   /** Authoritative device state derived from `useConnectedLunii`. */
   deviceState?: LuniiDeviceState;
@@ -66,6 +83,15 @@ export interface LuniiDecisionPanelProps {
    *  `useTransferPreview.refresh`. Makes the "Réessaie la comparaison" copy
    *  actionable. When omitted, the error shows its text without a button. */
   onRetryComparison?: () => void;
+  /** Read-only pre-transfer validation verdict. When omitted, the validation
+   *  section is not rendered at all (used by tests/storybook that do not
+   *  exercise it). When provided, it renders between the comparison and the
+   *  device regions — never as the panel's visual center. */
+  validation?: StoryValidationView;
+  /** Retry trigger for a failed validation — wired by the route to
+   *  `useStoryValidation.refresh`. Makes the "Réessaie la validation" copy
+   *  actionable. When omitted, the error shows its text without a button. */
+  onRetryValidation?: () => void;
   /** Required when the panel may expose an active Éditer CTA. */
   onEdit: () => void;
   /** Optional refresh trigger — wired by the route to
@@ -99,6 +125,8 @@ export function LuniiDecisionPanel({
   selectedCount = 0,
   comparison,
   onRetryComparison,
+  validation,
+  onRetryValidation,
   onEdit,
   onRefreshDevice,
   onConsultSupportProfile,
@@ -166,6 +194,16 @@ export function LuniiDecisionPanel({
           aria-live="polite"
         >
           {renderComparison(comparison, onRetryComparison)}
+        </section>
+      )}
+
+      {validation && (
+        <section
+          className="lunii-panel__validation"
+          aria-label="Validation avant envoi"
+          aria-live="polite"
+        >
+          {renderValidation(validation, onRetryValidation)}
         </section>
       )}
 
@@ -265,6 +303,110 @@ function renderComparison(
           )}
         </div>
       );
+  }
+}
+
+function renderValidation(
+  view: StoryValidationView,
+  onRetryValidation?: () => void,
+): React.JSX.Element {
+  switch (view.kind) {
+    case "none":
+      // Sober "nothing to validate yet" — the comparison section above already
+      // tells the user which gesture (select / plug) is missing.
+      return (
+        <p className="lunii-panel__reason">
+          Sélectionne une histoire locale et branche une Lunii lisible pour
+          vérifier la compatibilité avant l'envoi.
+        </p>
+      );
+    case "loading":
+      return (
+        <ProgressIndicator mode="indeterminate" label="Validation en cours…" />
+      );
+    case "ready":
+      return renderVerdict(view.verdict, view.blockers);
+    case "error":
+      // Critical feedback IN CONTEXT (role="alert"), never a toast (UX-DR15).
+      // The "Réessaie la validation" copy is made actionable by a retry CTA.
+      return (
+        <div role="alert" className="lunii-panel__validation-error">
+          <p>{view.error.message}</p>
+          {view.error.userAction && <p>{view.error.userAction}</p>}
+          {onRetryValidation && (
+            <Button
+              variant="quiet"
+              onClick={onRetryValidation}
+              aria-label="Réessayer la validation"
+            >
+              Réessayer
+            </Button>
+          )}
+        </div>
+      );
+  }
+}
+
+function renderVerdict(
+  verdict: ValidationVerdict,
+  blockers: ValidationBlocker[],
+): React.JSX.Element {
+  // AC1: the two axes are kept visible side by side — canonical validity
+  // (structure / media / filesystem) vs Lunii compatibility (deviceProfile).
+  const canonical = blockers.filter((b) => b.axis !== "deviceProfile");
+  const lunii = blockers.filter((b) => b.axis === "deviceProfile");
+  const { tone, label } = formatVerdictChip(verdict);
+  return (
+    <>
+      <StateChip tone={tone} label={label} />
+      {blockers.length === 0 ? (
+        <p className="lunii-panel__reason">
+          Aucun blocage détecté pour l'instant.
+        </p>
+      ) : (
+        <>
+          {canonical.length > 0 &&
+            renderBlockerGroup("Validité Rustory", canonical)}
+          {lunii.length > 0 &&
+            renderBlockerGroup("Compatibilité Lunii", lunii)}
+        </>
+      )}
+    </>
+  );
+}
+
+function renderBlockerGroup(
+  heading: string,
+  blockers: ValidationBlocker[],
+): React.JSX.Element {
+  // An `h3` WITHOUT a landmark region: the surrounding `<section>` already
+  // carries the accessible name; nested regions would over-fragment the panel.
+  return (
+    <div className="lunii-panel__validation-group">
+      <h3 className="lunii-panel__validation-heading">{heading}</h3>
+      <ul className="lunii-panel__blockers">
+        {blockers.map((b) => (
+          <li key={`${b.axis}:${b.cause}`} className="lunii-panel__blocker">
+            <p className="lunii-panel__blocker-message">{b.message}</p>
+            <p className="lunii-panel__reason">{b.userAction}</p>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+function formatVerdictChip(verdict: ValidationVerdict): {
+  tone: "success" | "warning" | "error";
+  label: string;
+} {
+  switch (verdict) {
+    case "presumedTransferable":
+      return { tone: "success", label: "Présumée transférable" };
+    case "toFix":
+      return { tone: "warning", label: "À corriger" };
+    case "blocked":
+      return { tone: "error", label: "Bloquée" };
   }
 }
 

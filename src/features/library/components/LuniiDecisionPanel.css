@@ -14,6 +14,7 @@
 
 .lunii-panel__selection,
 .lunii-panel__comparison,
+.lunii-panel__validation,
 .lunii-panel__device {
   display: flex;
   flex-direction: column;
@@ -26,12 +27,47 @@
   color: var(--color-text-primary);
 }
 
-.lunii-panel__comparison-error {
+.lunii-panel__comparison-error,
+.lunii-panel__validation-error {
   display: flex;
   flex-direction: column;
   gap: var(--space-1);
   font-size: var(--font-size-meta);
   color: var(--color-text-muted);
+}
+
+.lunii-panel__validation-group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.lunii-panel__validation-heading {
+  margin: 0;
+  font-size: var(--font-size-meta);
+  font-weight: var(--font-weight-semibold);
+  color: var(--color-text-primary);
+}
+
+.lunii-panel__blockers {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.lunii-panel__blocker {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.lunii-panel__blocker-message {
+  margin: 0;
+  font-size: var(--font-size-body);
+  color: var(--color-text-primary);
 }
 
 .lunii-panel__reason {

@@ -80,6 +80,7 @@ The UI should favor these labels when they are user-visible:
 | Recovery banner — last value committed to disk | `Dernier état enregistré` |
 | Validation/preflight is running | `en vérification` |
 | Action is prevented by a real blocking issue | `bloquée` |
+| A fixable blocking issue was detected (repairable before send) | `à corriger` |
 | Validation says the story may be sent | `présumée transférable` |
 | Preparation is running | `en préparation` |
 | Write/send is running | `en transfert` |

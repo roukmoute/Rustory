@@ -41,3 +41,6 @@ mod device_titles;
 
 #[path = "integration/transfer_preview.rs"]
 mod transfer_preview;
+
+#[path = "integration/story_validation.rs"]
+mod story_validation;

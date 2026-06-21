@@ -6,6 +6,7 @@ pub mod device_title;
 pub mod import_export;
 pub mod library;
 pub mod story;
+pub mod story_validation;
 pub mod transfer_preview;
 
 pub use device::{
@@ -21,6 +22,10 @@ pub use library::{LibraryOverviewDto, StoryCardDto};
 pub use story::{
     ApplyRecoveryInputDto, CreateStoryInputDto, DiscardDraftInputDto, RecordDraftInputDto,
     RecoverableDraftDto, StoryDetailDto, UpdateStoryInputDto, UpdateStoryOutputDto,
+};
+pub use story_validation::{
+    BlockerAxisDto, BlockerCauseDto, BlockerDto, ReadStoryValidationInputDto, StoryValidationDto,
+    StoryValidationStoryDto, VerdictDto,
 };
 pub use transfer_preview::{
     ReadTransferPreviewInputDto, TransferPreviewDto, TransferPreviewStoryDto,

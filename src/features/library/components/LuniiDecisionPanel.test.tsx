@@ -7,6 +7,19 @@ import { LuniiDecisionPanel } from "./LuniiDecisionPanel";
 describe("<LuniiDecisionPanel />", () => {
   const noop = () => {};
 
+  const checksumBlocker = {
+    axis: "structure" as const,
+    cause: "checksumMismatch" as const,
+    message: "Les données locales de l'histoire ont changé.",
+    userAction: "Restaure une sauvegarde saine de l'histoire.",
+  };
+  const profileBlocker = {
+    axis: "deviceProfile" as const,
+    cause: "metadataUnsupported" as const,
+    message: "Le profil de la Lunii connectée n'est pas pris en charge.",
+    userAction: "Consulte le profil de support pour voir les Lunii compatibles.",
+  };
+
   it("defaults to deviceState=absent and announces 'Aucun appareil connecté'", () => {
     render(<LuniiDecisionPanel onEdit={noop} />);
     expect(
@@ -507,5 +520,189 @@ describe("<LuniiDecisionPanel />", () => {
     // The loading→ready verdict must live in a live region (UX-DR21/UX-DR32).
     expect(region).toHaveAttribute("aria-live", "polite");
     expect(region).toHaveTextContent(/nouvelle sur l'appareil/i);
+  });
+
+  // --- Pre-transfer validation verdict (AC1, AC2, AC3) ---
+
+  it("does not render the validation section when no validation prop is given", () => {
+    render(<LuniiDecisionPanel deviceState="idle" onEdit={noop} />);
+    expect(
+      screen.queryByRole("region", { name: /validation avant envoi/i }),
+    ).toBeNull();
+  });
+
+  it("renders a sober hint for the validation 'none' state", () => {
+    render(
+      <LuniiDecisionPanel
+        deviceState="idle"
+        validation={{ kind: "none" }}
+        onEdit={noop}
+      />,
+    );
+    const region = screen.getByRole("region", {
+      name: /validation avant envoi/i,
+    });
+    expect(region).toHaveTextContent(/vérifier la compatibilité avant l'envoi/i);
+  });
+
+  it("renders a progressbar while the validation loads", () => {
+    render(
+      <LuniiDecisionPanel
+        deviceState="idle"
+        validation={{ kind: "loading" }}
+        onEdit={noop}
+      />,
+    );
+    const region = screen.getByRole("region", {
+      name: /validation avant envoi/i,
+    });
+    expect(within(region).getByRole("progressbar")).toBeInTheDocument();
+    expect(region).toHaveTextContent(/validation en cours/i);
+  });
+
+  it("renders the 'présumée transférable' verdict with a textual (non-color) chip", () => {
+    render(
+      <LuniiDecisionPanel
+        deviceState="idle"
+        validation={{
+          kind: "ready",
+          verdict: "presumedTransferable",
+          blockers: [],
+        }}
+        onEdit={noop}
+      />,
+    );
+    const region = screen.getByRole("region", {
+      name: /validation avant envoi/i,
+    });
+    // The verdict is conveyed in words, never by color alone (UX-DR32).
+    expect(region).toHaveTextContent(/présumée transférable/i);
+    expect(region).toHaveTextContent(/aucun blocage/i);
+  });
+
+  it("renders the 'à corriger' verdict and the fixable blocker's next gesture (AC2)", () => {
+    render(
+      <LuniiDecisionPanel
+        deviceState="idle"
+        validation={{
+          kind: "ready",
+          verdict: "toFix",
+          blockers: [
+            {
+              axis: "structure",
+              cause: "titleInvalid",
+              message: "Le titre enregistré n'est pas valide.",
+              userAction: "Renomme l'histoire avec un titre valide.",
+            },
+          ],
+        }}
+        onEdit={noop}
+      />,
+    );
+    const region = screen.getByRole("region", {
+      name: /validation avant envoi/i,
+    });
+    expect(region).toHaveTextContent(/à corriger/i);
+    expect(region).toHaveTextContent(/le titre enregistré n'est pas valide/i);
+    expect(region).toHaveTextContent(/renomme l'histoire/i);
+  });
+
+  it("groups blockers by axis (canonical vs Lunii) for a 'bloquée' verdict (AC1)", () => {
+    render(
+      <LuniiDecisionPanel
+        deviceState="idle"
+        validation={{
+          kind: "ready",
+          verdict: "blocked",
+          blockers: [checksumBlocker, profileBlocker],
+        }}
+        onEdit={noop}
+      />,
+    );
+    const region = screen.getByRole("region", {
+      name: /validation avant envoi/i,
+    });
+    expect(region).toHaveTextContent(/bloquée/i);
+    expect(
+      within(region).getByRole("heading", { name: /validité rustory/i }),
+    ).toBeInTheDocument();
+    expect(
+      within(region).getByRole("heading", { name: /compatibilité lunii/i }),
+    ).toBeInTheDocument();
+    // Each blocker's userAction is rendered verbatim (AC2).
+    expect(region).toHaveTextContent(/restaure une sauvegarde saine/i);
+    expect(region).toHaveTextContent(/consulte le profil de support/i);
+  });
+
+  it("renders a validation error in-context (role=alert) with an actionable retry, never a toast", async () => {
+    const user = userEvent.setup();
+    const onRetryValidation = vi.fn();
+    render(
+      <LuniiDecisionPanel
+        deviceState="idle"
+        validation={{
+          kind: "error",
+          error: {
+            code: "DEVICE_SCAN_FAILED",
+            message: "L'appareil a changé pendant la validation.",
+            userAction: "Vérifie que la Lunii est branchée puis réessaie.",
+            details: null,
+          },
+        }}
+        onRetryValidation={onRetryValidation}
+        onEdit={noop}
+      />,
+    );
+    const region = screen.getByRole("region", {
+      name: /validation avant envoi/i,
+    });
+    const alert = within(region).getByRole("alert");
+    expect(alert).toHaveTextContent(
+      /l'appareil a changé pendant la validation/i,
+    );
+    const retry = within(region).getByRole("button", {
+      name: /réessayer la validation/i,
+    });
+    await user.click(retry);
+    expect(onRetryValidation).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the send CTA disabled even when the verdict is présumée transférable (AC3/FR34)", () => {
+    render(
+      <LuniiDecisionPanel
+        deviceState="idle"
+        validation={{
+          kind: "ready",
+          verdict: "presumedTransferable",
+          blockers: [],
+        }}
+        onEdit={noop}
+      />,
+    );
+    const cta = screen.getByRole("button", { name: /envoyer vers la lunii/i });
+    expect(cta).toHaveAttribute("aria-disabled", "true");
+    const reasonId = cta.getAttribute("aria-describedby");
+    expect(document.getElementById(reasonId as string)).toHaveTextContent(
+      /transfert pas encore activé/i,
+    );
+  });
+
+  it("announces the verdict in a polite live region", () => {
+    render(
+      <LuniiDecisionPanel
+        deviceState="idle"
+        validation={{
+          kind: "ready",
+          verdict: "blocked",
+          blockers: [checksumBlocker],
+        }}
+        onEdit={noop}
+      />,
+    );
+    const region = screen.getByRole("region", {
+      name: /validation avant envoi/i,
+    });
+    expect(region).toHaveAttribute("aria-live", "polite");
+    expect(region).toHaveTextContent(/bloquée/i);
   });
 });
