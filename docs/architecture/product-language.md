@@ -59,6 +59,9 @@ It exists to keep the same product concepts named the same way across:
 | Story is prepared (indicator) | `Préparée` | Discreet marker that the artifacts were assembled and are fresh — never implies the transfer is enabled | `Prête`, `prête à transférer`, `prête à l'envoi` |
 | Send operation | `transfert` / `Envoyer vers la Lunii` | User-visible act of sending a story to the device | `deploy`, `sync job`, `push` |
 | Post-send confirmation | `vérification` | Explicit check that confirms what really happened on device | `post-check`, `validation finale` when it means something else |
+| Write interrupted after the device was touched | `transfert incomplet` | The write STARTED then was interrupted; the device may hold a partial copy and a relaunch (full cycle) restores a safe state. Distinct from `état partiel` (a verification verdict) and from `Contenu incomplet` (a device pack with a missing payload) | `incomplete`, `partial`, `corrupt`, `staging` |
+| Inspect the in-flight transfer detail (action) | `Consulter le détail` | Non-destructive disclosure of the running transfer's phase / progress, in-context (never a modal); distinct from any cancel (out of MVP scope) | `détails`, `debug`, `logs` |
+| Abandon a failed / incomplete transfer (action) | `Abandonner` | Returns to a stable library after a failed / incomplete transfer; the local draft stays intact | `annuler`, `cancel`, `supprimer` |
 | Supported local input/output | `artefact local supporté` | Project, archive, or local file explicitly supported by Rustory | `payload`, `package`, `blob` |
 | Availability policy | `profil de support` | Official support statement for devices and local artifacts | `matrix` in user-facing copy |
 
@@ -92,8 +95,11 @@ The UI should favor these labels when they are user-visible:
 | Write/send is running | `en transfert` |
 | Write done, not yet verified (NON-success terminal) | `écriture effectuée — vérification à venir` |
 | End result was explicitly confirmed | `transférée et vérifiée` |
-| Failure can be retried safely | `échec récupérable` |
-| Result is incomplete and not a success | `état partiel` |
+| Failure can be retried safely (device left untouched) | `échec récupérable` |
+| Write started then interrupted; the device may hold a partial copy and a relaunch restores a safe state | `transfert incomplet` |
+| Result is incomplete and not a success (a verification verdict) | `état partiel` |
+| Inspect the in-flight transfer detail (secondary, non-destructive) | `Consulter le détail` |
+| Abandon a failed / incomplete transfer (local draft intact) | `Abandonner` |
 | No device is connected | `Aucun appareil connecté` |
 | Supported device detected | `Appareil prêt — {famille} {cohort}` |
 | Detected device but profile not allow-listed | `Profil non supporté` |
@@ -159,7 +165,7 @@ These terms may exist in code or technical documentation, but should not be prim
 
 ## Technical Mapping Rule
 
-- Code and IPC contracts may use stable internal identifiers such as `jobId`, `transferring`, `write_story`, `verified`, or `retryable`.
+- Code and IPC contracts may use stable internal identifiers such as `jobId`, `transferring`, `write_story`, `verified`, `retryable`, `incomplete`, `completeness`, `progress`, `stage`, or `reached_device_mutation`.
 - User-facing UI must map those identifiers to the preferred French labels defined here and in [ui-states.md](./ui-states.md).
 - Logs may keep technical codes, but any surfaced message must still respect this glossary.
 

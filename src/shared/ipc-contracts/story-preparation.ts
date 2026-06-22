@@ -92,6 +92,15 @@ export interface JobFailedEvent {
   errorCode: string;
   errorMessage: string;
   userAction: string;
+  /** Transfer-only (AC2): whether the device was already mutated when the write
+   *  failed — `"failed"` (device left untouched → `échec récupérable`) vs
+   *  `"incomplete"` (the write had started → `transfert incomplet`). Absent for
+   *  preparation jobs, which have no device-mutation notion. */
+  completeness?: "failed" | "incomplete";
+  /** Transfer-only (AC3): the structured failure cause (camelCase) so the UI keeps
+   *  "cause + issue + next action" in context, not only the message. Absent for
+   *  preparation and the non-classifiable defensive terminal. */
+  cause?: string;
 }
 
 const CAUSES: ReadonlySet<string> = new Set([
@@ -152,7 +161,11 @@ const ALLOWED_FAILED_KEYS: ReadonlySet<string> = new Set([
   "errorCode",
   "errorMessage",
   "userAction",
+  "completeness",
+  "cause",
 ]);
+
+const COMPLETENESS: ReadonlySet<string> = new Set(["failed", "incomplete"]);
 
 function hasOnlyAllowedKeys(
   value: Record<string, unknown>,
@@ -285,6 +298,16 @@ export function isJobFailedEvent(value: unknown): value is JobFailedEvent {
   const c = value as Record<string, unknown>;
   if (!hasOnlyAllowedKeys(c, ALLOWED_FAILED_KEYS)) return false;
   if (!isJobBaseShape(c)) return false;
+  // `completeness` is optional (transfer-only); when present it must be a known
+  // variant.
+  if (c.completeness !== undefined && !COMPLETENESS.has(c.completeness as string)) {
+    return false;
+  }
+  // `cause` is optional (transfer-only); when present it must be a non-empty
+  // string (the closed transfer cause set lives in the transfer contract).
+  if (c.cause !== undefined && !isNonEmptyString(c.cause)) {
+    return false;
+  }
   return (
     isNonEmptyString(c.errorCode) &&
     isNonEmptyString(c.errorMessage) &&

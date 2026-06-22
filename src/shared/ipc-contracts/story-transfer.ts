@@ -53,6 +53,12 @@ export type TransferStateDto =
       cause: TransferCause;
       message: string;
       userAction: string;
+      /** Whether the device was already mutated (AC2): `"failed"` = untouched
+       *  (→ `échec récupérable`), `"incomplete"` = write had started (→ `transfert
+       *  incomplet`). Optional: a passive `read_transfer_state` only returns
+       *  `idle` / `transferred`, so the issue is normally carried by the
+       *  `job:failed` event, not this DTO. */
+      completeness?: "failed" | "incomplete";
     };
 
 /** Acceptance returned by `start_transfer_story`. */
@@ -83,8 +89,13 @@ const ALLOWED_KEYS: ReadonlyMap<string, ReadonlySet<string>> = new Map([
     new Set(["kind", "deviceIdentifier", "story", "progress"]),
   ],
   ["transferred", new Set(["kind", "deviceIdentifier", "story"])],
-  ["retryable", new Set(["kind", "story", "cause", "message", "userAction"])],
+  [
+    "retryable",
+    new Set(["kind", "story", "cause", "message", "userAction", "completeness"]),
+  ],
 ]);
+
+const COMPLETENESS: ReadonlySet<string> = new Set(["failed", "incomplete"]);
 
 const ALLOWED_STORY_KEYS: ReadonlySet<string> = new Set(["id", "title"]);
 
@@ -152,6 +163,12 @@ export function isTransferStateDto(value: unknown): value is TransferStateDto {
       if (typeof c.cause !== "string" || !CAUSES.has(c.cause)) return false;
       if (!isNonEmptyString(c.message)) return false;
       if (!isNonEmptyString(c.userAction)) return false;
+      if (
+        c.completeness !== undefined &&
+        !COMPLETENESS.has(c.completeness as string)
+      ) {
+        return false;
+      }
       return true;
     default:
       return false;

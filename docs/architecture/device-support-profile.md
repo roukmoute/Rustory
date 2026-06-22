@@ -29,6 +29,20 @@ realistic MVP write is the **round-trip of an imported story** (re-writing the
 opaque pack bytes back to the device, zero decryption); native stories have no
 device-format pack and are not transferable until a media transformer exists.
 
+The writer reports **progress** (bytes / files copied) during the measurable
+content-copy step so the UI can show an honest fraction — a named phase otherwise,
+never a fabricated value, never 100 % before the terminal. It also signals whether
+the **device mutation has started** (`reached_device_mutation`): the staging copy
+on the device volume is pre-mutation (the device is untouched), while the atomic
+`rename` promotion to `.content/<SHORT_ID>`, the `fsync` of the promoted tree, and
+the `.pi` index update are post-mutation. From this the flow derives the two honest
+interruption terminals — **`échoué`** (untouched → recoverable) vs **`incomplet`**
+(mutation started → the device may hold a partial copy). The invariant stays
+**files first, index last** (a pack is never indexed without its content present);
+there is **no resume** (a relaunch is a full cycle, and the writer
+proves-or-refuses an existing target pack so it converges safely); orphan staging
+directories (`.rustory-staging-*`) are swept best-effort.
+
 ## Detection Strategy
 
 Rustory recognizes a Lunii in two stages:

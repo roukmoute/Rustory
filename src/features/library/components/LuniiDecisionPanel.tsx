@@ -92,9 +92,10 @@ export type PreparationView =
 export type TransferView =
   | { kind: "unavailable"; reason: string }
   | { kind: "ready" }
-  | { kind: "transferring"; progress: number | null }
+  | { kind: "transferring"; progress: number | null; phase: string | null }
   | { kind: "transferred" }
   | { kind: "retryable"; message: string; userAction: string }
+  | { kind: "incomplete"; message: string; userAction: string }
   | { kind: "error"; error: AppError };
 
 export interface LuniiDecisionPanelProps {
@@ -156,9 +157,13 @@ export interface LuniiDecisionPanelProps {
    *  the active `Envoyer vers la Lunii` CTA (the `ready` view). */
   onSend?: () => void;
   /** Re-run a failed transfer — wired by the route to `useStoryTransfer.retry`.
-   *  Drives the `Relancer` / `Réessayer` action in the `retryable` / `error`
-   *  views. */
+   *  Drives the `Relancer` / `Réessayer` action in the `retryable` / `incomplete`
+   *  / `error` views. */
   onRetryTransfer?: () => void;
+  /** Abandon a failed / incomplete transfer — wired by the route to
+   *  `useStoryTransfer.dismiss`. Drives the `Abandonner` action; the local draft
+   *  is never touched (AC3). */
+  onDismissTransfer?: () => void;
   /** Required when the panel may expose an active Éditer CTA. */
   onEdit: () => void;
   /** Optional refresh trigger — wired by the route to
@@ -200,6 +205,7 @@ export function LuniiDecisionPanel({
   transfer,
   onSend,
   onRetryTransfer,
+  onDismissTransfer,
   onEdit,
   onRefreshDevice,
   onConsultSupportProfile,
@@ -303,7 +309,13 @@ export function LuniiDecisionPanel({
           aria-label="Transfert"
           aria-live="polite"
         >
-          {renderTransfer(transfer, transferReasonId, onSend, onRetryTransfer)}
+          {renderTransfer(
+            transfer,
+            transferReasonId,
+            onSend,
+            onRetryTransfer,
+            onDismissTransfer,
+          )}
         </section>
       )}
 
@@ -581,6 +593,7 @@ function renderTransfer(
   reasonId: string,
   onSend?: () => void,
   onRetryTransfer?: () => void,
+  onDismissTransfer?: () => void,
 ): React.JSX.Element {
   switch (view.kind) {
     case "unavailable":
@@ -600,18 +613,32 @@ function renderTransfer(
       // Writable cohort + a `Préparée` story + a clear target: the write can run.
       // No confirmation modal (AC1) — the context is unambiguous.
       return <Button onClick={onSend}>Envoyer vers la Lunii</Button>;
-    case "transferring":
-      // Honest progress: the phase is named ("en transfert"); a determinate bar
-      // shows ONLY when a reliable fraction is known, never a fake percentage.
-      // The 3.4 scope is a single calm phase (the rich phase split is later).
+    case "transferring": {
+      // Honest progress (AC1): the phase is NAMED (preflight gate vs write); a
+      // determinate bar shows ONLY when a reliable fraction is known, never a fake
+      // percentage, and is CAPPED at 99 % — 100 % is reserved for the terminal
+      // (F6). The secondary action is a NON-destructive "Consulter le détail"
+      // disclosure naming the real phase (F5); explicit cancel is out of scope.
+      const phaseLabel =
+        view.phase === "preflight"
+          ? "vérification de l'appareil"
+          : view.phase === "transfer"
+            ? "envoi en cours"
+            : // Before the 1st job:progress (optimistic window, phase unknown) name a
+              // NEUTRAL phase — never the wrong "envoi en cours" (C2/AC1).
+              "préparation de l'envoi…";
+      const percent =
+        view.progress != null
+          ? Math.min(99, Math.round(view.progress * 100))
+          : null;
       return (
         <>
           <StateChip tone="neutral" label="en transfert" />
-          {view.progress != null ? (
+          {percent != null ? (
             <ProgressIndicator
               mode="determinate"
               label="Transfert en cours…"
-              value={Math.round(view.progress * 100)}
+              value={percent}
             />
           ) : (
             <ProgressIndicator
@@ -619,8 +646,18 @@ function renderTransfer(
               label="Transfert en cours…"
             />
           )}
+          <details className="lunii-panel__transfer-detail">
+            <summary>Consulter le détail</summary>
+            <p className="lunii-panel__reason">
+              Phase : {phaseLabel}.{" "}
+              {percent != null
+                ? `Avancement : ${percent} %.`
+                : "Avancement : en cours."}
+            </p>
+          </details>
         </>
       );
+    }
     case "transferred":
       // NON-SUCCESS terminal (AC3): the bytes were written, nothing is verified
       // yet. NEVER "transférée et vérifiée" / "état partiel" (a later flow).
@@ -633,23 +670,31 @@ function renderTransfer(
         </div>
       );
     case "retryable":
-      // Recoverable failure IN CONTEXT (role="alert"), never a toast (UX-DR15).
-      // The canonical `échec récupérable` chip is shown (glyph + text), and a
-      // Relancer action re-runs the write. The local draft is never mutated.
+      // `échoué` (AC2): the device was left UNTOUCHED. Recoverable failure IN
+      // CONTEXT (role="alert"), never a toast (UX-DR15). Canonical `échec
+      // récupérable` chip (glyph + text). Both recovery gestures: Relancer (full
+      // cycle) and Abandonner (back to a stable library, draft intact — AC3).
       return (
         <div role="alert" className="lunii-panel__transfer-error">
           <StateChip tone="error" label="échec récupérable" />
           <p>{view.message}</p>
           <p className="lunii-panel__reason">{view.userAction}</p>
-          {onRetryTransfer && (
-            <Button
-              variant="quiet"
-              onClick={onRetryTransfer}
-              aria-label="Relancer le transfert"
-            >
-              Relancer
-            </Button>
-          )}
+          {renderTransferRecovery(onRetryTransfer, onDismissTransfer)}
+        </div>
+      );
+    case "incomplete":
+      // `incomplet` (AC2): the write STARTED then was interrupted (device
+      // mutated) — the Lunii may hold a partial copy. DISTINCT label `transfert
+      // incomplet` with its own glyph (tone ≠ `échoué`, never color-only) and an
+      // honest message; a relance (full cycle) restores a safe state. Same two
+      // gestures as `échoué`. NEVER a success ("écriture effectuée" stays for the
+      // clean terminal) nor `état partiel` (a later flow).
+      return (
+        <div role="alert" className="lunii-panel__transfer-error">
+          <StateChip tone="warning" label="transfert incomplet" />
+          <p>{view.message}</p>
+          <p className="lunii-panel__reason">{view.userAction}</p>
+          {renderTransferRecovery(onRetryTransfer, onDismissTransfer)}
         </div>
       );
     case "error":
@@ -670,6 +715,42 @@ function renderTransfer(
         </div>
       );
   }
+}
+
+/** Recovery gestures shared by the `échoué` (`retryable`) and `incomplet`
+ *  terminals (AC3): Relancer re-runs a FULL cycle (never a hidden partial
+ *  resume), Abandonner returns to a stable library with the local draft intact. */
+function renderTransferRecovery(
+  onRetryTransfer?: () => void,
+  onDismissTransfer?: () => void,
+): React.JSX.Element {
+  return (
+    <>
+      {onRetryTransfer ? (
+        <Button
+          variant="quiet"
+          onClick={onRetryTransfer}
+          aria-label="Relancer le transfert"
+        >
+          Relancer
+        </Button>
+      ) : (
+        // The relaunch needs a writable Lunii; an incomplet / interrupted terminal
+        // typically follows a device removal, so the route withholds onRetry. Give
+        // an HONEST next gesture instead of an inert button (C1).
+        <p className="lunii-panel__reason">Rebranche la Lunii pour relancer.</p>
+      )}
+      {onDismissTransfer && (
+        <Button
+          variant="quiet"
+          onClick={onDismissTransfer}
+          aria-label="Abandonner le transfert"
+        >
+          Abandonner
+        </Button>
+      )}
+    </>
+  );
 }
 
 function renderVerdict(

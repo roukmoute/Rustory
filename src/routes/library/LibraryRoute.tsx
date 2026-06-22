@@ -290,6 +290,8 @@ export function LibraryRoute(): React.JSX.Element {
       map.set(tx.storyId, "transferring");
     } else if (tx.kind === "retryable") {
       map.set(tx.storyId, "retryable");
+    } else if (tx.kind === "incomplete") {
+      map.set(tx.storyId, "incomplete");
     }
     return map;
   }, [storyPreparation.state, storyTransfer.state]);
@@ -489,7 +491,10 @@ export function LibraryRoute(): React.JSX.Element {
               onRetryPreparation={storyPreparation.retry}
               transfer={transferView}
               onSend={handleSendSelected}
-              onRetryTransfer={storyTransfer.retry}
+              onRetryTransfer={
+                writableDeviceId !== null ? handleSendSelected : undefined
+              }
+              onDismissTransfer={storyTransfer.dismiss}
               onEdit={handleEditSelected}
               onRefreshDevice={device.refresh}
               onConsultSupportProfile={openSupportProfile}
@@ -706,15 +711,29 @@ export function mapTransferView(
   prepared: boolean,
   transferable: boolean,
 ): TransferView {
+  // The active / failure terminal is shown in the panel ONLY for the SELECTED
+  // target story. The StoryCard badge is the persistent anchor across selection
+  // changes; the full panel context (alert + Relancer/Abandonner) is restored by
+  // re-selecting the faulty story (C5/T7).
   if (state.kind !== "idle" && state.storyId === selectedStoryId) {
     switch (state.kind) {
       case "transferring":
-        return { kind: "transferring", progress: state.progress };
+        return {
+          kind: "transferring",
+          progress: state.progress,
+          phase: state.phase,
+        };
       case "transferred":
         return { kind: "transferred" };
       case "retryable":
         return {
           kind: "retryable",
+          message: state.message,
+          userAction: state.userAction,
+        };
+      case "incomplete":
+        return {
+          kind: "incomplete",
           message: state.message,
           userAction: state.userAction,
         };

@@ -39,10 +39,14 @@ pub enum Event {
     /// vérification à venir").
     TransferCompleted { story_ref: String, elapsed_ms: u64 },
     /// A transfer job reached a `retryable` / transport failure. `cause` is the
-    /// stable diagnostic tag of [`TransferFailureCause`](crate::domain::transfer::TransferFailureCause).
+    /// stable diagnostic tag of [`TransferFailureCause`](crate::domain::transfer::TransferFailureCause);
+    /// `completeness` is `"failed"` (device intact) or `"incomplete"` (a possible
+    /// partial copy) — the stable tag of
+    /// [`TransferCompleteness`](crate::domain::transfer::TransferCompleteness).
     TransferFailed {
         story_ref: String,
         cause: &'static str,
+        completeness: &'static str,
         elapsed_ms: u64,
     },
 }
@@ -161,11 +165,13 @@ mod tests {
         let v = serde_json::to_value(Event::TransferFailed {
             story_ref: "abcd".into(),
             cause: "write_not_authorized",
+            completeness: "failed",
             elapsed_ms: 3,
         })
         .expect("ser");
         assert_eq!(v["category"], "transfer_failed");
         assert_eq!(v["cause"], "write_not_authorized");
+        assert_eq!(v["completeness"], "failed");
     }
 
     #[test]

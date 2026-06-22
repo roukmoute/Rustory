@@ -78,6 +78,18 @@ pub struct JobFailedEvent {
     pub error_code: String,
     pub error_message: String,
     pub user_action: String,
+    /// Transfer-only: `"failed"` (the device stayed intact) vs `"incomplete"` (a
+    /// possible partial copy on the device). ABSENT for flows without the
+    /// distinction (preparation) — the UI then renders a plain recoverable
+    /// failure. The structured truth still comes from the authoritative re-read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub completeness: Option<String>,
+    /// Transfer-only: the closed structured cause (camelCase, matching
+    /// `TransferCauseDto`) so the UI keeps "cause + issue + next action" in context
+    /// (AC3) instead of only the message. ABSENT for preparation and for the
+    /// non-classifiable defensive terminal.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cause: Option<String>,
 }
 
 #[cfg(test)]
@@ -136,12 +148,38 @@ mod tests {
             error_code: PREPARATION_FAILED_CODE.into(),
             error_message: "Préparation interrompue.".into(),
             user_action: "Relance la préparation.".into(),
+            completeness: None,
+            cause: None,
         };
         let v = serde_json::to_value(&ev).expect("ser");
         assert_eq!(v["errorCode"], "PREPARATION_FAILED");
         assert!(!v["errorMessage"].as_str().expect("msg").is_empty());
         assert!(!v["userAction"].as_str().expect("action").is_empty());
         assert!(v.get("error_code").is_none(), "snake_case must not leak");
+        // A preparation failure carries NO completeness — the field is omitted.
+        assert!(
+            v.get("completeness").is_none(),
+            "completeness omitted when None"
+        );
+        assert!(v.get("cause").is_none(), "cause omitted when None");
+    }
+
+    #[test]
+    fn failed_carries_transfer_completeness_when_present() {
+        let ev = JobFailedEvent {
+            job_id: "j1".into(),
+            job_type: JOB_TYPE_TRANSFER_STORY.into(),
+            target_story_id: "s1".into(),
+            sequence: 4,
+            error_code: TRANSFER_FAILED_CODE.into(),
+            error_message: "Envoi incomplet.".into(),
+            user_action: "Relance l'envoi.".into(),
+            completeness: Some("incomplete".into()),
+            cause: Some("writeRejected".into()),
+        };
+        let v = serde_json::to_value(&ev).expect("ser");
+        assert_eq!(v["completeness"], "incomplete");
+        assert_eq!(v["cause"], "writeRejected");
     }
 
     #[test]

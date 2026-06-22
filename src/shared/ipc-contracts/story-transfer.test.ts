@@ -99,6 +99,34 @@ describe("isTransferStateDto", () => {
     ).toBe(false);
   });
 
+  it("accepts an optional completeness on retryable", () => {
+    for (const completeness of ["failed", "incomplete"]) {
+      expect(
+        isTransferStateDto({
+          kind: "retryable",
+          story,
+          cause: "writeRejected",
+          message: "m",
+          userAction: "a",
+          completeness,
+        }),
+      ).toBe(true);
+    }
+  });
+
+  it("rejects an unknown completeness on retryable", () => {
+    expect(
+      isTransferStateDto({
+        kind: "retryable",
+        story,
+        cause: "writeRejected",
+        message: "m",
+        userAction: "a",
+        completeness: "partial",
+      }),
+    ).toBe(false);
+  });
+
   it("rejects a malformed story id", () => {
     expect(
       isTransferStateDto({

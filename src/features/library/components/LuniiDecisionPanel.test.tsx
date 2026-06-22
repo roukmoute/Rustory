@@ -205,7 +205,7 @@ describe("<LuniiDecisionPanel />", () => {
     // disabled CTA (unavailable) or no enabled send button at all (job/terminal).
     const nonReady: TransferView[] = [
       { kind: "unavailable", reason: "Envoi indisponible: profil non supporté" },
-      { kind: "transferring", progress: null },
+      { kind: "transferring", progress: null, phase: null },
       { kind: "transferred" },
       { kind: "retryable", message: "m", userAction: "a" },
       {
@@ -1001,7 +1001,7 @@ describe("<LuniiDecisionPanel /> — transfer", () => {
     render(
       <LuniiDecisionPanel
         deviceState="idle"
-        transfer={{ kind: "transferring", progress: null }}
+        transfer={{ kind: "transferring", progress: null, phase: null }}
         onEdit={noop}
       />,
     );
@@ -1055,6 +1055,161 @@ describe("<LuniiDecisionPanel /> — transfer", () => {
     expect(onRetryTransfer).toHaveBeenCalledTimes(1);
   });
 
+  it("renders the 'transfert incomplet' terminal distinct from 'échec récupérable', with Relancer + Abandonner (AC2/AC3)", async () => {
+    const onRetryTransfer = vi.fn();
+    const onDismissTransfer = vi.fn();
+    render(
+      <LuniiDecisionPanel
+        deviceState="idle"
+        transfer={{
+          kind: "incomplete",
+          message: "L'appareil peut contenir une copie partielle.",
+          userAction: "Relance l'envoi pour rétablir un état sûr.",
+        }}
+        onRetryTransfer={onRetryTransfer}
+        onDismissTransfer={onDismissTransfer}
+        onEdit={noop}
+      />,
+    );
+    const alert = screen.getByRole("alert");
+    // Distinct canonical label — the difference is in the TEXT (non-color).
+    expect(within(alert).getByText(/transfert incomplet/i)).toBeInTheDocument();
+    expect(within(alert).queryByText(/échec récupérable/i)).toBeNull();
+    // Non-color distinction (C3): the chip tone/glyph differs from `échoué`'s — a
+    // warning↔error swap is caught here, not just by the label text.
+    const incompleteChip = within(alert)
+      .getByText(/transfert incomplet/i)
+      .closest(".ds-chip");
+    expect(incompleteChip).toHaveClass("ds-chip--warning");
+    expect(incompleteChip).not.toHaveClass("ds-chip--error");
+    expect(alert).toHaveTextContent(/copie partielle/i);
+    // NEVER success / verification vocabulary on this terminal.
+    expect(alert).not.toHaveTextContent(/transférée et vérifiée/i);
+    expect(alert).not.toHaveTextContent(/état partiel/i);
+    // Both recovery gestures (AC3): Relancer (full cycle) AND Abandonner.
+    await userEvent.click(
+      screen.getByRole("button", { name: /relancer le transfert/i }),
+    );
+    await userEvent.click(
+      screen.getByRole("button", { name: /abandonner le transfert/i }),
+    );
+    expect(onRetryTransfer).toHaveBeenCalledTimes(1);
+    expect(onDismissTransfer).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows a reconnect hint instead of an inert Relancer when no writable device is connected (C1)", async () => {
+    const onDismissTransfer = vi.fn();
+    render(
+      <LuniiDecisionPanel
+        deviceState="idle"
+        transfer={{
+          kind: "incomplete",
+          message: "L'appareil peut contenir une copie partielle.",
+          userAction: "Relance l'envoi pour rétablir un état sûr.",
+        }}
+        onDismissTransfer={onDismissTransfer}
+        onEdit={noop}
+      />,
+    );
+    const alert = screen.getByRole("alert");
+    // No inert Relancer button — an honest reconnect hint instead (C1).
+    expect(
+      within(alert).queryByRole("button", { name: /relancer le transfert/i }),
+    ).toBeNull();
+    expect(
+      within(alert).getByText(/rebranche la lunii pour relancer/i),
+    ).toBeInTheDocument();
+    // Abandonner stays available even without a connected device.
+    await userEvent.click(
+      screen.getByRole("button", { name: /abandonner le transfert/i }),
+    );
+    expect(onDismissTransfer).toHaveBeenCalledTimes(1);
+  });
+
+  it("names a neutral phase before the first progress event (phase null) (C2/AC1)", () => {
+    render(
+      <LuniiDecisionPanel
+        deviceState="idle"
+        transfer={{ kind: "transferring", progress: null, phase: null }}
+        onEdit={noop}
+      />,
+    );
+    const region = screen.getByRole("region", { name: /^transfert$/i });
+    expect(
+      within(region).getByText(/préparation de l'envoi/i),
+    ).toBeInTheDocument();
+    // The wrong "envoi en cours" phase must NOT be claimed before the 1st progress.
+    expect(within(region).queryByText(/phase : envoi en cours/i)).toBeNull();
+  });
+
+  it("offers Abandonner on a recoverable (échoué) failure too", async () => {
+    const onDismissTransfer = vi.fn();
+    render(
+      <LuniiDecisionPanel
+        deviceState="idle"
+        transfer={{
+          kind: "retryable",
+          message: "Le transfert a échoué.",
+          userAction: "Relance l'envoi.",
+        }}
+        onRetryTransfer={noop}
+        onDismissTransfer={onDismissTransfer}
+        onEdit={noop}
+      />,
+    );
+    await userEvent.click(
+      screen.getByRole("button", { name: /abandonner le transfert/i }),
+    );
+    expect(onDismissTransfer).toHaveBeenCalledTimes(1);
+  });
+
+  it("offers a non-destructive 'Consulter le détail' during the transfer (no cancel)", () => {
+    render(
+      <LuniiDecisionPanel
+        deviceState="idle"
+        transfer={{ kind: "transferring", progress: 0.4, phase: "transfer" }}
+        onEdit={noop}
+      />,
+    );
+    const region = screen.getByRole("region", { name: /^transfert$/i });
+    expect(
+      within(region).getByText(/consulter le détail/i),
+    ).toBeInTheDocument();
+    // Explicit cancel is out of scope — no destructive affordance.
+    expect(
+      within(region).queryByRole("button", { name: /annuler/i }),
+    ).toBeNull();
+  });
+
+  it("names the real phase in the detail during preflight (F5/AC1)", () => {
+    render(
+      <LuniiDecisionPanel
+        deviceState="idle"
+        transfer={{ kind: "transferring", progress: null, phase: "preflight" }}
+        onEdit={noop}
+      />,
+    );
+    const region = screen.getByRole("region", { name: /^transfert$/i });
+    expect(
+      within(region).getByText(/vérification de l'appareil/i),
+    ).toBeInTheDocument();
+  });
+
+  it("caps the determinate bar at 99 % while transferring — 100 % is reserved for the terminal (F6)", () => {
+    render(
+      <LuniiDecisionPanel
+        deviceState="idle"
+        transfer={{ kind: "transferring", progress: 0.999, phase: "transfer" }}
+        onEdit={noop}
+      />,
+    );
+    const region = screen.getByRole("region", { name: /^transfert$/i });
+    expect(
+      within(region).getByText(/avancement\s*:\s*99\s*%/i),
+    ).toBeInTheDocument();
+    expect(within(region).queryByText(/100\s*%/)).toBeNull();
+  });
+
   it("renders a transport error in-context with Réessayer", async () => {
     const onRetryTransfer = vi.fn();
     render(
@@ -1086,7 +1241,7 @@ describe("<LuniiDecisionPanel /> — transfer", () => {
     render(
       <LuniiDecisionPanel
         deviceState="idle"
-        transfer={{ kind: "transferring", progress: null }}
+        transfer={{ kind: "transferring", progress: null, phase: null }}
         onEdit={noop}
       />,
     );

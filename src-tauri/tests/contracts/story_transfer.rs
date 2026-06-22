@@ -4,7 +4,7 @@
 //! (`src/shared/ipc-contracts/story-transfer.ts`) must stay byte-compatible.
 
 use rustory_lib::application::transfer::TransferStateView;
-use rustory_lib::domain::transfer::TransferFailureCause;
+use rustory_lib::domain::transfer::{TransferCompleteness, TransferFailureCause};
 use rustory_lib::ipc::dto::{PreparationStoryDto, StartTransferAcceptedDto, TransferStateDto};
 use rustory_lib::ipc::events::{
     JobFailedEvent, JobProgressEvent, JOB_TYPE_TRANSFER_STORY, TRANSFER_FAILED_CODE,
@@ -63,13 +63,44 @@ fn transferred_wire_shape_carries_no_success_vocabulary() {
 
 #[test]
 fn retryable_wire_shape_carries_non_empty_message_and_action() {
-    let dto = TransferStateDto::retryable(story(), TransferFailureCause::DeviceChanged);
+    let dto = TransferStateDto::retryable(
+        story(),
+        TransferFailureCause::DeviceChanged,
+        TransferCompleteness::Failed,
+    );
     let v = serde_json::to_value(&dto).expect("ser");
     assert_eq!(v["kind"], "retryable");
     assert_eq!(v["cause"], "deviceChanged");
+    assert_eq!(v["completeness"], "failed");
     assert!(!v["message"].as_str().expect("message").is_empty());
     assert!(!v["userAction"].as_str().expect("userAction").is_empty());
     assert!(v.get("user_action").is_none(), "no snake_case leak");
+}
+
+#[test]
+fn retryable_incomplete_wire_shape_carries_the_incomplete_completeness() {
+    let dto = TransferStateDto::retryable(
+        story(),
+        TransferFailureCause::WriteRejected,
+        TransferCompleteness::Incomplete,
+    );
+    let v = serde_json::to_value(&dto).expect("ser");
+    assert_eq!(v["kind"], "retryable");
+    assert_eq!(v["completeness"], "incomplete");
+    assert!(!v["message"].as_str().expect("message").is_empty());
+}
+
+#[test]
+fn transferring_wire_shape_carries_a_reliable_progress_fraction() {
+    // 0.5 is exactly representable in f32, so the wire value round-trips cleanly.
+    let v = serde_json::to_value(TransferStateDto::Transferring {
+        device_identifier: DEVICE.into(),
+        story: story(),
+        progress: Some(0.5),
+    })
+    .expect("ser");
+    assert_eq!(v["kind"], "transferring");
+    assert_eq!(v["progress"], json!(0.5));
 }
 
 #[test]
@@ -83,7 +114,12 @@ fn every_cause_serializes_to_a_distinct_camel_case_discriminant() {
         TransferFailureCause::WriteRejected,
         TransferFailureCause::Interrupted,
     ] {
-        let v = serde_json::to_value(TransferStateDto::retryable(story(), cause)).expect("ser");
+        let v = serde_json::to_value(TransferStateDto::retryable(
+            story(),
+            cause,
+            TransferCompleteness::Failed,
+        ))
+        .expect("ser");
         let tag = v["cause"].as_str().expect("cause").to_string();
         assert!(!tag.is_empty());
         seen.push(tag);
@@ -142,11 +178,15 @@ fn job_failed_event_uses_the_transfer_error_code() {
         target_story_id: STORY.into(),
         sequence: 3,
         error_code: TRANSFER_FAILED_CODE.into(),
-        error_message: "Envoi interrompu avant la fin.".into(),
+        error_message: "Envoi incomplet.".into(),
         user_action: "Relance l'envoi.".into(),
+        completeness: Some("incomplete".into()),
+        cause: Some("writeRejected".into()),
     })
     .expect("ser");
     assert_eq!(v["errorCode"], "TRANSFER_FAILED");
+    assert_eq!(v["completeness"], "incomplete");
+    assert_eq!(v["cause"], "writeRejected");
     assert!(!v["errorMessage"].as_str().expect("message").is_empty());
     assert!(!v["userAction"].as_str().expect("userAction").is_empty());
     assert!(v.get("error_code").is_none(), "no snake_case leak");

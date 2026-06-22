@@ -23,11 +23,14 @@ use rustory_lib::application::transfer::{
 use rustory_lib::domain::device::{format_pack_uuid, pack_short_id, parse_pack_index};
 use rustory_lib::domain::shared::AppError;
 use rustory_lib::domain::story::content_checksum;
-use rustory_lib::domain::transfer::{PreparationPhase, TransferFailureCause};
+use rustory_lib::domain::transfer::{
+    PackWritePlan, PreparationPhase, TransferCompleteness, TransferFailureCause,
+};
 use rustory_lib::infrastructure::db::{self, DbHandle};
 use rustory_lib::infrastructure::device::{
-    compute_device_identifier, DeviceScanReport, DeviceScanner, SystemDeviceLibraryReader,
-    SystemDevicePackReader, SystemDevicePackWriter, SystemDeviceScanner,
+    compute_device_identifier, DevicePackWriter, DeviceScanReport, DeviceScanner,
+    SystemDeviceLibraryReader, SystemDevicePackReader, SystemDevicePackWriter, SystemDeviceScanner,
+    WriteFailure, WriteProgress,
 };
 use rustory_lib::infrastructure::diagnostics::transfer as transfer_log;
 use rustory_lib::infrastructure::filesystem::SystemTransferArtifactSource;
@@ -48,14 +51,18 @@ fn budget() -> Duration {
 #[derive(Default)]
 struct CapturingEmitter {
     events: Mutex<Vec<String>>,
+    fractions: Mutex<Vec<f32>>,
 }
 
 impl PreparationEventEmitter for CapturingEmitter {
-    fn progress(&self, phase: PreparationPhase, _progress: Option<f32>, sequence: u64) {
+    fn progress(&self, phase: PreparationPhase, progress: Option<f32>, sequence: u64) {
         self.events
             .lock()
             .unwrap()
             .push(format!("progress:{}:{}", phase.wire_tag(), sequence));
+        if let Some(fraction) = progress {
+            self.fractions.lock().unwrap().push(fraction);
+        }
     }
     fn completed(&self, sequence: u64) {
         self.events
@@ -74,6 +81,10 @@ impl PreparationEventEmitter for CapturingEmitter {
 impl CapturingEmitter {
     fn events(&self) -> Vec<String> {
         self.events.lock().unwrap().clone()
+    }
+    /// The non-null in-flight fractions actually emitted (honest progress).
+    fn fractions(&self) -> Vec<f32> {
+        self.fractions.lock().unwrap().clone()
     }
 }
 
@@ -183,13 +194,30 @@ fn transfers_an_imported_pack_to_a_writable_device() {
         matches!(outcome, TransferOutcome::Transferred { .. }),
         "{outcome:?}"
     );
+    // The job reports preflight, then HONEST in-flight progress during the write,
+    // then the non-success terminal.
+    let events = emitter.events();
     assert_eq!(
-        emitter.events(),
-        vec![
-            "progress:preflight:1".to_string(),
-            "progress:transfer:2".to_string(),
-            "completed:3".to_string(),
-        ]
+        events.first().map(String::as_str),
+        Some("progress:preflight:1")
+    );
+    assert!(
+        events
+            .last()
+            .map(|e| e.starts_with("completed:"))
+            .unwrap_or(false),
+        "ends with the completed (non-success) terminal: {events:?}"
+    );
+    let fractions = emitter.fractions();
+    assert!(
+        !fractions.is_empty(),
+        "the write reports progress: {events:?}"
+    );
+    assert!(
+        // The honesty invariant is the HIGH bound (< 1.0 = PROGRESS_CEILING); the low
+        // bound is >= 0.0 because a zero-byte first file would legitimately emit 0.0.
+        fractions.iter().all(|f| *f >= 0.0 && *f < 1.0),
+        "honest fraction: never 100% before the completed terminal: {fractions:?}"
     );
 
     // The pack content landed byte-for-byte under `.content/<SHORT_ID>`.
@@ -245,7 +273,8 @@ fn v3_blocks_the_transfer_before_any_device_mutation() {
     assert_eq!(
         outcome,
         TransferOutcome::Retryable {
-            cause: TransferFailureCause::WriteNotAuthorized
+            cause: TransferFailureCause::WriteNotAuthorized,
+            completeness: TransferCompleteness::Failed,
         }
     );
     // Never entered the transfer phase, and the device is byte-identical.
@@ -295,7 +324,8 @@ fn a_native_story_is_not_transferable() {
     assert_eq!(
         outcome,
         TransferOutcome::Retryable {
-            cause: TransferFailureCause::NotTransferable
+            cause: TransferFailureCause::NotTransferable,
+            completeness: TransferCompleteness::Failed,
         }
     );
     assert_eq!(
@@ -331,7 +361,8 @@ fn device_changed_when_no_supported_device_is_present() {
     assert_eq!(
         outcome,
         TransferOutcome::Retryable {
-            cause: TransferFailureCause::DeviceChanged
+            cause: TransferFailureCause::DeviceChanged,
+            completeness: TransferCompleteness::Failed,
         }
     );
 }
@@ -513,6 +544,7 @@ fn transfer_trace_channel_records_a_closed_pii_free_event_set() {
         transfer_log::Event::TransferFailed {
             story_ref,
             cause: "write_not_authorized",
+            completeness: "failed",
             elapsed_ms: 3,
         },
     )
@@ -577,4 +609,180 @@ fn holds_no_db_lock_during_scan() {
         lock_free.load(Ordering::SeqCst),
         "the DB mutex must be free during the device scan"
     );
+}
+
+/// A writer that performs the content promotion (mutating the device) then fails
+/// the durability/index step — modelling a power loss / device yank right after
+/// the rename. Reports `reached_device_mutation = true`, so the service yields the
+/// honest `Incomplete` (`transfert incomplet`). A real deterministic post-promote
+/// failure is impossible (staging, promote and `.pi` share the mount's
+/// writability), so this instrument exercises that branch end-to-end.
+struct IncompleteAfterPromoteWriter;
+
+impl DevicePackWriter for IncompleteAfterPromoteWriter {
+    fn write_pack(
+        &self,
+        mount_path: &Path,
+        _source_pack_dir: &Path,
+        _pack_uuid: &str,
+        plan: &PackWritePlan,
+        _budget: Duration,
+        _progress: &dyn Fn(WriteProgress),
+    ) -> Result<(), WriteFailure> {
+        // Promote real content under `.content/<SHORT_ID>` — the device IS now
+        // mutated — but never touch `.pi` (the durability/index step "failed").
+        let target = mount_path.join(".content").join(&plan.short_id);
+        std::fs::create_dir_all(&target).expect("create promoted dir");
+        for file in &plan.files {
+            let dst = target.join(&file.rel_path);
+            if let Some(parent) = dst.parent() {
+                std::fs::create_dir_all(parent).expect("create parent");
+            }
+            std::fs::write(&dst, b"PROMOTED").expect("write promoted file");
+        }
+        Err(WriteFailure {
+            cause: TransferFailureCause::WriteRejected,
+            reached_device_mutation: true,
+        })
+    }
+}
+
+#[test]
+fn an_incomplete_transfer_leaves_promoted_content_unindexed_and_preserves_the_draft() {
+    // AC2 `incomplet`: a durability/index failure AFTER the content promotion
+    // surfaces the honest `transfert incomplet` — the device may hold an unindexed
+    // partial copy, and the canonical draft is never touched (FR18).
+    let db_tmp = tempfile::tempdir().expect("db dir");
+    let app_data = tempfile::tempdir().expect("app data");
+    let db = Mutex::new(open_db(&db_tmp));
+    let pack = uuid([0x1C, 0x1C, 0x1C, 0x1C]);
+    let (story_id, pack_bytes, _src) = import_one(&db, app_data.path(), pack);
+
+    let (_target, target_root, target_id, _) =
+        build_mount_with_pack(3, uuid([0x02, 0x02, 0x02, 0x02]));
+    let pi_before = std::fs::read(target_root.join(".pi")).expect("read .pi");
+    let canonical_before = read_story_row(&db, &story_id);
+    let scanner = SystemDeviceScanner::with_explicit_mount_roots(vec![target_root.clone()]);
+    let emitter = CapturingEmitter::default();
+
+    let outcome = transfer_story(
+        &db,
+        &scanner,
+        &SystemDeviceLibraryReader,
+        &SystemTransferArtifactSource,
+        &IncompleteAfterPromoteWriter,
+        app_data.path(),
+        &story_id,
+        &target_id,
+        budget(),
+        budget(),
+        &emitter,
+    );
+    assert_eq!(
+        outcome,
+        TransferOutcome::Retryable {
+            cause: TransferFailureCause::WriteRejected,
+            completeness: TransferCompleteness::Incomplete,
+        }
+    );
+    // The promoted content is present on the device but NOT indexed in `.pi`.
+    let short = pack_short_id(&pack_bytes);
+    assert!(
+        target_root.join(".content").join(&short).exists(),
+        "the promoted (partial) content is present"
+    );
+    let pi_after = std::fs::read(target_root.join(".pi")).expect("read .pi");
+    assert!(
+        !parse_pack_index(&pi_after)
+            .uuids
+            .iter()
+            .any(|u| u == &pack_bytes),
+        "the incomplete pack must NOT be indexed"
+    );
+    assert_eq!(
+        pi_after, pi_before,
+        ".pi is unchanged (the index step never ran)"
+    );
+    assert_eq!(
+        read_story_row(&db, &story_id),
+        canonical_before,
+        "the canonical draft is preserved after an incomplete transfer"
+    );
+    assert!(
+        emitter.events().iter().any(|e| e.starts_with("failed:")),
+        "a failure terminal was emitted"
+    );
+}
+
+#[test]
+fn relaunching_a_transfer_converges_without_clobber() {
+    // A relaunch is a FRESH full cycle (never a hidden partial resume): the
+    // writer's prove-or-refuse reuse path converges on the healthy pack
+    // idempotently — no duplicate index entry, no clobbered content.
+    let db_tmp = tempfile::tempdir().expect("db dir");
+    let app_data = tempfile::tempdir().expect("app data");
+    let db = Mutex::new(open_db(&db_tmp));
+    let pack = uuid([0x2C, 0x2C, 0x2C, 0x2C]);
+    let (story_id, pack_bytes, _src) = import_one(&db, app_data.path(), pack);
+
+    let (_target, target_root, target_id, _) =
+        build_mount_with_pack(3, uuid([0x03, 0x03, 0x03, 0x03]));
+    let scanner = SystemDeviceScanner::with_explicit_mount_roots(vec![target_root.clone()]);
+
+    let first = transfer_story(
+        &db,
+        &scanner,
+        &SystemDeviceLibraryReader,
+        &SystemTransferArtifactSource,
+        &SystemDevicePackWriter,
+        app_data.path(),
+        &story_id,
+        &target_id,
+        budget(),
+        budget(),
+        &CapturingEmitter::default(),
+    );
+    assert!(matches!(first, TransferOutcome::Transferred { .. }));
+    let short = pack_short_id(&pack_bytes);
+    let content_after_first =
+        std::fs::read(target_root.join(".content").join(&short).join("ni")).expect("ni");
+    let pi_after_first = std::fs::read(target_root.join(".pi")).expect(".pi");
+
+    // A write changes `.pi`, hence the device identifier Rustory derives from it;
+    // a relaunch re-detects the device (as the UI does) and uses the fresh id.
+    let target_id_after = compute_device_identifier(&pi_after_first, None);
+
+    let second = transfer_story(
+        &db,
+        &scanner,
+        &SystemDeviceLibraryReader,
+        &SystemTransferArtifactSource,
+        &SystemDevicePackWriter,
+        app_data.path(),
+        &story_id,
+        &target_id_after,
+        budget(),
+        budget(),
+        &CapturingEmitter::default(),
+    );
+    assert!(
+        matches!(second, TransferOutcome::Transferred { .. }),
+        "a relaunch converges to the non-success terminal: {second:?}"
+    );
+    assert_eq!(
+        std::fs::read(target_root.join(".content").join(&short).join("ni")).expect("ni"),
+        content_after_first,
+        "the content is not clobbered on relaunch"
+    );
+    assert_eq!(
+        std::fs::read(target_root.join(".pi")).expect(".pi"),
+        pi_after_first,
+        "no duplicate index entry on relaunch"
+    );
+    let count = parse_pack_index(&pi_after_first)
+        .uuids
+        .iter()
+        .filter(|u| **u == pack_bytes)
+        .count();
+    assert_eq!(count, 1, "the transferred UUID is indexed exactly once");
 }

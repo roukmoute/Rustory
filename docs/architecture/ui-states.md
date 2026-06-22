@@ -45,10 +45,11 @@ The transfer contract is part of the MVP and should map internal state to UI lab
 | `to_fix` | `à corriger` | A repairable block (e.g. an invalid title); show the cause + the fixing action |
 | `presumed_transferable` | `présumée transférable` | Valid for decision surfaces before send |
 | `preparing` | `en préparation` | May coexist with preserved local work |
-| `transferring` | `en transfert` | Must stay visibly in-context in the library |
+| `transferring` | `en transfert` | Must stay visibly in-context; honest progress (real `%` only during the content copy, never a fake value nor 100 % before the terminal); a non-destructive `Consulter le détail` discloses phase/progress in-context |
 | `verified` | `transférée et vérifiée` | Only after explicit confirmation |
-| `partial` | `état partiel` | Never collapse into success wording |
-| `retryable` | `échec récupérable` | Keep enough context for `Relancer` |
+| `partial` | `état partiel` | Never collapse into success wording (a verification verdict) |
+| `retryable` (`échoué`) | `échec récupérable` | Device left UNTOUCHED; keep enough context for `Relancer` / `Abandonner` |
+| `incomplete` | `transfert incomplet` | Write STARTED then interrupted (device mutated); the device may hold a partial copy, a relaunch restores a safe state; distinct from `état partiel`; `Relancer` / `Abandonner` |
 
 ## Post-MVP Import State Contract
 
@@ -746,9 +747,10 @@ context and target are unambiguous (single local selection + one writable device
 
 | Internal phase / state | UI Label | Notes |
 | --- | --- | --- |
-| `transferring` | `en transfert` | The write runs in the background; the library stays usable. A `%` bar appears only when reliable. |
+| `transferring` | `en transfert` + honest progress | The write runs in the background; the library stays usable. A `%` bar appears ONLY during the measurable content copy — never a fake value nor 100 % before the terminal; a named phase otherwise. A non-destructive `Consulter le détail` discloses the phase / progress in-context (no cancel — out of scope). |
 | terminal (write done) | non-success line `écriture effectuée — vérification à venir` | NEVER `transférée et vérifiée` / `état partiel` (a verification step owns those). |
-| `retryable` | `échec récupérable` | Keep enough context for `Relancer`. The local draft is preserved in full. |
+| `retryable` (`échoué`) | `échec récupérable` | The device was left UNTOUCHED. Keep enough context for `Relancer` / `Abandonner`. The local draft is preserved in full. |
+| `incomplete` | `transfert incomplet` | The write STARTED then was interrupted (device mutated): the Lunii may hold a partial copy; a relaunch (full cycle) restores a safe state. Distinct from `état partiel`. `Relancer` / `Abandonner`. |
 
 **No false success (AC3).** No success is communicated until BOTH the write AND a
 verification have completed. After a successful write the job reaches an **honest,
@@ -760,6 +762,26 @@ with no device-format pack) is the terminal `retryable` state: the canonical sto
 is **never** mutated (FR18), there is **no partial resume** (a failed transfer
 requires a fresh full cycle), and the recoverable detail is shown **in context**
 (`role="alert"`, never a toast) with `Relancer`.
+
+**Échoué vs incomplet (AC2).** An interruption resolves to one of two honest
+terminals, classified by a property of the DEVICE — whether the write reached the
+device mutation — not by the cause: **`échoué`** (`échec récupérable`) when the
+device was left untouched (the failure happened before the atomic promotion), and
+**`incomplet`** (`transfert incomplet`) when the mutation had started (a promoted
+folder may exist before the index update). The writer reports a
+`reached_device_mutation` signal; the closed cause taxonomy stays orthogonal.
+Neither is a success nor a false failure; a relaunch is always a full cycle (never
+a hidden partial resume), and the writer proves-or-refuses an existing target pack
+so a relaunch converges safely.
+
+**Context preserved in-session (AC3).** The `échoué` / `incomplet` outcome (cause
++ message + next action) lives in the CURRENT context — the live state of the
+transfer hook, kept sticky (a late `job:progress` never regresses it) — until the
+user chooses `Relancer` (full cycle) or `Abandonner` (back to a stable library,
+draft intact). It is NOT carried by the job-shell store (which holds only
+phase / progress) and is NOT persisted to disk: there is no `transfer_jobs` table
+and no migration. Durable cross-session memory (recovering the outcome after an
+app restart) is a later flow.
 
 **Closed write-error taxonomy.** `fs_write` (write / space failure on the device),
 `device_changed` (the live re-scan no longer resolves to the requested device),
@@ -783,11 +805,15 @@ On a terminal event the UI performs an **authoritative re-read**
 
 **Surface.** The transfer block lives **inside** the decision panel, in a
 `<section aria-label="Transfert" aria-live="polite">`, sibling to the preparation
-region. It renders: `transferring` → a `StateChip` `en transfert` + calm progress;
-the write-done terminal → the factual non-success line; `retryable` / transport
-`error` → the in-context recoverable message + a `Relancer` / `Réessayer` button,
-never a toast. Each state uses a non-color signal (glyph + text). The story-card
-badge reflects `en transfert` through the existing `StateChip`.
+region. It renders: `transferring` → a `StateChip` `en transfert` + honest
+progress + a non-destructive `Consulter le détail` disclosure; the write-done
+terminal → the factual non-success line; `retryable` (`échoué`) → `échec
+récupérable`; `incomplete` → the distinct `transfert incomplet` chip (its own
+glyph) + the partial-copy message; both failure terminals offer `Relancer` AND
+`Abandonner`; transport `error` → the in-context message + `Réessayer`; never a
+toast. Each state uses a non-color signal (glyph + text). The story-card badge
+reflects `en transfert` / `échec récupérable` / `transfert incomplet` through the
+existing `StateChip`.
 
 **No new persistence.** Like the preview / verdict / preparation, the transfer is
 not resumable, so there is no job table and no migration — the appliance is the

@@ -57,6 +57,22 @@ pub trait PreparationEventEmitter {
     fn completed(&self, sequence: u64);
     /// Failure terminal state, with the canonical message + next gesture.
     fn failed(&self, message: &str, user_action: &str, sequence: u64);
+    /// Failure terminal carrying the device COMPLETENESS (`"failed"` /
+    /// `"incomplete"`) — the transfer flow's honest distinction between a device
+    /// left intact and one with a possible partial copy. Defaults to dropping the
+    /// completeness and delegating to [`failed`](Self::failed); preparation has no
+    /// such distinction, so only the transfer command's runtime emitter overrides
+    /// this to carry the field onto the `job:failed` event.
+    fn failed_with_completeness(
+        &self,
+        message: &str,
+        user_action: &str,
+        _completeness: Option<&str>,
+        _cause: Option<&str>,
+        sequence: u64,
+    ) {
+        self.failed(message, user_action, sequence);
+    }
 }
 
 /// What the background job produced — returned to the command for a local trace

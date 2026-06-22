@@ -22,6 +22,7 @@
 //! `MockDeviceScanner`, a `MockDeviceLibraryReader`, a `MockTransferArtifactSource`,
 //! a `MockDevicePackWriter`, a capturing emitter and a temp DB.
 
+use std::cell::Cell;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -35,12 +36,14 @@ use crate::domain::device::SupportedOperation;
 use crate::domain::shared::AppError;
 use crate::domain::story::{validate_canonical, CanonicalBlocker, CanonicalStoryFacts};
 use crate::domain::transfer::{
-    build_write_plan, ensure_cohort_coherent, ensure_descriptor_coherent, gate_prepare,
-    short_id_from_pack_uuid, verify_aggregate, PreparationPhase, TransferArtifactDescriptor,
-    TransferFailureCause,
+    build_write_plan, classify, ensure_cohort_coherent, ensure_descriptor_coherent, failure_copy,
+    gate_prepare, short_id_from_pack_uuid, verify_aggregate, PreparationPhase,
+    TransferArtifactDescriptor, TransferCompleteness, TransferFailureCause,
 };
 use crate::infrastructure::db::DbHandle;
-use crate::infrastructure::device::{DeviceLibraryReader, DevicePackWriter, DeviceScanner};
+use crate::infrastructure::device::{
+    DeviceLibraryReader, DevicePackWriter, DeviceScanner, WriteProgress,
+};
 use crate::infrastructure::filesystem::{
     resolve_import_story_dir, AssemblyPlan, AssemblySource, TransferArtifactSource,
 };
@@ -61,8 +64,13 @@ pub enum TransferOutcome {
         story_title: String,
     },
     /// A functional failure — a terminal `retryable` job state (NOT an
-    /// `AppError`). The canonical draft is preserved.
-    Retryable { cause: TransferFailureCause },
+    /// `AppError`). The canonical draft is preserved. `completeness` distinguishes
+    /// a device left intact (`Failed` → `échec récupérable`) from one that may
+    /// hold a partial copy (`Incomplete` → `transfert incomplet`).
+    Retryable {
+        cause: TransferFailureCause,
+        completeness: TransferCompleteness,
+    },
     /// A transport failure that prevented producing a terminal job state
     /// (e.g. the local store became unreadable). Surfaced as an `AppError`.
     Transport { error: AppError },
@@ -116,6 +124,20 @@ enum TransferPreflight {
     NotConfirmed(TransferFailureCause),
 }
 
+/// Clamp ceiling for an in-flight transfer fraction: the content copy can reach
+/// 100 % of the bytes, but the job is not done until durability + indexing, so the
+/// emitted progress never reaches 1.0 — that is reserved for the `completed`
+/// terminal (honest progress, AC1).
+const PROGRESS_CEILING: f32 = 0.99;
+
+/// Advance and return the monotonic event sequence. Interior mutability lets the
+/// in-flight progress closure and the terminal share one counter.
+fn next_sequence(sequence: &Cell<u64>) -> u64 {
+    let next = sequence.get() + 1;
+    sequence.set(next);
+    next
+}
+
 /// Run the transfer job, emitting progress + a terminal event. Returns the
 /// outcome for the command's local trace.
 #[allow(clippy::too_many_arguments)]
@@ -132,9 +154,8 @@ pub fn transfer_story(
     write_budget: Duration,
     emitter: &dyn PreparationEventEmitter,
 ) -> TransferOutcome {
-    let mut sequence: u64 = 0;
-    sequence += 1;
-    emitter.progress(PreparationPhase::Preflight, None, sequence);
+    let sequence = Cell::new(0u64);
+    emitter.progress(PreparationPhase::Preflight, None, next_sequence(&sequence));
 
     let confirmed = match run_transfer_preflight(
         db,
@@ -149,22 +170,27 @@ pub fn transfer_story(
             // The capability gate / identity guard refused BEFORE any device
             // mutation (fail-closed, AC2/FR34): V3 or an unsupported profile →
             // `WriteNotAuthorized`; a changed/unreadable device → `DeviceChanged`;
-            // a scan timeout → `Interrupted`. The writer is never reached.
-            return fail(emitter, &mut sequence, cause);
+            // a scan timeout → `Interrupted`. The writer is never reached, so the
+            // device was never mutated → `Failed`.
+            return fail(emitter, &sequence, cause, TransferCompleteness::Failed);
         }
         Err(error) => {
             // A genuine local-store transport failure (vanished story / unreadable
             // DB). It cannot produce a terminal job state — surface the AppError.
-            sequence += 1;
             let action = error.user_action.clone().unwrap_or_default();
-            emitter.failed(&error.message, &action, sequence);
+            emitter.failed(&error.message, &action, next_sequence(&sequence));
             return TransferOutcome::Transport { error };
         }
     };
 
     // Fail-closed: the story must have passed validation to be transferable.
     if gate_prepare(&confirmed.blockers).is_err() {
-        return fail(emitter, &mut sequence, TransferFailureCause::NotPrepared);
+        return fail(
+            emitter,
+            &sequence,
+            TransferFailureCause::NotPrepared,
+            TransferCompleteness::Failed,
+        );
     }
 
     // A native story (no imported pack) has no device-format artifacts to write
@@ -172,8 +198,9 @@ pub fn transfer_story(
     let Some(pack_uuid) = confirmed.pack_uuid.clone() else {
         return fail(
             emitter,
-            &mut sequence,
+            &sequence,
             TransferFailureCause::NotTransferable,
+            TransferCompleteness::Failed,
         );
     };
     let Some(short_id) = short_id_from_pack_uuid(&pack_uuid) else {
@@ -181,13 +208,13 @@ pub fn transfer_story(
         // happen for a real import — a non-canonical value yields no target.
         return fail(
             emitter,
-            &mut sequence,
+            &sequence,
             TransferFailureCause::NotTransferable,
+            TransferCompleteness::Failed,
         );
     };
 
-    sequence += 1;
-    emitter.progress(PreparationPhase::Transfer, None, sequence);
+    emitter.progress(PreparationPhase::Transfer, None, next_sequence(&sequence));
 
     // Re-assemble the descriptor FRESH (read-only) and re-verify its integrity
     // against the recorded baseline before writing a single byte. A failure here
@@ -200,18 +227,18 @@ pub fn transfer_story(
         write_budget,
     ) {
         Ok(descriptor) => descriptor,
-        Err(cause) => return fail(emitter, &mut sequence, cause),
+        Err(cause) => return fail(emitter, &sequence, cause, TransferCompleteness::Failed),
     };
 
     let plan = match build_write_plan(&descriptor, &short_id) {
         Ok(plan) => plan,
         // Defensive: an imported descriptor always carries pack files; a
         // descriptor without one is not transferable.
-        Err(cause) => return fail(emitter, &mut sequence, cause),
+        Err(cause) => return fail(emitter, &sequence, cause, TransferCompleteness::Failed),
     };
     if let Err(cause) = ensure_cohort_coherent(&descriptor.target_cohort, &confirmed.device_cohort)
     {
-        return fail(emitter, &mut sequence, cause);
+        return fail(emitter, &sequence, cause, TransferCompleteness::Failed);
     }
 
     // F5 — re-validate the device identity IMMEDIATELY before the first mutation.
@@ -222,42 +249,71 @@ pub fn transfer_story(
     let mount_path =
         match revalidate_writable_device(scanner, requested_device_identifier, preflight_budget) {
             Ok(path) => path,
-            Err(cause) => return fail(emitter, &mut sequence, cause),
+            Err(cause) => return fail(emitter, &sequence, cause, TransferCompleteness::Failed),
         };
 
     // The opaque pack bytes live under the LOCAL imports folder — the writer
-    // reproduces them on the device (round-trip, no decryption).
+    // reproduces them on the device (round-trip, no decryption). The writer
+    // reports the content-copy fraction; translate each report to a `job:progress`
+    // (phase `Transfer`) with a monotone sequence, clamped below 100 %.
     let source_pack_dir = resolve_import_story_dir(app_data_dir, story_id);
+    let report = |p: WriteProgress| {
+        if p.bytes_total == 0 {
+            return;
+        }
+        let fraction = ((p.bytes_done as f32) / (p.bytes_total as f32)).min(PROGRESS_CEILING);
+        emitter.progress(
+            PreparationPhase::Transfer,
+            Some(fraction),
+            next_sequence(&sequence),
+        );
+    };
     match pack_writer.write_pack(
         &mount_path,
         &source_pack_dir,
         &pack_uuid,
         &plan,
         write_budget,
+        &report,
     ) {
         Ok(()) => {
-            sequence += 1;
-            emitter.completed(sequence);
+            emitter.completed(next_sequence(&sequence));
             TransferOutcome::Transferred {
                 device_identifier: confirmed.device_identifier,
                 story_id: story_id.to_string(),
                 story_title: confirmed.story_title,
             }
         }
-        Err(cause) => fail(emitter, &mut sequence, cause),
+        // The writer reports whether the device was already mutated; the domain
+        // classifies it into `Failed` (device intact) vs `Incomplete` (a possible
+        // partial copy a fresh relaunch converges).
+        Err(failure) => {
+            let completeness = classify(failure.cause, failure.reached_device_mutation);
+            fail(emitter, &sequence, failure.cause, completeness)
+        }
     }
 }
 
-/// Emit a functional failure terminal event and return the matching outcome.
+/// Emit a functional failure terminal event and return the matching outcome,
+/// carrying the device COMPLETENESS (`Failed` vs `Incomplete`).
 fn fail(
     emitter: &dyn PreparationEventEmitter,
-    sequence: &mut u64,
+    sequence: &Cell<u64>,
     cause: TransferFailureCause,
+    completeness: TransferCompleteness,
 ) -> TransferOutcome {
-    *sequence += 1;
-    let (message, action) = cause.copy();
-    emitter.failed(message, action, *sequence);
-    TransferOutcome::Retryable { cause }
+    let (message, action) = failure_copy(cause, completeness);
+    emitter.failed_with_completeness(
+        message,
+        action,
+        Some(completeness.diagnostic_tag()),
+        Some(cause.wire_cause()),
+        next_sequence(sequence),
+    );
+    TransferOutcome::Retryable {
+        cause,
+        completeness,
+    }
 }
 
 /// Authoritative re-read: re-derive the current transfer state on demand
@@ -687,6 +743,7 @@ mod tests {
     #[derive(Default)]
     struct CapturingEmitter {
         events: Mutex<Vec<Recorded>>,
+        progress_values: Mutex<Vec<Option<f32>>>,
     }
 
     #[derive(Debug, Clone, PartialEq)]
@@ -704,11 +761,12 @@ mod tests {
     }
 
     impl PreparationEventEmitter for CapturingEmitter {
-        fn progress(&self, phase: PreparationPhase, _progress: Option<f32>, sequence: u64) {
+        fn progress(&self, phase: PreparationPhase, progress: Option<f32>, sequence: u64) {
             self.events
                 .lock()
                 .unwrap()
                 .push(Recorded::Progress { phase, sequence });
+            self.progress_values.lock().unwrap().push(progress);
         }
         fn completed(&self, sequence: u64) {
             self.events
@@ -736,6 +794,15 @@ mod tests {
                     Recorded::Completed { sequence } => *sequence,
                     Recorded::Failed { sequence } => *sequence,
                 })
+                .collect()
+        }
+        /// The non-null in-flight fractions actually emitted (honest progress).
+        fn transfer_fractions(&self) -> Vec<f32> {
+            self.progress_values
+                .lock()
+                .unwrap()
+                .iter()
+                .filter_map(|p| *p)
                 .collect()
         }
     }
@@ -828,7 +895,8 @@ mod tests {
         assert_eq!(
             outcome,
             TransferOutcome::Retryable {
-                cause: TransferFailureCause::WriteNotAuthorized
+                cause: TransferFailureCause::WriteNotAuthorized,
+                completeness: TransferCompleteness::Failed,
             }
         );
         assert_eq!(
@@ -876,7 +944,8 @@ mod tests {
         assert_eq!(
             outcome,
             TransferOutcome::Retryable {
-                cause: TransferFailureCause::NotTransferable
+                cause: TransferFailureCause::NotTransferable,
+                completeness: TransferCompleteness::Failed,
             }
         );
         assert_eq!(writer.call_count(), 0);
@@ -910,7 +979,8 @@ mod tests {
         assert_eq!(
             outcome,
             TransferOutcome::Retryable {
-                cause: TransferFailureCause::DeviceChanged
+                cause: TransferFailureCause::DeviceChanged,
+                completeness: TransferCompleteness::Failed,
             }
         );
         assert_eq!(writer.call_count(), 0);
@@ -950,7 +1020,8 @@ mod tests {
         assert_eq!(
             outcome,
             TransferOutcome::Retryable {
-                cause: TransferFailureCause::DeviceChanged
+                cause: TransferFailureCause::DeviceChanged,
+                completeness: TransferCompleteness::Failed,
             }
         );
         assert_eq!(
@@ -992,7 +1063,8 @@ mod tests {
         assert_eq!(
             outcome,
             TransferOutcome::Retryable {
-                cause: TransferFailureCause::Interrupted
+                cause: TransferFailureCause::Interrupted,
+                completeness: TransferCompleteness::Failed,
             }
         );
         assert_eq!(
@@ -1048,7 +1120,8 @@ mod tests {
         assert_eq!(
             outcome,
             TransferOutcome::Retryable {
-                cause: TransferFailureCause::NotPrepared
+                cause: TransferFailureCause::NotPrepared,
+                completeness: TransferCompleteness::Failed,
             }
         );
         assert_eq!(writer.call_count(), 0, "no write when assembly fails");
@@ -1268,5 +1341,103 @@ mod tests {
         // Guards the helper that backs `read_transfer_state` transferability.
         let d = native_descriptor("s1");
         assert!(build_write_plan(&d, "FAC5562D").is_err());
+    }
+
+    #[test]
+    fn emits_monotone_transfer_progress() {
+        // AC1: the writer's content-copy progress surfaces as honest in-flight
+        // fractions — monotone, strictly below 100 % (reserved for `completed`).
+        let dir = tempfile::tempdir().expect("app data");
+        let db = fresh_db();
+        insert_story(&db, "s1");
+        insert_import(&db, "s1");
+        let scanner = supported_scanner(3);
+        scanner.enqueue_supported_lunii(3); // F5 re-validation before the write
+        let reader = readable_reader();
+        let artifacts = MockTransferArtifactSource::new();
+        artifacts.enqueue(Ok(imported_descriptor("s1", "origine_v1")));
+        let writer = MockDevicePackWriter::new();
+        writer.enqueue_success_with_progress();
+        let emitter = CapturingEmitter::default();
+
+        let outcome = transfer_story(
+            &db,
+            &scanner,
+            &reader,
+            &artifacts,
+            &writer,
+            dir.path(),
+            "s1",
+            &mock_identifier(),
+            budget(),
+            budget(),
+            &emitter,
+        );
+        assert!(matches!(outcome, TransferOutcome::Transferred { .. }));
+        let fractions = emitter.transfer_fractions();
+        assert_eq!(fractions.len(), 2, "two progress steps were reported");
+        assert!(
+            fractions.windows(2).all(|w| w[1] >= w[0]),
+            "progress is monotone"
+        );
+        assert!(
+            fractions.iter().all(|f| *f > 0.0 && *f < 1.0),
+            "honest fraction: never 100 % before the completed terminal"
+        );
+        assert!(
+            is_monotonic(&emitter.sequences()),
+            "the sequence stays monotone across progress events"
+        );
+    }
+
+    #[test]
+    fn retryable_incomplete_when_the_writer_fails_after_mutation() {
+        // AC2: a durability/index failure AFTER the content promotion is the
+        // honest `transfert incomplet` (the device may hold a partial copy), and
+        // the canonical draft is still never mutated (FR18).
+        let dir = tempfile::tempdir().expect("app data");
+        let db = fresh_db();
+        insert_story(&db, "s1");
+        insert_import(&db, "s1");
+        let scanner = supported_scanner(3);
+        scanner.enqueue_supported_lunii(3); // F5 re-validation before the write
+        let reader = readable_reader();
+        let artifacts = MockTransferArtifactSource::new();
+        artifacts.enqueue(Ok(imported_descriptor("s1", "origine_v1")));
+        let writer = MockDevicePackWriter::new();
+        writer.enqueue_failure_after_mutation(TransferFailureCause::WriteRejected);
+        let emitter = CapturingEmitter::default();
+
+        let before = read_story_row(&db, "s1");
+        let outcome = transfer_story(
+            &db,
+            &scanner,
+            &reader,
+            &artifacts,
+            &writer,
+            dir.path(),
+            "s1",
+            &mock_identifier(),
+            budget(),
+            budget(),
+            &emitter,
+        );
+        assert_eq!(
+            outcome,
+            TransferOutcome::Retryable {
+                cause: TransferFailureCause::WriteRejected,
+                completeness: TransferCompleteness::Incomplete,
+            }
+        );
+        assert_eq!(
+            writer.call_count(),
+            1,
+            "the writer ran and reported failure"
+        );
+        assert_eq!(
+            read_story_row(&db, "s1"),
+            before,
+            "the canonical draft is preserved even after an incomplete transfer"
+        );
     }
 }

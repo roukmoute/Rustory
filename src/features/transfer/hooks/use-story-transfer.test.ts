@@ -72,6 +72,16 @@ const failed = (sequence: number) => ({
   userAction: "Rebranche la Lunii puis relance l'envoi.",
 });
 
+// A `job:failed` whose device-mutation signal marks the write as having STARTED
+// (AC2 — the device may hold a partial copy).
+const failedIncomplete = (sequence: number) => ({
+  ...failed(sequence),
+  errorMessage: "L'appareil peut contenir une copie partielle.",
+  userAction: "Relance l'envoi pour rétablir un état sûr.",
+  completeness: "incomplete" as const,
+  cause: "writeRejected" as const,
+});
+
 describe("useStoryTransfer", () => {
   beforeEach(() => {
     subscriptions = [];
@@ -107,6 +117,7 @@ describe("useStoryTransfer", () => {
       kind: "transferring",
       storyId: STORY,
       progress: null,
+      phase: null,
     });
   });
 
@@ -227,27 +238,26 @@ describe("useStoryTransfer", () => {
     expect(result.current.state.kind).toBe("transferred");
   });
 
-  it("maps a failed terminal to retryable via the re-read", async () => {
+  it("settles a job:failed from the event without a re-read, never flipping to transferred (F1/AC2)", async () => {
     vi.mocked(startTransferStory).mockResolvedValue({ jobId: "j1", storyId: STORY });
-    vi.mocked(readTransferState)
-      .mockResolvedValueOnce({ kind: "idle" }) // catch-up — no-op
-      .mockResolvedValueOnce({
-        kind: "retryable",
-        story: { id: STORY, title: "Mon histoire" },
-        cause: "writeRejected",
-        message: "Le transfert a échoué.",
-        userAction: "Vérifie l'espace disponible puis relance l'envoi.",
-      });
+    // The catch-up re-read returns idle; the failure terminal must come straight
+    // from the EVENT — a `job:failed` is never re-read into a false `transferred`
+    // (a pack present after a post-promote fsync failure is the `incomplete` case).
+    vi.mocked(readTransferState).mockResolvedValue({ kind: "idle" });
 
     const { result } = renderHook(() => useStoryTransfer());
     act(() => result.current.send(STORY, DEVICE));
     await waitFor(() => expect(subscribeJobEvents).toHaveBeenCalled());
+    await waitFor(() => expect(readTransferState).toHaveBeenCalledTimes(1));
     act(() => lastSubscription().onFailed(failed(2)));
 
     await waitFor(() => expect(result.current.state.kind).toBe("retryable"));
+    expect(result.current.state.kind).not.toBe("transferred");
+    // No extra re-read on the failure path — only the earlier catch-up ran.
+    expect(readTransferState).toHaveBeenCalledTimes(1);
     if (result.current.state.kind === "retryable") {
       expect(result.current.state.storyId).toBe(STORY);
-      expect(result.current.state.message).toMatch(/a échoué/i);
+      expect(result.current.state.message).toMatch(/l'appareil connecté a changé/i);
     }
   });
 
@@ -264,6 +274,49 @@ describe("useStoryTransfer", () => {
     if (result.current.state.kind === "retryable") {
       expect(result.current.state.message).toMatch(/l'appareil connecté a changé/i);
     }
+  });
+
+  it("maps a job:failed with completeness 'incomplete' to the incomplete terminal, distinct from retryable (AC2)", async () => {
+    vi.mocked(startTransferStory).mockResolvedValue({ jobId: "j1", storyId: STORY });
+    vi.mocked(readTransferState).mockResolvedValue({ kind: "idle" });
+
+    const { result } = renderHook(() => useStoryTransfer());
+    act(() => result.current.send(STORY, DEVICE));
+    await waitFor(() => expect(subscribeJobEvents).toHaveBeenCalled());
+    act(() => lastSubscription().onFailed(failedIncomplete(2)));
+
+    await waitFor(() => expect(result.current.state.kind).toBe("incomplete"));
+    expect(result.current.state.kind).not.toBe("retryable");
+    if (result.current.state.kind === "incomplete") {
+      expect(result.current.state.storyId).toBe(STORY);
+      // The structured cause is carried into the current state (F4/AC3).
+      expect(result.current.state.cause).toBe("writeRejected");
+      expect(result.current.state.message).toMatch(/copie partielle/i);
+      expect(result.current.state.userAction).toMatch(/rétablir un état sûr/i);
+    }
+  });
+
+  it("dismiss() returns to idle while keeping retry() available, draft untouched (AC3)", async () => {
+    vi.mocked(startTransferStory).mockResolvedValue({ jobId: "j1", storyId: STORY });
+    vi.mocked(readTransferState).mockResolvedValue({ kind: "idle" });
+
+    const { result } = renderHook(() => useStoryTransfer());
+    act(() => result.current.send(STORY, DEVICE));
+    await waitFor(() => expect(subscribeJobEvents).toHaveBeenCalled());
+    act(() => lastSubscription().onFailed(failedIncomplete(2)));
+    await waitFor(() => expect(result.current.state.kind).toBe("incomplete"));
+
+    // Abandonner → back to idle.
+    act(() => result.current.dismiss());
+    expect(result.current.state.kind).toBe("idle");
+
+    // The last request is preserved, so retry() / send() stay possible afterwards.
+    act(() => result.current.retry());
+    await waitFor(() => expect(startTransferStory).toHaveBeenCalledTimes(2));
+    expect(vi.mocked(startTransferStory).mock.lastCall?.[0]).toEqual({
+      storyId: STORY,
+      deviceIdentifier: DEVICE,
+    });
   });
 
   it("surfaces an error when start_transfer_story rejects with a drift", async () => {
@@ -313,6 +366,7 @@ describe("useStoryTransfer", () => {
       kind: "transferring",
       storyId: STORY,
       progress: null,
+      phase: null,
     });
   });
 

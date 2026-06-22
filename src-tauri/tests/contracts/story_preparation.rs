@@ -187,9 +187,15 @@ fn job_failed_event_carries_non_empty_message_and_action() {
         error_code: PREPARATION_FAILED_CODE.into(),
         error_message: "Préparation interrompue.".into(),
         user_action: "Relance la préparation.".into(),
+        completeness: None,
+        cause: None,
     })
     .expect("ser");
     assert_eq!(v["errorCode"], "PREPARATION_FAILED");
+    assert!(
+        v.get("completeness").is_none(),
+        "preparation failures carry no completeness"
+    );
     assert!(!v["errorMessage"].as_str().expect("message").is_empty());
     assert!(!v["userAction"].as_str().expect("userAction").is_empty());
     assert!(v.get("error_code").is_none(), "no snake_case leak");

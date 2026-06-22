@@ -18,6 +18,7 @@ pub use preparation::{
     PREPARATION_PIPELINE_VERSION,
 };
 pub use transfer::{
-    append_pack_uuid, build_write_plan, ensure_cohort_coherent, pack_uuid_bytes,
-    short_id_from_pack_uuid, PackWriteFile, PackWritePlan, TransferFailureCause,
+    append_pack_uuid, build_write_plan, classify, ensure_cohort_coherent, failure_copy,
+    pack_uuid_bytes, short_id_from_pack_uuid, PackWriteFile, PackWritePlan, TransferCompleteness,
+    TransferFailureCause,
 };

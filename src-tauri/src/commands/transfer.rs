@@ -81,6 +81,39 @@ impl PreparationEventEmitter for TauriJobEmitter {
     }
 
     fn failed(&self, message: &str, user_action: &str, sequence: u64) {
+        self.emit_failed(message, user_action, None, None, sequence);
+    }
+
+    fn failed_with_completeness(
+        &self,
+        message: &str,
+        user_action: &str,
+        completeness: Option<&str>,
+        cause: Option<&str>,
+        sequence: u64,
+    ) {
+        self.emit_failed(
+            message,
+            user_action,
+            completeness.map(str::to_string),
+            cause.map(str::to_string),
+            sequence,
+        );
+    }
+}
+
+impl TauriJobEmitter {
+    /// Build + emit the `job:failed` payload (best-effort). `completeness` is set
+    /// only for the transfer flow (`"failed"` / `"incomplete"`); preparation
+    /// passes `None`, so the field is omitted on the wire.
+    fn emit_failed(
+        &self,
+        message: &str,
+        user_action: &str,
+        completeness: Option<String>,
+        cause: Option<String>,
+        sequence: u64,
+    ) {
         let _ = self.app.emit(
             EVENT_JOB_FAILED,
             JobFailedEvent {
@@ -91,6 +124,8 @@ impl PreparationEventEmitter for TauriJobEmitter {
                 error_code: self.error_code.to_string(),
                 error_message: message.to_string(),
                 user_action: user_action.to_string(),
+                completeness,
+                cause,
             },
         );
     }
@@ -200,6 +235,8 @@ pub async fn start_prepare_story(
                         error_code: PREPARATION_FAILED_CODE.to_string(),
                         error_message: "Préparation interrompue avant la fin.".to_string(),
                         user_action: "Relance la préparation.".to_string(),
+                        completeness: None,
+                        cause: None,
                     },
                 );
                 transfer_log::Event::PreparationFailed {
@@ -335,14 +372,19 @@ pub async fn start_transfer_story(
                 story_ref,
                 elapsed_ms,
             },
-            Ok(TransferOutcome::Retryable { cause }) => transfer_log::Event::TransferFailed {
+            Ok(TransferOutcome::Retryable {
+                cause,
+                completeness,
+            }) => transfer_log::Event::TransferFailed {
                 story_ref,
                 cause: cause.diagnostic_tag(),
+                completeness: completeness.diagnostic_tag(),
                 elapsed_ms,
             },
             Ok(TransferOutcome::Transport { .. }) => transfer_log::Event::TransferFailed {
                 story_ref,
                 cause: "transport",
+                completeness: "failed",
                 elapsed_ms,
             },
             Err(_join) => {
@@ -351,6 +393,10 @@ pub async fn start_transfer_story(
                 // always-winning sequence so the UI does not hang in "en
                 // transfert" (idempotent consumers keep the highest sequence).
                 // Defensive: the service is panic-free by construction.
+                // A panicked / cancelled worker is NON-CLASSIFIABLE: the write may
+                // have begun mutating the device, so we must NOT claim it stayed
+                // intact. Surface the honest `incomplete` (AC2) — a relance (full
+                // cycle) restores a safe state — never a device-intact `échoué`.
                 let _ = task_app.emit(
                     EVENT_JOB_FAILED,
                     JobFailedEvent {
@@ -359,13 +405,18 @@ pub async fn start_transfer_story(
                         target_story_id: emitter_story_id.clone(),
                         sequence: u64::MAX,
                         error_code: TRANSFER_FAILED_CODE.to_string(),
-                        error_message: "Envoi interrompu avant la fin.".to_string(),
-                        user_action: "Relance l'envoi.".to_string(),
+                        error_message:
+                            "Envoi interrompu : l'appareil peut contenir une copie partielle."
+                                .to_string(),
+                        user_action: "Relance l'envoi pour rétablir un état sûr.".to_string(),
+                        completeness: Some("incomplete".to_string()),
+                        cause: None,
                     },
                 );
                 transfer_log::Event::TransferFailed {
                     story_ref,
                     cause: "interrupted",
+                    completeness: "incomplete",
                     elapsed_ms,
                 }
             }

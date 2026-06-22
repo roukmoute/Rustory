@@ -32,7 +32,10 @@ pub use pack_reader::{AcquiredPack, DevicePackReader, SystemDevicePackReader};
 pub use parser::{compute_device_identifier, parse_metadata_version, MetadataParseError};
 pub use scanner::{DeviceCandidate, DeviceScanReport, DeviceScanner};
 pub use system::{SystemDeviceScanner, EXTRA_MOUNT_ROOTS_ENV, SYSTEM_SCANNER_DEFAULT};
-pub use writer::{sweep_device_transfer_staging, DevicePackWriter, SystemDevicePackWriter};
+pub use writer::{
+    sweep_device_transfer_staging, DevicePackWriter, SystemDevicePackWriter, WriteFailure,
+    WriteProgress,
+};
 
 #[cfg(test)]
 pub use mock::{

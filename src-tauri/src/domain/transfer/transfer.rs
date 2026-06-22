@@ -60,6 +60,20 @@ impl TransferFailureCause {
         }
     }
 
+    /// Stable camelCase wire discriminant carried on the `job:failed` event so the
+    /// UI keeps the structured cause (AC3) alongside the message + next gesture.
+    /// MUST match `TransferCauseDto`'s serde representation (the IPC mirror).
+    pub const fn wire_cause(self) -> &'static str {
+        match self {
+            Self::WriteNotAuthorized => "writeNotAuthorized",
+            Self::NotPrepared => "notPrepared",
+            Self::NotTransferable => "notTransferable",
+            Self::DeviceChanged => "deviceChanged",
+            Self::WriteRejected => "writeRejected",
+            Self::Interrupted => "interrupted",
+        }
+    }
+
     /// Frozen severity per cause (reuses the canonical-validity vocabulary). It
     /// does NOT change the UI rendering — every transfer failure surfaces as
     /// `échec récupérable` with `Relancer` — but it labels the cause for traces
@@ -105,6 +119,71 @@ impl TransferFailureCause {
             ),
             Self::Interrupted => ("Envoi interrompu avant la fin.", "Relance l'envoi."),
         }
+    }
+}
+
+/// Whether a failed transfer left the DEVICE untouched or mid-mutation — the
+/// honest distinction story 3.5 surfaces. It is a property of the DEVICE (did the
+/// write reach the content promotion?), ORTHOGONAL to [`TransferFailureCause`]:
+/// the SAME cause can be `Failed` (refused before any byte hit the device) or
+/// `Incomplete` (an I/O failure AFTER the content was promoted but before it was
+/// indexed). Distinct from `état partiel` (a `verify` verdict, a later story).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransferCompleteness {
+    /// The device was NEVER mutated — the write was refused/interrupted before the
+    /// content promotion. The existing content is intact; surfaced as the
+    /// canonical `échec récupérable`.
+    Failed,
+    /// The write began mutating the device (content promoted) then was interrupted
+    /// before the index update: the device may hold an unreferenced partial copy.
+    /// Surfaced as `transfert incomplet`; a FRESH relaunch (never a hidden partial
+    /// resume) restores a safe state.
+    Incomplete,
+}
+
+impl TransferCompleteness {
+    /// Stable snake_case wire/log tag — the closed identifier the UI branches on
+    /// and traces record, never a localized message.
+    pub const fn diagnostic_tag(self) -> &'static str {
+        match self {
+            Self::Failed => "failed",
+            Self::Incomplete => "incomplete",
+        }
+    }
+}
+
+/// Classify a transfer failure by whether the DEVICE write reached its mutation
+/// point. Orthogonal to the cause: `reached_device_mutation` (reported by the
+/// writer — `true` only once the content promotion succeeded) is the ONLY input.
+/// `cause` is accepted for call-site clarity and future-proofing but never alters
+/// the result.
+pub fn classify(
+    _cause: TransferFailureCause,
+    reached_device_mutation: bool,
+) -> TransferCompleteness {
+    if reached_device_mutation {
+        TransferCompleteness::Incomplete
+    } else {
+        TransferCompleteness::Failed
+    }
+}
+
+/// The single canonical FR `(message, userAction)` for a failure terminal,
+/// combining the cause with the device completeness. An `Incomplete` outcome
+/// carries the device-state nuance (a partial copy may exist; relaunching is
+/// safe) regardless of the precise cause; a `Failed` outcome defers to the
+/// cause's own copy (the device is intact — no second wording for one cause). No
+/// technical jargon leaks.
+pub fn failure_copy(
+    cause: TransferFailureCause,
+    completeness: TransferCompleteness,
+) -> (&'static str, &'static str) {
+    match completeness {
+        TransferCompleteness::Failed => cause.copy(),
+        TransferCompleteness::Incomplete => (
+            "Envoi incomplet : l'appareil peut contenir une copie partielle de l'histoire.",
+            "Relance l'envoi pour rétablir un état sûr.",
+        ),
     }
 }
 
@@ -413,5 +492,74 @@ mod tests {
         unique.dedup();
         assert_eq!(unique.len(), tags.len(), "tags must be distinct");
         assert!(tags.iter().all(|t| !t.is_empty()));
+    }
+
+    #[test]
+    fn classify_is_failed_before_mutation_and_incomplete_after() {
+        use TransferFailureCause::*;
+        // The realistic writer outcomes: Interrupted is always pre-promotion, a
+        // staging WriteRejected is pre-promotion → Failed.
+        assert_eq!(classify(Interrupted, false), TransferCompleteness::Failed);
+        assert_eq!(classify(WriteRejected, false), TransferCompleteness::Failed);
+        // A durability/index I/O failure AFTER a successful promote → Incomplete.
+        assert_eq!(
+            classify(WriteRejected, true),
+            TransferCompleteness::Incomplete
+        );
+        // Orthogonal to the cause: the result folds purely on the mutation flag.
+        for cause in [
+            WriteNotAuthorized,
+            NotPrepared,
+            NotTransferable,
+            DeviceChanged,
+            WriteRejected,
+            Interrupted,
+        ] {
+            assert_eq!(classify(cause, false), TransferCompleteness::Failed);
+            assert_eq!(classify(cause, true), TransferCompleteness::Incomplete);
+        }
+    }
+
+    #[test]
+    fn completeness_diagnostic_tags_are_stable() {
+        assert_eq!(TransferCompleteness::Failed.diagnostic_tag(), "failed");
+        assert_eq!(
+            TransferCompleteness::Incomplete.diagnostic_tag(),
+            "incomplete"
+        );
+    }
+
+    #[test]
+    fn failure_copy_defers_to_cause_when_failed_and_is_device_aware_when_incomplete() {
+        // Failed → the cause's own copy verbatim (the device is intact).
+        assert_eq!(
+            failure_copy(
+                TransferFailureCause::Interrupted,
+                TransferCompleteness::Failed
+            ),
+            TransferFailureCause::Interrupted.copy()
+        );
+        // Incomplete → the device-nuance copy, identical regardless of the cause,
+        // non-empty, and free of any technical jargon.
+        let (m_a, a_a) = failure_copy(
+            TransferFailureCause::WriteRejected,
+            TransferCompleteness::Incomplete,
+        );
+        let (m_b, a_b) = failure_copy(
+            TransferFailureCause::Interrupted,
+            TransferCompleteness::Incomplete,
+        );
+        assert_eq!(
+            (m_a, a_a),
+            (m_b, a_b),
+            "Incomplete copy is cause-independent"
+        );
+        assert!(!m_a.is_empty() && !a_a.is_empty());
+        for bad in [
+            "write", "staging", "promote", "index", ".pi", "job", "payload", "stage",
+        ] {
+            assert!(!m_a.contains(bad), "no jargon: {bad}");
+            assert!(!a_a.contains(bad), "no jargon: {bad}");
+        }
     }
 }

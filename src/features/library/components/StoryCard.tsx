@@ -11,7 +11,11 @@ export type StoryCardSelectionMode = "replace" | "toggle";
  *  "éléments prêts/bloquants"). Derived from `useStoryPreparation` /
  *  `useStoryTransfer`, never a new source of truth; the authoritative surface
  *  stays the decision panel. */
-export type StoryPreparationBadge = "preparing" | "retryable" | "transferring";
+export type StoryPreparationBadge =
+  | "preparing"
+  | "retryable"
+  | "transferring"
+  | "incomplete";
 
 export interface StoryCardProps {
   story: StoryCardDto;
@@ -121,7 +125,13 @@ export function StoryCard({
         <h3 className="story-card__title">{story.title}</h3>
         {preparationBadge ? (
           <StateChip
-            tone={preparationBadge === "retryable" ? "error" : "neutral"}
+            tone={
+              preparationBadge === "retryable"
+                ? "error"
+                : preparationBadge === "incomplete"
+                  ? "warning"
+                  : "neutral"
+            }
             label={badgeLabel(preparationBadge)}
             className="story-card__preparation-chip"
           />
@@ -141,5 +151,7 @@ function badgeLabel(badge: StoryPreparationBadge): string {
       return "en transfert";
     case "retryable":
       return "échec récupérable";
+    case "incomplete":
+      return "transfert incomplet";
   }
 }

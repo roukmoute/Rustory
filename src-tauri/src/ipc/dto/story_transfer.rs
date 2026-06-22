@@ -17,7 +17,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::application::transfer::TransferStateView;
-use crate::domain::transfer::TransferFailureCause;
+use crate::domain::transfer::{failure_copy, TransferCompleteness, TransferFailureCause};
 
 use super::PreparationStoryDto;
 
@@ -63,6 +63,16 @@ pub enum TransferCauseDto {
     Interrupted,
 }
 
+/// Closed device-completeness discriminant for a failed transfer (camelCase): a
+/// device left intact (`failed`) vs one that may hold a partial copy
+/// (`incomplete`). The UI maps it to `échec récupérable` vs `transfert incomplet`.
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum TransferCompletenessDto {
+    Failed,
+    Incomplete,
+}
+
 /// Wire shape of the transfer state. Tagged enum on `kind`. The `transferring`
 /// variant describes the in-flight phase the frontend derives from
 /// `job:progress`; the `retryable` variant is built from the `job:failed` event;
@@ -88,12 +98,14 @@ pub enum TransferStateDto {
         device_identifier: String,
         story: PreparationStoryDto,
     },
-    /// A recoverable failure (`échec récupérable`) consultable in context, with
-    /// the canonical message + next gesture.
+    /// A recoverable failure consultable in context, with the canonical message +
+    /// next gesture. `completeness` distinguishes `échec récupérable` (the device
+    /// stayed intact) from `transfert incomplet` (a possible partial copy).
     #[serde(rename_all = "camelCase")]
     Retryable {
         story: PreparationStoryDto,
         cause: TransferCauseDto,
+        completeness: TransferCompletenessDto,
         message: String,
         user_action: String,
     },
@@ -123,11 +135,16 @@ impl TransferStateDto {
     /// canonical FR `message` / `userAction` from the single domain source. Used
     /// by the contract tests and available to any consumer that surfaces a
     /// terminal failure from its cause.
-    pub fn retryable(story: PreparationStoryDto, cause: TransferFailureCause) -> Self {
-        let (message, user_action) = cause.copy();
+    pub fn retryable(
+        story: PreparationStoryDto,
+        cause: TransferFailureCause,
+        completeness: TransferCompleteness,
+    ) -> Self {
+        let (message, user_action) = failure_copy(cause, completeness);
         Self::Retryable {
             story,
             cause: cause_dto(cause),
+            completeness: completeness_dto(completeness),
             message: message.to_string(),
             user_action: user_action.to_string(),
         }
@@ -143,6 +160,14 @@ pub fn cause_dto(cause: TransferFailureCause) -> TransferCauseDto {
         TransferFailureCause::DeviceChanged => TransferCauseDto::DeviceChanged,
         TransferFailureCause::WriteRejected => TransferCauseDto::WriteRejected,
         TransferFailureCause::Interrupted => TransferCauseDto::Interrupted,
+    }
+}
+
+/// Map a device-completeness to its closed wire discriminant.
+pub fn completeness_dto(completeness: TransferCompleteness) -> TransferCompletenessDto {
+    match completeness {
+        TransferCompleteness::Failed => TransferCompletenessDto::Failed,
+        TransferCompleteness::Incomplete => TransferCompletenessDto::Incomplete,
     }
 }
 
@@ -199,14 +224,31 @@ mod tests {
 
     #[test]
     fn retryable_carries_cause_message_and_user_action() {
-        let dto =
-            TransferStateDto::retryable(story_dto(), TransferFailureCause::WriteNotAuthorized);
+        let dto = TransferStateDto::retryable(
+            story_dto(),
+            TransferFailureCause::WriteNotAuthorized,
+            TransferCompleteness::Failed,
+        );
         let v = serde_json::to_value(&dto).expect("ser");
         assert_eq!(v["kind"], "retryable");
         assert_eq!(v["cause"], "writeNotAuthorized");
+        assert_eq!(v["completeness"], "failed");
         assert!(!v["message"].as_str().expect("message").is_empty());
         assert!(!v["userAction"].as_str().expect("userAction").is_empty());
         assert!(v.get("user_action").is_none(), "no snake_case leak");
+    }
+
+    #[test]
+    fn retryable_incomplete_carries_the_incomplete_completeness() {
+        let dto = TransferStateDto::retryable(
+            story_dto(),
+            TransferFailureCause::WriteRejected,
+            TransferCompleteness::Incomplete,
+        );
+        let v = serde_json::to_value(&dto).expect("ser");
+        assert_eq!(v["completeness"], "incomplete");
+        // The message conveys the device-state nuance (a possible partial copy).
+        assert!(!v["message"].as_str().expect("message").is_empty());
     }
 
     #[test]

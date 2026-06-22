@@ -35,11 +35,31 @@ const DRIFT_ERROR: AppError = {
  */
 export type StoryTransferState =
   | { kind: "idle" }
-  | { kind: "transferring"; storyId: string; progress: number | null }
+  | {
+      kind: "transferring";
+      storyId: string;
+      progress: number | null;
+      /** The live phase ("preflight" gate vs "transfer" write) so the detail can
+       *  name it honestly even when no reliable % is known (AC1). */
+      phase: string | null;
+    }
   | { kind: "transferred"; storyId: string }
   | {
       kind: "retryable";
       storyId: string;
+      /** Structured failure cause (AC3), when the event carried one. */
+      cause?: string;
+      message: string;
+      userAction: string;
+    }
+  | {
+      // The write STARTED then was interrupted (the device was mutated): the Lunii
+      // may hold a partial copy; a relance (full cycle) restores a safe state
+      // (AC2). Distinct from `retryable` (device left untouched → `échec
+      // récupérable`) and from `transferred` (no success is ever claimed here).
+      kind: "incomplete";
+      storyId: string;
+      cause?: string;
       message: string;
       userAction: string;
     }
@@ -50,8 +70,14 @@ export interface UseStoryTransfer {
   /** Start sending `storyId` to `deviceIdentifier`. No-op if either is empty.
    *  Supersedes any transfer already tracked by this hook. */
   send: (storyId: string, deviceIdentifier: string) => void;
-  /** Re-run the last transfer after a recoverable failure. */
+  /** Re-run the last transfer after a recoverable failure (a full new cycle —
+   *  never a hidden partial resume). */
   retry: () => void;
+  /** Abandon the current outcome: return to `idle` WITHOUT clearing the last
+   *  request, so `retry()` / `send()` stay available. Wired to the "Abandonner"
+   *  action on a `retryable` / `incomplete` terminal; the local draft is never
+   *  touched (AC3). */
+  dismiss: () => void;
 }
 
 /**
@@ -138,12 +164,23 @@ export function useStoryTransfer(): UseStoryTransfer {
             setState({ kind: "transferred", storyId: sid });
           } else if (dto.kind === "retryable") {
             settle();
-            setState({
-              kind: "retryable",
-              storyId: sid,
-              message: dto.message,
-              userAction: dto.userAction,
-            });
+            // `read_transfer_state` normally folds to idle/transferred, but if it
+            // ever carries the device-mutation nuance, honor it.
+            setState(
+              dto.completeness === "incomplete"
+                ? {
+                    kind: "incomplete",
+                    storyId: sid,
+                    message: dto.message,
+                    userAction: dto.userAction,
+                  }
+                : {
+                    kind: "retryable",
+                    storyId: sid,
+                    message: dto.message,
+                    userAction: dto.userAction,
+                  },
+            );
           } else {
             // idle / transferring — defer: let the event-derived outcome or the
             // live events decide.
@@ -178,7 +215,7 @@ export function useStoryTransfer(): UseStoryTransfer {
       lastRequestRef.current = { storyId, deviceIdentifier };
       teardown();
       // Optimistic: the write starts in flight. Live events refine the progress.
-      setState({ kind: "transferring", storyId, progress: null });
+      setState({ kind: "transferring", storyId, progress: null, phase: null });
 
       startTransferStory({ storyId, deviceIdentifier })
         .then((acceptance) => {
@@ -205,9 +242,14 @@ export function useStoryTransfer(): UseStoryTransfer {
                 progress: event.progress,
                 sequence: event.sequence,
               });
-              // 3.4 scope: both the preflight gate and the transfer write map to
-              // a single calm "en transfert" phase (the rich phase split is 3.5).
-              setState({ kind: "transferring", storyId, progress: event.progress });
+              // The phase ("preflight" gate vs "transfer" write) is carried so the
+              // detail can name it honestly (AC1) when no reliable % is known.
+              setState({
+                kind: "transferring",
+                storyId,
+                progress: event.progress,
+                phase: event.phase,
+              });
             },
             onCompleted: (event) => {
               if (!mountedRef.current || callId !== activeJobRef.current) return;
@@ -229,15 +271,31 @@ export function useStoryTransfer(): UseStoryTransfer {
             onFailed: (event) => {
               if (!mountedRef.current || callId !== activeJobRef.current) return;
               teardown();
-              // Preserve the recoverable failure even if the re-read can no
-              // longer confirm a state (device left mid-write → idle).
-              reread(callId, event.jobId, storyId, deviceIdentifier, () =>
-                setState({
-                  kind: "retryable",
-                  storyId,
-                  message: event.errorMessage,
-                  userAction: event.userAction,
-                }),
+              // AC2/AC3 — the failure terminal is AUTHORITATIVE from the event: a
+              // `job:failed` must NEVER be flipped to `transferred` by a re-read (a
+              // pack present after e.g. a post-promote fsync failure is exactly the
+              // `incomplete` case, not a success). Settle directly from the event:
+              // `incomplete` (write started — the Lunii may hold a partial copy) vs
+              // `retryable` / `échoué` (device untouched), carrying the structured
+              // cause for the in-context decision.
+              settledRef.current = callId;
+              clearJob(event.jobId);
+              setState(
+                event.completeness === "incomplete"
+                  ? {
+                      kind: "incomplete",
+                      storyId,
+                      cause: event.cause,
+                      message: event.errorMessage,
+                      userAction: event.userAction,
+                    }
+                  : {
+                      kind: "retryable",
+                      storyId,
+                      cause: event.cause,
+                      message: event.errorMessage,
+                      userAction: event.userAction,
+                    },
               );
             },
           });
@@ -281,6 +339,16 @@ export function useStoryTransfer(): UseStoryTransfer {
     if (last) start(last.storyId, last.deviceIdentifier);
   }, [start]);
 
+  const dismiss = useCallback(() => {
+    // Abandon the current outcome (AC3). Supersede any in-flight callbacks (a
+    // pending re-read for the old call becomes a no-op), stop the live
+    // subscription, and return to idle WITHOUT clearing `lastRequestRef` so a
+    // later `retry()` / `send()` stays possible. The local draft is never touched.
+    activeJobRef.current += 1;
+    teardown();
+    setState({ kind: "idle" });
+  }, [teardown]);
+
   useEffect(() => {
     mountedRef.current = true;
     return () => {
@@ -289,5 +357,5 @@ export function useStoryTransfer(): UseStoryTransfer {
     };
   }, [teardown]);
 
-  return { state, send, retry };
+  return { state, send, retry, dismiss };
 }

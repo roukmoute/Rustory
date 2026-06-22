@@ -2694,7 +2694,7 @@ describe("<LibraryRoute />", () => {
   it("mapTransferView shows the active / terminal state ONLY for the selected target story", () => {
     expect(
       mapTransferView(
-        { kind: "transferring", storyId: STORY_A, progress: null },
+        { kind: "transferring", storyId: STORY_A, progress: null, phase: null },
         STORY_A,
         1,
         "idle",
@@ -2702,7 +2702,7 @@ describe("<LibraryRoute />", () => {
         true,
         true,
       ),
-    ).toEqual({ kind: "transferring", progress: null });
+    ).toEqual({ kind: "transferring", progress: null, phase: null });
     expect(
       mapTransferView(
         { kind: "transferred", storyId: STORY_A },
@@ -2730,6 +2730,48 @@ describe("<LibraryRoute />", () => {
         true,
       ),
     ).toEqual({ kind: "retryable", message: "Échec.", userAction: "Relance." });
+    expect(
+      mapTransferView(
+        {
+          kind: "incomplete",
+          storyId: STORY_A,
+          message: "Copie partielle.",
+          userAction: "Relance pour rétablir un état sûr.",
+        },
+        STORY_A,
+        1,
+        "idle",
+        true,
+        true,
+        true,
+      ),
+    ).toEqual({
+      kind: "incomplete",
+      message: "Copie partielle.",
+      userAction: "Relance pour rétablir un état sûr.",
+    });
+  });
+
+  it("anchors a failure issue to its story: hidden when another is selected, restored on re-select (C5/T7)", () => {
+    const failedA = {
+      kind: "retryable" as const,
+      storyId: STORY_A,
+      message: "Le transfert a échoué.",
+      userAction: "Relance.",
+    };
+    // Selecting another story B: A's full panel context is NOT shown — the
+    // StoryCard badge is the persistent anchor across selection changes.
+    expect(
+      mapTransferView(failedA, STORY_B, 1, "idle", true, true, true).kind,
+    ).not.toBe("retryable");
+    // Re-selecting A restores the full context (alert + Relancer/Abandonner).
+    expect(
+      mapTransferView(failedA, STORY_A, 1, "idle", true, true, true),
+    ).toEqual({
+      kind: "retryable",
+      message: "Le transfert a échoué.",
+      userAction: "Relance.",
+    });
   });
 
   it("mapTransferView blocks a NEW send while a transfer targets another story (single-flight, F4)", () => {
@@ -2739,7 +2781,7 @@ describe("<LibraryRoute />", () => {
     // its badge (the selected-and-transferring case is handled above this branch).
     expect(
       mapTransferView(
-        { kind: "transferring", storyId: STORY_A, progress: null },
+        { kind: "transferring", storyId: STORY_A, progress: null, phase: null },
         STORY_B,
         1,
         "idle",

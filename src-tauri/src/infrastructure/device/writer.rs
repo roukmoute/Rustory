@@ -59,6 +59,47 @@ const COPY_BUF_BYTES: usize = 64 * 1024;
 /// write without ever touching the device's own content.
 const DEVICE_STAGING_PREFIX: &str = ".rustory-staging-";
 
+/// Progress of the content-copy step, reported by [`DevicePackWriter::write_pack`]
+/// so the application can surface an HONEST fraction. Emitted ONLY during the
+/// measurable content copy (never for preflight / durability / index), monotone,
+/// never exceeding the total. The application turns it into a `job:progress`
+/// fraction and clamps it below 100 % (reserved for the completed terminal).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WriteProgress {
+    pub bytes_done: u64,
+    pub bytes_total: u64,
+}
+
+/// A device-write failure plus whether the DEVICE was already mutated when it
+/// happened — the input the domain
+/// [`classify`](crate::domain::transfer::classify) turns into `Failed` vs
+/// `Incomplete`. `reached_device_mutation` is `false` until the content promotion
+/// succeeds, then `true` for the durability + index steps (and the reuse-path
+/// index update), so a post-promotion I/O failure is honestly reported as a
+/// possible partial copy rather than a clean failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WriteFailure {
+    pub cause: TransferFailureCause,
+    pub reached_device_mutation: bool,
+}
+
+/// A failure BEFORE the device was mutated (existing content intact → `Failed`).
+fn clean(cause: TransferFailureCause) -> WriteFailure {
+    WriteFailure {
+        cause,
+        reached_device_mutation: false,
+    }
+}
+
+/// A failure AFTER the device mutation began (content promoted, possibly not yet
+/// indexed → `Incomplete`): a possible partial copy a fresh relaunch converges.
+fn mutated(cause: TransferFailureCause) -> WriteFailure {
+    WriteFailure {
+        cause,
+        reached_device_mutation: true,
+    }
+}
+
 /// Writes a prepared pack onto a writable Lunii volume. MUST respect the
 /// `budget` wall-clock deadline so a stalled mount cannot keep the
 /// `spawn_blocking` worker alive past the command budget, and MUST update `.pi`
@@ -67,7 +108,10 @@ pub trait DevicePackWriter: Send + Sync + 'static {
     /// `source_pack_dir` is the LOCAL `{app_data_dir}/imports/<story_id>/` folder
     /// (read-only source of the opaque bytes); `pack_uuid` is the canonical
     /// lowercase UUID added to `.pi`; `plan` lists the files to reproduce under
-    /// `.content/<plan.short_id>`.
+    /// `.content/<plan.short_id>`. `progress` is called during the content copy
+    /// with a monotone [`WriteProgress`]. On failure the [`WriteFailure`] reports
+    /// whether the device was already mutated (for the `Failed`/`Incomplete`
+    /// distinction).
     fn write_pack(
         &self,
         mount_path: &Path,
@@ -75,7 +119,8 @@ pub trait DevicePackWriter: Send + Sync + 'static {
         pack_uuid: &str,
         plan: &PackWritePlan,
         budget: Duration,
-    ) -> Result<(), TransferFailureCause>;
+        progress: &dyn Fn(WriteProgress),
+    ) -> Result<(), WriteFailure>;
 }
 
 /// Production writer: stdlib filesystem copies + atomic renames + fsync.
@@ -90,16 +135,18 @@ impl DevicePackWriter for SystemDevicePackWriter {
         pack_uuid: &str,
         plan: &PackWritePlan,
         budget: Duration,
-    ) -> Result<(), TransferFailureCause> {
+        progress: &dyn Fn(WriteProgress),
+    ) -> Result<(), WriteFailure> {
         // The UUID must be canonical — callers pass the value the import
         // recorded (schema-canonical), so a non-canonical value is a caller
         // invariant violation, refused WITHOUT touching the device.
-        let uuid_bytes = pack_uuid_bytes(pack_uuid).ok_or(TransferFailureCause::WriteRejected)?;
+        let uuid_bytes =
+            pack_uuid_bytes(pack_uuid).ok_or_else(|| clean(TransferFailureCause::WriteRejected))?;
 
         // F8 — validate every plan path at the write boundary BEFORE any device
         // I/O: a `..`, absolute or empty/dot component is refused, never followed.
         for file in &plan.files {
-            validate_rel_path(&file.rel_path)?;
+            validate_rel_path(&file.rel_path).map_err(clean)?;
         }
 
         // F3 — serialize writes to THIS mount: a single USB volume is written
@@ -121,73 +168,89 @@ impl DevicePackWriter for SystemDevicePackWriter {
         // F7 — refuse a corrupt `.pi` (length not a whole number of 16-byte
         // UUIDs) BEFORE any mutation; an append would misalign the new entry.
         // (Guard lives in `read_pi`; the index is re-read fresh before the append.)
-        read_pi(&pi_path)?;
+        read_pi(&pi_path).map_err(clean)?;
 
         // F2 — an existing `.content/<SHORT_ID>` is NEVER deleted or overwritten.
         // It must be PROVEN to be the same healthy pack (every planned file
         // present, matching size + checksum) before we reuse it; a collision,
         // stale or incomplete folder under this SHORT_ID is refused, not clobbered.
         if target.exists() {
-            if !pack_dir_matches_plan(&target, plan, started, budget)? {
-                return Err(TransferFailureCause::WriteRejected);
+            if !pack_dir_matches_plan(&target, plan, started, budget).map_err(clean)? {
+                return Err(clean(TransferFailureCause::WriteRejected));
             }
             // C3 — budget adherence "between steps": validating the existing pack
             // may have consumed the budget; do not run the (durable) index step
-            // over budget.
+            // over budget. This is pre-mutation for THIS run → `Failed`.
             if started.elapsed() >= budget {
-                return Err(TransferFailureCause::Interrupted);
+                return Err(clean(TransferFailureCause::Interrupted));
             }
-            // The healthy pack is already present. Converge the index (files-first
-            // recovery: a prior write may have promoted content but not indexed
-            // it) and stop — no staging, no destructive promote.
-            return index_pack(mount_path, &pi_path, &uuid_bytes);
+            // The healthy pack is already present (a prior write promoted it).
+            // Converging the index now touches the device, so an index failure
+            // here leaves content-present-not-indexed → `Incomplete`.
+            return index_pack(mount_path, &pi_path, &uuid_bytes).map_err(mutated);
         }
 
         // 1. Stage the opaque bytes in a temp dir ON THE DEVICE VOLUME.
         let staging = Builder::new()
             .prefix(DEVICE_STAGING_PREFIX)
             .tempdir_in(mount_path)
-            .map_err(|_| TransferFailureCause::WriteRejected)?;
+            .map_err(|_| clean(TransferFailureCause::WriteRejected))?;
 
+        let bytes_total: u64 = plan.files.iter().map(|f| f.byte_len).sum();
+        let mut bytes_done: u64 = 0;
         for file in &plan.files {
             if started.elapsed() >= budget {
-                return Err(TransferFailureCause::Interrupted);
+                return Err(clean(TransferFailureCause::Interrupted));
             }
-            let src = safe_rel_join(source_pack_dir, &file.rel_path)?;
-            let dst = safe_rel_join(staging.path(), &file.rel_path)?;
+            let src = safe_rel_join(source_pack_dir, &file.rel_path).map_err(clean)?;
+            let dst = safe_rel_join(staging.path(), &file.rel_path).map_err(clean)?;
             if let Some(parent) = dst.parent() {
-                fs::create_dir_all(parent).map_err(|_| TransferFailureCause::WriteRejected)?;
+                fs::create_dir_all(parent)
+                    .map_err(|_| clean(TransferFailureCause::WriteRejected))?;
             }
-            copy_one_file(&src, &dst, &file.checksum, started, budget)?;
+            copy_one_file(&src, &dst, &file.checksum, started, budget).map_err(clean)?;
+            // Honest progress: report ONLY the measurable content copy, monotone
+            // and bounded by the total. All of this is pre-promotion (staging) →
+            // any failure above is `Failed`.
+            bytes_done = bytes_done.saturating_add(file.byte_len);
+            progress(WriteProgress {
+                bytes_done,
+                bytes_total,
+            });
         }
 
         // C3 — budget adherence "between steps": the copy loop above may have
         // exhausted the budget; refuse BEFORE the durability + indexing phase
         // (fsync → promote → fsync → `.pi`) rather than running it over budget.
-        // This bounds the gap between steps; it does NOT interrupt an
-        // already-blocked syscall.
+        // Still pre-promotion → `Failed`. This bounds the gap between steps; it
+        // does NOT interrupt an already-blocked syscall.
         if started.elapsed() >= budget {
-            return Err(TransferFailureCause::Interrupted);
+            return Err(clean(TransferFailureCause::Interrupted));
         }
 
         // 2. Persist the staged contents' directory entries before promotion.
-        fsync_tree(staging.path()).map_err(|_| TransferFailureCause::WriteRejected)?;
+        fsync_tree(staging.path()).map_err(|_| clean(TransferFailureCause::WriteRejected))?;
 
-        // 3. Promote atomically. FILES FIRST: `.pi` is touched only afterwards.
-        fs::create_dir_all(&content_dir).map_err(|_| TransferFailureCause::WriteRejected)?;
-        promote(staging.path(), &target)?;
+        // 3. Promote atomically. FILES FIRST: `.pi` is touched only afterwards. A
+        //    failed `rename` did not move anything → still `Failed`.
+        fs::create_dir_all(&content_dir).map_err(|_| clean(TransferFailureCause::WriteRejected))?;
+        promote(staging.path(), &target).map_err(clean)?;
         // The staged path no longer exists; the TempDir drop is a no-op.
 
+        // FROM HERE the device IS mutated (content promoted): a durability or
+        // index I/O failure is `Incomplete` (a partial copy may remain until the
+        // next relaunch converges it via the prove-or-refuse reuse path), never
+        // `Failed`.
         // 4. Persist the promoted tree + `.content` parent so a power loss after
         //    the `.pi` update cannot resurrect a half-written folder.
-        fsync_tree(&target).map_err(|_| TransferFailureCause::WriteRejected)?;
-        fsync_dir(&content_dir).map_err(|_| TransferFailureCause::WriteRejected)?;
+        fsync_tree(&target).map_err(|_| mutated(TransferFailureCause::WriteRejected))?;
+        fsync_dir(&content_dir).map_err(|_| mutated(TransferFailureCause::WriteRejected))?;
 
         // 5. Add the UUID to `.pi` atomically (idempotent), re-reading the
         //    freshest index first (F3). A promoted folder left unreferenced if
         //    this step fails is benign unused content; the forbidden inverse (an
         //    index entry without content) cannot happen — this is the LAST step.
-        index_pack(mount_path, &pi_path, &uuid_bytes)
+        index_pack(mount_path, &pi_path, &uuid_bytes).map_err(mutated)
     }
 }
 
@@ -571,6 +634,45 @@ mod tests {
         Duration::from_secs(30)
     }
 
+    /// A no-op progress sink for the writes whose progress is not under test.
+    fn noop_progress(_: WriteProgress) {}
+
+    #[test]
+    fn progress_is_monotone_and_bounded_during_a_successful_write() {
+        let mount = empty_mount();
+        let source = source_pack();
+        let uuid = uuid_bytes([0x9A, 0x9B, 0x9C, 0x9D]);
+        let canonical = format_pack_uuid(&uuid);
+        let short_id = pack_short_id(&uuid);
+        let plan = plan_for(source.path(), &short_id);
+        let total: u64 = plan.files.iter().map(|f| f.byte_len).sum();
+
+        let seen: Mutex<Vec<WriteProgress>> = Mutex::new(Vec::new());
+        SystemDevicePackWriter
+            .write_pack(
+                mount.path(),
+                source.path(),
+                &canonical,
+                &plan,
+                budget(),
+                &|p| seen.lock().unwrap().push(p),
+            )
+            .expect("write must succeed");
+
+        let seen = seen.into_inner().unwrap();
+        assert!(
+            !seen.is_empty(),
+            "progress must be reported during the copy"
+        );
+        // Every report carries the same total, a monotone non-decreasing
+        // bytes_done bounded by the total, ending exactly at the total (the
+        // application clamps the fraction below 100 %, reserved for `completed`).
+        assert!(seen.iter().all(|p| p.bytes_total == total));
+        assert!(seen.windows(2).all(|w| w[1].bytes_done >= w[0].bytes_done));
+        assert!(seen.iter().all(|p| p.bytes_done <= p.bytes_total));
+        assert_eq!(seen.last().unwrap().bytes_done, total);
+    }
+
     /// Build a write plan for the plausible pack at `source`, computing each
     /// file's SHA-256 exactly as the preparation assembler records it.
     fn plan_for(source: &Path, short_id: &str) -> PackWritePlan {
@@ -622,7 +724,14 @@ mod tests {
         let plan = plan_for(source.path(), &short_id);
 
         SystemDevicePackWriter
-            .write_pack(mount.path(), source.path(), &canonical, &plan, budget())
+            .write_pack(
+                mount.path(),
+                source.path(),
+                &canonical,
+                &plan,
+                budget(),
+                &noop_progress,
+            )
             .expect("write must succeed");
 
         // Content reproduced byte-for-byte under `.content/<SHORT_ID>`.
@@ -652,10 +761,24 @@ mod tests {
         let plan = plan_for(source.path(), &short_id);
 
         SystemDevicePackWriter
-            .write_pack(mount.path(), source.path(), &canonical, &plan, budget())
+            .write_pack(
+                mount.path(),
+                source.path(),
+                &canonical,
+                &plan,
+                budget(),
+                &noop_progress,
+            )
             .expect("first write");
         SystemDevicePackWriter
-            .write_pack(mount.path(), source.path(), &canonical, &plan, budget())
+            .write_pack(
+                mount.path(),
+                source.path(),
+                &canonical,
+                &plan,
+                budget(),
+                &noop_progress,
+            )
             .expect("second write is a no-op");
 
         let pi = std::fs::read(mount.path().join(".pi")).expect("read .pi");
@@ -688,9 +811,20 @@ mod tests {
         std::fs::remove_file(source.path().join("ni")).expect("drop source ni");
 
         let err = SystemDevicePackWriter
-            .write_pack(mount.path(), source.path(), &canonical, &plan, budget())
+            .write_pack(
+                mount.path(),
+                source.path(),
+                &canonical,
+                &plan,
+                budget(),
+                &noop_progress,
+            )
             .expect_err("a missing source file must fail the write");
-        assert_eq!(err, TransferFailureCause::WriteRejected);
+        assert_eq!(err.cause, TransferFailureCause::WriteRejected);
+        assert!(
+            !err.reached_device_mutation,
+            "a failure before promotion leaves the device unmutated"
+        );
 
         // No staging residue, the new pack never promoted, `.pi` unchanged, and
         // the pre-existing pack untouched.
@@ -721,9 +855,14 @@ mod tests {
                 &canonical,
                 &plan,
                 Duration::ZERO,
+                &noop_progress,
             )
             .expect_err("zero budget must abort");
-        assert_eq!(err, TransferFailureCause::Interrupted);
+        assert_eq!(err.cause, TransferFailureCause::Interrupted);
+        assert!(
+            !err.reached_device_mutation,
+            "an interruption is always before promotion → not mutated"
+        );
         assert!(!mount.path().join(".content").join(&short_id).exists());
         assert!(!mount.path().join(".pi").exists());
         assert_eq!(sweep_device_transfer_staging(mount.path()), 0);
@@ -764,9 +903,20 @@ mod tests {
         std::fs::write(mount.path().join(".pi"), other).expect("seed .pi");
 
         let err = SystemDevicePackWriter
-            .write_pack(mount.path(), source.path(), &canonical, &plan, budget())
+            .write_pack(
+                mount.path(),
+                source.path(),
+                &canonical,
+                &plan,
+                budget(),
+                &noop_progress,
+            )
             .expect_err("a mismatched existing pack must be refused");
-        assert_eq!(err, TransferFailureCause::WriteRejected);
+        assert_eq!(err.cause, TransferFailureCause::WriteRejected);
+        assert!(
+            !err.reached_device_mutation,
+            "a failure before promotion leaves the device unmutated"
+        );
         // The existing folder is intact (not clobbered) and `.pi` is unchanged.
         assert_eq!(
             std::fs::read(target.join("ni")).unwrap(),
@@ -793,7 +943,14 @@ mod tests {
         let plan = plan_for(source.path(), &short_id);
 
         SystemDevicePackWriter
-            .write_pack(mount.path(), source.path(), &canonical, &plan, budget())
+            .write_pack(
+                mount.path(),
+                source.path(),
+                &canonical,
+                &plan,
+                budget(),
+                &noop_progress,
+            )
             .expect("initial write");
         // Simulate "content present, index lost".
         std::fs::write(mount.path().join(".pi"), Vec::<u8>::new()).expect("wipe index");
@@ -801,7 +958,14 @@ mod tests {
             std::fs::read(mount.path().join(".content").join(&short_id).join("ni")).unwrap();
 
         SystemDevicePackWriter
-            .write_pack(mount.path(), source.path(), &canonical, &plan, budget())
+            .write_pack(
+                mount.path(),
+                source.path(),
+                &canonical,
+                &plan,
+                budget(),
+                &noop_progress,
+            )
             .expect("recovery indexes the existing healthy pack");
 
         let pi = std::fs::read(mount.path().join(".pi")).expect("read .pi");
@@ -831,9 +995,20 @@ mod tests {
         std::fs::write(mount.path().join(".pi"), &pi).expect("seed fragmented .pi");
 
         let err = SystemDevicePackWriter
-            .write_pack(mount.path(), source.path(), &canonical, &plan, budget())
+            .write_pack(
+                mount.path(),
+                source.path(),
+                &canonical,
+                &plan,
+                budget(),
+                &noop_progress,
+            )
             .expect_err("a fragmented .pi must be refused");
-        assert_eq!(err, TransferFailureCause::WriteRejected);
+        assert_eq!(err.cause, TransferFailureCause::WriteRejected);
+        assert!(
+            !err.reached_device_mutation,
+            "a failure before promotion leaves the device unmutated"
+        );
         // Nothing written: no content folder, `.pi` byte-identical, no residue.
         assert!(!mount.path().join(".content").join(&short_id).exists());
         assert_eq!(std::fs::read(mount.path().join(".pi")).unwrap(), pi);
@@ -860,9 +1035,16 @@ mod tests {
                 }],
             };
             let err = SystemDevicePackWriter
-                .write_pack(mount.path(), source.path(), &canonical, &plan, budget())
+                .write_pack(
+                    mount.path(),
+                    source.path(),
+                    &canonical,
+                    &plan,
+                    budget(),
+                    &noop_progress,
+                )
                 .expect_err(bad);
-            assert_eq!(err, TransferFailureCause::WriteRejected, "{bad}");
+            assert_eq!(err.cause, TransferFailureCause::WriteRejected, "{bad}");
         }
         // No content, no `.pi`, no staging residue, and nothing escaped the mount.
         assert!(!mount.path().join(".content").join(&short_id).exists());
@@ -889,11 +1071,25 @@ mod tests {
 
         let (mp1, sp1) = (mount_path.clone(), src_path.clone());
         let h1 = std::thread::spawn(move || {
-            SystemDevicePackWriter.write_pack(&mp1, &sp1, &ca, &plan_a, Duration::from_secs(30))
+            SystemDevicePackWriter.write_pack(
+                &mp1,
+                &sp1,
+                &ca,
+                &plan_a,
+                Duration::from_secs(30),
+                &noop_progress,
+            )
         });
         let (mp2, sp2) = (mount_path.clone(), src_path.clone());
         let h2 = std::thread::spawn(move || {
-            SystemDevicePackWriter.write_pack(&mp2, &sp2, &cb, &plan_b, Duration::from_secs(30))
+            SystemDevicePackWriter.write_pack(
+                &mp2,
+                &sp2,
+                &cb,
+                &plan_b,
+                Duration::from_secs(30),
+                &noop_progress,
+            )
         });
         h1.join().unwrap().expect("write A");
         h2.join().unwrap().expect("write B");
@@ -928,9 +1124,14 @@ mod tests {
                 &canonical,
                 &plan,
                 Duration::ZERO,
+                &noop_progress,
             )
             .expect_err("zero budget at the durability phase must abort");
-        assert_eq!(err, TransferFailureCause::Interrupted);
+        assert_eq!(err.cause, TransferFailureCause::Interrupted);
+        assert!(
+            !err.reached_device_mutation,
+            "an interruption is always before promotion → not mutated"
+        );
         assert!(!mount.path().join(".content").join(&short_id).exists());
         assert!(!mount.path().join(".pi").exists());
         assert_eq!(sweep_device_transfer_staging(mount.path()), 0);
@@ -950,16 +1151,34 @@ mod tests {
 
         // Write the healthy pack, then drop an EXTRA file the plan never describes.
         SystemDevicePackWriter
-            .write_pack(mount.path(), source.path(), &canonical, &plan, budget())
+            .write_pack(
+                mount.path(),
+                source.path(),
+                &canonical,
+                &plan,
+                budget(),
+                &noop_progress,
+            )
             .expect("initial write");
         let target = mount.path().join(".content").join(&short_id);
         std::fs::write(target.join("EXTRA"), b"unexpected").expect("seed extra file");
         let pi_before = std::fs::read(mount.path().join(".pi")).expect("read .pi");
 
         let err = SystemDevicePackWriter
-            .write_pack(mount.path(), source.path(), &canonical, &plan, budget())
+            .write_pack(
+                mount.path(),
+                source.path(),
+                &canonical,
+                &plan,
+                budget(),
+                &noop_progress,
+            )
             .expect_err("an extra file makes the existing pack untrusted");
-        assert_eq!(err, TransferFailureCause::WriteRejected);
+        assert_eq!(err.cause, TransferFailureCause::WriteRejected);
+        assert!(
+            !err.reached_device_mutation,
+            "a failure before promotion leaves the device unmutated"
+        );
         // The extra file + planned content are left intact (never clobbered) and
         // `.pi` is unchanged.
         assert_eq!(

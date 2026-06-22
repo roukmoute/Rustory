@@ -216,4 +216,34 @@ describe("job event guards", () => {
       }),
     ).toBe(false);
   });
+  it("accepts a failed event with an optional transfer completeness", () => {
+    for (const completeness of ["failed", "incomplete"]) {
+      expect(
+        isJobFailedEvent({
+          jobId: "j",
+          jobType: "transfer_story",
+          targetStoryId: STORY,
+          sequence: 2,
+          errorCode: "TRANSFER_FAILED",
+          errorMessage: "m",
+          userAction: "a",
+          completeness,
+        }),
+      ).toBe(true);
+    }
+  });
+  it("rejects a failed event with an unknown completeness", () => {
+    expect(
+      isJobFailedEvent({
+        jobId: "j",
+        jobType: "transfer_story",
+        targetStoryId: STORY,
+        sequence: 2,
+        errorCode: "TRANSFER_FAILED",
+        errorMessage: "m",
+        userAction: "a",
+        completeness: "partial",
+      }),
+    ).toBe(false);
+  });
 });
