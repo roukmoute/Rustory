@@ -4,7 +4,7 @@ use crate::application::device::preflight::{
     Blocker, BlockerCause, StoryValidationOutcome, Verdict,
 };
 use crate::domain::device::UnsupportedReason;
-use crate::domain::story::{Axis, CanonicalCause};
+use crate::domain::story::{Axis, CanonicalBlocker, CanonicalCause};
 
 /// Input accepted by the `read_story_validation` Tauri command.
 /// `deny_unknown_fields` fails deserialization if the UI ever sends a field
@@ -148,6 +148,20 @@ fn axis_dto(axis: Axis) -> BlockerAxisDto {
 
 fn blocker_dto(blocker: &Blocker) -> BlockerDto {
     let (cause, message, user_action) = cause_copy(&blocker.cause);
+    BlockerDto {
+        axis: axis_dto(blocker.axis),
+        cause,
+        message: message.to_string(),
+        user_action: user_action.to_string(),
+    }
+}
+
+/// Map a DOMAIN canonical blocker (`domain::story::CanonicalBlocker`) to the wire
+/// `BlockerDto`, reusing the SINGLE canonical FR copy per cause. Shared with the
+/// story-preparation flow, where a non-passing `preflight` reports its canonical
+/// blockers verbatim — never a second wording for the same cause.
+pub fn canonical_blocker_dto(blocker: &CanonicalBlocker) -> BlockerDto {
+    let (cause, message, user_action) = canonical_copy(&blocker.cause);
     BlockerDto {
         axis: axis_dto(blocker.axis),
         cause,

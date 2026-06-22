@@ -22,3 +22,6 @@ mod transfer_preview;
 
 #[path = "contracts/story_validation.rs"]
 mod story_validation;
+
+#[path = "contracts/story_preparation.rs"]
+mod story_preparation;

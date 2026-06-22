@@ -17,6 +17,8 @@ const mockStoryValidation = vi.fn();
 const mockCatalogStatus = vi.fn();
 const mockCatalogRefresh = vi.fn();
 const mockCatalogImport = vi.fn();
+const mockStartPrepare = vi.fn();
+const mockReadPreparation = vi.fn();
 
 vi.mock("../../ipc/commands/library", () => ({
   getLibraryOverview: () => ({
@@ -94,6 +96,24 @@ vi.mock("../../ipc/commands/device-catalog", () => ({
   readPackCover: () => Promise.resolve(null),
 }));
 
+vi.mock("../../ipc/commands/story-preparation", async () => {
+  const actual = await vi.importActual<
+    typeof import("../../ipc/commands/story-preparation")
+  >("../../ipc/commands/story-preparation");
+  return {
+    ...actual,
+    startPrepareStory: (input: unknown) => mockStartPrepare(input),
+    readPreparationState: (input: unknown) => mockReadPreparation(input),
+  };
+});
+
+vi.mock("../../ipc/events/job-events", () => ({
+  // The render tests drive the panel through the optimistic preflight + the
+  // authoritative re-read; no live event is fired, so a no-op unsubscribe is
+  // enough.
+  subscribeJobEvents: () => () => {},
+}));
+
 import { invalidateConnectedLuniiCache } from "../../features/device/hooks/use-connected-lunii";
 import { invalidateDeviceLibraryCache } from "../../features/device/hooks/use-device-library";
 import { invalidateLibraryOverviewCache } from "../../features/library/hooks/use-library-overview";
@@ -101,6 +121,7 @@ import { useLibraryShell } from "../../shell/state/library-shell-store";
 import {
   LibraryRoute,
   mapDeviceForPanel,
+  mapPreparationView,
   mapStoryValidationToView,
   mapTransferPreviewToComparison,
 } from "./LibraryRoute";
@@ -153,6 +174,15 @@ describe("<LibraryRoute />", () => {
     mockCatalogRefresh.mockResolvedValue({ count: 0 });
     mockCatalogImport.mockReset();
     mockCatalogImport.mockResolvedValue({ kind: "cancelled" });
+    // Default: preparation is user-triggered, so on mount nothing is called.
+    // Tests that exercise the Préparer CTA override these.
+    mockStartPrepare.mockReset();
+    mockStartPrepare.mockResolvedValue({
+      jobId: "0197a5d0-0000-7000-8000-0000000000aa",
+      storyId: "s1",
+    });
+    mockReadPreparation.mockReset();
+    mockReadPreparation.mockResolvedValue({ kind: "idle" });
     // The hooks keep module-local stale-while-revalidate caches; reset
     // them between tests so no stray snapshot bleeds across cases.
     invalidateLibraryOverviewCache();
@@ -2003,6 +2033,112 @@ describe("<LibraryRoute />", () => {
     ).toBeInTheDocument();
   });
 
+  // --- Pre-transfer preparation surface (route-level, T10) ---
+
+  const presumedTransferableValidation = {
+    ...blockedValidation,
+    verdict: "presumedTransferable" as const,
+    blockers: [],
+  };
+
+  it("offers an active Préparer CTA for a présumée-transférable selection and triggers the preparation (T10)", async () => {
+    const user = userEvent.setup();
+    mockGet.mockResolvedValueOnce({ stories: [{ id: "s1", title: "Le soleil" }] });
+    mockDevice.mockResolvedValue(supportedV3);
+    mockStoryValidation.mockResolvedValue(presumedTransferableValidation);
+    renderLibrary();
+
+    await user.click(await screen.findByRole("button", { name: /le soleil/i }));
+    const panel = screen.getByRole("complementary", {
+      name: /panneau de décision/i,
+    });
+    const prep = within(panel).getByRole("region", { name: /^préparation$/i });
+    const cta = within(prep).getByRole("button", { name: /^préparer$/i });
+    await waitFor(() =>
+      expect(cta).not.toHaveAttribute("aria-disabled", "true"),
+    );
+
+    await user.click(cta);
+    expect(mockStartPrepare).toHaveBeenCalledWith({
+      storyId: "s1",
+      deviceIdentifier: supportedV3.deviceIdentifier,
+    });
+  });
+
+  it("keeps the library usable while a preparation is in flight (T10/AC2)", async () => {
+    const user = userEvent.setup();
+    mockGet.mockResolvedValueOnce({
+      stories: [
+        { id: "s1", title: "Le soleil" },
+        { id: "s2", title: "La lune" },
+      ],
+    });
+    mockDevice.mockResolvedValue(supportedV3);
+    mockStoryValidation.mockResolvedValue(presumedTransferableValidation);
+    // The catch-up re-read stays idle so the panel holds the in-flight phase.
+    mockReadPreparation.mockResolvedValue({ kind: "idle" });
+    renderLibrary();
+
+    await user.click(await screen.findByRole("button", { name: /le soleil/i }));
+    const panel = screen.getByRole("complementary", {
+      name: /panneau de décision/i,
+    });
+    const cta = within(panel).getByRole("button", { name: /^préparer$/i });
+    await waitFor(() =>
+      expect(cta).not.toHaveAttribute("aria-disabled", "true"),
+    );
+    await user.click(cta);
+
+    // The preparation surface shows the in-flight phase IN the panel...
+    await waitFor(() =>
+      expect(
+        within(panel).getByRole("region", { name: /^préparation$/i }),
+      ).toHaveTextContent(/en vérification/i),
+    );
+    // ...and the center-column library stays rendered + usable (both cards).
+    expect(
+      screen.getByRole("button", { name: /le soleil/i }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /la lune/i })).toBeInTheDocument();
+  });
+
+  it("surfaces a preparation failure in-context and leaves the local library intact (T10/AC3)", async () => {
+    const user = userEvent.setup();
+    mockGet.mockResolvedValueOnce({ stories: [{ id: "s1", title: "Le soleil" }] });
+    mockDevice.mockResolvedValue(supportedV3);
+    mockStoryValidation.mockResolvedValue(presumedTransferableValidation);
+    // The authoritative re-read folds to a recoverable failure.
+    mockReadPreparation.mockResolvedValue({
+      kind: "retryable",
+      story: { id: "s1", title: "Le soleil" },
+      cause: "artifactMissing",
+      message: "Préparation impossible : un fichier nécessaire est introuvable.",
+      userAction: "Vérifie l'histoire locale puis relance la préparation.",
+      blockers: [],
+    });
+    renderLibrary();
+
+    await user.click(await screen.findByRole("button", { name: /le soleil/i }));
+    const panel = screen.getByRole("complementary", {
+      name: /panneau de décision/i,
+    });
+    const cta = within(panel).getByRole("button", { name: /^préparer$/i });
+    await waitFor(() =>
+      expect(cta).not.toHaveAttribute("aria-disabled", "true"),
+    );
+    await user.click(cta);
+
+    const prep = within(panel).getByRole("region", { name: /^préparation$/i });
+    await waitFor(() => expect(prep).toHaveTextContent(/échec récupérable/i));
+    // In-context recovery (never a toast), and the local library stays intact.
+    expect(
+      within(prep).getByRole("button", { name: /relancer la préparation/i }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /le soleil/i }),
+    ).toBeInTheDocument();
+  });
+
   // --- Pure mapper unit tests (mapStoryValidationToView) ---
 
   it("mapStoryValidationToView maps a folded idle to the sober none state", () => {
@@ -2109,5 +2245,145 @@ describe("<LibraryRoute />", () => {
     );
     expect(mapped.deviceState).toBe("error");
     expect(mapped.deviceReason).toBe("Réessaie la détection.");
+  });
+
+  // --- Pure mapper unit tests (mapPreparationView) ---
+
+  const presumedTransferable: ReturnType<typeof mapStoryValidationToView> = {
+    kind: "ready",
+    verdict: "presumedTransferable",
+    blockers: [],
+  };
+
+  const STORY_A = "0197a5d0-0000-7000-8000-00000000000a";
+  const STORY_B = "0197a5d0-0000-7000-8000-00000000000b";
+
+  it("mapPreparationView enables Préparer for a single selection + readable device + présumée transférable", () => {
+    expect(
+      mapPreparationView(
+        { kind: "idle" },
+        STORY_A,
+        1,
+        "readable",
+        presumedTransferable,
+      ),
+    ).toEqual({ kind: "ready" });
+  });
+
+  it("mapPreparationView disables Préparer with the selection reasons", () => {
+    expect(
+      mapPreparationView({ kind: "idle" }, null, 0, "readable", presumedTransferable),
+    ).toEqual({
+      kind: "unavailable",
+      reason: "Préparation indisponible: aucune histoire sélectionnée",
+    });
+    expect(
+      mapPreparationView({ kind: "idle" }, null, 2, "readable", presumedTransferable),
+    ).toEqual({
+      kind: "unavailable",
+      reason: "Préparation indisponible: sélection multiple",
+    });
+  });
+
+  it("mapPreparationView disables Préparer with the device reasons", () => {
+    expect(
+      mapPreparationView({ kind: "idle" }, STORY_A, 1, "absent", presumedTransferable),
+    ).toEqual({
+      kind: "unavailable",
+      reason: "Préparation indisponible: aucun appareil connecté",
+    });
+    expect(
+      mapPreparationView(
+        { kind: "idle" },
+        STORY_A,
+        1,
+        "unsupported",
+        presumedTransferable,
+      ),
+    ).toEqual({
+      kind: "unavailable",
+      reason: "Préparation indisponible: profil non supporté",
+    });
+  });
+
+  it("mapPreparationView disables Préparer with 'corrige les blocages d'abord' when the verdict is not présumée transférable", () => {
+    const validations: ReturnType<typeof mapStoryValidationToView>[] = [
+      { kind: "ready", verdict: "blocked", blockers: [] },
+      { kind: "ready", verdict: "toFix", blockers: [] },
+      { kind: "loading" },
+      { kind: "none" },
+    ];
+    for (const validation of validations) {
+      expect(
+        mapPreparationView({ kind: "idle" }, STORY_A, 1, "readable", validation),
+      ).toEqual({
+        kind: "unavailable",
+        reason: "Préparation indisponible: corrige les blocages d'abord",
+      });
+    }
+  });
+
+  it("mapPreparationView shows the active / terminal state ONLY for the selected target story", () => {
+    expect(
+      mapPreparationView(
+        { kind: "preflight", storyId: STORY_A },
+        STORY_A,
+        1,
+        "readable",
+        presumedTransferable,
+      ),
+    ).toEqual({ kind: "preflight" });
+    expect(
+      mapPreparationView(
+        { kind: "preparing", storyId: STORY_A, progress: null },
+        STORY_A,
+        1,
+        "readable",
+        presumedTransferable,
+      ),
+    ).toEqual({ kind: "preparing", progress: null });
+    expect(
+      mapPreparationView(
+        { kind: "prepared", storyId: STORY_A },
+        STORY_A,
+        1,
+        "readable",
+        presumedTransferable,
+      ),
+    ).toEqual({ kind: "prepared" });
+    expect(
+      mapPreparationView(
+        {
+          kind: "retryable",
+          storyId: STORY_A,
+          message: "Échec.",
+          userAction: "Relance.",
+          blockers: [],
+        },
+        STORY_A,
+        1,
+        "readable",
+        presumedTransferable,
+      ),
+    ).toEqual({
+      kind: "retryable",
+      message: "Échec.",
+      userAction: "Relance.",
+      blockers: [],
+    });
+  });
+
+  it("mapPreparationView shows the CURRENT selection's gate when an active job targets another story (F4)", () => {
+    // Story A is preparing; the user selected story B (présumée transférable):
+    // the panel shows B's `ready` gate — A's job stays consultable via its badge.
+    expect(
+      mapPreparationView(
+        { kind: "preparing", storyId: STORY_A, progress: null },
+        STORY_B,
+        1,
+        "readable",
+        presumedTransferable,
+      ),
+    ).toEqual({ kind: "ready" });
   });
 });

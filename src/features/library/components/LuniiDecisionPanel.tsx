@@ -56,6 +56,29 @@ export type StoryValidationView =
   | { kind: "ready"; verdict: ValidationVerdict; blockers: ValidationBlocker[] }
   | { kind: "error"; error: AppError };
 
+/**
+ * Read-only-then-LOCAL preparation state, composed by Rust and only PRESENTED
+ * here (AC1/AC2/AC3). `unavailable` shows the disabled `Préparer` CTA + the
+ * standardized "Préparation indisponible: …" reason; `ready` shows the active
+ * CTA (verdict présumée transférable). The `preflight` / `preparing` phases come
+ * from `job:progress`; `prepared` / `retryable` from the authoritative re-read.
+ * Preparation is ORTHOGONAL to the send gate — reaching `prepared` never enables
+ * the `Envoyer` CTA.
+ */
+export type PreparationView =
+  | { kind: "unavailable"; reason: string }
+  | { kind: "ready" }
+  | { kind: "preflight" }
+  | { kind: "preparing"; progress: number | null }
+  | { kind: "prepared" }
+  | {
+      kind: "retryable";
+      message: string;
+      userAction: string;
+      blockers: ValidationBlocker[];
+    }
+  | { kind: "error"; error: AppError };
+
 export interface LuniiDecisionPanelProps {
   /** Authoritative device state derived from `useConnectedLunii`. */
   deviceState?: LuniiDeviceState;
@@ -92,6 +115,18 @@ export interface LuniiDecisionPanelProps {
    *  `useStoryValidation.refresh`. Makes the "Réessaie la validation" copy
    *  actionable. When omitted, the error shows its text without a button. */
   onRetryValidation?: () => void;
+  /** Local preparation state. When omitted, the preparation section is not
+   *  rendered (tests/storybook that do not exercise it). When provided, it
+   *  renders between the validation and the device regions — never the panel's
+   *  visual center. */
+  preparation?: PreparationView;
+  /** Start the preparation — wired by the route to `useStoryPreparation.prepare`.
+   *  Drives the active `Préparer` CTA (the `ready` view). */
+  onPrepare?: () => void;
+  /** Re-run a failed preparation — wired by the route to
+   *  `useStoryPreparation.retry`. Drives the `Relancer` / `Réessayer` action in
+   *  the `retryable` / `error` views. */
+  onRetryPreparation?: () => void;
   /** Required when the panel may expose an active Éditer CTA. */
   onEdit: () => void;
   /** Optional refresh trigger — wired by the route to
@@ -127,6 +162,9 @@ export function LuniiDecisionPanel({
   onRetryComparison,
   validation,
   onRetryValidation,
+  preparation,
+  onPrepare,
+  onRetryPreparation,
   onEdit,
   onRefreshDevice,
   onConsultSupportProfile,
@@ -139,6 +177,7 @@ export function LuniiDecisionPanel({
   const titleId = useId();
   const deviceReasonId = useId();
   const editReasonId = useId();
+  const preparationReasonId = useId();
 
   const deviceChipLabel = formatDeviceChipLabel(deviceState, deviceLabel);
   const deviceChipTone = formatDeviceChipTone(deviceState);
@@ -204,6 +243,21 @@ export function LuniiDecisionPanel({
           aria-live="polite"
         >
           {renderValidation(validation, onRetryValidation)}
+        </section>
+      )}
+
+      {preparation && (
+        <section
+          className="lunii-panel__preparation"
+          aria-label="Préparation"
+          aria-live="polite"
+        >
+          {renderPreparation(
+            preparation,
+            preparationReasonId,
+            onPrepare,
+            onRetryPreparation,
+          )}
         </section>
       )}
 
@@ -345,6 +399,122 @@ function renderValidation(
         </div>
       );
   }
+}
+
+function renderPreparation(
+  view: PreparationView,
+  reasonId: string,
+  onPrepare?: () => void,
+  onRetryPreparation?: () => void,
+): React.JSX.Element {
+  switch (view.kind) {
+    case "unavailable":
+      // The Préparer CTA is visible but disabled, with the standardized reason
+      // (kept focusable so keyboard users reach the reason via aria-describedby).
+      return (
+        <>
+          <Button
+            variant="secondary"
+            aria-disabled="true"
+            aria-describedby={reasonId}
+          >
+            Préparer
+          </Button>
+          <p id={reasonId} className="lunii-panel__reason">
+            {view.reason}
+          </p>
+        </>
+      );
+    case "ready":
+      // Verdict présumée transférable: the preparation can run. The send CTA
+      // below stays disabled regardless — preparation never enables it.
+      return (
+        <Button variant="secondary" onClick={onPrepare}>
+          Préparer
+        </Button>
+      );
+    case "preflight":
+      return <StateChip tone="neutral" label="en vérification" />;
+    case "preparing":
+      // Honest progress: the phase is always named. A determinate bar is shown
+      // ONLY when a reliable fraction is known; otherwise the indicator stays
+      // calm and indeterminate rather than a fake percentage. MVP sends no
+      // fraction, but a future reliable `progress` is surfaced, not hidden.
+      return (
+        <>
+          <StateChip tone="neutral" label="en préparation" />
+          {view.progress != null ? (
+            <ProgressIndicator
+              mode="determinate"
+              label="Préparation en cours…"
+              value={Math.round(view.progress * 100)}
+            />
+          ) : (
+            <ProgressIndicator
+              mode="indeterminate"
+              label="Préparation en cours…"
+            />
+          )}
+        </>
+      );
+    case "prepared":
+      // Discreet "Préparée" indicator — NOT a transfer success, and it never
+      // enables the send CTA.
+      return <StateChip tone="success" label="Préparée" />;
+    case "retryable":
+      // Recoverable failure IN CONTEXT (role="alert"), never a toast (UX-DR15).
+      // The canonical state label `échec récupérable` is shown (glyph + text),
+      // and a non-passing preflight reports its blockers (reused 3.x grouping).
+      return (
+        <div role="alert" className="lunii-panel__preparation-error">
+          <StateChip tone="error" label="échec récupérable" />
+          <p>{view.message}</p>
+          <p className="lunii-panel__reason">{view.userAction}</p>
+          {view.blockers.length > 0 && renderPreparationBlockers(view.blockers)}
+          {onRetryPreparation && (
+            <Button
+              variant="quiet"
+              onClick={onRetryPreparation}
+              aria-label="Relancer la préparation"
+            >
+              Relancer
+            </Button>
+          )}
+        </div>
+      );
+    case "error":
+      // Transport failure: in-context, never a toast.
+      return (
+        <div role="alert" className="lunii-panel__preparation-error">
+          <p>{view.error.message}</p>
+          {view.error.userAction && <p>{view.error.userAction}</p>}
+          {onRetryPreparation && (
+            <Button
+              variant="quiet"
+              onClick={onRetryPreparation}
+              aria-label="Réessayer la préparation"
+            >
+              Réessayer
+            </Button>
+          )}
+        </div>
+      );
+  }
+}
+
+function renderPreparationBlockers(
+  blockers: ValidationBlocker[],
+): React.JSX.Element {
+  // Same two-axis split + grouping as the validation verdict, so a non-passing
+  // preflight reuses the exact blocker presentation (never a second wording).
+  const canonical = blockers.filter((b) => b.axis !== "deviceProfile");
+  const lunii = blockers.filter((b) => b.axis === "deviceProfile");
+  return (
+    <>
+      {canonical.length > 0 && renderBlockerGroup("Validité Rustory", canonical)}
+      {lunii.length > 0 && renderBlockerGroup("Compatibilité Lunii", lunii)}
+    </>
+  );
 }
 
 function renderVerdict(

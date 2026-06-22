@@ -304,6 +304,21 @@ NEVER consults `WriteStory` — transfer activation stays governed by that gate
 (`false` for every cohort in MVP Phase 1) and is orthogonal to the verdict, so a
 `présumée transférable` story still sits beside a disabled send CTA.
 
+Read vs. write coherence (story preparation): the preparation step
+(`start_prepare_story` / `read_preparation_state`, see
+[ui-states.md#Story Preparation Contract](./ui-states.md)) is a **local**
+operation that produces **derived** artifacts. It does NOT require the
+`WriteStory` capability and never attempts a device write. It depends on the
+device only for its `preflight` phase, which reuses the `ReadLibrary` gate (a
+re-scan + identity guard + the read-only validation) to confirm the requested
+device before assembly; the assembly phase itself is local and does not need the
+device to stay plugged in. Transfer activation stays governed by `WriteStory`
+(`false` for every cohort in MVP Phase 1) and is orthogonal to preparation — a
+story can be fully prepared while the send CTA stays disabled. No new
+`SupportedOperation` is introduced: preparation is not a device capability, it is
+local derived work. The media transformer it would host is declared but has no
+live implementation in MVP (no story type requires transcoding yet).
+
 Adding a new operation:
 
 1. Add a boolean field on `SupportedOperations`.

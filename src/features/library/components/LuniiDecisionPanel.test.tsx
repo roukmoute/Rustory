@@ -706,3 +706,166 @@ describe("<LuniiDecisionPanel />", () => {
     expect(region).toHaveTextContent(/bloquée/i);
   });
 });
+
+describe("<LuniiDecisionPanel /> — preparation", () => {
+  const noop = () => {};
+
+  const titleBlocker = {
+    axis: "structure" as const,
+    cause: "titleInvalid" as const,
+    message: "Le titre enregistré de l'histoire n'est pas valide.",
+    userAction: "Renomme l'histoire avec un titre valide.",
+  };
+
+  it("renders the Préparer CTA disabled with the standardized reason when unavailable", () => {
+    render(
+      <LuniiDecisionPanel
+        deviceState="idle"
+        preparation={{
+          kind: "unavailable",
+          reason: "Préparation indisponible: corrige les blocages d'abord",
+        }}
+        onEdit={noop}
+      />,
+    );
+    const cta = screen.getByRole("button", { name: /^préparer$/i });
+    expect(cta).toHaveAttribute("aria-disabled", "true");
+    const reasonId = cta.getAttribute("aria-describedby");
+    const reason = document.getElementById(reasonId as string);
+    expect(reason).toHaveTextContent(
+      /préparation indisponible: corrige les blocages d'abord/i,
+    );
+  });
+
+  it("activates the Préparer CTA when ready and calls onPrepare", async () => {
+    const onPrepare = vi.fn();
+    render(
+      <LuniiDecisionPanel
+        deviceState="idle"
+        preparation={{ kind: "ready" }}
+        onPrepare={onPrepare}
+        onEdit={noop}
+      />,
+    );
+    const cta = screen.getByRole("button", { name: /^préparer$/i });
+    expect(cta).not.toHaveAttribute("aria-disabled", "true");
+    await userEvent.click(cta);
+    expect(onPrepare).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows the named phases (en vérification, en préparation) without a fake percentage", () => {
+    const { rerender } = render(
+      <LuniiDecisionPanel
+        deviceState="idle"
+        preparation={{ kind: "preflight" }}
+        onEdit={noop}
+      />,
+    );
+    expect(screen.getByText(/en vérification/i)).toBeInTheDocument();
+
+    rerender(
+      <LuniiDecisionPanel
+        deviceState="idle"
+        preparation={{ kind: "preparing", progress: null }}
+        onEdit={noop}
+      />,
+    );
+    expect(screen.getByText(/en préparation/i)).toBeInTheDocument();
+    expect(screen.getByText(/préparation en cours…/i)).toBeInTheDocument();
+    // No percentage is shown (honest progress; MVP sends no reliable fraction).
+    expect(screen.queryByText(/%/)).toBeNull();
+  });
+
+  it("shows the discreet Préparée indicator and STILL keeps the send CTA disabled (FR34)", () => {
+    render(
+      <LuniiDecisionPanel
+        deviceState="idle"
+        preparation={{ kind: "prepared" }}
+        onEdit={noop}
+      />,
+    );
+    expect(screen.getByText(/préparée/i)).toBeInTheDocument();
+    // Reaching `prepared` NEVER enables the send.
+    const send = screen.getByRole("button", { name: /envoyer vers la lunii/i });
+    expect(send).toHaveAttribute("aria-disabled", "true");
+    const reasonId = send.getAttribute("aria-describedby");
+    expect(document.getElementById(reasonId as string)).toHaveTextContent(
+      /transfert pas encore activé \(mvp phase 1\)/i,
+    );
+  });
+
+  it("renders a recoverable failure in-context with Relancer (never a toast) and its blockers", async () => {
+    const onRetryPreparation = vi.fn();
+    render(
+      <LuniiDecisionPanel
+        deviceState="idle"
+        preparation={{
+          kind: "retryable",
+          message: "La préparation ne peut pas démarrer.",
+          userAction: "Corrige les points signalés puis relance la préparation.",
+          blockers: [titleBlocker],
+        }}
+        onRetryPreparation={onRetryPreparation}
+        onEdit={noop}
+      />,
+    );
+    const alert = screen.getByRole("alert");
+    expect(alert).toHaveTextContent(/la préparation ne peut pas démarrer/i);
+    expect(alert).toHaveTextContent(/corrige les points signalés/i);
+    // The non-passing preflight reports its blocker (reused 3.x grouping).
+    expect(alert).toHaveTextContent(
+      /le titre enregistré de l'histoire n'est pas valide/i,
+    );
+    await userEvent.click(
+      screen.getByRole("button", { name: /relancer la préparation/i }),
+    );
+    expect(onRetryPreparation).toHaveBeenCalledTimes(1);
+  });
+
+  it("renders a transport error in-context with Réessayer", async () => {
+    const onRetryPreparation = vi.fn();
+    render(
+      <LuniiDecisionPanel
+        deviceState="idle"
+        preparation={{
+          kind: "error",
+          error: {
+            code: "PREPARATION_FAILED",
+            message: "Préparation indisponible: réponse invalide.",
+            userAction: "Réessaie la préparation.",
+            details: null,
+          },
+        }}
+        onRetryPreparation={onRetryPreparation}
+        onEdit={noop}
+      />,
+    );
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      /préparation indisponible: réponse invalide/i,
+    );
+    await userEvent.click(
+      screen.getByRole("button", { name: /réessayer la préparation/i }),
+    );
+    expect(onRetryPreparation).toHaveBeenCalledTimes(1);
+  });
+
+  it("hosts the preparation section in a polite live region", () => {
+    render(
+      <LuniiDecisionPanel
+        deviceState="idle"
+        preparation={{ kind: "preflight" }}
+        onEdit={noop}
+      />,
+    );
+    const region = screen.getByRole("region", { name: /^préparation$/i });
+    expect(region).toHaveAttribute("aria-live", "polite");
+  });
+
+  it("does not render the preparation section when the prop is omitted", () => {
+    render(<LuniiDecisionPanel deviceState="idle" onEdit={noop} />);
+    expect(
+      screen.queryByRole("region", { name: /^préparation$/i }),
+    ).toBeNull();
+    expect(screen.queryByRole("button", { name: /^préparer$/i })).toBeNull();
+  });
+});

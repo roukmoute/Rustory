@@ -15,6 +15,7 @@ pub enum AppErrorCode {
     DeviceScanFailed,
     DeviceUnsupported,
     ImportFailed,
+    PreparationFailed,
     OfficialCatalogUnavailable,
 }
 
@@ -138,6 +139,21 @@ impl AppError {
     pub fn import_failed(message: impl Into<String>, user_action: impl Into<String>) -> Self {
         Self {
             code: AppErrorCode::ImportFailed,
+            message: message.into(),
+            user_action: Some(user_action.into()),
+            details: None,
+        }
+    }
+
+    /// Constructed when a story PREPARATION cannot even produce a terminal job
+    /// outcome — a TRANSPORT failure such as the local store having no resolvable
+    /// home (`app_data_dir` unavailable). A FUNCTIONAL preparation failure
+    /// (artifact missing/corrupt, preflight not passing, interruption) is NOT an
+    /// `AppError`: it is the terminal `retryable` state of the job, surfaced
+    /// through the preparation DTO and the `job:failed` event.
+    pub fn preparation_failed(message: impl Into<String>, user_action: impl Into<String>) -> Self {
+        Self {
+            code: AppErrorCode::PreparationFailed,
             message: message.into(),
             user_action: Some(user_action.into()),
             details: None,
@@ -365,6 +381,16 @@ mod tests {
         assert_eq!(v["code"], "IMPORT_FAILED");
         assert_eq!(v["details"]["source"], "fs_read");
         assert_eq!(v["details"]["kind"], "not_found");
+    }
+
+    #[test]
+    fn preparation_failed_serializes_with_stable_code() {
+        let err = AppError::preparation_failed("msg", "action");
+        let v = serde_json::to_value(&err).expect("serialize");
+        assert_eq!(v["code"], "PREPARATION_FAILED");
+        assert_eq!(v["message"], "msg");
+        assert_eq!(v["userAction"], "action");
+        assert!(v.get("user_action").is_none(), "snake_case must not leak");
     }
 
     #[test]

@@ -1,6 +1,7 @@
 pub mod app_paths;
 pub mod catalog_covers;
 pub mod import_store;
+pub mod transfer_artifacts;
 
 pub use app_paths::{ensure_app_data_dir, ensure_dir_writable, resolve_db_path, DB_FILENAME};
 pub use catalog_covers::{
@@ -11,6 +12,12 @@ pub use import_store::{
     ensure_import_store, resolve_import_story_dir, resolve_imports_dir,
     resolve_imports_staging_dir, IMPORTS_DIR_NAME, IMPORTS_STAGING_DIR_NAME,
 };
+pub use transfer_artifacts::{
+    AssemblyPlan, AssemblySource, SystemTransferArtifactSource, TransferArtifactSource,
+};
+
+#[cfg(test)]
+pub use transfer_artifacts::MockTransferArtifactSource;
 
 /// Short, PII-free `details.kind` tag for filesystem I/O failures crossing
 /// the IPC boundary. Single source of truth shared by the export flow and

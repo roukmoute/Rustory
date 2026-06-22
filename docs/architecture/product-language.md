@@ -54,6 +54,9 @@ It exists to keep the same product concepts named the same way across:
 | Selected story already lives on the device | `Déjà présente sur l'appareil` | Comparison verdict: a send would REPLACE the copy already on the device | `existe`, `doublon`, `déjà transférée` (asserts a past send) |
 | Other device stories left untouched by a send | `resteront inchangées` | Reassurance that a transfer touches only the selected story, not the rest of the device library | `non affectées`, `safe`, technical counts without the verb |
 | Preparation step | `préparation` | Pre-transfer work needed to make the story sendable | `pipeline`, `build`, `compile assets` |
+| Start the preparation (action) | `Préparer` | User-visible action that starts assembling the artifacts a transfer would need, locally | `Lancer`, `Commencer`, `Build`, `Compiler` |
+| Preparation in flight | `Préparation en cours…` | Calm feedback while the preparation is running | `job en cours`, `traitement`, `processing` |
+| Story is prepared (indicator) | `Préparée` | Discreet marker that the artifacts were assembled and are fresh — never implies the transfer is enabled | `Prête`, `prête à transférer`, `prête à l'envoi` |
 | Send operation | `transfert` / `Envoyer vers la Lunii` | User-visible act of sending a story to the device | `deploy`, `sync job`, `push` |
 | Post-send confirmation | `vérification` | Explicit check that confirms what really happened on device | `post-check`, `validation finale` when it means something else |
 | Supported local input/output | `artefact local supporté` | Project, archive, or local file explicitly supported by Rustory | `payload`, `package`, `blob` |
@@ -83,6 +86,9 @@ The UI should favor these labels when they are user-visible:
 | A fixable blocking issue was detected (repairable before send) | `à corriger` |
 | Validation says the story may be sent | `présumée transférable` |
 | Preparation is running | `en préparation` |
+| Start the preparation (action) | `Préparer` |
+| Preparation is in flight | `Préparation en cours…` |
+| Preparation finished and artifacts are fresh | `Préparée` |
 | Write/send is running | `en transfert` |
 | End result was explicitly confirmed | `transférée et vérifiée` |
 | Failure can be retried safely | `échec récupérable` |

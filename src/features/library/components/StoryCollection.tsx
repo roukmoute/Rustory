@@ -7,7 +7,11 @@ import {
   applyLibraryFilters,
   type LibrarySortKey,
 } from "../hooks/use-library-collection";
-import { StoryCard, type StoryCardSelectionMode } from "./StoryCard";
+import {
+  StoryCard,
+  type StoryCardSelectionMode,
+  type StoryPreparationBadge,
+} from "./StoryCard";
 
 import "./StoryCollection.css";
 
@@ -20,6 +24,9 @@ export interface StoryCollectionProps {
   onSortChange: (sort: LibrarySortKey) => void;
   onResetFilters: () => void;
   selectedStoryIds?: ReadonlySet<string>;
+  /** Per-story preparation badge (AC2). Keyed by story id; absent ⇒ no badge.
+   *  Derived from `useStoryPreparation`, never a competing source of truth. */
+  preparationBadges?: ReadonlyMap<string, StoryPreparationBadge>;
   onSelectStory?: (id: string, mode: StoryCardSelectionMode) => void;
   onOpenStory?: (id: string) => void;
   /** Fires when the user requests to open the "Créer une histoire" flow.
@@ -50,6 +57,7 @@ export function StoryCollection({
   onSortChange,
   onResetFilters,
   selectedStoryIds = EMPTY_SELECTION,
+  preparationBadges,
   onSelectStory,
   onOpenStory,
   onCreateStoryRequest,
@@ -237,6 +245,7 @@ export function StoryCollection({
                 story={story}
                 isSelected={selectedStoryIds.has(story.id)}
                 selectionSize={selectedCount}
+                preparationBadge={preparationBadges?.get(story.id)}
                 onSelect={handleSelect}
                 onOpen={handleOpen}
               />

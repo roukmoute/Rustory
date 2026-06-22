@@ -37,9 +37,12 @@ import { LibraryFiltersNav } from "../../features/library/components/LibraryFilt
 import {
   LuniiDecisionPanel,
   type LuniiDeviceState,
+  type PreparationView,
   type StoryValidationView,
   type TransferComparisonView,
 } from "../../features/library/components/LuniiDecisionPanel";
+import { useStoryPreparation } from "../../features/transfer";
+import type { StoryPreparationBadge } from "../../features/library/components/StoryCard";
 import { StoryCollection } from "../../features/library/components/StoryCollection";
 import {
   invalidateLibraryOverviewCache,
@@ -190,6 +193,48 @@ export function LibraryRoute(): React.JSX.Element {
       ? { kind: "none" }
       : mapStoryValidationToView(storyValidation.state);
 
+  // Pre-transfer preparation (LOCAL, orthogonal to the send gate). USER-TRIGGERED
+  // via the Préparer CTA — the hook stays idle until `prepare()`. Same gating
+  // pair (single selection + readable device) as the comparison / validation;
+  // the CTA is enabled only when the verdict is `présumée transférable`.
+  // Tracks ONE preparation, independent of the selection — an in-flight job or a
+  // recoverable failure stays consultable when the user selects another story
+  // (AC2). The panel reflects it only while its target story is selected.
+  const storyPreparation = useStoryPreparation();
+  const deviceAvailability: DeviceAvailability =
+    readableDeviceId !== null
+      ? "readable"
+      : effectiveDevice !== null
+        ? "unsupported"
+        : "absent";
+  const preparationView: PreparationView = mapPreparationView(
+    storyPreparation.state,
+    singleSelectedStoryId,
+    presentSelectedIds.size,
+    deviceAvailability,
+    validationView,
+  );
+  const handlePrepareSelected = (): void => {
+    if (singleSelectedStoryId && readableDeviceId) {
+      storyPreparation.prepare(singleSelectedStoryId, readableDeviceId);
+    }
+  };
+
+  // Reflect the in-flight / failed preparation as a discreet card badge (AC2),
+  // keyed on the job's TARGET story (from the hook state) — never the current
+  // selection — so it survives the user selecting another story. The panel stays
+  // the authoritative surface; this is a derived signal.
+  const preparationBadges = useMemo(() => {
+    const map = new Map<string, StoryPreparationBadge>();
+    const prep = storyPreparation.state;
+    if (prep.kind === "preflight" || prep.kind === "preparing") {
+      map.set(prep.storyId, "preparing");
+    } else if (prep.kind === "retryable") {
+      map.set(prep.storyId, "retryable");
+    }
+    return map;
+  }, [storyPreparation.state]);
+
   // Inspection is offered when the supported profile authorizes it.
   // `inspectStory` is ✅ for every supported cohort (V3 included, unlike
   // import), so in practice this tracks `readableDeviceId`; gating on the
@@ -334,6 +379,7 @@ export function LibraryRoute(): React.JSX.Element {
         setSort,
         resetFilters,
         handleCreateStoryRequest,
+        preparationBadges,
       )}
       <DeviceStoryCollection
         state={deviceLibrary.state}
@@ -379,6 +425,9 @@ export function LibraryRoute(): React.JSX.Element {
               onRetryComparison={transferPreview.refresh}
               validation={validationView}
               onRetryValidation={storyValidation.refresh}
+              preparation={preparationView}
+              onPrepare={handlePrepareSelected}
+              onRetryPreparation={storyPreparation.retry}
               onEdit={handleEditSelected}
               onRefreshDevice={device.refresh}
               onConsultSupportProfile={openSupportProfile}
@@ -492,6 +541,84 @@ export function mapStoryValidationToView(
   }
 }
 
+/** Disposition of the connected device for the preparation gate: a readable
+ *  supported Lunii, a device present but not read-authorized, or nothing. */
+type DeviceAvailability = "readable" | "unsupported" | "absent";
+
+/**
+ * Pure mapper from the `useStoryPreparation` state (+ the gating context) to the
+ * `preparation` prop `LuniiDecisionPanel` expects. Pure so it stays testable in
+ * isolation. An active / terminal preparation shows its own state; an idle hook
+ * shows the `Préparer` CTA, enabled only for a single selection + a readable
+ * device + a `présumée transférable` verdict, else disabled with the
+ * standardized "Préparation indisponible: …" reason.
+ */
+export function mapPreparationView(
+  state: ReturnType<typeof useStoryPreparation>["state"],
+  selectedStoryId: string | null,
+  selectionCount: number,
+  deviceAvailability: DeviceAvailability,
+  validation: StoryValidationView,
+): PreparationView {
+  // An active / terminal preparation is shown ONLY for the story it targets, so
+  // it stays consultable while that story is selected and the panel reflects the
+  // CURRENT selection's gate otherwise (the badge keeps the other story flagged).
+  if (state.kind !== "idle" && state.storyId === selectedStoryId) {
+    switch (state.kind) {
+      case "preflight":
+        return { kind: "preflight" };
+      case "preparing":
+        return { kind: "preparing", progress: state.progress };
+      case "prepared":
+        return { kind: "prepared" };
+      case "retryable":
+        return {
+          kind: "retryable",
+          message: state.message,
+          userAction: state.userAction,
+          blockers: state.blockers,
+        };
+      case "error":
+        return { kind: "error", error: state.error };
+    }
+  }
+  if (selectionCount === 0) {
+    return {
+      kind: "unavailable",
+      reason: "Préparation indisponible: aucune histoire sélectionnée",
+    };
+  }
+  if (selectionCount > 1) {
+    return {
+      kind: "unavailable",
+      reason: "Préparation indisponible: sélection multiple",
+    };
+  }
+  if (deviceAvailability === "absent") {
+    return {
+      kind: "unavailable",
+      reason: "Préparation indisponible: aucun appareil connecté",
+    };
+  }
+  if (deviceAvailability === "unsupported") {
+    return {
+      kind: "unavailable",
+      reason: "Préparation indisponible: profil non supporté",
+    };
+  }
+  if (
+    validation.kind === "ready" &&
+    validation.verdict === "presumedTransferable"
+  ) {
+    return { kind: "ready" };
+  }
+  // Any non-passing or still-pending verdict: repair the blocks first.
+  return {
+    kind: "unavailable",
+    reason: "Préparation indisponible: corrige les blocages d'abord",
+  };
+}
+
 function mapDeviceDtoForPanel(dto: ConnectedDeviceDto): DevicePanelMapping {
   switch (dto.kind) {
     case "none":
@@ -566,6 +693,7 @@ function renderCenter(
   onSortChange: (s: "titre-asc" | "titre-desc") => void,
   onResetFilters: () => void,
   onCreateStoryRequest: () => void,
+  preparationBadges: ReadonlyMap<string, StoryPreparationBadge>,
 ): React.JSX.Element {
   switch (state.kind) {
     case "error": {
@@ -592,6 +720,7 @@ function renderCenter(
           onSortChange={onSortChange}
           onResetFilters={onResetFilters}
           selectedStoryIds={selectedStoryIds}
+          preparationBadges={preparationBadges}
           onSelectStory={onSelectStory}
           onOpenStory={onOpenStory}
           onCreateStoryRequest={onCreateStoryRequest}
@@ -608,6 +737,7 @@ function renderCenter(
           onSortChange={onSortChange}
           onResetFilters={onResetFilters}
           selectedStoryIds={selectedStoryIds}
+          preparationBadges={preparationBadges}
           onSelectStory={onSelectStory}
           onOpenStory={onOpenStory}
           onCreateStoryRequest={onCreateStoryRequest}

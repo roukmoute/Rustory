@@ -44,3 +44,6 @@ mod transfer_preview;
 
 #[path = "integration/story_validation.rs"]
 mod story_validation;
+
+#[path = "integration/story_preparation.rs"]
+mod story_preparation;

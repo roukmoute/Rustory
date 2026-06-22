@@ -1,11 +1,16 @@
 import type React from "react";
 
 import type { StoryCardDto } from "../../../shared/ipc-contracts/library";
-import { SurfacePanel } from "../../../shared/ui";
+import { StateChip, SurfacePanel } from "../../../shared/ui";
 
 import "./StoryCard.css";
 
 export type StoryCardSelectionMode = "replace" | "toggle";
+
+/** Preparation state reflected as a discreet card badge (AC2 — "éléments
+ *  prêts/bloquants"). Derived from `useStoryPreparation`, never a new source of
+ *  truth; the authoritative surface stays the decision panel. */
+export type StoryPreparationBadge = "preparing" | "retryable";
 
 export interface StoryCardProps {
   story: StoryCardDto;
@@ -15,6 +20,8 @@ export interface StoryCardProps {
    *  the no-op behavior when a multi-selection is in play (avoids a
    *  multi-select collapse on the first click of a double-click). */
   selectionSize?: number;
+  /** Discreet preparation badge for this card. Omitted ⇒ no badge. */
+  preparationBadge?: StoryPreparationBadge;
   onSelect: (id: string, mode: StoryCardSelectionMode) => void;
   onOpen: (id: string) => void;
 }
@@ -32,6 +39,7 @@ export function StoryCard({
   story,
   isSelected,
   selectionSize = 0,
+  preparationBadge,
   onSelect,
   onOpen,
 }: StoryCardProps): React.JSX.Element {
@@ -110,6 +118,17 @@ export function StoryCard({
           </span>
         ) : null}
         <h3 className="story-card__title">{story.title}</h3>
+        {preparationBadge ? (
+          <StateChip
+            tone={preparationBadge === "preparing" ? "neutral" : "error"}
+            label={
+              preparationBadge === "preparing"
+                ? "en préparation"
+                : "échec récupérable"
+            }
+            className="story-card__preparation-chip"
+          />
+        ) : null}
       </div>
     </SurfacePanel>
   );

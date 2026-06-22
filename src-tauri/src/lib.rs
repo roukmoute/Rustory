@@ -39,6 +39,11 @@ pub struct AppState {
     /// Phase C). Behind an `Arc` + `spawn_blocking` like the other device
     /// I/O. The only networked component; never invoked implicitly.
     pub catalog_source: std::sync::Arc<dyn infrastructure::device::OfficialCatalogSource>,
+    /// Read-only assembler of the transfer-artifact descriptor used by the
+    /// story-preparation flow. Same `Arc` + `spawn_blocking` discipline; the
+    /// production impl reads the local canonical structure / promoted pack and
+    /// re-checksums it. Never writes, never touches the device.
+    pub artifact_source: std::sync::Arc<dyn infrastructure::filesystem::TransferArtifactSource>,
 }
 
 /// Read every story id that still has a pending draft row. Ordered by
@@ -170,6 +175,9 @@ pub fn run() {
                 catalog_source: std::sync::Arc::new(
                     infrastructure::device::LuniiHttpCatalogSource::default(),
                 ),
+                artifact_source: std::sync::Arc::new(
+                    infrastructure::filesystem::SystemTransferArtifactSource,
+                ),
             });
             Ok(())
         })
@@ -192,12 +200,14 @@ pub fn run() {
             commands::device::read_connected_lunii,
             commands::device::read_device_library,
             commands::catalog::read_pack_cover,
+            commands::transfer::read_preparation_state,
             commands::story::read_recoverable_draft,
             commands::device::read_story_validation,
             commands::device::read_transfer_preview,
             commands::catalog::refresh_official_catalog,
             commands::story::record_draft,
             commands::device::set_device_story_title,
+            commands::transfer::start_prepare_story,
             commands::story::update_story,
         ])
         .run(tauri::generate_context!())

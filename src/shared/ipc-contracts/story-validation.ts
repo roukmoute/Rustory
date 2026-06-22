@@ -152,7 +152,7 @@ function isStoryValidationStory(
   return true;
 }
 
-function isValidationBlocker(value: unknown): value is ValidationBlocker {
+export function isValidationBlocker(value: unknown): value is ValidationBlocker {
   if (typeof value !== "object" || value === null) return false;
   const b = value as Record<string, unknown>;
   if (!hasOnlyAllowedKeys(b, ALLOWED_BLOCKER_KEYS)) return false;

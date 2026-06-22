@@ -126,6 +126,11 @@ Preferred patterns:
 - `Copie indisponible: profil non supporté`
 - `Copie indisponible: déjà dans ta bibliothèque`
 - `Copie indisponible: contenu incomplet sur l'appareil`
+- `Préparation indisponible: aucune histoire sélectionnée`
+- `Préparation indisponible: sélection multiple`
+- `Préparation indisponible: aucun appareil connecté`
+- `Préparation indisponible: profil non supporté`
+- `Préparation indisponible: corrige les blocages d'abord`
 
 Error payloads that surface in the autosave alert carry a stable
 `details.source` discriminator so support can triage the cause without
@@ -607,6 +612,113 @@ only non-error read outcomes are `noDevice` (no device at all — the hook folds
 to the same recoverable "device changed" surface) and `ready` (the verdict). The
 triggering command is `read_story_validation`; it emits no `device_log` event (a
 light read-only snapshot).
+
+## Story Preparation Contract
+
+Once a story is `présumée transférable` (or its only blockers were fixable and
+are now repaired) and a readable supported device is connected, Rustory can
+**prepare** the artifacts a transfer would need. Preparation is a **purely local**
+operation that produces **derived** artifacts: it never writes to the device and
+does NOT depend on the `WriteStory` gate. Like the comparison and the validation
+it sits beside, the preparation state is **composed in Rust** and only
+**presented** by the panel — the frontend never recomposes phases or outcome from
+raw events.
+
+**Local ⟂ send gate.** Preparation only assembles, locally, *what a transfer
+would need*, so it can be genuinely active in MVP Phase 1 even while the send CTA
+(`Envoyer vers la Lunii`) stays disabled with its standardized reason
+`Envoi indisponible: transfert pas encore activé (MVP Phase 1)`. The `Préparer`
+action is gated on the validation verdict (`présumée transférable`), NEVER on
+`WriteStory`; reaching the rest state never enables the send. This mirrors the
+preview's `transferable = false` and the verdict ⟂ gate rule above. Folding the
+send gate into preparation would make `Préparer` unreachable.
+
+**Observable phases.** Preparation exposes the transfer machine's first two
+phases; the rest/failure outcomes reuse the existing MVP states:
+
+| Internal phase / state | UI Label | Notes |
+| --- | --- | --- |
+| `preflight` | `en vérification` | Re-runs the read-only validation + authoritative device re-scan before any assembly. |
+| `preparing` | `en préparation` | Local artifact assembly + integrity re-check. May coexist with preserved local work. |
+| `prepared` | rest state: keeps `présumée transférable` + a discreet `Préparée` indicator | Artifacts assembled and fresh. NOT a transfer success — it never enables the send. |
+| `retryable` | `échec récupérable` | Keep enough context for `Relancer`. |
+
+The `transfer` and `verify` phases of the machine are **declared but never
+emitted here** (a later write / verification step owns them) — no false coverage.
+In MVP there is **no media transcoding** to perform (the available stories are
+raw imported packs already in device format, or minimal native stories with an
+empty `nodes`): the media transformer is declared but has no live implementation,
+exactly like the `media` / `filesystem` validation axes. The real, testable work
+is the observable phase progression plus a genuine local assembly — re-`preflight`
+then enumerating and re-checksumming the required artifacts (the imported pack's
+files, or the canonical structure) into an ephemeral transfer-artifact descriptor
+stamped with a pipeline version.
+
+**Long-running, non-blocking (AC2).** While preparation runs, the **library stays
+usable** (navigation, search, selection, sort): the preparation lives in the
+right-column panel and never becomes the visual center, never a modal, never a
+tunnel, never a toast. Progress is **honest**: the current phase is always named;
+a percentage appears ONLY when it is reliable, otherwise the named-phase state
+stands on its own (no fake percentage). At minimum the `preparing` and `preflight`
+states, and the still-blocking or ready elements, are shown.
+
+**Failure is a state, never a faked success (AC3).** If preparation fails or is
+interrupted (error, device unplugged during `preflight`, window close, missing /
+corrupt artifact), Rustory **preserves the local draft in full** — the canonical
+story is **never** mutated by preparation (only derived artifacts are produced;
+in MVP the descriptor stays in memory, so there is not even a derived write to
+compensate). The outcome is marked `échec récupérable` with the cause and the
+next gesture (`Relancer`) **consultable in the current context** (`role="alert"`,
+never a toast), never disguised as success and never promising a hidden partial
+resume. The closed failure causes are: `preflightNotPassing` (the verdict is not
+`présumée transférable` — the offending blockers are reported, reusing the
+validation blocker grouping), `artifactMissing`, `artifactCorrupt`,
+`deviceChanged` (the live re-scan no longer resolves to the requested device
+during `preflight`), and `interrupted` (deadline / close). Each cause carries one
+canonical `message` (cause + impact) and one `userAction`; Rust owns both
+strings, React renders them verbatim.
+
+**Surface.** The preparation block lives **inside** the decision panel, in a
+`<section aria-label="Préparation" aria-live="polite">`, sibling to
+`Comparaison avant envoi` and `Validation avant envoi`. The polite live region
+announces each phase transition; a transport `error` additionally carries
+`role="alert"` and a `Réessayer` CTA, never a toast. The panel renders:
+`preflight` → a `StateChip` `en vérification`; `preparing` → `en préparation` +
+calm progress (named phase; a `%` bar only when progress is reliable); `prepared`
+→ the discreet `Préparée` indicator (the send stays disabled); `retryable` → the
+in-context recoverable message (cause + `userAction`) + a `Relancer` button. Each
+state uses a non-color signal (glyph + text). The story-card badge in the library
+reflects `en préparation` / `échec récupérable` through the existing `StateChip`
+(derived from the panel state, never a competing source of truth).
+
+**Authoritative re-read, not event reconstruction.** Preparation is the first
+long-running flow: a `start_prepare_story` command returns an acceptance
+immediately and the work continues in the background, reporting through typed
+`job:progress` / `job:completed` / `job:failed` events correlated by `job_id`,
+each carrying a monotonic `sequence` so consumers stay idempotent and tolerate
+late / duplicate delivery. On a terminal event the UI performs an **authoritative
+re-read** (`read_preparation_state`) rather than rebuilding truth from the events
+alone. The `preflight` follows the same I/O-first / scoped-DB-lock pattern as the
+comparison and the validation; a device change during `preflight` surfaces the
+recoverable `deviceChanged` outcome. The `preparing` phase is local and does not
+require the device to stay plugged in.
+
+**No new persistence.** The transfer-artifact descriptor is **ephemeral and
+re-derivable**, like the preview and the verdict: no migration, no
+`preparation_outputs` row, no job record in MVP (freshness beats caching; the
+transfer is not resumable, so each attempt re-prepares). AC3's "consultable
+detail" is satisfied by the in-context state (the hook / panel keeps the last
+result + error), exactly like the recoverable errors of the comparison and the
+validation. Durable derived artifacts + their table are deferred to the real
+transfer step.
+
+**Error contract.** The preparation states (`preflight` / `preparing` /
+`prepared` / `retryable`) are outcomes of a **successful** read (a tagged union +
+event payloads), never an error. Only a **transport** failure that prevents even
+producing a terminal job outcome becomes an `AppError` — a new code
+`PREPARATION_FAILED`, reserved for transport. A **functional** preparation failure
+(missing / corrupt artifact, `preflight` not passing, interruption) is the
+terminal `retryable` state of the job, not a raw `AppError`.
 
 ## Official Catalog Contract
 
