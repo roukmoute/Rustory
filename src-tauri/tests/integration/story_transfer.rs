@@ -1,0 +1,580 @@
+//! End-to-end integration of the story transfer (device write): the REAL system
+//! scanner + REAL filesystem assembler + REAL device writer against temp mounts,
+//! composed with a real on-disk SQLite store. Proves the whole `transfer_story`
+//! pipeline (authoritative re-scan → `WriteStory` gate BEFORE any mutation →
+//! scoped DB lock → fresh re-assembly + integrity re-check → safe atomic write →
+//! outcome + events) on actual I/O, including the strongest check: a pack
+//! imported by story 2.x's REAL import, then transferred, lands byte-for-byte on
+//! the device with its UUID added to `.pi`.
+//!
+//! The `#[cfg(test)]` fixtures + mocks are not visible to this separate test
+//! crate, so the mounts + a capturing emitter are built inline.
+
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use rustory_lib::application::device::import::{import_device_story, ImportDeviceStoryRequest};
+use rustory_lib::application::transfer::{
+    read_transfer_state, transfer_story, PreparationEventEmitter, TransferOutcome,
+    TransferStateView,
+};
+use rustory_lib::domain::device::{format_pack_uuid, pack_short_id, parse_pack_index};
+use rustory_lib::domain::shared::AppError;
+use rustory_lib::domain::story::content_checksum;
+use rustory_lib::domain::transfer::{PreparationPhase, TransferFailureCause};
+use rustory_lib::infrastructure::db::{self, DbHandle};
+use rustory_lib::infrastructure::device::{
+    compute_device_identifier, DeviceScanReport, DeviceScanner, SystemDeviceLibraryReader,
+    SystemDevicePackReader, SystemDevicePackWriter, SystemDeviceScanner,
+};
+use rustory_lib::infrastructure::diagnostics::transfer as transfer_log;
+use rustory_lib::infrastructure::filesystem::SystemTransferArtifactSource;
+use tempfile::TempDir;
+
+const HEALTHY_JSON: &str = "{\"schemaVersion\":1,\"nodes\":[]}";
+
+fn uuid(tail: [u8; 4]) -> [u8; 16] {
+    let mut b = [0xAB; 16];
+    b[12..16].copy_from_slice(&tail);
+    b
+}
+
+fn budget() -> Duration {
+    Duration::from_secs(30)
+}
+
+#[derive(Default)]
+struct CapturingEmitter {
+    events: Mutex<Vec<String>>,
+}
+
+impl PreparationEventEmitter for CapturingEmitter {
+    fn progress(&self, phase: PreparationPhase, _progress: Option<f32>, sequence: u64) {
+        self.events
+            .lock()
+            .unwrap()
+            .push(format!("progress:{}:{}", phase.wire_tag(), sequence));
+    }
+    fn completed(&self, sequence: u64) {
+        self.events
+            .lock()
+            .unwrap()
+            .push(format!("completed:{sequence}"));
+    }
+    fn failed(&self, _message: &str, _user_action: &str, sequence: u64) {
+        self.events
+            .lock()
+            .unwrap()
+            .push(format!("failed:{sequence}"));
+    }
+}
+
+impl CapturingEmitter {
+    fn events(&self) -> Vec<String> {
+        self.events.lock().unwrap().clone()
+    }
+}
+
+/// Write a complete plausible pack (declared subset) into `pack_dir`.
+fn write_pack(pack_dir: &Path) {
+    std::fs::create_dir_all(pack_dir).expect("mkdir pack");
+    std::fs::write(pack_dir.join("ni"), vec![0x4E; 512]).expect("ni");
+    std::fs::write(pack_dir.join("li"), vec![0x4C; 256]).expect("li");
+    std::fs::write(pack_dir.join("ri"), vec![0x52; 128]).expect("ri");
+    std::fs::write(pack_dir.join("si"), vec![0x53; 128]).expect("si");
+    std::fs::write(pack_dir.join("nm"), vec![0x6E; 32]).expect("nm");
+    let rf = pack_dir.join("rf").join("000");
+    std::fs::create_dir_all(&rf).expect("rf/000");
+    std::fs::write(rf.join("AAAAAAAA"), vec![0xAA; 2048]).expect("rf asset");
+}
+
+/// Mount with one pack present (markers + `.pi` + `.content/<SHORT_ID>`).
+fn build_mount_with_pack(
+    metadata_version: u8,
+    pack_uuid: [u8; 16],
+) -> (TempDir, PathBuf, String, String) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().to_path_buf();
+    std::fs::write(root.join(".md"), [metadata_version, 0xff, 0xaa]).expect(".md");
+    std::fs::write(root.join(".pi"), pack_uuid).expect(".pi");
+    let short_id = pack_short_id(&pack_uuid);
+    write_pack(&root.join(".content").join(&short_id));
+    let identifier = compute_device_identifier(&pack_uuid, None);
+    (dir, root, identifier, format_pack_uuid(&pack_uuid))
+}
+
+fn open_db(tmp: &TempDir) -> DbHandle {
+    let path = tmp.path().join("rustory.sqlite");
+    let mut handle = db::open_at(&path).expect("open");
+    db::run_migrations(&mut handle).expect("migrate");
+    handle
+}
+
+fn insert_native_story(db: &Mutex<DbHandle>, id: &str) {
+    db.lock()
+        .unwrap()
+        .conn()
+        .execute(
+            "INSERT INTO stories (id, title, schema_version, structure_json, content_checksum, created_at, updated_at) \
+             VALUES (?1, 'Mon histoire', 1, ?2, ?3, '2026-06-22T00:00:00.000Z', '2026-06-22T00:00:00.000Z')",
+            rusqlite::params![id, HEALTHY_JSON, content_checksum(HEALTHY_JSON)],
+        )
+        .expect("insert story");
+}
+
+/// Import one story from a fresh V1 (md v3) source mount via the REAL import
+/// path. Returns the local story id, the canonical pack UUID, the raw bytes and
+/// the source mount guard (kept alive).
+fn import_one(
+    db: &Mutex<DbHandle>,
+    app_data: &Path,
+    pack: [u8; 16],
+) -> (String, [u8; 16], TempDir) {
+    let (guard, root, identifier, canonical) = build_mount_with_pack(3, pack);
+    let scanner = SystemDeviceScanner::with_explicit_mount_roots(vec![root]);
+    let imported = import_device_story(
+        db,
+        &scanner,
+        &SystemDeviceLibraryReader,
+        &SystemDevicePackReader,
+        app_data,
+        &ImportDeviceStoryRequest {
+            device_identifier: identifier,
+            pack_uuid: canonical,
+        },
+        budget(),
+    )
+    .expect("import");
+    (imported.story.id, pack, guard)
+}
+
+#[test]
+fn transfers_an_imported_pack_to_a_writable_device() {
+    // import 2.4 (real) → prepare/assemble 3.3 (real) → transfer 3.4 (real).
+    let db_tmp = tempfile::tempdir().expect("db dir");
+    let app_data = tempfile::tempdir().expect("app data");
+    let db = Mutex::new(open_db(&db_tmp));
+
+    let pack = uuid([0xFA, 0xC5, 0x56, 0x2D]);
+    let (story_id, pack_bytes, _src) = import_one(&db, app_data.path(), pack);
+
+    // A SEPARATE writable V1 target device, holding a different existing pack.
+    let (_target, target_root, target_id, _) =
+        build_mount_with_pack(3, uuid([0x11, 0x22, 0x33, 0x44]));
+    let target_scanner = SystemDeviceScanner::with_explicit_mount_roots(vec![target_root.clone()]);
+    let emitter = CapturingEmitter::default();
+
+    let outcome = transfer_story(
+        &db,
+        &target_scanner,
+        &SystemDeviceLibraryReader,
+        &SystemTransferArtifactSource,
+        &SystemDevicePackWriter,
+        app_data.path(),
+        &story_id,
+        &target_id,
+        budget(),
+        budget(),
+        &emitter,
+    );
+    assert!(
+        matches!(outcome, TransferOutcome::Transferred { .. }),
+        "{outcome:?}"
+    );
+    assert_eq!(
+        emitter.events(),
+        vec![
+            "progress:preflight:1".to_string(),
+            "progress:transfer:2".to_string(),
+            "completed:3".to_string(),
+        ]
+    );
+
+    // The pack content landed byte-for-byte under `.content/<SHORT_ID>`.
+    let short = pack_short_id(&pack_bytes);
+    let landed = target_root.join(".content").join(&short);
+    assert!(landed.join("ni").is_file(), "ni must be written");
+    assert_eq!(
+        std::fs::read(landed.join("ni")).unwrap(),
+        vec![0x4E; 512],
+        "ni must be reproduced verbatim"
+    );
+    assert!(landed.join("rf").join("000").join("AAAAAAAA").is_file());
+
+    // The UUID is now in the device index (alongside the pre-existing one).
+    let pi = std::fs::read(target_root.join(".pi")).expect("read .pi");
+    assert!(
+        parse_pack_index(&pi).uuids.iter().any(|u| u == &pack_bytes),
+        "the transferred UUID must be in .pi"
+    );
+}
+
+#[test]
+fn v3_blocks_the_transfer_before_any_device_mutation() {
+    // AC2/FR34: a V3 (md v7) target is not write-authorized — the gate refuses
+    // before any byte is written, and the device is left untouched.
+    let db_tmp = tempfile::tempdir().expect("db dir");
+    let app_data = tempfile::tempdir().expect("app data");
+    let db = Mutex::new(open_db(&db_tmp));
+
+    let (story_id, pack_bytes, _src) =
+        import_one(&db, app_data.path(), uuid([0xAA, 0xBB, 0xCC, 0xDD]));
+
+    // V3 target with a pre-existing pack.
+    let existing = uuid([0x09, 0x09, 0x09, 0x09]);
+    let (_target, target_root, target_id, _) = build_mount_with_pack(7, existing);
+    let pi_before = std::fs::read(target_root.join(".pi")).expect("read .pi");
+    let target_scanner = SystemDeviceScanner::with_explicit_mount_roots(vec![target_root.clone()]);
+    let emitter = CapturingEmitter::default();
+
+    let outcome = transfer_story(
+        &db,
+        &target_scanner,
+        &SystemDeviceLibraryReader,
+        &SystemTransferArtifactSource,
+        &SystemDevicePackWriter,
+        app_data.path(),
+        &story_id,
+        &target_id,
+        budget(),
+        budget(),
+        &emitter,
+    );
+    assert_eq!(
+        outcome,
+        TransferOutcome::Retryable {
+            cause: TransferFailureCause::WriteNotAuthorized
+        }
+    );
+    // Never entered the transfer phase, and the device is byte-identical.
+    assert_eq!(
+        emitter.events(),
+        vec!["progress:preflight:1".to_string(), "failed:2".to_string()]
+    );
+    assert!(
+        !target_root
+            .join(".content")
+            .join(pack_short_id(&pack_bytes))
+            .exists(),
+        "the unauthorized pack must never be written"
+    );
+    assert_eq!(
+        std::fs::read(target_root.join(".pi")).expect("read .pi"),
+        pi_before,
+        ".pi must be untouched on a blocked transfer"
+    );
+}
+
+#[test]
+fn a_native_story_is_not_transferable() {
+    let db_tmp = tempfile::tempdir().expect("db dir");
+    let app_data = tempfile::tempdir().expect("app data");
+    let db = Mutex::new(open_db(&db_tmp));
+    insert_native_story(&db, "native"); // no story_imports row
+
+    let (_target, target_root, target_id, _) =
+        build_mount_with_pack(3, uuid([0x55, 0x55, 0x55, 0x55]));
+    let pi_before = std::fs::read(target_root.join(".pi")).expect("read .pi");
+    let target_scanner = SystemDeviceScanner::with_explicit_mount_roots(vec![target_root.clone()]);
+
+    let outcome = transfer_story(
+        &db,
+        &target_scanner,
+        &SystemDeviceLibraryReader,
+        &SystemTransferArtifactSource,
+        &SystemDevicePackWriter,
+        app_data.path(),
+        "native",
+        &target_id,
+        budget(),
+        budget(),
+        &CapturingEmitter::default(),
+    );
+    assert_eq!(
+        outcome,
+        TransferOutcome::Retryable {
+            cause: TransferFailureCause::NotTransferable
+        }
+    );
+    assert_eq!(
+        std::fs::read(target_root.join(".pi")).expect("read .pi"),
+        pi_before,
+        ".pi must be untouched for a non-transferable story"
+    );
+}
+
+#[test]
+fn device_changed_when_no_supported_device_is_present() {
+    let db_tmp = tempfile::tempdir().expect("db dir");
+    let app_data = tempfile::tempdir().expect("app data");
+    let db = Mutex::new(open_db(&db_tmp));
+    let (story_id, _pack, _src) = import_one(&db, app_data.path(), uuid([1, 2, 3, 4]));
+
+    let empty = tempfile::tempdir().expect("empty mount");
+    let scanner = SystemDeviceScanner::with_explicit_mount_roots(vec![empty.path().to_path_buf()]);
+
+    let outcome = transfer_story(
+        &db,
+        &scanner,
+        &SystemDeviceLibraryReader,
+        &SystemTransferArtifactSource,
+        &SystemDevicePackWriter,
+        app_data.path(),
+        &story_id,
+        "00000000000000000000000000000000",
+        budget(),
+        budget(),
+        &CapturingEmitter::default(),
+    );
+    assert_eq!(
+        outcome,
+        TransferOutcome::Retryable {
+            cause: TransferFailureCause::DeviceChanged
+        }
+    );
+}
+
+#[test]
+fn budget_exhaustion_writes_nothing_and_preserves_the_draft() {
+    // A zero write budget aborts the write phase recoverably (the fresh
+    // re-assembly runs out of budget first → NotPrepared), mutating neither the
+    // device nor the canonical draft. The writer's own deadline path (staging
+    // cleaned, `.pi` intact) is covered by its unit tests.
+    let db_tmp = tempfile::tempdir().expect("db dir");
+    let app_data = tempfile::tempdir().expect("app data");
+    let db = Mutex::new(open_db(&db_tmp));
+    let pack = uuid([0x77, 0x88, 0x99, 0xAA]);
+    let (story_id, pack_bytes, _src) = import_one(&db, app_data.path(), pack);
+
+    let canonical_before = read_story_row(&db, &story_id);
+    let (_target, target_root, target_id, _) =
+        build_mount_with_pack(3, uuid([0x01, 0x01, 0x01, 0x01]));
+    let pi_before = std::fs::read(target_root.join(".pi")).expect("read .pi");
+    let target_scanner = SystemDeviceScanner::with_explicit_mount_roots(vec![target_root.clone()]);
+
+    let outcome = transfer_story(
+        &db,
+        &target_scanner,
+        &SystemDeviceLibraryReader,
+        &SystemTransferArtifactSource,
+        &SystemDevicePackWriter,
+        app_data.path(),
+        &story_id,
+        &target_id,
+        budget(),
+        Duration::ZERO, // write phase out of budget
+        &CapturingEmitter::default(),
+    );
+    assert!(
+        matches!(outcome, TransferOutcome::Retryable { .. }),
+        "a budget exhaustion must be recoverable: {outcome:?}"
+    );
+    assert!(
+        !target_root
+            .join(".content")
+            .join(pack_short_id(&pack_bytes))
+            .exists(),
+        "nothing must be written under a zero budget"
+    );
+    assert_eq!(
+        std::fs::read(target_root.join(".pi")).expect("read .pi"),
+        pi_before,
+        ".pi must be untouched"
+    );
+    assert_eq!(
+        read_story_row(&db, &story_id),
+        canonical_before,
+        "the canonical draft must be preserved"
+    );
+}
+
+#[test]
+fn the_canonical_story_is_unchanged_after_a_blocked_transfer() {
+    let db_tmp = tempfile::tempdir().expect("db dir");
+    let app_data = tempfile::tempdir().expect("app data");
+    let db = Mutex::new(open_db(&db_tmp));
+    let (story_id, _pack, _src) = import_one(&db, app_data.path(), uuid([2, 4, 6, 8]));
+
+    let before = read_story_row(&db, &story_id);
+    // V3 target → blocked.
+    let (_target, target_root, target_id, _) = build_mount_with_pack(7, uuid([8, 6, 4, 2]));
+    let scanner = SystemDeviceScanner::with_explicit_mount_roots(vec![target_root]);
+    let _ = transfer_story(
+        &db,
+        &scanner,
+        &SystemDeviceLibraryReader,
+        &SystemTransferArtifactSource,
+        &SystemDevicePackWriter,
+        app_data.path(),
+        &story_id,
+        &target_id,
+        budget(),
+        budget(),
+        &CapturingEmitter::default(),
+    );
+    assert_eq!(
+        before,
+        read_story_row(&db, &story_id),
+        "transfer must never mutate the canonical row"
+    );
+}
+
+#[test]
+fn read_transfer_state_is_idle_when_the_pack_is_on_a_non_target_device() {
+    // C1 — the authoritative re-read is PINNED to the requested device. A pack
+    // present on a DIFFERENT writable device must read as `idle`, never
+    // `transferred` (no false "écriture effectuée", no wrong-device attribution);
+    // asking about the device that ACTUALLY holds it does report transferred.
+    let db_tmp = tempfile::tempdir().expect("db dir");
+    let app_data = tempfile::tempdir().expect("app data");
+    let db = Mutex::new(open_db(&db_tmp));
+    let pack = uuid([0x5A, 0x5A, 0x5A, 0x5A]);
+    let (story_id, _pack_bytes, _src) = import_one(&db, app_data.path(), pack);
+
+    // The connected device HOLDS this pack, but it is not the target we request.
+    let (_dev, dev_root, dev_id, _) = build_mount_with_pack(3, pack);
+    let scanner = SystemDeviceScanner::with_explicit_mount_roots(vec![dev_root]);
+    let other_target = "00000000000000000000000000000000";
+    assert_ne!(dev_id.as_str(), other_target);
+
+    let view = read_transfer_state(
+        &db,
+        &scanner,
+        &SystemDeviceLibraryReader,
+        &SystemTransferArtifactSource,
+        app_data.path(),
+        &story_id,
+        other_target,
+        budget(),
+        budget(),
+    )
+    .expect("read state");
+    assert_eq!(
+        view,
+        TransferStateView::Idle,
+        "a pack on a non-target device must not read as transferred"
+    );
+
+    // Sanity: requesting the device that ACTUALLY holds the pack reports it.
+    let view = read_transfer_state(
+        &db,
+        &scanner,
+        &SystemDeviceLibraryReader,
+        &SystemTransferArtifactSource,
+        app_data.path(),
+        &story_id,
+        &dev_id,
+        budget(),
+        budget(),
+    )
+    .expect("read state");
+    assert!(
+        matches!(view, TransferStateView::Transferred { .. }),
+        "the targeted device that holds the pack reads as transferred: {view:?}"
+    );
+}
+
+fn read_story_row(db: &Mutex<DbHandle>, id: &str) -> (String, String, String) {
+    db.lock()
+        .unwrap()
+        .conn()
+        .query_row(
+            "SELECT title, structure_json, content_checksum FROM stories WHERE id = ?1",
+            rusqlite::params![id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .expect("read row")
+}
+
+#[test]
+fn transfer_trace_channel_records_a_closed_pii_free_event_set() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = transfer_log::log_path_for(dir.path());
+    let story_ref = transfer_log::story_ref("0197a5d0-0000-7000-8000-000000000000");
+    transfer_log::record_event_at_path(
+        &path,
+        transfer_log::Event::TransferStarted {
+            story_ref: story_ref.clone(),
+        },
+    )
+    .expect("start");
+    transfer_log::record_event_at_path(
+        &path,
+        transfer_log::Event::TransferCompleted {
+            story_ref: story_ref.clone(),
+            elapsed_ms: 12,
+        },
+    )
+    .expect("completed");
+    transfer_log::record_event_at_path(
+        &path,
+        transfer_log::Event::TransferFailed {
+            story_ref,
+            cause: "write_not_authorized",
+            elapsed_ms: 3,
+        },
+    )
+    .expect("failed");
+
+    let contents = std::fs::read_to_string(&path).expect("read log");
+    assert_eq!(contents.lines().count(), 3);
+    assert!(contents.contains("transfer_started"));
+    assert!(contents.contains("transfer_completed"));
+    assert!(contents.contains("transfer_failed"));
+    // PII-free: the raw story id never appears, only its short hash.
+    assert!(!contents.contains("0197a5d0-0000-7000-8000-000000000000"));
+}
+
+/// Scanner wrapper proving the DB mutex is FREE during the device scan — the
+/// service never holds the lock across the device I/O.
+struct LockProbeScanner {
+    inner: SystemDeviceScanner,
+    db: Arc<Mutex<DbHandle>>,
+    lock_free_during_scan: Arc<AtomicBool>,
+}
+
+impl DeviceScanner for LockProbeScanner {
+    fn scan(&self, budget: Duration) -> Result<DeviceScanReport, AppError> {
+        if self.db.try_lock().is_ok() {
+            self.lock_free_during_scan.store(true, Ordering::SeqCst);
+        }
+        self.inner.scan(budget)
+    }
+}
+
+#[test]
+fn holds_no_db_lock_during_scan() {
+    let db_tmp = tempfile::tempdir().expect("db dir");
+    let app_data = tempfile::tempdir().expect("app data");
+    let db = Arc::new(Mutex::new(open_db(&db_tmp)));
+    let (story_id, _pack, _src) = import_one(&db, app_data.path(), uuid([3, 3, 3, 3]));
+
+    let (_target, target_root, target_id, _) = build_mount_with_pack(3, uuid([4, 4, 4, 4]));
+    let lock_free = Arc::new(AtomicBool::new(false));
+    let scanner = LockProbeScanner {
+        inner: SystemDeviceScanner::with_explicit_mount_roots(vec![target_root]),
+        db: db.clone(),
+        lock_free_during_scan: lock_free.clone(),
+    };
+
+    let outcome = transfer_story(
+        &db,
+        &scanner,
+        &SystemDeviceLibraryReader,
+        &SystemTransferArtifactSource,
+        &SystemDevicePackWriter,
+        app_data.path(),
+        &story_id,
+        &target_id,
+        budget(),
+        budget(),
+        &CapturingEmitter::default(),
+    );
+    assert!(matches!(outcome, TransferOutcome::Transferred { .. }));
+    assert!(
+        lock_free.load(Ordering::SeqCst),
+        "the DB mutex must be free during the device scan"
+    );
+}

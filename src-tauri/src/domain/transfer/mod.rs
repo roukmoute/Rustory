@@ -1,14 +1,23 @@
 //! Transfer domain layer.
 //!
-//! Canonical, framework-free types for the transfer flow. The first occupant is
-//! the story-preparation model (story 3.x); the actual write + verification
-//! phases land in later stories. Strictly independent of `infrastructure/`,
+//! Canonical, framework-free types for the transfer flow: the story-preparation
+//! model (assembles LOCALLY what a transfer would need) and the story-transfer
+//! model (writes the prepared pack back to the device). The verification phase
+//! lands in a later story. Strictly independent of `infrastructure/`,
 //! `application/` and `tauri::*`.
 
 pub mod preparation;
+// The submodule shares the parent module's name on purpose: it owns the
+// transfer-specific pure rules, kept separate from the preparation model.
+#[allow(clippy::module_inception)]
+pub mod transfer;
 
 pub use preparation::{
     ensure_descriptor_coherent, gate_prepare, verify_aggregate, PreparationFailureCause,
     PreparationPhase, PreparedArtifact, PreparedArtifactKind, TransferArtifactDescriptor,
     PREPARATION_PIPELINE_VERSION,
+};
+pub use transfer::{
+    append_pack_uuid, build_write_plan, ensure_cohort_coherent, pack_uuid_bytes,
+    short_id_from_pack_uuid, PackWriteFile, PackWritePlan, TransferFailureCause,
 };

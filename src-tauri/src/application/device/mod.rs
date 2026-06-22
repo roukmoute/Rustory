@@ -277,7 +277,8 @@ mod tests {
                 assert_eq!(p.device_identifier.len(), 32);
                 assert!(p.supported_operations.read_library);
                 assert!(p.supported_operations.import_story);
-                assert!(!p.supported_operations.write_story);
+                // V1 accepts writes since Epic 3 wired the gate.
+                assert!(p.supported_operations.write_story);
             }
             other => panic!("expected Supported, got {other:?}"),
         }
@@ -377,7 +378,8 @@ mod tests {
         match outcome {
             ConnectedLuniiOutcome::Supported(p) => {
                 assert!(p.supported_operations.read_library);
-                assert!(!p.supported_operations.write_story);
+                // The bt-missing fixture is a v3/Origine V1 mount → writable.
+                assert!(p.supported_operations.write_story);
             }
             other => panic!("expected Supported, got {other:?}"),
         }
@@ -474,19 +476,26 @@ mod tests {
     }
 
     #[test]
-    fn check_operation_allowed_blocks_write_story_for_every_mvp_profile() {
+    fn check_operation_allowed_authorizes_write_story_for_v1_v2_and_blocks_v3() {
+        // Epic 3 wires the write gate. Every matrix line is covered so a
+        // silent regression on any cohort fails here (capability-gate
+        // discipline): V1/V2 are writable, V3 stays fail-closed.
         for (cohort, version) in [
             (LuniiFirmwareCohort::OrigineV1, 3u8),
             (LuniiFirmwareCohort::MidGenV2, 6),
-            (LuniiFirmwareCohort::V3, 7),
         ] {
             let p = build_profile(cohort, version);
-            let err = check_operation_allowed(&p, SupportedOperation::WriteStory)
-                .expect_err("expect blocked");
-            let v = serde_json::to_value(&err).expect("ser");
-            assert_eq!(v["code"], "DEVICE_UNSUPPORTED");
-            assert_eq!(v["details"]["operation"], "write_story");
+            check_operation_allowed(&p, SupportedOperation::WriteStory)
+                .expect("write_story must be allowed for V1/V2");
         }
+
+        let v3 = build_profile(LuniiFirmwareCohort::V3, 7);
+        let err = check_operation_allowed(&v3, SupportedOperation::WriteStory)
+            .expect_err("V3 write must stay blocked");
+        let v = serde_json::to_value(&err).expect("ser");
+        assert_eq!(v["code"], "DEVICE_UNSUPPORTED");
+        assert_eq!(v["details"]["source"], "capability_gate");
+        assert_eq!(v["details"]["operation"], "write_story");
     }
 
     #[test]

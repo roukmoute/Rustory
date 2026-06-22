@@ -42,6 +42,10 @@ export type PreparationStateDto =
       deviceIdentifier: string;
       story: PreparationStory;
       targetCohort: string;
+      /** Whether the prepared descriptor carries a device-format pack (an
+       *  imported story). `false` for a native story with no pack — the send
+       *  gate disables `Envoyer` before any write attempt. */
+      transferable: boolean;
     }
   | {
       kind: "retryable";
@@ -58,8 +62,10 @@ export interface StartPreparationAcceptedDto {
   storyId: string;
 }
 
-/** Phase carried by a `job:progress` event (the in-flight phases). */
-export type JobPhase = "preflight" | "prepare";
+/** Phase carried by a `job:progress` event (the in-flight phases). Shared by
+ *  the preparation flow (`preflight` / `prepare`) and the transfer flow
+ *  (`transfer`, on the same job channel). `verify` stays out of scope. */
+export type JobPhase = "preflight" | "prepare" | "transfer";
 
 export interface JobProgressEvent {
   jobId: string;
@@ -96,7 +102,10 @@ const CAUSES: ReadonlySet<string> = new Set([
   "interrupted",
 ]);
 
-const PHASES: ReadonlySet<string> = new Set(["preflight", "prepare"]);
+// The generic job channel accepts every live phase Rustory emits: `preflight` /
+// `prepare` (preparation) and `transfer` (the write flow). `verify` is reserved
+// and stays rejected until its flow exists.
+const PHASES: ReadonlySet<string> = new Set(["preflight", "prepare", "transfer"]);
 
 const DEVICE_IDENTIFIER_PATTERN = /^[0-9a-f]{32}$/;
 const STORY_ID_PATTERN =
@@ -108,7 +117,10 @@ const ALLOWED_KEYS: ReadonlyMap<string, ReadonlySet<string>> = new Map([
   ["idle", new Set(["kind"])],
   ["preflight", new Set(["kind", "deviceIdentifier", "story"])],
   ["preparing", new Set(["kind", "deviceIdentifier", "story", "progress"])],
-  ["prepared", new Set(["kind", "deviceIdentifier", "story", "targetCohort"])],
+  [
+    "prepared",
+    new Set(["kind", "deviceIdentifier", "story", "targetCohort", "transferable"]),
+  ],
   [
     "retryable",
     new Set(["kind", "story", "cause", "message", "userAction", "blockers"]),
@@ -208,7 +220,8 @@ export function isPreparationStateDto(
       return (
         isDeviceIdentifier(c.deviceIdentifier) &&
         isPreparationStory(c.story) &&
-        isNonEmptyString(c.targetCohort)
+        isNonEmptyString(c.targetCohort) &&
+        typeof c.transferable === "boolean"
       );
     case "retryable":
       if (!isPreparationStory(c.story)) return false;

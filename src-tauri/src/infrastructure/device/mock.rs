@@ -10,6 +10,8 @@ use super::catalog_source::OfficialCatalogSource;
 use super::library_reader::DeviceLibraryReader;
 use super::pack_reader::{AcquiredPack, DevicePackReader};
 use super::scanner::{DeviceCandidate, DeviceScanReport, DeviceScanner};
+use super::writer::DevicePackWriter;
+use crate::domain::transfer::{PackWritePlan, TransferFailureCause};
 
 /// Programmable mock for tests. Each `scan()` call pops the next queued
 /// outcome (FIFO). When the queue is empty, returns an empty report — a
@@ -419,5 +421,61 @@ impl OfficialCatalogSource for MockOfficialCatalogSource {
             ));
         }
         Ok(MOCK_PNG.to_vec())
+    }
+}
+
+/// Programmable mock for the device write path. Records call count and returns
+/// the next scripted outcome (FIFO); an empty queue succeeds. Lets the transfer
+/// service prove its orchestration (gate-before-mutation, event sequence,
+/// terminal mapping) without a real volume. The recorded call count proves the
+/// writer is NEVER reached on an unauthorized profile ("block before mutation").
+#[derive(Clone, Default)]
+pub struct MockDevicePackWriter {
+    queue: Arc<Mutex<Vec<Result<(), TransferFailureCause>>>>,
+    calls: Arc<Mutex<u32>>,
+}
+
+impl MockDevicePackWriter {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn enqueue_success(&self) {
+        self.queue
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .push(Ok(()));
+    }
+
+    pub fn enqueue_failure(&self, cause: TransferFailureCause) {
+        self.queue
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .push(Err(cause));
+    }
+
+    /// Number of times `write_pack` was invoked — `0` proves the capability gate
+    /// blocked the write before any device mutation.
+    pub fn call_count(&self) -> u32 {
+        *self.calls.lock().unwrap_or_else(|p| p.into_inner())
+    }
+}
+
+impl DevicePackWriter for MockDevicePackWriter {
+    fn write_pack(
+        &self,
+        _mount_path: &Path,
+        _source_pack_dir: &Path,
+        _pack_uuid: &str,
+        _plan: &PackWritePlan,
+        _budget: Duration,
+    ) -> Result<(), TransferFailureCause> {
+        *self.calls.lock().unwrap_or_else(|p| p.into_inner()) += 1;
+        let mut g = self.queue.lock().unwrap_or_else(|p| p.into_inner());
+        if g.is_empty() {
+            Ok(())
+        } else {
+            g.remove(0)
+        }
     }
 }

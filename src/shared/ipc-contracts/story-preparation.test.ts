@@ -42,6 +42,7 @@ describe("isPreparationStateDto", () => {
         deviceIdentifier: DEVICE,
         story,
         targetCohort: "v3",
+        transferable: false,
       }),
     ).toBe(true);
     expect(
@@ -67,6 +68,26 @@ describe("isPreparationStateDto", () => {
   it("rejects a malformed deviceIdentifier", () => {
     expect(
       isPreparationStateDto({ kind: "preflight", deviceIdentifier: "nothex", story }),
+    ).toBe(false);
+  });
+
+  it("rejects a prepared without a boolean transferable flag", () => {
+    expect(
+      isPreparationStateDto({
+        kind: "prepared",
+        deviceIdentifier: DEVICE,
+        story,
+        targetCohort: "v3",
+      }),
+    ).toBe(false);
+    expect(
+      isPreparationStateDto({
+        kind: "prepared",
+        deviceIdentifier: DEVICE,
+        story,
+        targetCohort: "v3",
+        transferable: "yes",
+      }),
     ).toBe(false);
   });
 
@@ -149,8 +170,9 @@ describe("job event guards", () => {
   it("accepts a valid progress event", () => {
     expect(isJobProgressEvent(validProgress)).toBe(true);
   });
-  it("rejects an out-of-scope phase (transfer / verify are not emitted here)", () => {
-    expect(isJobProgressEvent({ ...validProgress, phase: "transfer" })).toBe(false);
+  it("accepts the transfer phase (shared job channel) but rejects the reserved verify phase", () => {
+    expect(isJobProgressEvent({ ...validProgress, phase: "transfer" })).toBe(true);
+    expect(isJobProgressEvent({ ...validProgress, phase: "verify" })).toBe(false);
   });
   it("rejects a negative sequence", () => {
     expect(isJobProgressEvent({ ...validProgress, sequence: -1 })).toBe(false);

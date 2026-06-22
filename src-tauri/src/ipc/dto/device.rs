@@ -201,7 +201,8 @@ mod tests {
         assert_eq!(v["kind"], "supported");
         assert_eq!(v["firmwareCohort"], "origineV1");
         assert_eq!(v["supportedOperations"]["importStory"], true);
-        assert_eq!(v["supportedOperations"]["writeStory"], false);
+        // V1 is writable since Epic 3 wired the gate.
+        assert_eq!(v["supportedOperations"]["writeStory"], true);
     }
 
     #[test]

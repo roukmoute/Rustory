@@ -79,6 +79,24 @@ export type PreparationView =
     }
   | { kind: "error"; error: AppError };
 
+/**
+ * Transfer (real device WRITE) state, composed by Rust and only PRESENTED here
+ * (AC1/AC2/AC3). `unavailable` shows the disabled `Envoyer vers la Lunii` CTA +
+ * the standardized "Envoi indisponible: …" reason (fail-closed: the default
+ * until a writable cohort + a `Préparée` story + a clear target are all proven);
+ * `ready` shows the active CTA (no confirmation modal — AC1). `transferring`
+ * comes from `job:progress`; `transferred` is the AUTHORITATIVE re-read terminal
+ * — a NON-SUCCESS "écriture effectuée — vérification à venir" (verification is a
+ * later flow, never `transférée et vérifiée`).
+ */
+export type TransferView =
+  | { kind: "unavailable"; reason: string }
+  | { kind: "ready" }
+  | { kind: "transferring"; progress: number | null }
+  | { kind: "transferred" }
+  | { kind: "retryable"; message: string; userAction: string }
+  | { kind: "error"; error: AppError };
+
 export interface LuniiDecisionPanelProps {
   /** Authoritative device state derived from `useConnectedLunii`. */
   deviceState?: LuniiDeviceState;
@@ -127,6 +145,20 @@ export interface LuniiDecisionPanelProps {
    *  `useStoryPreparation.retry`. Drives the `Relancer` / `Réessayer` action in
    *  the `retryable` / `error` views. */
   onRetryPreparation?: () => void;
+  /** Transfer (real device write) state. When omitted, the panel keeps the
+   *  legacy always-disabled send CTA in the device region (tests/storybook that
+   *  do not exercise the write flow). When provided, the route OWNS the send
+   *  gate: the `Envoyer vers la Lunii` CTA + the transfer status live in a
+   *  dedicated "Transfert" region, and the device region no longer renders the
+   *  CTA. */
+  transfer?: TransferView;
+  /** Start the transfer — wired by the route to `useStoryTransfer.send`. Drives
+   *  the active `Envoyer vers la Lunii` CTA (the `ready` view). */
+  onSend?: () => void;
+  /** Re-run a failed transfer — wired by the route to `useStoryTransfer.retry`.
+   *  Drives the `Relancer` / `Réessayer` action in the `retryable` / `error`
+   *  views. */
+  onRetryTransfer?: () => void;
   /** Required when the panel may expose an active Éditer CTA. */
   onEdit: () => void;
   /** Optional refresh trigger — wired by the route to
@@ -165,6 +197,9 @@ export function LuniiDecisionPanel({
   preparation,
   onPrepare,
   onRetryPreparation,
+  transfer,
+  onSend,
+  onRetryTransfer,
   onEdit,
   onRefreshDevice,
   onConsultSupportProfile,
@@ -178,6 +213,7 @@ export function LuniiDecisionPanel({
   const deviceReasonId = useId();
   const editReasonId = useId();
   const preparationReasonId = useId();
+  const transferReasonId = useId();
 
   const deviceChipLabel = formatDeviceChipLabel(deviceState, deviceLabel);
   const deviceChipTone = formatDeviceChipTone(deviceState);
@@ -261,6 +297,16 @@ export function LuniiDecisionPanel({
         </section>
       )}
 
+      {transfer && (
+        <section
+          className="lunii-panel__transfer"
+          aria-label="Transfert"
+          aria-live="polite"
+        >
+          {renderTransfer(transfer, transferReasonId, onSend, onRetryTransfer)}
+        </section>
+      )}
+
       <section className="lunii-panel__device" aria-label="État de l'appareil">
         <StateChip tone={deviceChipTone} label={deviceChipLabel} />
         {deviceState === "idle" && supportedOperations && (
@@ -273,12 +319,25 @@ export function LuniiDecisionPanel({
             ))}
           </ul>
         )}
-        <Button aria-disabled="true" aria-describedby={deviceReasonId}>
-          Envoyer vers la Lunii
-        </Button>
-        <p id={deviceReasonId} className="lunii-panel__reason">
-          {sendDisabledReason}
-        </p>
+        {transfer === undefined ? (
+          // Legacy fallback (tests/storybook without the write flow): the send
+          // CTA lives here, disabled, with its standardized reason.
+          <>
+            <Button aria-disabled="true" aria-describedby={deviceReasonId}>
+              Envoyer vers la Lunii
+            </Button>
+            <p id={deviceReasonId} className="lunii-panel__reason">
+              {sendDisabledReason}
+            </p>
+          </>
+        ) : (
+          // The route owns the send CTA (in the Transfert region). The device
+          // region keeps surfacing the DEVICE detail reason (unsupported /
+          // ambiguous / error) so the user still sees why the Lunii is not ready.
+          deviceReason && (
+            <p className="lunii-panel__reason">{deviceReason}</p>
+          )
+        )}
         {onRefreshDevice && !isScanning && (
           <Button
             variant="quiet"
@@ -515,6 +574,102 @@ function renderPreparationBlockers(
       {lunii.length > 0 && renderBlockerGroup("Compatibilité Lunii", lunii)}
     </>
   );
+}
+
+function renderTransfer(
+  view: TransferView,
+  reasonId: string,
+  onSend?: () => void,
+  onRetryTransfer?: () => void,
+): React.JSX.Element {
+  switch (view.kind) {
+    case "unavailable":
+      // The send CTA is visible but disabled, with the standardized reason
+      // (kept focusable so keyboard users reach the reason via aria-describedby).
+      return (
+        <>
+          <Button aria-disabled="true" aria-describedby={reasonId}>
+            Envoyer vers la Lunii
+          </Button>
+          <p id={reasonId} className="lunii-panel__reason">
+            {view.reason}
+          </p>
+        </>
+      );
+    case "ready":
+      // Writable cohort + a `Préparée` story + a clear target: the write can run.
+      // No confirmation modal (AC1) — the context is unambiguous.
+      return <Button onClick={onSend}>Envoyer vers la Lunii</Button>;
+    case "transferring":
+      // Honest progress: the phase is named ("en transfert"); a determinate bar
+      // shows ONLY when a reliable fraction is known, never a fake percentage.
+      // The 3.4 scope is a single calm phase (the rich phase split is later).
+      return (
+        <>
+          <StateChip tone="neutral" label="en transfert" />
+          {view.progress != null ? (
+            <ProgressIndicator
+              mode="determinate"
+              label="Transfert en cours…"
+              value={Math.round(view.progress * 100)}
+            />
+          ) : (
+            <ProgressIndicator
+              mode="indeterminate"
+              label="Transfert en cours…"
+            />
+          )}
+        </>
+      );
+    case "transferred":
+      // NON-SUCCESS terminal (AC3): the bytes were written, nothing is verified
+      // yet. NEVER "transférée et vérifiée" / "état partiel" (a later flow).
+      return (
+        <div className="lunii-panel__transfer-done">
+          <StateChip tone="neutral" label="écriture effectuée" />
+          <p className="lunii-panel__reason">
+            Écriture effectuée — vérification à venir.
+          </p>
+        </div>
+      );
+    case "retryable":
+      // Recoverable failure IN CONTEXT (role="alert"), never a toast (UX-DR15).
+      // The canonical `échec récupérable` chip is shown (glyph + text), and a
+      // Relancer action re-runs the write. The local draft is never mutated.
+      return (
+        <div role="alert" className="lunii-panel__transfer-error">
+          <StateChip tone="error" label="échec récupérable" />
+          <p>{view.message}</p>
+          <p className="lunii-panel__reason">{view.userAction}</p>
+          {onRetryTransfer && (
+            <Button
+              variant="quiet"
+              onClick={onRetryTransfer}
+              aria-label="Relancer le transfert"
+            >
+              Relancer
+            </Button>
+          )}
+        </div>
+      );
+    case "error":
+      // Transport failure: in-context, never a toast.
+      return (
+        <div role="alert" className="lunii-panel__transfer-error">
+          <p>{view.error.message}</p>
+          {view.error.userAction && <p>{view.error.userAction}</p>}
+          {onRetryTransfer && (
+            <Button
+              variant="quiet"
+              onClick={onRetryTransfer}
+              aria-label="Réessayer le transfert"
+            >
+              Réessayer
+            </Button>
+          )}
+        </div>
+      );
+  }
 }
 
 function renderVerdict(

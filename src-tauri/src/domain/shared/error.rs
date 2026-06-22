@@ -16,6 +16,7 @@ pub enum AppErrorCode {
     DeviceUnsupported,
     ImportFailed,
     PreparationFailed,
+    TransferFailed,
     OfficialCatalogUnavailable,
 }
 
@@ -154,6 +155,22 @@ impl AppError {
     pub fn preparation_failed(message: impl Into<String>, user_action: impl Into<String>) -> Self {
         Self {
             code: AppErrorCode::PreparationFailed,
+            message: message.into(),
+            user_action: Some(user_action.into()),
+            details: None,
+        }
+    }
+
+    /// Constructed when a story TRANSFER cannot even produce a terminal job
+    /// outcome — a TRANSPORT failure such as the local store having no resolvable
+    /// home (`app_data_dir` unavailable) or the blocking worker being lost. A
+    /// FUNCTIONAL transfer failure (write not authorized, device changed, write
+    /// rejected, interruption) is NOT an `AppError`: it is the terminal
+    /// `retryable` state of the job, surfaced through the transfer DTO and the
+    /// `job:failed` event.
+    pub fn transfer_failed(message: impl Into<String>, user_action: impl Into<String>) -> Self {
+        Self {
+            code: AppErrorCode::TransferFailed,
             message: message.into(),
             user_action: Some(user_action.into()),
             details: None,
@@ -388,6 +405,16 @@ mod tests {
         let err = AppError::preparation_failed("msg", "action");
         let v = serde_json::to_value(&err).expect("serialize");
         assert_eq!(v["code"], "PREPARATION_FAILED");
+        assert_eq!(v["message"], "msg");
+        assert_eq!(v["userAction"], "action");
+        assert!(v.get("user_action").is_none(), "snake_case must not leak");
+    }
+
+    #[test]
+    fn transfer_failed_serializes_with_stable_code() {
+        let err = AppError::transfer_failed("msg", "action");
+        let v = serde_json::to_value(&err).expect("serialize");
+        assert_eq!(v["code"], "TRANSFER_FAILED");
         assert_eq!(v["message"], "msg");
         assert_eq!(v["userAction"], "action");
         assert!(v.get("user_action").is_none(), "snake_case must not leak");

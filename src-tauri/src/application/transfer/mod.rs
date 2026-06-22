@@ -7,8 +7,13 @@
 //! module only sees the [`prepare::PreparationEventEmitter`] trait.
 
 pub mod prepare;
+// Shares the parent module's name on purpose: it owns the device-write
+// orchestration, kept separate from the preparation service.
+#[allow(clippy::module_inception)]
+pub mod transfer;
 
 pub use prepare::{
     prepare_story, read_preparation_state, PreparationEventEmitter, PreparationOutcome,
     PreparationStateView,
 };
+pub use transfer::{read_transfer_state, transfer_story, TransferOutcome, TransferStateView};

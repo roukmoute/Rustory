@@ -88,12 +88,15 @@ pub enum PreparationStateDto {
         progress: Option<f32>,
     },
     /// Artifacts assembled and fresh (`Préparée`). NOT a transfer success — the
-    /// send CTA stays disabled.
+    /// send CTA stays disabled. `transferable` tells the send gate whether the
+    /// prepared descriptor carries a device-format pack (an imported story) or is
+    /// a native story with no pack, so `Envoyer` is disabled before any write.
     #[serde(rename_all = "camelCase")]
     Prepared {
         device_identifier: String,
         story: PreparationStoryDto,
         target_cohort: String,
+        transferable: bool,
     },
     /// A recoverable failure (`échec récupérable`) consultable in context, with
     /// the canonical message + next gesture and any preflight blockers.
@@ -118,6 +121,7 @@ impl PreparationStateDto {
                 story_id,
                 story_title,
                 target_cohort,
+                transferable,
             } => Self::Prepared {
                 device_identifier,
                 story: PreparationStoryDto {
@@ -125,6 +129,7 @@ impl PreparationStateDto {
                     title: story_title,
                 },
                 target_cohort,
+                transferable,
             },
             PreparationStateView::Retryable {
                 story_id,
@@ -188,12 +193,14 @@ mod tests {
             story_id: STORY.into(),
             story_title: "Mon histoire".into(),
             target_cohort: "origine_v1".into(),
+            transferable: true,
         });
         let v = serde_json::to_value(&dto).expect("ser");
         assert_eq!(v["kind"], "prepared");
         assert_eq!(v["deviceIdentifier"], VALID_ID);
         assert_eq!(v["story"]["id"], STORY);
         assert_eq!(v["targetCohort"], "origine_v1");
+        assert_eq!(v["transferable"], true);
         assert!(v.get("device_identifier").is_none(), "no snake_case leak");
         assert!(v.get("target_cohort").is_none());
     }

@@ -21,10 +21,11 @@ use crate::domain::story::{CanonicalBlocker, Severity};
 /// strategy). It stays `1` for the whole MVP — no real consumer caches yet.
 pub const PREPARATION_PIPELINE_VERSION: u32 = 1;
 
-/// The observable phases of the transfer state machine emitted by the
-/// preparation flow. `Transfer` and `Verify` belong to the machine too but are
-/// OUT OF SCOPE here (a later write / verification step owns them) — they are
-/// deliberately NOT represented so no caller can emit false coverage.
+/// The observable phases of the transfer state machine. `Preflight` and
+/// `Prepare` are emitted by the preparation flow; `Transfer` is emitted by the
+/// device-write flow. `Verify` belongs to the machine too but is OUT OF SCOPE
+/// (a later verification step owns it) — deliberately NOT represented so no
+/// caller can emit false coverage.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PreparationPhase {
     /// Re-runs the read-only validation + authoritative device re-scan before
@@ -32,6 +33,9 @@ pub enum PreparationPhase {
     Preflight,
     /// Local artifact assembly + integrity re-check. Maps to `en préparation`.
     Prepare,
+    /// Device write of the prepared pack (story 3.x write flow). Maps to the
+    /// `en transfert` UI label.
+    Transfer,
 }
 
 impl PreparationPhase {
@@ -41,6 +45,7 @@ impl PreparationPhase {
         match self {
             Self::Preflight => "preflight",
             Self::Prepare => "prepare",
+            Self::Transfer => "transfer",
         }
     }
 }
@@ -368,6 +373,7 @@ mod tests {
     fn phase_wire_tags_are_stable() {
         assert_eq!(PreparationPhase::Preflight.wire_tag(), "preflight");
         assert_eq!(PreparationPhase::Prepare.wire_tag(), "prepare");
+        assert_eq!(PreparationPhase::Transfer.wire_tag(), "transfer");
     }
 
     #[test]

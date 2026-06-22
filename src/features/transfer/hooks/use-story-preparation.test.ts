@@ -115,6 +115,7 @@ describe("useStoryPreparation", () => {
         deviceIdentifier: DEVICE,
         story: { id: STORY, title: "Mon histoire" },
         targetCohort: "origine_v1",
+        transferable: true,
       });
 
     const { result } = renderHook(() => useStoryPreparation());
@@ -130,6 +131,7 @@ describe("useStoryPreparation", () => {
     await waitFor(() => expect(result.current.state.kind).toBe("prepared"));
     if (result.current.state.kind === "prepared") {
       expect(result.current.state.storyId).toBe(STORY);
+      expect(result.current.state.transferable).toBe(true);
     }
   });
 
@@ -142,6 +144,7 @@ describe("useStoryPreparation", () => {
       deviceIdentifier: DEVICE,
       story: { id: STORY, title: "Mon histoire" },
       targetCohort: "origine_v1",
+      transferable: true,
     });
 
     const { result } = renderHook(() => useStoryPreparation());
@@ -157,6 +160,7 @@ describe("useStoryPreparation", () => {
       deviceIdentifier: DEVICE,
       story: { id: STORY, title: "Mon histoire" },
       targetCohort: "origine_v1",
+      transferable: true,
     });
 
     const { result } = renderHook(() => useStoryPreparation());

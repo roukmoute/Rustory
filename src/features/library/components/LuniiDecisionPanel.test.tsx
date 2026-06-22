@@ -2,7 +2,7 @@ import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
-import { LuniiDecisionPanel } from "./LuniiDecisionPanel";
+import { LuniiDecisionPanel, type TransferView } from "./LuniiDecisionPanel";
 
 describe("<LuniiDecisionPanel />", () => {
   const noop = () => {};
@@ -182,7 +182,55 @@ describe("<LuniiDecisionPanel />", () => {
     expect(onRefreshDevice).toHaveBeenCalledTimes(1);
   });
 
-  it("never enables the send CTA in any MVP Phase 1 device state", () => {
+  it("enables the send CTA ONLY on a ready transfer view, never in any other transfer state", async () => {
+    // `ready` (writable cohort + Préparée + clear target) → active CTA + onSend.
+    const onSend = vi.fn();
+    const { unmount } = render(
+      <LuniiDecisionPanel
+        deviceState="idle"
+        transfer={{ kind: "ready" }}
+        onSend={onSend}
+        onEdit={noop}
+      />,
+    );
+    const ready = screen.getByRole("button", {
+      name: /envoyer vers la lunii/i,
+    });
+    expect(ready).not.toHaveAttribute("aria-disabled", "true");
+    await userEvent.click(ready);
+    expect(onSend).toHaveBeenCalledTimes(1);
+    unmount();
+
+    // Every other transfer state keeps the send affordance non-active: either a
+    // disabled CTA (unavailable) or no enabled send button at all (job/terminal).
+    const nonReady: TransferView[] = [
+      { kind: "unavailable", reason: "Envoi indisponible: profil non supporté" },
+      { kind: "transferring", progress: null },
+      { kind: "transferred" },
+      { kind: "retryable", message: "m", userAction: "a" },
+      {
+        kind: "error",
+        error: {
+          code: "TRANSFER_FAILED",
+          message: "m",
+          userAction: "a",
+          details: null,
+        },
+      },
+    ];
+    for (const view of nonReady) {
+      const { unmount: u } = render(
+        <LuniiDecisionPanel deviceState="idle" transfer={view} onEdit={noop} />,
+      );
+      const cta = screen.queryByRole("button", {
+        name: /envoyer vers la lunii/i,
+      });
+      if (cta) expect(cta).toHaveAttribute("aria-disabled", "true");
+      u();
+    }
+  });
+
+  it("without a transfer prop, keeps the legacy disabled send CTA in the device region (back-compat)", () => {
     for (const state of [
       "absent",
       "idle",
@@ -867,5 +915,204 @@ describe("<LuniiDecisionPanel /> — preparation", () => {
       screen.queryByRole("region", { name: /^préparation$/i }),
     ).toBeNull();
     expect(screen.queryByRole("button", { name: /^préparer$/i })).toBeNull();
+  });
+});
+
+describe("<LuniiDecisionPanel /> — transfer", () => {
+  const noop = () => {};
+
+  it("renders the send CTA disabled with the standardized reason when unavailable", () => {
+    render(
+      <LuniiDecisionPanel
+        deviceState="idle"
+        transfer={{
+          kind: "unavailable",
+          reason: "Envoi indisponible: prépare l'histoire d'abord",
+        }}
+        onEdit={noop}
+      />,
+    );
+    const cta = screen.getByRole("button", { name: /envoyer vers la lunii/i });
+    expect(cta).toHaveAttribute("aria-disabled", "true");
+    const reasonId = cta.getAttribute("aria-describedby");
+    expect(document.getElementById(reasonId as string)).toHaveTextContent(
+      /envoi indisponible: prépare l'histoire d'abord/i,
+    );
+  });
+
+  it("disables the send CTA on a V3-shaped 'profil non supporté' reason", () => {
+    render(
+      <LuniiDecisionPanel
+        deviceState="idle"
+        transfer={{
+          kind: "unavailable",
+          reason: "Envoi indisponible: profil non supporté",
+        }}
+        onEdit={noop}
+      />,
+    );
+    const cta = screen.getByRole("button", { name: /envoyer vers la lunii/i });
+    expect(cta).toHaveAttribute("aria-disabled", "true");
+    const reasonId = cta.getAttribute("aria-describedby");
+    expect(document.getElementById(reasonId as string)).toHaveTextContent(
+      /envoi indisponible: profil non supporté/i,
+    );
+  });
+
+  it("disables the send CTA with the native-non-transferable reason", () => {
+    render(
+      <LuniiDecisionPanel
+        deviceState="idle"
+        transfer={{
+          kind: "unavailable",
+          reason:
+            "Envoi indisponible: histoire native non transférable (pas de pack appareil)",
+        }}
+        onEdit={noop}
+      />,
+    );
+    const cta = screen.getByRole("button", { name: /envoyer vers la lunii/i });
+    expect(cta).toHaveAttribute("aria-disabled", "true");
+    const reasonId = cta.getAttribute("aria-describedby");
+    expect(document.getElementById(reasonId as string)).toHaveTextContent(
+      /histoire native non transférable \(pas de pack appareil\)/i,
+    );
+  });
+
+  it("activates the send CTA when ready and calls onSend (no confirmation modal)", async () => {
+    const onSend = vi.fn();
+    render(
+      <LuniiDecisionPanel
+        deviceState="idle"
+        transfer={{ kind: "ready" }}
+        onSend={onSend}
+        onEdit={noop}
+      />,
+    );
+    const cta = screen.getByRole("button", { name: /envoyer vers la lunii/i });
+    expect(cta).not.toHaveAttribute("aria-disabled", "true");
+    await userEvent.click(cta);
+    expect(onSend).toHaveBeenCalledTimes(1);
+    // No confirmation dialog appears (AC1).
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  it("shows the named 'en transfert' phase without a fake percentage", () => {
+    render(
+      <LuniiDecisionPanel
+        deviceState="idle"
+        transfer={{ kind: "transferring", progress: null }}
+        onEdit={noop}
+      />,
+    );
+    const region = screen.getByRole("region", { name: /^transfert$/i });
+    expect(within(region).getByText(/en transfert/i)).toBeInTheDocument();
+    expect(within(region).getByText(/transfert en cours…/i)).toBeInTheDocument();
+    expect(within(region).queryByText(/%/)).toBeNull();
+  });
+
+  it("renders the NON-SUCCESS terminal — never 'transférée et vérifiée'", () => {
+    render(
+      <LuniiDecisionPanel
+        deviceState="idle"
+        transfer={{ kind: "transferred" }}
+        onEdit={noop}
+      />,
+    );
+    const region = screen.getByRole("region", { name: /^transfert$/i });
+    expect(region).toHaveTextContent(/écriture effectuée/i);
+    expect(region).toHaveTextContent(/vérification à venir/i);
+    // The success vocabulary reserved for verification must NEVER appear here.
+    expect(region).not.toHaveTextContent(/transférée et vérifiée/i);
+    expect(region).not.toHaveTextContent(/état partiel/i);
+  });
+
+  it("renders a recoverable failure in-context with Relancer (never a toast)", async () => {
+    const onRetryTransfer = vi.fn();
+    render(
+      <LuniiDecisionPanel
+        deviceState="idle"
+        transfer={{
+          kind: "retryable",
+          message: "Le transfert a été interrompu.",
+          userAction: "Rebranche la Lunii puis relance l'envoi.",
+        }}
+        onRetryTransfer={onRetryTransfer}
+        onEdit={noop}
+      />,
+    );
+    const alert = screen.getByRole("alert");
+    expect(alert).toHaveTextContent(/le transfert a été interrompu/i);
+    expect(alert).toHaveTextContent(/rebranche la lunii/i);
+    expect(within(alert).getByText(/échec récupérable/i)).toBeInTheDocument();
+    // No polite status region carries the critical failure (never a toast).
+    screen
+      .queryAllByRole("status")
+      .forEach((s) => expect(s).not.toHaveTextContent(/le transfert a été interrompu/i));
+    await userEvent.click(
+      screen.getByRole("button", { name: /relancer le transfert/i }),
+    );
+    expect(onRetryTransfer).toHaveBeenCalledTimes(1);
+  });
+
+  it("renders a transport error in-context with Réessayer", async () => {
+    const onRetryTransfer = vi.fn();
+    render(
+      <LuniiDecisionPanel
+        deviceState="idle"
+        transfer={{
+          kind: "error",
+          error: {
+            code: "TRANSFER_FAILED",
+            message: "Envoi indisponible: réponse invalide.",
+            userAction: "Réessaie l'envoi.",
+            details: null,
+          },
+        }}
+        onRetryTransfer={onRetryTransfer}
+        onEdit={noop}
+      />,
+    );
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      /envoi indisponible: réponse invalide/i,
+    );
+    await userEvent.click(
+      screen.getByRole("button", { name: /réessayer le transfert/i }),
+    );
+    expect(onRetryTransfer).toHaveBeenCalledTimes(1);
+  });
+
+  it("hosts the transfer section in a polite live region", () => {
+    render(
+      <LuniiDecisionPanel
+        deviceState="idle"
+        transfer={{ kind: "transferring", progress: null }}
+        onEdit={noop}
+      />,
+    );
+    const region = screen.getByRole("region", { name: /^transfert$/i });
+    expect(region).toHaveAttribute("aria-live", "polite");
+  });
+
+  it("does not duplicate the send CTA: with a transfer prop the device region drops its fallback CTA", () => {
+    render(
+      <LuniiDecisionPanel
+        deviceState="idle"
+        transfer={{ kind: "ready" }}
+        onSend={noop}
+        onEdit={noop}
+      />,
+    );
+    // Exactly one "Envoyer vers la Lunii" button — owned by the Transfert region.
+    expect(
+      screen.getAllByRole("button", { name: /envoyer vers la lunii/i }),
+    ).toHaveLength(1);
+  });
+
+  it("does not render the transfer section when the prop is omitted", () => {
+    render(<LuniiDecisionPanel deviceState="idle" onEdit={noop} />);
+    expect(
+      screen.queryByRole("region", { name: /^transfert$/i }),
+    ).toBeNull();
   });
 });

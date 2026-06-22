@@ -90,6 +90,7 @@ The UI should favor these labels when they are user-visible:
 | Preparation is in flight | `Préparation en cours…` |
 | Preparation finished and artifacts are fresh | `Préparée` |
 | Write/send is running | `en transfert` |
+| Write done, not yet verified (NON-success terminal) | `écriture effectuée — vérification à venir` |
 | End result was explicitly confirmed | `transférée et vérifiée` |
 | Failure can be retried safely | `échec récupérable` |
 | Result is incomplete and not a success | `état partiel` |
@@ -152,12 +153,13 @@ These terms may exist in code or technical documentation, but should not be prim
 - `job`
 - `payload`
 - `mount`
+- `write` / `staging` when `écriture` / `Envoyer vers la Lunii` is meant
 - `artifact` when `artefact local supporté` is more precise
 - `state machine`
 
 ## Technical Mapping Rule
 
-- Code and IPC contracts may use stable internal identifiers such as `jobId`, `verified`, or `retryable`.
+- Code and IPC contracts may use stable internal identifiers such as `jobId`, `transferring`, `write_story`, `verified`, or `retryable`.
 - User-facing UI must map those identifiers to the preferred French labels defined here and in [ui-states.md](./ui-states.md).
 - Logs may keep technical codes, but any surfaced message must still respect this glossary.
 

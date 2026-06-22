@@ -39,7 +39,7 @@ use crate::domain::shared::AppError;
 use crate::domain::story::{validate_canonical, CanonicalBlocker, CanonicalStoryFacts};
 use crate::domain::transfer::{
     ensure_descriptor_coherent, gate_prepare, verify_aggregate, PreparationFailureCause,
-    PreparationPhase, TransferArtifactDescriptor,
+    PreparationPhase, PreparedArtifactKind, TransferArtifactDescriptor,
 };
 use crate::infrastructure::db::DbHandle;
 use crate::infrastructure::device::{DeviceLibraryReader, DeviceScanner};
@@ -88,6 +88,11 @@ pub enum PreparationStateView {
         story_id: String,
         story_title: String,
         target_cohort: String,
+        /// Whether the assembled descriptor carries a device-format pack (an
+        /// imported story) versus a native story with no pack. The send gate
+        /// uses it to disable `Envoyer` BEFORE any write attempt on a native
+        /// story, rather than failing server-side post-click.
+        transferable: bool,
     },
     /// A recoverable failure consultable in context.
     Retryable {
@@ -239,11 +244,19 @@ pub fn read_preparation_state(
     }
 
     match assemble_and_verify(artifact_source, app_data_dir, &confirmed, assembly_budget) {
-        Ok(_descriptor) => Ok(PreparationStateView::Prepared {
+        Ok(descriptor) => Ok(PreparationStateView::Prepared {
             device_identifier: confirmed.device_identifier,
             story_id: story_id.to_string(),
             story_title: confirmed.story_title,
             target_cohort: confirmed.target_cohort,
+            // Transferable only when the descriptor carries device-format pack
+            // bytes (an imported story). A native story (canonical structure
+            // only) has no pack → the send gate disables `Envoyer` before any
+            // write attempt, instead of letting it fail server-side post-click.
+            transferable: descriptor
+                .artifacts
+                .iter()
+                .any(|a| matches!(a.kind, PreparedArtifactKind::PackFile)),
         }),
         Err(cause) => Ok(PreparationStateView::Retryable {
             story_id: story_id.to_string(),
@@ -519,6 +532,38 @@ mod tests {
             }],
             aggregate_checksum: checksum,
         }
+    }
+
+    /// An imported-pack descriptor: a single device-format `PackFile` artifact
+    /// whose aggregate matches the recorded `pack_checksum`. Marks the prepared
+    /// story TRANSFERABLE (it carries device-format bytes).
+    fn imported_pack_descriptor(story_id: &str, pack_checksum: &str) -> TransferArtifactDescriptor {
+        TransferArtifactDescriptor {
+            story_id: story_id.into(),
+            target_cohort: "origine_v1".into(),
+            pipeline_version: PREPARATION_PIPELINE_VERSION,
+            artifacts: vec![PreparedArtifact {
+                kind: PreparedArtifactKind::PackFile,
+                relative_ref: "ni".into(),
+                byte_len: 16,
+                checksum: pack_checksum.into(),
+            }],
+            aggregate_checksum: pack_checksum.into(),
+        }
+    }
+
+    /// Seed a `story_imports` row so the preparation reads the story as an
+    /// imported pack (its integrity baseline becomes `pack_checksum`).
+    fn insert_import(db: &Mutex<DbHandle>, story_id: &str, pack_checksum: &str) {
+        db.lock()
+            .unwrap()
+            .conn()
+            .execute(
+                "INSERT INTO story_imports (story_id, pack_uuid, source_device_identifier, imported_at, pack_file_count, pack_total_bytes, pack_checksum) \
+                 VALUES (?1, '0197a5d0-0000-7000-8000-0000000000aa', 'devhash', '2026-06-22T00:00:00.000Z', 1, 16, ?2)",
+                rusqlite::params![story_id, pack_checksum],
+            )
+            .expect("insert story_imports");
     }
 
     #[derive(Default)]
@@ -984,11 +1029,48 @@ mod tests {
             PreparationStateView::Prepared {
                 story_title,
                 target_cohort,
+                transferable,
                 ..
             } => {
                 assert_eq!(story_title, "Mon histoire");
                 assert_eq!(target_cohort, "origine_v1");
+                assert!(
+                    !transferable,
+                    "a native story has no device-format pack → not transferable"
+                );
             }
+            other => panic!("expected Prepared, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn read_preparation_state_marks_an_imported_story_transferable() {
+        let dir = tempfile::tempdir().expect("app data");
+        let db = fresh_db();
+        insert_healthy(&db, "s1");
+        let pack_checksum = "c".repeat(64);
+        insert_import(&db, "s1", &pack_checksum);
+        let scanner = supported_scanner(3);
+        let reader = readable_reader();
+        let artifacts = MockTransferArtifactSource::new();
+        artifacts.enqueue(Ok(imported_pack_descriptor("s1", &pack_checksum)));
+
+        let view = read_preparation_state(
+            &db,
+            &scanner,
+            &reader,
+            &artifacts,
+            dir.path(),
+            "s1",
+            budget(),
+            budget(),
+        )
+        .expect("read state");
+        match view {
+            PreparationStateView::Prepared { transferable, .. } => assert!(
+                transferable,
+                "an imported story carries a device-format pack → transferable"
+            ),
             other => panic!("expected Prepared, got {other:?}"),
         }
     }

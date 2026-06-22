@@ -34,7 +34,14 @@ export type StoryPreparationState =
   | { kind: "idle" }
   | { kind: "preflight"; storyId: string }
   | { kind: "preparing"; storyId: string; progress: number | null }
-  | { kind: "prepared"; storyId: string }
+  | {
+      kind: "prepared";
+      storyId: string;
+      transferable: boolean;
+      /** The device the story was prepared FOR. The send gate refuses to transfer
+       *  to a different device (a swap requires re-preparation). */
+      deviceIdentifier: string;
+    }
   | {
       kind: "retryable";
       storyId: string;
@@ -114,7 +121,12 @@ export function useStoryPreparation(): UseStoryPreparation {
           if (!mountedRef.current || callId !== activeJobRef.current) return;
           if (dto.kind === "prepared") {
             settle();
-            setState({ kind: "prepared", storyId: sid });
+            setState({
+              kind: "prepared",
+              storyId: sid,
+              transferable: dto.transferable,
+              deviceIdentifier: dto.deviceIdentifier,
+            });
           } else if (dto.kind === "retryable") {
             settle();
             setState({
@@ -189,7 +201,15 @@ export function useStoryPreparation(): UseStoryPreparation {
               if (!mountedRef.current || callId !== activeJobRef.current) return;
               teardown();
               reread(callId, event.jobId, storyId, () =>
-                setState({ kind: "prepared", storyId }),
+                // The completed event fired but the re-read can no longer derive
+                // a state (device gone). Fail-closed on transferability — the
+                // send gate stays disabled (the device is gone anyway).
+                setState({
+                  kind: "prepared",
+                  storyId,
+                  transferable: false,
+                  deviceIdentifier,
+                }),
               );
             },
             onFailed: (event) => {

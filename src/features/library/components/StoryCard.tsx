@@ -7,10 +7,11 @@ import "./StoryCard.css";
 
 export type StoryCardSelectionMode = "replace" | "toggle";
 
-/** Preparation state reflected as a discreet card badge (AC2 — "éléments
- *  prêts/bloquants"). Derived from `useStoryPreparation`, never a new source of
- *  truth; the authoritative surface stays the decision panel. */
-export type StoryPreparationBadge = "preparing" | "retryable";
+/** Preparation / transfer state reflected as a discreet card badge (AC2 —
+ *  "éléments prêts/bloquants"). Derived from `useStoryPreparation` /
+ *  `useStoryTransfer`, never a new source of truth; the authoritative surface
+ *  stays the decision panel. */
+export type StoryPreparationBadge = "preparing" | "retryable" | "transferring";
 
 export interface StoryCardProps {
   story: StoryCardDto;
@@ -120,16 +121,25 @@ export function StoryCard({
         <h3 className="story-card__title">{story.title}</h3>
         {preparationBadge ? (
           <StateChip
-            tone={preparationBadge === "preparing" ? "neutral" : "error"}
-            label={
-              preparationBadge === "preparing"
-                ? "en préparation"
-                : "échec récupérable"
-            }
+            tone={preparationBadge === "retryable" ? "error" : "neutral"}
+            label={badgeLabel(preparationBadge)}
             className="story-card__preparation-chip"
           />
         ) : null}
       </div>
     </SurfacePanel>
   );
+}
+
+/** Canonical lowercase badge labels, kept in sync with the decision panel and
+ *  `docs/architecture/product-language.md` (never color-only). */
+function badgeLabel(badge: StoryPreparationBadge): string {
+  switch (badge) {
+    case "preparing":
+      return "en préparation";
+    case "transferring":
+      return "en transfert";
+    case "retryable":
+      return "échec récupérable";
+  }
 }

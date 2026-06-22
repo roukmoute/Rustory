@@ -175,24 +175,29 @@ fn input_rejects_unknown_field_no_path_crosses_ipc() {
 }
 
 #[test]
-fn presumed_transferable_verdict_does_not_imply_write_capability() {
-    // FR34 / AC3: the verdict is ORTHOGONAL to the send gate. Even a profile
-    // that could yield `présumée transférable` keeps `WriteStory` refused for
-    // every MVP cohort — the CTA stays disabled, no write is reachable.
-    for (cohort, version) in [
-        (LuniiFirmwareCohort::OrigineV1, 3u8),
-        (LuniiFirmwareCohort::MidGenV2, 6),
-        (LuniiFirmwareCohort::V3, 7),
+fn write_capability_is_governed_by_the_cohort_gate_not_the_verdict() {
+    // FR34 / AC2: write authorization is decided SOLELY by the capability gate
+    // per cohort — never by a validity verdict. Epic 3 wired the gate: V1/V2 are
+    // writable, V3 stays refused (reverse-engineering still active). A `présumée
+    // transférable` verdict on a V3 device therefore still cannot reach a write.
+    for (cohort, version, writable) in [
+        (LuniiFirmwareCohort::OrigineV1, 3u8, true),
+        (LuniiFirmwareCohort::MidGenV2, 6, true),
+        (LuniiFirmwareCohort::V3, 7, false),
     ] {
         let profile = match classify_lunii(version, true, true, "deadbeefdeadbeef") {
             DeviceProfileClassification::Supported(p) => p,
             other => panic!("md v{version} must classify as supported, got {other:?}"),
         };
         assert_eq!(profile.firmware_cohort, cohort);
-        let err = check_operation_allowed(&profile, SupportedOperation::WriteStory)
-            .expect_err("WriteStory must stay refused regardless of the verdict");
-        let v = serde_json::to_value(&err).expect("ser");
-        assert_eq!(v["code"], "DEVICE_UNSUPPORTED");
-        assert_eq!(v["details"]["operation"], "write_story");
+        let result = check_operation_allowed(&profile, SupportedOperation::WriteStory);
+        if writable {
+            result.expect("V1/V2 write must be allowed by the gate");
+        } else {
+            let err = result.expect_err("V3 write must stay refused");
+            let v = serde_json::to_value(&err).expect("ser");
+            assert_eq!(v["code"], "DEVICE_UNSUPPORTED");
+            assert_eq!(v["details"]["operation"], "write_story");
+        }
     }
 }

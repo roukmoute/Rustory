@@ -107,12 +107,16 @@ Preferred patterns:
 - `Récupération indisponible: vérifie le disque local et réessaie.`
 - `Restauration en cours: patiente quelques instants.`
 - `Édition en attente: choisis d'abord comment reprendre cette histoire.`
+- `Envoi indisponible: aucune histoire sélectionnée`
+- `Envoi indisponible: sélection multiple`
 - `Envoi indisponible: aucun appareil connecté`
-- `Envoi indisponible: profil non supporté`
+- `Envoi indisponible: profil non supporté` — covers a V3 (device write is still being reverse-engineered, like import), FLAM, and any unsupported profile
 - `Envoi indisponible: profil ambigu`
 - `Envoi indisponible: détection en cours`
 - `Envoi indisponible: détection en échec`
-- `Envoi indisponible: transfert pas encore activé (MVP Phase 1)`
+- `Envoi indisponible: prépare l'histoire d'abord` — no fresh transfer-artifact descriptor yet; run `Préparer` first
+- `Envoi indisponible: histoire native non transférable (pas de pack appareil)` — a native story has no device-format pack; enforced by the backend transfer outcome (`notTransferable`) and surfaced in context
+- `Envoi indisponible: transfert pas encore activé (MVP Phase 1)` — **legacy fallback only**: it no longer applies to the write-authorized cohorts (V1/V2), where the `Envoyer vers la Lunii` CTA is now activable; it subsists solely where the panel is given no write target at all (tests/storybook)
 - `Détection indisponible: vérifie que la Lunii est branchée et réessaie.`
 - `Profil non supporté: format métadonnées v{n} non géré`
 - `Profil non supporté: firmware {hint} non géré`
@@ -718,6 +722,82 @@ event payloads), never an error. Only a **transport** failure that prevents even
 producing a terminal job outcome becomes an `AppError` — a new code
 `PREPARATION_FAILED`, reserved for transport. A **functional** preparation failure
 (missing / corrupt artifact, `preflight` not passing, interruption) is the
+terminal `retryable` state of the job, not a raw `AppError`.
+
+## Story Transfer Contract
+
+Once a story is **`Préparée`** (a transfer-artifact descriptor was assembled — so
+an **imported** story carrying device-format pack files) and a **write-authorized**
+Lunii is connected, Rustory can run the real **transfer** — the FIRST device write.
+The transfer state is **composed in Rust** and only **presented** by the panel.
+
+**Gate before mutation, fail-closed (AC2 / FR34).** The `WriteStory` capability is
+checked **before any write I/O**: the send is allowed only on a write-authorized
+cohort. In MVP Phase 1 the matrix wires writes for **Lunii Origine v1** and
+**Mid-Gen v2**; **V3 stays read-only** (active reverse-engineering, same rationale
+as import) and FLAM is unsupported. The `Envoyer vers la Lunii` CTA is therefore
+**activable** — active ONLY on (write-authorized cohort + `Préparée` story + a
+single clear target), disabled everywhere else with a standardized
+`Envoi indisponible: …` reason. **No confirmation modal** is shown when the
+context and target are unambiguous (single local selection + one writable device).
+
+**Observable phase.** The transfer branches the machine's `transfer` phase
+(declared by the preparation contract, emitted here):
+
+| Internal phase / state | UI Label | Notes |
+| --- | --- | --- |
+| `transferring` | `en transfert` | The write runs in the background; the library stays usable. A `%` bar appears only when reliable. |
+| terminal (write done) | non-success line `écriture effectuée — vérification à venir` | NEVER `transférée et vérifiée` / `état partiel` (a verification step owns those). |
+| `retryable` | `échec récupérable` | Keep enough context for `Relancer`. The local draft is preserved in full. |
+
+**No false success (AC3).** No success is communicated until BOTH the write AND a
+verification have completed. After a successful write the job reaches an **honest,
+non-success** terminal (`écriture effectuée — vérification à venir`); the
+`transférée et vérifiée` and `état partiel` labels stay reserved for a later
+verification flow. An interruption / failure (device unplugged mid-write,
+`.content` not writable, no space, a stale / corrupt descriptor, a native story
+with no device-format pack) is the terminal `retryable` state: the canonical story
+is **never** mutated (FR18), there is **no partial resume** (a failed transfer
+requires a fresh full cycle), and the recoverable detail is shown **in context**
+(`role="alert"`, never a toast) with `Relancer`.
+
+**Closed write-error taxonomy.** `fs_write` (write / space failure on the device),
+`device_changed` (the live re-scan no longer resolves to the requested device),
+`checksum_mismatch` (the assembled artifact no longer matches its stored
+reference), `timeout` (budget exceeded), `interrupted` (deadline / close /
+unplugged). Each maps to one canonical `message` + `userAction` — Rust owns both
+strings, React renders them verbatim.
+
+**Safe, atomic, offline write.** The write reuses the safe-write pattern: stage on
+the device volume → promote atomically (`rename`) → `fsync` the promoted tree +
+parent → update the device pack index atomically (files first, index after — a
+pack is never indexed without its content present). Zero network I/O (USB only —
+FR19). On failure the staging is swept; the canonical draft is untouched.
+
+**Authoritative re-read, not event reconstruction.** A `start_transfer_story`
+command returns an acceptance immediately and the write runs in the background,
+reporting through the shared typed `job:progress` / `job:completed` / `job:failed`
+events correlated by `job_id` (`jobType = "transfer_story"`, monotonic `sequence`).
+On a terminal event the UI performs an **authoritative re-read**
+(`read_transfer_state`) rather than rebuilding truth from the events alone.
+
+**Surface.** The transfer block lives **inside** the decision panel, in a
+`<section aria-label="Transfert" aria-live="polite">`, sibling to the preparation
+region. It renders: `transferring` → a `StateChip` `en transfert` + calm progress;
+the write-done terminal → the factual non-success line; `retryable` / transport
+`error` → the in-context recoverable message + a `Relancer` / `Réessayer` button,
+never a toast. Each state uses a non-color signal (glyph + text). The story-card
+badge reflects `en transfert` through the existing `StateChip`.
+
+**No new persistence.** Like the preview / verdict / preparation, the transfer is
+not resumable, so there is no job table and no migration — the appliance is the
+truth (re-scan), the state is re-derived via the authoritative re-read.
+
+**Error contract.** The transfer states (`transferring` / write-done terminal /
+`retryable`) are outcomes of a **successful** read, never an error. Only a
+**transport** failure that prevents even producing a terminal job outcome becomes
+an `AppError` — a new code `TRANSFER_FAILED`, reserved for transport (the exact
+parallel of `PREPARATION_FAILED`). A **functional** transfer failure is the
 terminal `retryable` state of the job, not a raw `AppError`.
 
 ## Official Catalog Contract

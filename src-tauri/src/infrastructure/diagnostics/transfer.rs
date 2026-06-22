@@ -33,6 +33,18 @@ pub enum Event {
         cause: &'static str,
         elapsed_ms: u64,
     },
+    /// A transfer (device-write) job was accepted and started.
+    TransferStarted { story_ref: String },
+    /// A transfer job wrote the pack (non-success terminal "écriture effectuée —
+    /// vérification à venir").
+    TransferCompleted { story_ref: String, elapsed_ms: u64 },
+    /// A transfer job reached a `retryable` / transport failure. `cause` is the
+    /// stable diagnostic tag of [`TransferFailureCause`](crate::domain::transfer::TransferFailureCause).
+    TransferFailed {
+        story_ref: String,
+        cause: &'static str,
+        elapsed_ms: u64,
+    },
 }
 
 /// Short, stable, PII-free reference to a story id (first 16 hex of its
@@ -129,6 +141,31 @@ mod tests {
         .expect("ser");
         assert_eq!(v["category"], "preparation_failed");
         assert_eq!(v["cause"], "device_changed");
+    }
+
+    #[test]
+    fn transfer_events_serialize_with_category_tag() {
+        let v = serde_json::to_value(Event::TransferStarted {
+            story_ref: "abcd".into(),
+        })
+        .expect("ser");
+        assert_eq!(v["category"], "transfer_started");
+
+        let v = serde_json::to_value(Event::TransferCompleted {
+            story_ref: "abcd".into(),
+            elapsed_ms: 9,
+        })
+        .expect("ser");
+        assert_eq!(v["category"], "transfer_completed");
+
+        let v = serde_json::to_value(Event::TransferFailed {
+            story_ref: "abcd".into(),
+            cause: "write_not_authorized",
+            elapsed_ms: 3,
+        })
+        .expect("ser");
+        assert_eq!(v["category"], "transfer_failed");
+        assert_eq!(v["cause"], "write_not_authorized");
     }
 
     #[test]

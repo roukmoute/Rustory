@@ -16,6 +16,8 @@
 .lunii-panel__comparison,
 .lunii-panel__validation,
 .lunii-panel__preparation,
+.lunii-panel__transfer,
+.lunii-panel__transfer-done,
 .lunii-panel__device {
   display: flex;
   flex-direction: column;
@@ -30,7 +32,8 @@
 
 .lunii-panel__comparison-error,
 .lunii-panel__validation-error,
-.lunii-panel__preparation-error {
+.lunii-panel__preparation-error,
+.lunii-panel__transfer-error {
   display: flex;
   flex-direction: column;
   gap: var(--space-1);

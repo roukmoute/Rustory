@@ -59,12 +59,14 @@ fn prepared_wire_shape_is_camel_case() {
         story_id: STORY.into(),
         story_title: "Mon histoire".into(),
         target_cohort: "v3".into(),
+        transferable: false,
     });
     let v = serde_json::to_value(&dto).expect("ser");
     assert_eq!(v["kind"], "prepared");
     assert_eq!(v["deviceIdentifier"], DEVICE);
     assert_eq!(v["story"]["title"], "Mon histoire");
     assert_eq!(v["targetCohort"], "v3");
+    assert_eq!(v["transferable"], false);
     assert!(v.get("target_cohort").is_none(), "no snake_case leak");
 }
 

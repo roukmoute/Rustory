@@ -129,11 +129,11 @@ pub fn read_transfer_preview(
                 story_title: facts.title,
                 on_device,
                 unchanged_count,
-                // Read-only preview: the `WriteStory` capability is hard-coded
-                // `false` for every supported MVP cohort (locked by
-                // `check_operation_allowed_blocks_write_story_for_every_mvp_profile`),
-                // and a `Readable` outcome only ever arises for a supported
-                // profile. Epic 3 wires the real transfer gate.
+                // Read-only preview: this 3.1 flag stays `false` for every
+                // cohort. The actual send is gated by the `WriteStory`
+                // capability + the prepared-artifact check in the transfer
+                // flow, never by this preview flag. A `Readable` outcome only
+                // ever arises for a supported profile.
                 transferable: false,
             })
         }

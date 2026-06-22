@@ -497,11 +497,16 @@ fn holds_no_db_lock_during_scan() {
 }
 
 #[test]
-fn prepared_never_implies_write_capability_for_any_mvp_cohort() {
-    // FR34: a prepared story coexists with a HARD-disabled send — the device
-    // profile refuses `WriteStory` for every supported MVP cohort, and the
-    // preparation flow never consults `WriteStory`.
-    for (version, expected_cohort) in [(3u8, "origine_v1"), (6, "mid_gen_v2"), (7, "v3")] {
+fn preparation_does_not_change_the_write_gate_for_any_mvp_cohort() {
+    // FR34: preparation is ORTHOGONAL to the send gate — the preparation flow
+    // never consults `WriteStory`, and after a successful prepare the write
+    // capability is still exactly what the cohort gate dictates (V1/V2 writable
+    // since Epic 3, V3 refused), unchanged by the preparation.
+    for (version, expected_cohort, writable) in [
+        (3u8, "origine_v1", true),
+        (6, "mid_gen_v2", true),
+        (7, "v3", false),
+    ] {
         let db_tmp = tempfile::tempdir().expect("db dir");
         let app_data = tempfile::tempdir().expect("app data");
         let db = Mutex::new(open_db(&db_tmp));
@@ -526,15 +531,17 @@ fn prepared_never_implies_write_capability_for_any_mvp_cohort() {
             "md v{version} should prepare"
         );
 
-        // The SAME profile still refuses WriteStory — preparation did not unlock it.
+        // Preparation did not alter the gate: write capability is still exactly
+        // what the cohort dictates (V1/V2 writable, V3 refused).
         let profile = match classify_lunii(version, true, true, &identifier) {
             DeviceProfileClassification::Supported(p) => p,
             other => panic!("expected Supported, got {other:?}"),
         };
         assert_eq!(profile.firmware_cohort.diagnostic_tag(), expected_cohort);
-        assert!(
-            check_operation_allowed(&profile, SupportedOperation::WriteStory).is_err(),
-            "md v{version}: prepared must never enable WriteStory"
+        assert_eq!(
+            check_operation_allowed(&profile, SupportedOperation::WriteStory).is_ok(),
+            writable,
+            "md v{version}: preparation must not change the write gate"
         );
     }
 }

@@ -17,6 +17,10 @@ use serde::Serialize;
 /// `job:*` events by this value + `targetStoryId`.
 pub const JOB_TYPE_PREPARE_STORY: &str = "prepare_story";
 
+/// `jobType` discriminant of the story-transfer (device-write) flow. The same
+/// `job:*` payloads carry it; the `phase` field then also takes `"transfer"`.
+pub const JOB_TYPE_TRANSFER_STORY: &str = "transfer_story";
+
 /// Wire event name: a phase transition / progress update.
 pub const EVENT_JOB_PROGRESS: &str = "job:progress";
 /// Wire event name: the job reached a successful terminal state.
@@ -30,6 +34,11 @@ pub const EVENT_JOB_FAILED: &str = "job:failed";
 /// functional (`retryable`) and transport failures. The structured cause +
 /// blockers come from the authoritative re-read, not this label.
 pub const PREPARATION_FAILED_CODE: &str = "PREPARATION_FAILED";
+
+/// Stable `errorCode` carried by every transfer `job:failed` — both functional
+/// (`retryable`) and transport failures. The canonical `message` / `userAction`
+/// travel in the same payload; the structured truth is the authoritative re-read.
+pub const TRANSFER_FAILED_CODE: &str = "TRANSFER_FAILED";
 
 /// `job:progress` payload. `progress` is `null` unless a RELIABLE fraction is
 /// known (MVP never sends a fake percentage). `message` stays `null` here — the

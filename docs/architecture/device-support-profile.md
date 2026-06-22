@@ -17,10 +17,17 @@ behavior is a bug.
 
 | Famille | Cohort firmware | Format métadonnées | Lecture biblio | Inspection histoire | Import histoire | Écriture (transfert) |
 | --- | --- | --- | --- | --- | --- | --- |
-| Lunii | Origine v1 (fw 1.x / 2.x) | v3 | ✅ | ✅ | ✅ | ❌ (Phase 1 — Epic 3 wires the gate) |
-| Lunii | Mid-Gen v2 (fw 3.0 – 3.1) | v6 | ✅ | ✅ | ✅ | ❌ (Phase 1 — Epic 3 wires the gate) |
-| Lunii | V3 (fw 3.2.x +) | v7 | ✅ | ✅ | ❌ (RE actif — corruption risk) | ❌ (Phase 1 — Epic 3 wires the gate) |
+| Lunii | Origine v1 (fw 1.x / 2.x) | v3 | ✅ | ✅ | ✅ | ✅ (round-trip d'une histoire importée) |
+| Lunii | Mid-Gen v2 (fw 3.0 – 3.1) | v6 | ✅ | ✅ | ✅ | ✅ (round-trip d'une histoire importée) |
+| Lunii | V3 (fw 3.2.x +) | v7 | ✅ | ✅ | ❌ (RE actif — corruption risk) | ❌ (RE actif — même rationale que l'import) |
 | FLAM | — | — | ❌ (Post-MVP) | ❌ | ❌ | ❌ |
+
+The write column is wired by the transfer flow: `WriteStory` is `true` for
+**Origine v1** and **Mid-Gen v2**, and stays `false` for **V3** (device-write
+reverse-engineering is still active — same rationale as import) and **FLAM**. The
+realistic MVP write is the **round-trip of an imported story** (re-writing the
+opaque pack bytes back to the device, zero decryption); native stories have no
+device-format pack and are not transferable until a media transformer exists.
 
 ## Detection Strategy
 
@@ -301,8 +308,9 @@ verdict on an unconfirmed device. The `deviceProfile` axis and its
 (ready for a future device-format validation) but have no live emitter in MVP
 Phase 1 — exactly like the `media` / `filesystem` axes. The validation verdict
 NEVER consults `WriteStory` — transfer activation stays governed by that gate
-(`false` for every cohort in MVP Phase 1) and is orthogonal to the verdict, so a
-`présumée transférable` story still sits beside a disabled send CTA.
+(write-authorized for V1/V2, `false` for V3/FLAM in MVP Phase 1) and is orthogonal
+to the verdict: a `présumée transférable` verdict never enables the send by itself
+(preparation + the write gate do).
 
 Read vs. write coherence (story preparation): the preparation step
 (`start_prepare_story` / `read_preparation_state`, see
@@ -313,11 +321,36 @@ device only for its `preflight` phase, which reuses the `ReadLibrary` gate (a
 re-scan + identity guard + the read-only validation) to confirm the requested
 device before assembly; the assembly phase itself is local and does not need the
 device to stay plugged in. Transfer activation stays governed by `WriteStory`
-(`false` for every cohort in MVP Phase 1) and is orthogonal to preparation — a
-story can be fully prepared while the send CTA stays disabled. No new
-`SupportedOperation` is introduced: preparation is not a device capability, it is
-local derived work. The media transformer it would host is declared but has no
+(write-authorized for V1/V2 in MVP Phase 1) and is orthogonal to preparation — a
+story can be fully prepared while the send stays gated on the write capability. No
+new `SupportedOperation` is introduced: preparation is not a device capability, it
+is local derived work. The media transformer it would host is declared but has no
 live implementation in MVP (no story type requires transcoding yet).
+
+Read vs. write coherence (story transfer): the transfer step
+(`start_transfer_story` / `read_transfer_state`, see
+[ui-states.md#Story Transfer Contract](./ui-states.md)) is the FIRST real device
+**write**, the pendant of preparation: preparation assembles, locally, what a
+transfer would need; the transfer writes it to the device. The `WriteStory`
+capability is checked **before any write I/O** (fail-closed): a re-scan + identity
+guard confirm the requested device, then `check_operation_allowed(profile,
+WriteStory)` must pass — `true` only for Origine v1 / Mid-Gen v2, never V3 / FLAM.
+
+The writer reuses the safe-write pattern from import: stage on the device volume
+(`tempdir_in` at the mount root, never `app_data_dir`) → copy the opaque pack bytes
+(read-only from `imports/<story_id>/`, re-checksummed, TOCTOU `lstat`→`fstat`) →
+promote atomically (`rename`) to `.content/<SHORT_ID>` → `fsync` the promoted tree
++ parent → update the device index (`.pi`) atomically (append the 16-byte pack
+UUID, write a temp + `rename`). Files first, index after: a pack UUID is never
+added to `.pi` until its content is safely present. The write is idempotent (a UUID
+already present with content is not duplicated), offline (USB only — no network),
+and never decrypts.
+
+`SHORT_ID` is the **last 8 hex characters, UPPERCASED**, of the canonical pack
+UUID — the same `.content/<SHORT_ID>` folder the library reader enumerates. Cohort
+coherence is enforced: the descriptor's target cohort must match the connected
+device's cohort. No new `SupportedOperation` is added — `WriteStory` already
+exists; the transfer only flips it to `true` for the write-authorized cohorts.
 
 Adding a new operation:
 

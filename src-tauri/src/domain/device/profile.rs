@@ -93,20 +93,24 @@ pub fn classify_lunii(
     let (cohort, ops) = match metadata_version {
         3 => (
             LuniiFirmwareCohort::OrigineV1,
+            // Epic 3 wires the write gate: Origine v1 accepts the round-trip
+            // of an imported pack (opaque bytes already in device format) —
+            // the safest possible write, reproducing what the device held.
             SupportedOperations {
                 read_library: true,
                 inspect_story: true,
                 import_story: true,
-                write_story: false,
+                write_story: true,
             },
         ),
         6 => (
             LuniiFirmwareCohort::MidGenV2,
+            // Mid-Gen v2: same round-trip write support as Origine v1.
             SupportedOperations {
                 read_library: true,
                 inspect_story: true,
                 import_story: true,
-                write_story: false,
+                write_story: true,
             },
         ),
         7 => (
@@ -160,7 +164,7 @@ mod tests {
     }
 
     #[test]
-    fn classify_lunii_v3_metadata_returns_supported_origine_with_read_only() {
+    fn classify_lunii_v3_metadata_returns_supported_origine_with_write_enabled() {
         let p = supported_profile(classify_lunii(3, true, true, "abc"));
         assert_eq!(p.family, DeviceFamily::Lunii);
         assert_eq!(p.firmware_cohort, LuniiFirmwareCohort::OrigineV1);
@@ -169,18 +173,18 @@ mod tests {
         assert!(p.supported_operations.read_library);
         assert!(p.supported_operations.inspect_story);
         assert!(p.supported_operations.import_story);
-        assert!(!p.supported_operations.write_story);
+        assert!(p.supported_operations.write_story);
     }
 
     #[test]
-    fn classify_lunii_v6_metadata_returns_supported_midgen_v2_with_read_only() {
+    fn classify_lunii_v6_metadata_returns_supported_midgen_v2_with_write_enabled() {
         let p = supported_profile(classify_lunii(6, true, true, "abc"));
         assert_eq!(p.firmware_cohort, LuniiFirmwareCohort::MidGenV2);
         assert_eq!(p.metadata_format_version, 6);
         assert!(p.supported_operations.read_library);
         assert!(p.supported_operations.inspect_story);
         assert!(p.supported_operations.import_story);
-        assert!(!p.supported_operations.write_story);
+        assert!(p.supported_operations.write_story);
     }
 
     #[test]
@@ -195,12 +199,15 @@ mod tests {
     }
 
     #[test]
-    fn every_supported_profile_has_write_story_false_in_mvp_phase_1() {
-        for v in [3u8, 6, 7] {
+    fn write_story_is_enabled_for_v1_v2_and_blocked_for_v3_in_mvp_phase_1() {
+        // Epic 3 wires the write gate: Origine v1 / Mid-Gen v2 accept the
+        // round-trip of an imported pack; V3 stays write-blocked while its
+        // format reverse-engineering is still active (same rationale as import).
+        for (v, expected) in [(3u8, true), (6, true), (7, false)] {
             let p = supported_profile(classify_lunii(v, true, true, "id"));
-            assert!(
-                !p.supported_operations.write_story,
-                "metadata v{v} must have write_story=false in MVP",
+            assert_eq!(
+                p.supported_operations.write_story, expected,
+                "metadata v{v} write_story must be {expected} in MVP",
             );
         }
     }

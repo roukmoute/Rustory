@@ -44,6 +44,11 @@ pub struct AppState {
     /// production impl reads the local canonical structure / promoted pack and
     /// re-checksums it. Never writes, never touches the device.
     pub artifact_source: std::sync::Arc<dyn infrastructure::filesystem::TransferArtifactSource>,
+    /// Safe/atomic device writer used by the story-transfer flow to reproduce a
+    /// prepared pack on a connected writable Lunii. Same `Arc` + `spawn_blocking`
+    /// discipline; the production impl stages → promotes → fsyncs → updates `.pi`.
+    /// Reached only AFTER the `WriteStory` capability gate passes.
+    pub pack_writer: std::sync::Arc<dyn infrastructure::device::DevicePackWriter>,
 }
 
 /// Read every story id that still has a pending draft row. Ordered by
@@ -178,6 +183,9 @@ pub fn run() {
                 artifact_source: std::sync::Arc::new(
                     infrastructure::filesystem::SystemTransferArtifactSource,
                 ),
+                pack_writer: std::sync::Arc::new(
+                    infrastructure::device::SystemDevicePackWriter,
+                ),
             });
             Ok(())
         })
@@ -204,10 +212,12 @@ pub fn run() {
             commands::story::read_recoverable_draft,
             commands::device::read_story_validation,
             commands::device::read_transfer_preview,
+            commands::transfer::read_transfer_state,
             commands::catalog::refresh_official_catalog,
             commands::story::record_draft,
             commands::device::set_device_story_title,
             commands::transfer::start_prepare_story,
+            commands::transfer::start_transfer_story,
             commands::story::update_story,
         ])
         .run(tauri::generate_context!())

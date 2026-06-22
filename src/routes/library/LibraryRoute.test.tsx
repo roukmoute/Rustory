@@ -19,6 +19,8 @@ const mockCatalogRefresh = vi.fn();
 const mockCatalogImport = vi.fn();
 const mockStartPrepare = vi.fn();
 const mockReadPreparation = vi.fn();
+const mockStartTransfer = vi.fn();
+const mockReadTransfer = vi.fn();
 
 vi.mock("../../ipc/commands/library", () => ({
   getLibraryOverview: () => ({
@@ -107,6 +109,17 @@ vi.mock("../../ipc/commands/story-preparation", async () => {
   };
 });
 
+vi.mock("../../ipc/commands/story-transfer", async () => {
+  const actual = await vi.importActual<
+    typeof import("../../ipc/commands/story-transfer")
+  >("../../ipc/commands/story-transfer");
+  return {
+    ...actual,
+    startTransferStory: (input: unknown) => mockStartTransfer(input),
+    readTransferState: (input: unknown) => mockReadTransfer(input),
+  };
+});
+
 vi.mock("../../ipc/events/job-events", () => ({
   // The render tests drive the panel through the optimistic preflight + the
   // authoritative re-read; no live event is fired, so a no-op unsubscribe is
@@ -124,6 +137,7 @@ import {
   mapPreparationView,
   mapStoryValidationToView,
   mapTransferPreviewToComparison,
+  mapTransferView,
 } from "./LibraryRoute";
 
 const STORY_EDIT_MARKER_TITLE = "Edit stub for";
@@ -183,6 +197,15 @@ describe("<LibraryRoute />", () => {
     });
     mockReadPreparation.mockReset();
     mockReadPreparation.mockResolvedValue({ kind: "idle" });
+    // Default: transfer is user-triggered, so on mount nothing is called.
+    // Tests that exercise the Envoyer CTA override these.
+    mockStartTransfer.mockReset();
+    mockStartTransfer.mockResolvedValue({
+      jobId: "0197a5d0-0000-7000-8000-0000000000bb",
+      storyId: "s1",
+    });
+    mockReadTransfer.mockReset();
+    mockReadTransfer.mockResolvedValue({ kind: "idle" });
     // The hooks keep module-local stale-while-revalidate caches; reset
     // them between tests so no stray snapshot bleeds across cases.
     invalidateLibraryOverviewCache();
@@ -2344,7 +2367,12 @@ describe("<LibraryRoute />", () => {
     ).toEqual({ kind: "preparing", progress: null });
     expect(
       mapPreparationView(
-        { kind: "prepared", storyId: STORY_A },
+        {
+          kind: "prepared",
+          storyId: STORY_A,
+          transferable: true,
+          deviceIdentifier: "0123456789abcdef0123456789abcdef",
+        },
         STORY_A,
         1,
         "readable",
@@ -2385,5 +2413,343 @@ describe("<LibraryRoute />", () => {
         presumedTransferable,
       ),
     ).toEqual({ kind: "ready" });
+  });
+
+  // --- Transfer (real device write) — route flow + pure mapper (T10) ---
+
+  const writableOrigine = {
+    ...supportedOrigine,
+    supportedOperations: {
+      ...supportedOrigine.supportedOperations,
+      writeStory: true,
+    },
+  };
+
+  const preparedReread = {
+    kind: "prepared" as const,
+    deviceIdentifier: writableOrigine.deviceIdentifier,
+    story: { id: "s1", title: "Le soleil" },
+    targetCohort: "origine_v1",
+    transferable: true,
+  };
+
+  it("activates the Envoyer CTA on a writable cohort once the story is Préparée, then triggers the transfer (T10/AC1)", async () => {
+    const user = userEvent.setup();
+    mockGet.mockResolvedValueOnce({ stories: [{ id: "s1", title: "Le soleil" }] });
+    mockDevice.mockResolvedValue(writableOrigine);
+    mockStoryValidation.mockResolvedValue(presumedTransferableValidation);
+    mockReadPreparation.mockResolvedValue(preparedReread);
+    renderLibrary();
+
+    await user.click(await screen.findByRole("button", { name: /le soleil/i }));
+    const panel = screen.getByRole("complementary", {
+      name: /panneau de décision/i,
+    });
+
+    // Before preparing, the single send CTA is gated on "prépare l'histoire d'abord".
+    const sendBefore = within(panel).getByRole("button", {
+      name: /envoyer vers la lunii/i,
+    });
+    await waitFor(() =>
+      expect(sendBefore).toHaveAttribute("aria-disabled", "true"),
+    );
+    expect(
+      document.getElementById(
+        sendBefore.getAttribute("aria-describedby") as string,
+      ),
+    ).toHaveTextContent(/prépare l'histoire d'abord/i);
+
+    // Prepare the story → it becomes Préparée.
+    const prepare = within(panel).getByRole("button", { name: /^préparer$/i });
+    await waitFor(() =>
+      expect(prepare).not.toHaveAttribute("aria-disabled", "true"),
+    );
+    await user.click(prepare);
+    await waitFor(() =>
+      expect(
+        within(panel).getByRole("region", { name: /^préparation$/i }),
+      ).toHaveTextContent(/préparée/i),
+    );
+
+    // Now the send CTA is active; clicking it starts the transfer (no modal).
+    const send = within(panel).getByRole("button", {
+      name: /envoyer vers la lunii/i,
+    });
+    await waitFor(() => expect(send).not.toHaveAttribute("aria-disabled", "true"));
+    await user.click(send);
+    expect(mockStartTransfer).toHaveBeenCalledWith({
+      storyId: "s1",
+      deviceIdentifier: writableOrigine.deviceIdentifier,
+    });
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  it("blocks the Envoyer CTA when the story was Préparée for a DIFFERENT device (re-prepare required, F6)", async () => {
+    const user = userEvent.setup();
+    mockGet.mockResolvedValueOnce({ stories: [{ id: "s1", title: "Le soleil" }] });
+    mockDevice.mockResolvedValue(writableOrigine); // connected writable device
+    mockStoryValidation.mockResolvedValue(presumedTransferableValidation);
+    // Prepared for ANOTHER device (≠ the currently-connected writable device): a
+    // device swap must force a re-preparation before any send (no stale-descriptor
+    // cross-device send — the same gate covers a V1/V2/V3 swap).
+    mockReadPreparation.mockResolvedValue({
+      ...preparedReread,
+      deviceIdentifier: "ffffffffffffffffffffffffffffffff",
+    });
+    renderLibrary();
+
+    await user.click(await screen.findByRole("button", { name: /le soleil/i }));
+    const panel = screen.getByRole("complementary", {
+      name: /panneau de décision/i,
+    });
+    const prepare = within(panel).getByRole("button", { name: /^préparer$/i });
+    await waitFor(() =>
+      expect(prepare).not.toHaveAttribute("aria-disabled", "true"),
+    );
+    await user.click(prepare);
+    await waitFor(() =>
+      expect(
+        within(panel).getByRole("region", { name: /^préparation$/i }),
+      ).toHaveTextContent(/préparée/i),
+    );
+
+    // Préparée, but for another device → the send CTA stays disabled, asking to
+    // (re-)prepare for the connected device. No write is ever started.
+    const send = within(panel).getByRole("button", {
+      name: /envoyer vers la lunii/i,
+    });
+    expect(send).toHaveAttribute("aria-disabled", "true");
+    expect(
+      document.getElementById(send.getAttribute("aria-describedby") as string),
+    ).toHaveTextContent(/prépare l'histoire d'abord/i);
+    expect(mockStartTransfer).not.toHaveBeenCalled();
+  });
+
+  it("blocks the Envoyer CTA on a non-writable V3 cohort with 'profil non supporté' (T10/AC2)", async () => {
+    const user = userEvent.setup();
+    mockGet.mockResolvedValueOnce({ stories: [{ id: "s1", title: "Le soleil" }] });
+    mockDevice.mockResolvedValue(supportedV3); // writeStory: false
+    mockStoryValidation.mockResolvedValue(presumedTransferableValidation);
+    renderLibrary();
+
+    await user.click(await screen.findByRole("button", { name: /le soleil/i }));
+    const panel = screen.getByRole("complementary", {
+      name: /panneau de décision/i,
+    });
+    await waitFor(() => {
+      const send = within(panel).getByRole("button", {
+        name: /envoyer vers la lunii/i,
+      });
+      expect(send).toHaveAttribute("aria-disabled", "true");
+      expect(
+        document.getElementById(send.getAttribute("aria-describedby") as string),
+      ).toHaveTextContent(/profil non supporté/i);
+    });
+    expect(mockStartTransfer).not.toHaveBeenCalled();
+  });
+
+  it("keeps the library usable while a transfer is in flight (T10/AC2)", async () => {
+    const user = userEvent.setup();
+    mockGet.mockResolvedValueOnce({
+      stories: [
+        { id: "s1", title: "Le soleil" },
+        { id: "s2", title: "La lune" },
+      ],
+    });
+    mockDevice.mockResolvedValue(writableOrigine);
+    mockStoryValidation.mockResolvedValue(presumedTransferableValidation);
+    mockReadPreparation.mockResolvedValue(preparedReread);
+    // The transfer catch-up re-read stays idle so the panel holds "en transfert".
+    mockReadTransfer.mockResolvedValue({ kind: "idle" });
+    renderLibrary();
+
+    await user.click(await screen.findByRole("button", { name: /le soleil/i }));
+    const panel = screen.getByRole("complementary", {
+      name: /panneau de décision/i,
+    });
+    const prepare = within(panel).getByRole("button", { name: /^préparer$/i });
+    await waitFor(() =>
+      expect(prepare).not.toHaveAttribute("aria-disabled", "true"),
+    );
+    await user.click(prepare);
+    const send = within(panel).getByRole("button", {
+      name: /envoyer vers la lunii/i,
+    });
+    await waitFor(() => expect(send).not.toHaveAttribute("aria-disabled", "true"));
+    await user.click(send);
+
+    // The transfer surface shows the in-flight phase IN the panel...
+    await waitFor(() =>
+      expect(
+        within(panel).getByRole("region", { name: /^transfert$/i }),
+      ).toHaveTextContent(/en transfert/i),
+    );
+    // ...and the center-column library stays rendered + usable (both cards).
+    expect(
+      screen.getByRole("button", { name: /le soleil/i }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /la lune/i })).toBeInTheDocument();
+  });
+
+  it("surfaces a transfer failure in-context and leaves the local library intact (T10/AC3)", async () => {
+    const user = userEvent.setup();
+    mockGet.mockResolvedValueOnce({ stories: [{ id: "s1", title: "Le soleil" }] });
+    mockDevice.mockResolvedValue(writableOrigine);
+    mockStoryValidation.mockResolvedValue(presumedTransferableValidation);
+    mockReadPreparation.mockResolvedValue(preparedReread);
+    // The authoritative transfer re-read folds to a recoverable failure.
+    mockReadTransfer.mockResolvedValue({
+      kind: "retryable",
+      story: { id: "s1", title: "Le soleil" },
+      cause: "interrupted",
+      message: "Transfert interrompu : l'appareil a été retiré.",
+      userAction: "Rebranche la Lunii puis relance l'envoi.",
+    });
+    renderLibrary();
+
+    await user.click(await screen.findByRole("button", { name: /le soleil/i }));
+    const panel = screen.getByRole("complementary", {
+      name: /panneau de décision/i,
+    });
+    const prepare = within(panel).getByRole("button", { name: /^préparer$/i });
+    await waitFor(() =>
+      expect(prepare).not.toHaveAttribute("aria-disabled", "true"),
+    );
+    await user.click(prepare);
+    const send = within(panel).getByRole("button", {
+      name: /envoyer vers la lunii/i,
+    });
+    await waitFor(() => expect(send).not.toHaveAttribute("aria-disabled", "true"));
+    await user.click(send);
+
+    const transfer = within(panel).getByRole("region", { name: /^transfert$/i });
+    await waitFor(() => expect(transfer).toHaveTextContent(/échec récupérable/i));
+    // In-context recovery (never a toast), and the local library stays intact.
+    expect(
+      within(transfer).getByRole("button", { name: /relancer le transfert/i }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /le soleil/i }),
+    ).toBeInTheDocument();
+  });
+
+  // --- Pure mapper unit tests (mapTransferView) ---
+
+  it("mapTransferView enables Envoyer for a single selection + writable device + Préparée transférable", () => {
+    expect(
+      mapTransferView({ kind: "idle" }, STORY_A, 1, "idle", true, true, true),
+    ).toEqual({ kind: "ready" });
+  });
+
+  it("mapTransferView disables Envoyer with the selection reasons", () => {
+    expect(
+      mapTransferView({ kind: "idle" }, null, 0, "idle", true, true, true),
+    ).toEqual({
+      kind: "unavailable",
+      reason: "Envoi indisponible: aucune histoire sélectionnée",
+    });
+    expect(
+      mapTransferView({ kind: "idle" }, null, 2, "idle", true, true, true),
+    ).toEqual({
+      kind: "unavailable",
+      reason: "Envoi indisponible: sélection multiple",
+    });
+  });
+
+  it("mapTransferView maps each non-writable device state to a standardized reason", () => {
+    const cases = [
+      ["absent", "Envoi indisponible: aucun appareil connecté"],
+      ["idle", "Envoi indisponible: profil non supporté"], // V3: supported but not writable
+      ["unsupported", "Envoi indisponible: profil non supporté"],
+      ["ambiguous", "Envoi indisponible: profil ambigu"],
+      ["scanning", "Envoi indisponible: détection en cours"],
+      ["error", "Envoi indisponible: détection en échec"],
+    ] as const;
+    for (const [deviceState, reason] of cases) {
+      expect(
+        mapTransferView({ kind: "idle" }, STORY_A, 1, deviceState, false, true, true),
+      ).toEqual({ kind: "unavailable", reason });
+    }
+  });
+
+  it("mapTransferView asks to prepare first when writable but not Préparée", () => {
+    expect(
+      mapTransferView({ kind: "idle" }, STORY_A, 1, "idle", true, false, false),
+    ).toEqual({
+      kind: "unavailable",
+      reason: "Envoi indisponible: prépare l'histoire d'abord",
+    });
+  });
+
+  it("mapTransferView blocks a native (Préparée but not transferable) story before any write", () => {
+    expect(
+      mapTransferView({ kind: "idle" }, STORY_A, 1, "idle", true, true, false),
+    ).toEqual({
+      kind: "unavailable",
+      reason:
+        "Envoi indisponible: histoire native non transférable (pas de pack appareil)",
+    });
+  });
+
+  it("mapTransferView shows the active / terminal state ONLY for the selected target story", () => {
+    expect(
+      mapTransferView(
+        { kind: "transferring", storyId: STORY_A, progress: null },
+        STORY_A,
+        1,
+        "idle",
+        true,
+        true,
+        true,
+      ),
+    ).toEqual({ kind: "transferring", progress: null });
+    expect(
+      mapTransferView(
+        { kind: "transferred", storyId: STORY_A },
+        STORY_A,
+        1,
+        "idle",
+        true,
+        true,
+        true,
+      ),
+    ).toEqual({ kind: "transferred" });
+    expect(
+      mapTransferView(
+        {
+          kind: "retryable",
+          storyId: STORY_A,
+          message: "Échec.",
+          userAction: "Relance.",
+        },
+        STORY_A,
+        1,
+        "idle",
+        true,
+        true,
+        true,
+      ),
+    ).toEqual({ kind: "retryable", message: "Échec.", userAction: "Relance." });
+  });
+
+  it("mapTransferView blocks a NEW send while a transfer targets another story (single-flight, F4)", () => {
+    // Story A is transferring; the user selected story B (writable + Préparée).
+    // Single-flight: B's send is REFUSED — the hook tracks one job and the device
+    // volume must never see two concurrent writes. A's write stays consultable via
+    // its badge (the selected-and-transferring case is handled above this branch).
+    expect(
+      mapTransferView(
+        { kind: "transferring", storyId: STORY_A, progress: null },
+        STORY_B,
+        1,
+        "idle",
+        true,
+        true,
+        true,
+      ),
+    ).toEqual({
+      kind: "unavailable",
+      reason: "Envoi indisponible: un transfert est déjà en cours",
+    });
   });
 });

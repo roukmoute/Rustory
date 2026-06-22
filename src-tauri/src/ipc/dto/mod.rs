@@ -7,6 +7,7 @@ pub mod import_export;
 pub mod library;
 pub mod story;
 pub mod story_preparation;
+pub mod story_transfer;
 pub mod story_validation;
 pub mod transfer_preview;
 
@@ -27,6 +28,10 @@ pub use story::{
 pub use story_preparation::{
     PreparationCauseDto, PreparationStateDto, PreparationStoryDto, ReadPreparationStateInputDto,
     StartPreparationAcceptedDto, StartPrepareStoryInputDto,
+};
+pub use story_transfer::{
+    cause_dto as transfer_cause_dto, ReadTransferStateInputDto, StartTransferAcceptedDto,
+    StartTransferStoryInputDto, TransferCauseDto, TransferStateDto,
 };
 pub use story_validation::{
     BlockerAxisDto, BlockerCauseDto, BlockerDto, ReadStoryValidationInputDto, StoryValidationDto,
