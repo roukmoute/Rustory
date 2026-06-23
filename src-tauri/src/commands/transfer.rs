@@ -15,22 +15,30 @@
 //! the `WriteStory` gate is checked BEFORE any device mutation, and no
 //! `mount_path` crosses the IPC boundary.
 
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::application::transfer::{
-    read_transfer_state as read_transfer_state_service, transfer_story, PreparationEventEmitter,
-    PreparationOutcome, TransferOutcome,
+    discard_transfer_outcome as discard_transfer_outcome_service,
+    read_transfer_outcome as read_transfer_outcome_service,
+    read_transfer_state as read_transfer_state_service, record_transfer_outcome, transfer_story,
+    PreparationEventEmitter, PreparationOutcome, TransferOutcome,
 };
 use crate::commands::device::{DEVICE_LIBRARY_READ_BUDGET, IMPORT_DEVICE_STORY_BUDGET};
 use crate::domain::shared::AppError;
-use crate::domain::transfer::PreparationPhase;
+use crate::domain::transfer::{
+    PersistedTransferOutcome, PreparationPhase, TransferCompleteness, TransferFailureCause,
+    VerifiedSummary, VerifyVerdict,
+};
+use crate::infrastructure::db::DbHandle;
 use crate::infrastructure::diagnostics::transfer as transfer_log;
 use crate::ipc::dto::{
-    PreparationStateDto, ReadPreparationStateInputDto, ReadTransferStateInputDto,
-    StartPreparationAcceptedDto, StartPrepareStoryInputDto, StartTransferAcceptedDto,
-    StartTransferStoryInputDto, TransferStateDto,
+    DiscardTransferOutcomeInputDto, PreparationStateDto, ReadPreparationStateInputDto,
+    ReadTransferOutcomeInputDto, ReadTransferStateInputDto, StartPreparationAcceptedDto,
+    StartPrepareStoryInputDto, StartTransferAcceptedDto, StartTransferStoryInputDto,
+    TransferOutcomeDto, TransferStateDto,
 };
 use crate::ipc::events::{
     JobCompletedEvent, JobCompletedSummary, JobFailedEvent, JobProgressEvent, EVENT_JOB_COMPLETED,
@@ -38,6 +46,16 @@ use crate::ipc::events::{
     PREPARATION_FAILED_CODE, TRANSFER_FAILED_CODE,
 };
 use crate::AppState;
+
+/// Durable-memory context the TRANSFER emitter persists each terminal into BEFORE
+/// emitting its event. `None` for the preparation flow (which has no `transfer_jobs`
+/// row). Holding it on the emitter is what closes the `Abandonner` race: the row is
+/// written under the same blocking worker that emits the terminal, so the UI can
+/// never `discard` a row that does not exist yet.
+struct TransferMemory {
+    db: Arc<Mutex<DbHandle>>,
+    device_identifier: String,
+}
 
 /// Tauri implementation of the job event sink, shared by the preparation and the
 /// transfer flows. Closes over the correlation identifiers + the flow's
@@ -50,6 +68,8 @@ struct TauriJobEmitter {
     story_id: String,
     job_type: &'static str,
     error_code: &'static str,
+    /// Durable cross-session memory — `Some` for the transfer flow only.
+    transfer_memory: Option<TransferMemory>,
 }
 
 impl PreparationEventEmitter for TauriJobEmitter {
@@ -82,9 +102,14 @@ impl PreparationEventEmitter for TauriJobEmitter {
     }
 
     fn completed_verified(&self, changed: &str, unchanged: &str, sequence: u64) {
-        // Carry the AC2 confirmation summary ON the terminal so the UI renders the
-        // verified success straight from the event — never via a re-read with the
-        // now-stale pre-write device identifier (F1).
+        // Persist the verified terminal to the durable memory BEFORE emitting (F5:
+        // the row exists before the UI can `Abandonner`). Then carry the AC2 summary
+        // ON the terminal so the UI renders the success straight from the event —
+        // never via a re-read with the now-stale pre-write device identifier (F1).
+        self.persist_terminal(PersistedTransferOutcome::from_verified(VerifiedSummary {
+            changed: changed.to_string(),
+            unchanged: unchanged.to_string(),
+        }));
         let _ = self.app.emit(
             EVENT_JOB_COMPLETED,
             JobCompletedEvent {
@@ -112,6 +137,11 @@ impl PreparationEventEmitter for TauriJobEmitter {
         cause: Option<&str>,
         sequence: u64,
     ) {
+        // Persist the write-phase terminal BEFORE emitting (F5: race-free vs
+        // Abandonner). The terminal kind / copy are re-derived from the closed tags.
+        if let Some(outcome) = persisted_write_terminal(completeness, cause) {
+            self.persist_terminal(outcome);
+        }
         self.emit_failed(
             message,
             user_action,
@@ -123,8 +153,14 @@ impl PreparationEventEmitter for TauriJobEmitter {
     }
 
     fn failed_verify(&self, message: &str, user_action: &str, verdict: &str, sequence: u64) {
-        // A verify terminal carries ONLY the verify verdict — no write-phase
-        // completeness/cause (those describe how a WRITE ended, not a re-read).
+        // Persist the verify terminal BEFORE emitting (F5). A verify terminal carries
+        // ONLY the verify verdict — no write-phase completeness/cause (those describe
+        // how a WRITE ended, not a re-read).
+        if let Some(outcome) = VerifyVerdict::from_diagnostic_tag(verdict)
+            .and_then(PersistedTransferOutcome::from_verify_verdict)
+        {
+            self.persist_terminal(outcome);
+        }
         self.emit_failed(
             message,
             user_action,
@@ -137,6 +173,42 @@ impl PreparationEventEmitter for TauriJobEmitter {
 }
 
 impl TauriJobEmitter {
+    /// Persist a terminal to the durable `transfer_jobs` memory and trace the result.
+    /// Called BEFORE the terminal event is emitted (F5: the row exists before the UI
+    /// can `Abandonner`). Best-effort + transfer-only (a no-op when `transfer_memory`
+    /// is `None`): a persistence failure is LOGGED (F3) and never blocks the terminal.
+    fn persist_terminal(&self, outcome: PersistedTransferOutcome) {
+        let Some(memory) = &self.transfer_memory else {
+            return;
+        };
+        let terminal_kind = outcome.terminal_kind.wire_tag();
+        let result = {
+            let mut db = memory
+                .db
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            record_transfer_outcome(
+                &mut db,
+                &self.story_id,
+                &self.job_id,
+                Some(&memory.device_identifier),
+                &outcome,
+            )
+        };
+        let story_ref = transfer_log::story_ref(&self.story_id);
+        let event = match &result {
+            Ok(()) => transfer_log::Event::TransferOutcomeRecorded {
+                story_ref,
+                terminal_kind,
+            },
+            Err(err) => transfer_log::Event::TransferOutcomeUnavailable {
+                story_ref,
+                source: outcome_unavailable_source(err),
+            },
+        };
+        let _ = transfer_log::record_event(&self.app, event);
+    }
+
     /// Build + emit the `job:failed` payload (best-effort). `completeness` is set
     /// only for the transfer flow (`"failed"` / `"incomplete"`); preparation
     /// passes `None`, so the field is omitted on the wire.
@@ -220,6 +292,8 @@ pub async fn start_prepare_story(
             story_id: emitter_story_id.clone(),
             job_type: JOB_TYPE_PREPARE_STORY,
             error_code: PREPARATION_FAILED_CODE,
+            // Preparation has no durable cross-session memory.
+            transfer_memory: None,
         };
         let worker_story_id = emitter_story_id.clone();
         let outcome = tauri::async_runtime::spawn_blocking(move || {
@@ -363,6 +437,11 @@ pub async fn start_transfer_story(
     let library_reader = state.library_reader.clone();
     let artifact_source = state.artifact_source.clone();
     let pack_writer = state.pack_writer.clone();
+    // The emitter persists each terminal into this handle BEFORE emitting (F5); a
+    // separate handle covers the defensive `incomplete` of a panicked worker (the
+    // blocking worker moves its own `db` clone, and the emitter is consumed by it).
+    let persist_db = state.db.clone();
+    let join_db = state.db.clone();
 
     let _ = transfer_log::record_event(
         &app,
@@ -377,12 +456,22 @@ pub async fn start_transfer_story(
 
     tauri::async_runtime::spawn(async move {
         let started = Instant::now();
+        // The targeted device id, kept for the durable-memory row (traceability only
+        // — it is stale by construction once a write mutates `.pi`).
+        let emitter_device_id = requested.clone();
+        let join_device_id = requested.clone();
         let emitter = TauriJobEmitter {
             app: task_app.clone(),
             job_id: emitter_job_id.clone(),
             story_id: emitter_story_id.clone(),
             job_type: JOB_TYPE_TRANSFER_STORY,
             error_code: TRANSFER_FAILED_CODE,
+            // The emitter persists each terminal into this memory BEFORE emitting,
+            // closing the `Abandonner` race (F5).
+            transfer_memory: Some(TransferMemory {
+                db: persist_db,
+                device_identifier: emitter_device_id,
+            }),
         };
         let worker_story_id = emitter_story_id.clone();
         let outcome = tauri::async_runtime::spawn_blocking(move || {
@@ -462,6 +551,39 @@ pub async fn start_transfer_story(
                         verify_verdict: None,
                     },
                 );
+                // Defensive persist (inline, best-effort): the panicked worker never
+                // ran the emitter, so mirror the emitted `incomplete` here so a restart
+                // still re-offers a safe relaunch (AC2). The DB lock is held only for
+                // the single-row UPSERT (no await), then released before the trace.
+                let incomplete = PersistedTransferOutcome::from_write_terminal(
+                    TransferFailureCause::Interrupted,
+                    TransferCompleteness::Incomplete,
+                );
+                let persisted = {
+                    let mut db = join_db
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    record_transfer_outcome(
+                        &mut db,
+                        &emitter_story_id,
+                        &emitter_job_id,
+                        Some(&join_device_id),
+                        &incomplete,
+                    )
+                };
+                let _ = transfer_log::record_event(
+                    &task_app,
+                    match &persisted {
+                        Ok(()) => transfer_log::Event::TransferOutcomeRecorded {
+                            story_ref: transfer_log::story_ref(&emitter_story_id),
+                            terminal_kind: incomplete.terminal_kind.wire_tag(),
+                        },
+                        Err(err) => transfer_log::Event::TransferOutcomeUnavailable {
+                            story_ref: transfer_log::story_ref(&emitter_story_id),
+                            source: outcome_unavailable_source(err),
+                        },
+                    },
+                );
                 transfer_log::Event::TransferFailed {
                     story_ref,
                     cause: Some("interrupted"),
@@ -519,6 +641,136 @@ pub async fn read_transfer_state(
     .map_err(|_| transfer_join_error())?;
 
     view.map(TransferStateDto::from_view)
+}
+
+/// Read the durable transfer outcome remembered for `storyId` (the Transfer Resume
+/// Contract). Read-only and BEST-EFFORT (§6): returns `null` when there is no memory
+/// AND when a transport failure degrades the read — the degradation is LOGGED to
+/// `transfer.jsonl` (so support sees it) but never rejects, so the panel is never
+/// blocked. The hook re-hydrates its sticky non-success state from it on mount,
+/// reconciled against the live `read_transfer_state` (the live `Verified` always wins).
+#[tauri::command]
+pub async fn read_transfer_outcome(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    input: ReadTransferOutcomeInputDto,
+) -> Result<Option<TransferOutcomeDto>, AppError> {
+    crate::commands::shared::validate_story_id(&input.story_id)?;
+
+    let db = state.db.clone();
+    let story_id = input.story_id;
+    let read_story_id = story_id.clone();
+
+    let read = tauri::async_runtime::spawn_blocking(move || {
+        let db = db.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        read_transfer_outcome_service(&db, &read_story_id)
+    })
+    .await;
+
+    // §6: trace the degradation, then treat it as "no memory". Both a service
+    // transport error (`sqlite_select`) and a worker join error (`spawn_blocking_join`)
+    // resolve to `null` so a mount read never blocks the panel.
+    let stored = match read {
+        Ok(Ok(stored)) => stored,
+        Ok(Err(err)) => {
+            log_outcome_degraded(&app, &story_id, outcome_unavailable_source(&err));
+            None
+        }
+        Err(_join) => {
+            log_outcome_degraded(&app, &story_id, "spawn_blocking_join");
+            None
+        }
+    };
+
+    Ok(stored.map(|stored| TransferOutcomeDto::from_stored(story_id, stored)))
+}
+
+/// Best-effort `transfer.jsonl` trace of a durable-memory read/write degradation.
+fn log_outcome_degraded(app: &AppHandle, story_id: &str, source: &'static str) {
+    let _ = transfer_log::record_event(
+        app,
+        transfer_log::Event::TransferOutcomeUnavailable {
+            story_ref: transfer_log::story_ref(story_id),
+            source,
+        },
+    );
+}
+
+/// Purge the durable transfer outcome for `storyId` (the `Abandonner` gesture).
+/// Idempotent; never touches canonical state. A purge failure IS surfaced (unlike
+/// the best-effort read) so the user learns the memory could not be cleared.
+#[tauri::command]
+pub async fn discard_transfer_outcome(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    input: DiscardTransferOutcomeInputDto,
+) -> Result<(), AppError> {
+    crate::commands::shared::validate_story_id(&input.story_id)?;
+
+    let db = state.db.clone();
+    let story_id = input.story_id;
+    let discard_story_id = story_id.clone();
+
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut db = db.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        discard_transfer_outcome_service(&mut db, &discard_story_id)
+    })
+    .await
+    .map_err(|_| transfer_outcome_join_error())??;
+
+    let _ = transfer_log::record_event(
+        &app,
+        transfer_log::Event::TransferOutcomeAbandoned {
+            story_ref: transfer_log::story_ref(&story_id),
+        },
+    );
+    Ok(())
+}
+
+/// Rebuild the persisted WRITE-phase terminal from the closed wire tags the emitter
+/// carries (`completeness` = `"failed"` / `"incomplete"`, `cause` = the camelCase
+/// `wire_cause`). `None` when either tag is absent / drifts — defensive, since the
+/// service always passes both for a write-phase failure. The re-derived copy matches
+/// the emitted message (both come from `failure_copy`).
+fn persisted_write_terminal(
+    completeness: Option<&str>,
+    cause: Option<&str>,
+) -> Option<PersistedTransferOutcome> {
+    let completeness = TransferCompleteness::from_diagnostic_tag(completeness?)?;
+    let cause = TransferFailureCause::from_wire_cause(cause?)?;
+    Some(PersistedTransferOutcome::from_write_terminal(
+        cause,
+        completeness,
+    ))
+}
+
+/// Extract the closed `details.source` of a durable-memory transport error for a
+/// PII-free diagnostics tag (`sqlite_upsert` / `sqlite_select` / `sqlite_delete` /
+/// `story_missing` / `other`).
+fn outcome_unavailable_source(err: &AppError) -> &'static str {
+    match err
+        .details
+        .as_ref()
+        .and_then(|details| details.get("source"))
+        .and_then(|source| source.as_str())
+    {
+        Some("sqlite_upsert") => "sqlite_upsert",
+        Some("sqlite_select") => "sqlite_select",
+        Some("sqlite_delete") => "sqlite_delete",
+        Some("story_missing") => "story_missing",
+        _ => "other",
+    }
+}
+
+/// The blocking durable-memory worker could not be joined (panicked or cancelled).
+fn transfer_outcome_join_error() -> AppError {
+    AppError::transfer_outcome_unavailable(
+        "Mémoire de transfert indisponible: tâche interrompue.",
+        "Réessaie ; si le problème persiste, redémarre Rustory.",
+    )
+    .with_details(serde_json::json!({
+        "source": "spawn_blocking_join",
+    }))
 }
 
 fn is_32_lowercase_hex(value: &str) -> bool {

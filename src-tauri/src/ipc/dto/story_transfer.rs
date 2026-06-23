@@ -16,8 +16,10 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::application::transfer::TransferStateView;
-use crate::domain::transfer::{failure_copy, TransferCompleteness, TransferFailureCause};
+use crate::application::transfer::{StoredTransferOutcome, TransferStateView};
+use crate::domain::transfer::{
+    failure_copy, PersistedTerminalKind, TransferCompleteness, TransferFailureCause,
+};
 
 use super::PreparationStoryDto;
 
@@ -189,6 +191,88 @@ pub fn completeness_dto(completeness: TransferCompleteness) -> TransferCompleten
     match completeness {
         TransferCompleteness::Failed => TransferCompletenessDto::Failed,
         TransferCompleteness::Incomplete => TransferCompletenessDto::Incomplete,
+    }
+}
+
+/// Input accepted by `read_transfer_outcome`: the story whose durable transfer
+/// memory to re-hydrate. `deny_unknown_fields` keeps the boundary authoritative
+/// (no path crosses IPC).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ReadTransferOutcomeInputDto {
+    pub story_id: String,
+}
+
+/// Input accepted by `discard_transfer_outcome` (the `Abandonner` purge).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DiscardTransferOutcomeInputDto {
+    pub story_id: String,
+}
+
+/// Closed terminal-kind discriminant of a remembered transfer outcome (camelCase).
+/// Drives the hook's re-hydrated sticky state; the UI maps it to the FR label.
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum TransferTerminalKindDto {
+    Verified,
+    Partial,
+    Retryable,
+    Incomplete,
+}
+
+/// Wire shape of a durable transfer outcome re-hydrated from `transfer_jobs`. The
+/// hook seeds its sticky state from it on mount (the Transfer Resume Contract).
+/// `terminal_kind` drives the rendered state; `cause` is the AC3 structured cause
+/// of a write-phase terminal (absent for a verify terminal / `verified`); `summary`
+/// carries the `verified` confirmation lines (composed in Rust). `message` /
+/// `userAction` are the canonical FR copy the panel renders verbatim.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TransferOutcomeDto {
+    pub story_id: String,
+    pub terminal_kind: TransferTerminalKindDto,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cause: Option<TransferCauseDto>,
+    pub message: String,
+    pub user_action: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub summary: Option<TransferVerifiedSummaryDto>,
+    pub recorded_at: String,
+}
+
+impl TransferOutcomeDto {
+    /// Map a stored outcome (+ its persistence timestamp) to the wire shape for
+    /// `storyId`. Lossless for the fields the hook re-hydrates from; the redundant
+    /// `completeness` / `verify_verdict` discriminants are implied by `terminal_kind`
+    /// and deliberately not echoed on the wire.
+    pub fn from_stored(story_id: String, stored: StoredTransferOutcome) -> Self {
+        let StoredTransferOutcome {
+            outcome,
+            recorded_at,
+        } = stored;
+        Self {
+            story_id,
+            terminal_kind: terminal_kind_dto(outcome.terminal_kind),
+            cause: outcome.cause.map(cause_dto),
+            message: outcome.message,
+            user_action: outcome.user_action,
+            summary: outcome.summary.map(|s| TransferVerifiedSummaryDto {
+                changed: s.changed,
+                unchanged: s.unchanged,
+            }),
+            recorded_at,
+        }
+    }
+}
+
+/// Map a persisted terminal kind to its closed wire discriminant.
+pub fn terminal_kind_dto(kind: PersistedTerminalKind) -> TransferTerminalKindDto {
+    match kind {
+        PersistedTerminalKind::Verified => TransferTerminalKindDto::Verified,
+        PersistedTerminalKind::Partial => TransferTerminalKindDto::Partial,
+        PersistedTerminalKind::Retryable => TransferTerminalKindDto::Retryable,
+        PersistedTerminalKind::Incomplete => TransferTerminalKindDto::Incomplete,
     }
 }
 

@@ -80,6 +80,38 @@ export interface StartTransferAcceptedDto {
   storyId: string;
 }
 
+/**
+ * Closed terminal-kind discriminant of a durable transfer outcome (the Transfer
+ * Resume Contract). Mirror of the Rust `TransferTerminalKindDto`. Drives the hook's
+ * re-hydrated sticky state on mount.
+ */
+export type TransferTerminalKind =
+  | "verified"
+  | "partial"
+  | "retryable"
+  | "incomplete";
+
+/**
+ * Wire shape of a durable transfer outcome re-hydrated from `transfer_jobs`
+ * (`read_transfer_outcome`). Mirror of the Rust `TransferOutcomeDto`. `terminalKind`
+ * drives the rendered state; `cause` is the AC3 structured cause of a write-phase
+ * terminal (absent on a verify terminal / `verified`); `summary` carries the
+ * `verified` confirmation lines (present iff `terminalKind === "verified"`).
+ * `message` / `userAction` are the canonical FR copy rendered verbatim; `recordedAt`
+ * is the ISO-8601 UTC instant the terminal was remembered.
+ */
+export interface TransferOutcomeDto {
+  storyId: string;
+  terminalKind: TransferTerminalKind;
+  /** AC3 structured cause — only on a write-phase `retryable` / `incomplete`. */
+  cause?: TransferCause;
+  message: string;
+  userAction: string;
+  /** The `verified` confirmation lines — only on `terminalKind === "verified"`. */
+  summary?: TransferVerifiedSummary;
+  recordedAt: string;
+}
+
 const CAUSES: ReadonlySet<string> = new Set([
   "writeNotAuthorized",
   "notPrepared",
@@ -219,4 +251,65 @@ export function isStartTransferAcceptedDto(
     typeof a.storyId === "string" &&
     STORY_ID_PATTERN.test(a.storyId)
   );
+}
+
+const TERMINAL_KINDS: ReadonlySet<string> = new Set([
+  "verified",
+  "partial",
+  "retryable",
+  "incomplete",
+]);
+
+const OUTCOME_ALLOWED_KEYS: ReadonlySet<string> = new Set([
+  "storyId",
+  "terminalKind",
+  "cause",
+  "message",
+  "userAction",
+  "summary",
+  "recordedAt",
+]);
+
+// ISO-8601 UTC with millisecond precision and a literal `Z` — the exact shape Rust
+// composes (`now_iso_ms`). A bare-second or offset timestamp is drift.
+const ISO_UTC_MS_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
+
+/**
+ * Runtime guard for `TransferOutcomeDto`. Rejects every drift: unknown `kind`,
+ * missing/extra fields, wrong types, malformed `storyId` / `recordedAt`,
+ * unrecognized `cause`, empty `message` / `userAction`, AND the coherence rules
+ * mirroring the Rust model: `summary` is present iff `terminalKind === "verified"`;
+ * a `cause` is allowed only on a write-phase `retryable` / `incomplete` and is
+ * REQUIRED on `incomplete`.
+ */
+export function isTransferOutcomeDto(value: unknown): value is TransferOutcomeDto {
+  if (typeof value !== "object" || value === null) return false;
+  const o = value as Record<string, unknown>;
+  if (!hasOnlyAllowedKeys(o, OUTCOME_ALLOWED_KEYS)) return false;
+  if (typeof o.storyId !== "string" || !STORY_ID_PATTERN.test(o.storyId)) {
+    return false;
+  }
+  if (typeof o.terminalKind !== "string" || !TERMINAL_KINDS.has(o.terminalKind)) {
+    return false;
+  }
+  if (!isNonEmptyString(o.message)) return false;
+  if (!isNonEmptyString(o.userAction)) return false;
+  if (typeof o.recordedAt !== "string" || !ISO_UTC_MS_PATTERN.test(o.recordedAt)) {
+    return false;
+  }
+  // `cause`: only on a write-phase terminal, required on `incomplete`.
+  if (o.cause !== undefined) {
+    if (typeof o.cause !== "string" || !CAUSES.has(o.cause)) return false;
+    if (o.terminalKind === "verified" || o.terminalKind === "partial") {
+      return false;
+    }
+  }
+  if (o.terminalKind === "incomplete" && o.cause === undefined) return false;
+  // `summary`: present iff `verified`.
+  if (o.terminalKind === "verified") {
+    if (!isVerifiedSummary(o.summary)) return false;
+  } else if (o.summary !== undefined) {
+    return false;
+  }
+  return true;
 }

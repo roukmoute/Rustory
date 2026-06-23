@@ -381,6 +381,16 @@ success path is demonstrable on **Origine v1 / Mid-Gen v2 or a fake mount only**
 the write). The verify verdicts (`verified` / `partial` / `failed`) are job states,
 never new `SupportedOperation`s or error codes.
 
+Resume / relaunch (story transfer): the durable `transfer_jobs` memory that lets the
+panel re-offer `Relancer` after an app restart (see
+[ui-states.md#Transfer Resume Contract](./ui-states.md)) introduces **no new
+`SupportedOperation`**. A `Relancer` re-runs the WHOLE transfer cycle through the
+same `start_transfer_story` path, so it reuses the `WriteStory` gate unchanged
+(write-authorized for Origine v1 / Mid-Gen v2, refused for V3 / FLAM) with a FRESH
+device identity re-validated before any write — never the stored, now-stale
+`device_identifier`. Reading / writing / purging the memory is a local SQLite
+operation, gated by nothing device-side.
+
 Adding a new operation:
 
 1. Add a boolean field on `SupportedOperations`.

@@ -1,13 +1,18 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import {
+  discardTransferOutcome,
+  readTransferOutcome,
   readTransferState,
   startTransferStory,
   TransferContractDriftError,
 } from "../../../ipc/commands/story-transfer";
 import { subscribeJobEvents } from "../../../ipc/events/job-events";
 import { toAppError, type AppError } from "../../../shared/errors/app-error";
-import type { TransferVerifiedSummary } from "../../../shared/ipc-contracts/story-transfer";
+import type {
+  TransferOutcomeDto,
+  TransferVerifiedSummary,
+} from "../../../shared/ipc-contracts/story-transfer";
 import { useJobShell } from "../../../shell/state/job-shell-store";
 
 /** `jobType` of the transfer flow — mirrors the Rust `JOB_TYPE_TRANSFER_STORY`. */
@@ -95,11 +100,22 @@ export interface UseStoryTransfer {
   /** Re-run the last transfer after a recoverable failure (a full new cycle —
    *  never a hidden partial resume). */
   retry: () => void;
-  /** Abandon the current outcome: return to `idle` WITHOUT clearing the last
-   *  request, so `retry()` / `send()` stay available. Wired to the "Abandonner"
-   *  action on a `partial` / `retryable` / `incomplete` terminal; the local draft
-   *  is never touched (AC3). */
+  /** Abandon the current outcome: PURGE the durable memory then return to `idle`
+   *  WITHOUT clearing the last request, so `retry()` / `send()` stay available.
+   *  Wired to the "Abandonner" action on a `partial` / `retryable` / `incomplete`
+   *  terminal; the local draft is never touched (AC3). A purge failure stays
+   *  visible in-context (§6). */
   dismiss: () => void;
+  /** Re-hydrate the sticky state from the durable transfer memory for `storyId`
+   *  (the Transfer Resume Contract). Seeds a remembered NON-success terminal
+   *  (`partial` / `retryable` / `incomplete`) so the panel re-offers
+   *  `Relancer` / `Abandonner` after a restart / re-visit. Reconciliation (§2): when
+   *  `deviceId` is given, the live `read_transfer_state` is consulted first — a live
+   *  `verified` (the device proves the pack) ALWAYS wins; a remembered `verified` is
+   *  otherwise NEVER promoted to a live success from memory (no false success). An
+   *  in-flight transfer is never disturbed. Best-effort: a read failure is "no
+   *  memory". */
+  hydrate: (storyId: string, deviceId?: string | null) => void;
 }
 
 /**
@@ -134,6 +150,11 @@ export function useStoryTransfer(): UseStoryTransfer {
   // The callId whose transfer has reached a terminal via a re-read. Guards
   // against a late `job:progress` regressing the panel out of the terminal.
   const settledRef = useRef(0);
+  // Mirror of the latest state for the imperative `hydrate` / `dismiss` guards,
+  // which must read the CURRENT kind without re-subscribing through a stale
+  // closure (and without forcing those callbacks to depend on `state`).
+  const stateRef = useRef(state);
+  stateRef.current = state;
   const trackJobProgress = useJobShell((s) => s.trackJobProgress);
   const clearJob = useJobShell((s) => s.clearJob);
 
@@ -386,14 +407,142 @@ export function useStoryTransfer(): UseStoryTransfer {
   }, [start]);
 
   const dismiss = useCallback(() => {
+    // Never abandon a transfer mid-flight: `Abandonner` is only ever wired on a
+    // terminal, but the hook guards the F5 invariant itself — a `discard` concurrent
+    // with the terminal UPSERT could otherwise race the row. A no-op while in flight.
+    if (stateRef.current.kind === "transferring") return;
     // Abandon the current outcome (AC3). Supersede any in-flight callbacks (a
     // pending re-read for the old call becomes a no-op), stop the live
     // subscription, and return to idle WITHOUT clearing `lastRequestRef` so a
     // later `retry()` / `send()` stays possible. The local draft is never touched.
-    activeJobRef.current += 1;
+    const current = stateRef.current;
+    const storyId = "storyId" in current ? current.storyId : null;
+    const callId = ++activeJobRef.current;
     teardown();
     setState({ kind: "idle" });
+    if (!storyId) return;
+    // PURGE the durable memory so the abandoned outcome is not re-offered on the
+    // next visit / restart. A purge failure stays visible in-context (§6): surface
+    // it as a recoverable transport error rather than silently leaving the row.
+    discardTransferOutcome({ storyId }).catch((err) => {
+      if (!mountedRef.current || callId !== activeJobRef.current) return;
+      setState({
+        kind: "error",
+        storyId,
+        error:
+          err instanceof TransferContractDriftError
+            ? DRIFT_ERROR
+            : toAppError(err),
+      });
+    });
   }, [teardown]);
+
+  const hydrate = useCallback(
+    (storyId: string, deviceId?: string | null) => {
+      if (!storyId) return;
+      // Never disturb an in-flight write — the live session is always more
+      // authoritative than the durable memory (and tearing its subscription down
+      // would lose its progress).
+      if (stateRef.current.kind === "transferring") return;
+      // Already showing THIS story's settled terminal: re-hydrating is redundant (it
+      // would re-read the same memory) AND bumping `activeJobRef` would supersede an
+      // in-flight `dismiss` purge, swallowing its error (§6 needs it visible). Short-
+      // circuit so a repeated hydrate (e.g. the route effect re-firing on a
+      // `writableDeviceId` change) is a no-op.
+      const current = stateRef.current;
+      if (
+        current.kind !== "idle" &&
+        "storyId" in current &&
+        current.storyId === storyId
+      ) {
+        return;
+      }
+
+      const callId = ++activeJobRef.current;
+      teardown();
+
+      // Restore a remembered terminal into the sticky state. A remembered NON-success
+      // (`partial` / `retryable` / `incomplete`) — which a passive live read can never
+      // reproduce — is re-shown so the panel re-offers Relancer / Abandonner. A
+      // remembered `verified` is NEVER re-surfaced from memory (no false success — the
+      // live read is the sole authority for a success), so it leaves the current
+      // tracked terminal untouched (its badge stays anchored; the panel renders a
+      // terminal only for its own story).
+      const applyRemembered = (outcome: TransferOutcomeDto) => {
+        switch (outcome.terminalKind) {
+          case "partial":
+            settledRef.current = callId;
+            setState({
+              kind: "partial",
+              storyId,
+              message: outcome.message,
+              userAction: outcome.userAction,
+            });
+            break;
+          case "incomplete":
+            settledRef.current = callId;
+            setState({
+              kind: "incomplete",
+              storyId,
+              cause: outcome.cause,
+              message: outcome.message,
+              userAction: outcome.userAction,
+            });
+            break;
+          case "retryable":
+            settledRef.current = callId;
+            setState({
+              kind: "retryable",
+              storyId,
+              cause: outcome.cause,
+              message: outcome.message,
+              userAction: outcome.userAction,
+            });
+            break;
+          case "verified":
+            break;
+        }
+      };
+
+      readTransferOutcome({ storyId })
+        .then((outcome) => {
+          if (!mountedRef.current || callId !== activeJobRef.current) return;
+          if (!outcome) return; // no memory → never clobber the current terminal
+          // Reconciliation (§2): the live `read_transfer_state` ALWAYS wins for a
+          // success. When a device is connected, consult it BEFORE restoring the
+          // memory: a live `verified` proves the pack present + byte-faithful and
+          // supersedes the remembered terminal (so a remembered NON-success is never
+          // restored over a real success, and a remembered `verified` is rendered
+          // only when the device confirms it — F1/F2). Otherwise the memory is
+          // restored (a non-success the device cannot reproduce), never a false
+          // success.
+          if (!deviceId) {
+            applyRemembered(outcome);
+            return;
+          }
+          readTransferState({ storyId: storyId, deviceIdentifier: deviceId })
+            .then((live) => {
+              if (!mountedRef.current || callId !== activeJobRef.current) return;
+              if (live.kind === "verified") {
+                settledRef.current = callId;
+                setState({ kind: "verified", storyId, summary: live.summary });
+                return;
+              }
+              applyRemembered(outcome);
+            })
+            .catch(() => {
+              // A live-read failure must not lose the memory — fall back to it.
+              if (!mountedRef.current || callId !== activeJobRef.current) return;
+              applyRemembered(outcome);
+            });
+        })
+        .catch(() => {
+          // Best-effort (§6): a memory-read failure is treated as "no memory" and
+          // never blocks the panel — leave the current state untouched.
+        });
+    },
+    [teardown],
+  );
 
   useEffect(() => {
     mountedRef.current = true;
@@ -403,5 +552,5 @@ export function useStoryTransfer(): UseStoryTransfer {
     };
   }, [teardown]);
 
-  return { state, send, retry, dismiss };
+  return { state, send, retry, dismiss, hydrate };
 }

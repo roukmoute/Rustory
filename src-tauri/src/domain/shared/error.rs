@@ -17,6 +17,7 @@ pub enum AppErrorCode {
     ImportFailed,
     PreparationFailed,
     TransferFailed,
+    TransferOutcomeUnavailable,
     OfficialCatalogUnavailable,
 }
 
@@ -171,6 +172,28 @@ impl AppError {
     pub fn transfer_failed(message: impl Into<String>, user_action: impl Into<String>) -> Self {
         Self {
             code: AppErrorCode::TransferFailed,
+            message: message.into(),
+            user_action: Some(user_action.into()),
+            details: None,
+        }
+    }
+
+    /// Constructed when the durable transfer-outcome memory (`transfer_jobs`) cannot
+    /// be written, read or purged — a TRANSPORT failure of the persistence channel
+    /// (SQLite / diagnostics). The exact parallel of [`recovery_draft_unavailable`].
+    /// RESERVED for the persistence transport: a FUNCTIONAL transfer failure (write
+    /// not authorized, device changed, interruption, a non-success verify verdict)
+    /// is NEVER this code — it stays the terminal `retryable` / `partial` job state.
+    /// `details.source` is a closed set (`sqlite_upsert` / `sqlite_select` /
+    /// `sqlite_delete` / `spawn_blocking_join` / `diagnostics_*`).
+    ///
+    /// [`recovery_draft_unavailable`]: AppError::recovery_draft_unavailable
+    pub fn transfer_outcome_unavailable(
+        message: impl Into<String>,
+        user_action: impl Into<String>,
+    ) -> Self {
+        Self {
+            code: AppErrorCode::TransferOutcomeUnavailable,
             message: message.into(),
             user_action: Some(user_action.into()),
             details: None,
@@ -418,6 +441,29 @@ mod tests {
         assert_eq!(v["message"], "msg");
         assert_eq!(v["userAction"], "action");
         assert!(v.get("user_action").is_none(), "snake_case must not leak");
+    }
+
+    #[test]
+    fn transfer_outcome_unavailable_serializes_with_stable_code() {
+        let err = AppError::transfer_outcome_unavailable("msg", "action");
+        let v = serde_json::to_value(&err).expect("serialize");
+        assert_eq!(v["code"], "TRANSFER_OUTCOME_UNAVAILABLE");
+        assert_eq!(v["message"], "msg");
+        assert_eq!(v["userAction"], "action");
+        assert!(v.get("user_action").is_none(), "snake_case must not leak");
+    }
+
+    #[test]
+    fn transfer_outcome_unavailable_carries_source_details() {
+        let err = AppError::transfer_outcome_unavailable(
+            "Mémoire de transfert indisponible.",
+            "Réessaie plus tard.",
+        )
+        .with_details(serde_json::json!({ "source": "sqlite_upsert", "kind": "busy" }));
+        let v = serde_json::to_value(&err).expect("serialize");
+        assert_eq!(v["code"], "TRANSFER_OUTCOME_UNAVAILABLE");
+        assert_eq!(v["details"]["source"], "sqlite_upsert");
+        assert_eq!(v["details"]["kind"], "busy");
     }
 
     #[test]

@@ -3,8 +3,10 @@ import { invoke } from "@tauri-apps/api/core";
 import { toAppError } from "../../shared/errors/app-error";
 import {
   isStartTransferAcceptedDto,
+  isTransferOutcomeDto,
   isTransferStateDto,
   type StartTransferAcceptedDto,
+  type TransferOutcomeDto,
   type TransferStateDto,
 } from "../../shared/ipc-contracts/story-transfer";
 
@@ -24,6 +26,12 @@ export interface StartTransferStoryInput {
 export interface ReadTransferStateInput {
   storyId: string;
   deviceIdentifier: string;
+}
+
+/** Input accepted by {@link readTransferOutcome} / {@link discardTransferOutcome}.
+ *  Just the story whose durable transfer memory to re-hydrate / purge. */
+export interface TransferOutcomeStoryInput {
+  storyId: string;
 }
 
 /**
@@ -90,6 +98,48 @@ export function readTransferState(
     })
     .catch((err) => {
       if (err instanceof TransferContractDriftError) throw err;
+      throw toAppError(err);
+    });
+}
+
+/**
+ * Re-hydrate the durable transfer outcome remembered for a story (the Transfer
+ * Resume Contract). Resolves with the outcome, or `null` when there is no memory.
+ * Best-effort by contract: the hook treats a rejection as "no memory" so a
+ * persistence-read failure never blocks the panel. Rejects with the
+ * {@link TransferContractDriftError} on a drifted shape, or a normalized `AppError`.
+ */
+export function readTransferOutcome(
+  input: TransferOutcomeStoryInput,
+): Promise<TransferOutcomeDto | null> {
+  return invoke<unknown>("read_transfer_outcome", { input })
+    .then((raw) => {
+      if (raw === null) return null;
+      if (!isTransferOutcomeDto(raw)) {
+        throw new TransferContractDriftError(
+          "TransferOutcomeDto wire shape drifted from the canonical contract.",
+          { raw },
+        );
+      }
+      return raw;
+    })
+    .catch((err) => {
+      if (err instanceof TransferContractDriftError) throw err;
+      throw toAppError(err);
+    });
+}
+
+/**
+ * Purge the durable transfer outcome for a story (the `Abandonner` gesture).
+ * Idempotent; never touches canonical state. Rejects with a normalized `AppError`
+ * (a purge failure IS surfaced, unlike the best-effort read).
+ */
+export function discardTransferOutcome(
+  input: TransferOutcomeStoryInput,
+): Promise<void> {
+  return invoke<unknown>("discard_transfer_outcome", { input })
+    .then(() => undefined)
+    .catch((err) => {
       throw toAppError(err);
     });
 }

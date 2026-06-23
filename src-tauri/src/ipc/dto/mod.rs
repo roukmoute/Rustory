@@ -30,8 +30,10 @@ pub use story_preparation::{
     StartPreparationAcceptedDto, StartPrepareStoryInputDto,
 };
 pub use story_transfer::{
-    cause_dto as transfer_cause_dto, ReadTransferStateInputDto, StartTransferAcceptedDto,
-    StartTransferStoryInputDto, TransferCauseDto, TransferStateDto, TransferVerifiedSummaryDto,
+    cause_dto as transfer_cause_dto, DiscardTransferOutcomeInputDto, ReadTransferOutcomeInputDto,
+    ReadTransferStateInputDto, StartTransferAcceptedDto, StartTransferStoryInputDto,
+    TransferCauseDto, TransferOutcomeDto, TransferStateDto, TransferTerminalKindDto,
+    TransferVerifiedSummaryDto,
 };
 pub use story_validation::{
     BlockerAxisDto, BlockerCauseDto, BlockerDto, ReadStoryValidationInputDto, StoryValidationDto,

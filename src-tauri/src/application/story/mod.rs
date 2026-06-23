@@ -236,7 +236,7 @@ fn map_insert_error(err: rusqlite::Error) -> AppError {
     }))
 }
 
-pub(super) fn sqlite_kind_label(err: &rusqlite::Error) -> &'static str {
+pub(crate) fn sqlite_kind_label(err: &rusqlite::Error) -> &'static str {
     match err {
         rusqlite::Error::SqliteFailure(code, _) => match code.code {
             rusqlite::ErrorCode::ConstraintViolation => "constraint_violation",

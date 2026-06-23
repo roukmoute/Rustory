@@ -33,7 +33,7 @@ fn fresh_install_applies_v2_migration() {
         .expect("collect");
     assert_eq!(
         versions,
-        vec![1, 2, 3, 4],
+        vec![1, 2, 3, 4, 5],
         "ledger must contain every declared migration"
     );
 }
@@ -102,7 +102,7 @@ fn existing_v1_database_upgrades_to_v2() {
         .expect("collect");
     assert_eq!(
         versions,
-        vec![1, 2, 3, 4],
+        vec![1, 2, 3, 4, 5],
         "v1 row preserved + newer versions added"
     );
 

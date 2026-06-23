@@ -6,12 +6,14 @@
 //! lands in a later story. Strictly independent of `infrastructure/`,
 //! `application/` and `tauri::*`.
 
+pub mod outcome;
 pub mod preparation;
 // The submodule shares the parent module's name on purpose: it owns the
 // transfer-specific pure rules, kept separate from the preparation model.
 #[allow(clippy::module_inception)]
 pub mod transfer;
 
+pub use outcome::{PersistedTerminalKind, PersistedTransferOutcome};
 pub use preparation::{
     ensure_descriptor_coherent, gate_prepare, verify_aggregate, PreparationFailureCause,
     PreparationPhase, PreparedArtifact, PreparedArtifactKind, TransferArtifactDescriptor,

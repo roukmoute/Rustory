@@ -3,9 +3,15 @@
 //! event payloads with `phase: "transfer"`. The frontend mirror
 //! (`src/shared/ipc-contracts/story-transfer.ts`) must stay byte-compatible.
 
-use rustory_lib::application::transfer::TransferStateView;
-use rustory_lib::domain::transfer::{TransferCompleteness, TransferFailureCause, VerifiedSummary};
-use rustory_lib::ipc::dto::{PreparationStoryDto, StartTransferAcceptedDto, TransferStateDto};
+use rustory_lib::application::transfer::{StoredTransferOutcome, TransferStateView};
+use rustory_lib::domain::transfer::{
+    PersistedTransferOutcome, TransferCompleteness, TransferFailureCause, VerifiedSummary,
+    VerifyVerdict,
+};
+use rustory_lib::ipc::dto::{
+    DiscardTransferOutcomeInputDto, PreparationStoryDto, ReadTransferOutcomeInputDto,
+    StartTransferAcceptedDto, TransferOutcomeDto, TransferStateDto,
+};
 use rustory_lib::ipc::events::{
     JobCompletedEvent, JobCompletedSummary, JobFailedEvent, JobProgressEvent,
     JOB_TYPE_TRANSFER_STORY, TRANSFER_FAILED_CODE,
@@ -269,4 +275,113 @@ fn job_failed_event_carries_the_verify_partial_verdict() {
     assert!(v.get("cause").is_none(), "no write-phase cause");
     assert!(!v["errorMessage"].as_str().expect("message").is_empty());
     assert!(!v["userAction"].as_str().expect("userAction").is_empty());
+}
+
+// --- Durable transfer-outcome (Transfer Resume Contract) ---
+
+fn stored(outcome: PersistedTransferOutcome) -> StoredTransferOutcome {
+    StoredTransferOutcome {
+        outcome,
+        recorded_at: "2026-06-23T00:00:00.000Z".into(),
+    }
+}
+
+#[test]
+fn transfer_outcome_verified_wire_shape_carries_the_summary() {
+    let dto = TransferOutcomeDto::from_stored(
+        STORY.into(),
+        stored(PersistedTransferOutcome::from_verified(VerifiedSummary {
+            changed: "« Mon histoire » est maintenant sur la Lunii.".into(),
+            unchanged: "2 autres histoires de l'appareil restent inchangées.".into(),
+        })),
+    );
+    let v = serde_json::to_value(&dto).expect("ser");
+    assert_eq!(v["storyId"], STORY);
+    assert_eq!(v["terminalKind"], "verified");
+    assert_eq!(
+        v["summary"]["changed"],
+        "« Mon histoire » est maintenant sur la Lunii."
+    );
+    assert_eq!(v["recordedAt"], "2026-06-23T00:00:00.000Z");
+    assert!(v.get("cause").is_none(), "verified carries no cause");
+    assert!(v.get("user_action").is_none(), "no snake_case leak");
+}
+
+#[test]
+fn transfer_outcome_retryable_wire_shape_carries_the_cause_and_no_summary() {
+    let dto = TransferOutcomeDto::from_stored(
+        STORY.into(),
+        stored(PersistedTransferOutcome::from_write_terminal(
+            TransferFailureCause::DeviceChanged,
+            TransferCompleteness::Failed,
+        )),
+    );
+    let v = serde_json::to_value(&dto).expect("ser");
+    assert_eq!(v["terminalKind"], "retryable");
+    assert_eq!(v["cause"], "deviceChanged");
+    assert!(!v["message"].as_str().expect("message").is_empty());
+    assert!(!v["userAction"].as_str().expect("userAction").is_empty());
+    assert!(v.get("summary").is_none(), "a failure carries no summary");
+}
+
+#[test]
+fn transfer_outcome_incomplete_wire_shape_carries_the_cause() {
+    let dto = TransferOutcomeDto::from_stored(
+        STORY.into(),
+        stored(PersistedTransferOutcome::from_write_terminal(
+            TransferFailureCause::WriteRejected,
+            TransferCompleteness::Incomplete,
+        )),
+    );
+    let v = serde_json::to_value(&dto).expect("ser");
+    assert_eq!(v["terminalKind"], "incomplete");
+    assert_eq!(v["cause"], "writeRejected");
+    assert!(v.get("summary").is_none());
+}
+
+#[test]
+fn transfer_outcome_partial_wire_shape_omits_cause_and_summary() {
+    // A verify `partial` terminal carries ONLY message / userAction (F6): no
+    // write-phase cause, no verified summary.
+    let dto = TransferOutcomeDto::from_stored(
+        STORY.into(),
+        stored(
+            PersistedTransferOutcome::from_verify_verdict(VerifyVerdict::Partial)
+                .expect("partial is a non-success"),
+        ),
+    );
+    let v = serde_json::to_value(&dto).expect("ser");
+    assert_eq!(v["terminalKind"], "partial");
+    assert!(
+        v.get("cause").is_none(),
+        "a verify terminal carries no cause"
+    );
+    assert!(v.get("summary").is_none());
+    assert!(!v["message"].as_str().expect("message").is_empty());
+}
+
+#[test]
+fn read_transfer_outcome_input_requires_story_id_and_refuses_unknown_fields() {
+    let dto: ReadTransferOutcomeInputDto =
+        serde_json::from_value(json!({ "storyId": STORY })).expect("deser");
+    assert_eq!(dto.story_id, STORY);
+    let err = serde_json::from_value::<ReadTransferOutcomeInputDto>(json!({
+        "storyId": STORY,
+        "mountPath": "/sneaky",
+    }))
+    .expect_err("read outcome input refuses unknown fields — no path crosses IPC");
+    assert!(err.to_string().contains("mountPath"));
+}
+
+#[test]
+fn discard_transfer_outcome_input_requires_story_id_and_refuses_unknown_fields() {
+    let dto: DiscardTransferOutcomeInputDto =
+        serde_json::from_value(json!({ "storyId": STORY })).expect("deser");
+    assert_eq!(dto.story_id, STORY);
+    let err = serde_json::from_value::<DiscardTransferOutcomeInputDto>(json!({
+        "storyId": STORY,
+        "extra": true,
+    }))
+    .expect_err("discard outcome input refuses unknown fields");
+    assert!(err.to_string().contains("extra"));
 }

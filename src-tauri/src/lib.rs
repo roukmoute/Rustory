@@ -95,6 +95,37 @@ fn collect_pending_drafts(
     })
 }
 
+/// Read the story ids that still have a NON-success durable transfer outcome.
+/// Ordered by `recorded_at DESC` so the most recently remembered transfer shows up
+/// first and CAPPED in SQL (`LIMIT`) so a runaway table never loads unbounded rows
+/// at boot. `verified` rows are EXCLUDED: a successful transfer that was simply
+/// quit has nothing pending to acknowledge (it is never re-surfaced by `hydrate`),
+/// so it must not raise a false `interrupted_transfer_detected`; the `verified` row
+/// is kept only for the "latest wins" overwrite of a failure by a successful
+/// relaunch. A surviving non-success row means a transfer reached a recoverable
+/// terminal and was never acknowledged (Relancer / Abandonner) — the boot probe
+/// surfaces that to the trace; the per-story re-hydration is driven by the
+/// route-level reads. On failure it returns the stable stage tag so the caller can
+/// log the degradation (it never propagates a fatal — losing the probe must not
+/// block boot).
+fn collect_pending_transfer_outcomes(
+    db: &infrastructure::db::DbHandle,
+) -> Result<Vec<String>, &'static str> {
+    let mut stmt = db
+        .conn()
+        .prepare(
+            "SELECT story_id FROM transfer_jobs \
+             WHERE terminal_kind <> 'verified' \
+             ORDER BY recorded_at DESC LIMIT 100",
+        )
+        .map_err(|_| "boot_probe_prepare")?;
+    let rows = stmt
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(|_| "boot_probe_query")?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|_| "boot_probe_collect")
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -166,6 +197,42 @@ pub fn run() {
             // boot; the residues are retried at the next launch.
             let _ = application::device::import::sweep_import_artifacts(&db, &app_data_dir);
 
+            // Boot-time transfer-resume probe: any durable transfer outcome
+            // surviving the previous session indicates a transfer that reached a
+            // terminal and was never acknowledged (Relancer / Abandonner). Emit a
+            // single `interrupted_transfer_detected` into transfer.jsonl so the
+            // trace carries the chronology — the per-story re-hydration is driven by
+            // the route-level reads, not this probe. PII-free: each id is hashed to
+            // a short `story_ref`. A read failure is a support-visible degradation,
+            // not a fatal: boot must continue.
+            match collect_pending_transfer_outcomes(&db) {
+                Ok(pending_outcomes) => {
+                    if !pending_outcomes.is_empty() {
+                        // The SQL `LIMIT` already caps the row count; just hash each id.
+                        let story_refs: Vec<String> = pending_outcomes
+                            .iter()
+                            .map(|id| infrastructure::diagnostics::transfer::story_ref(id))
+                            .collect();
+                        let _ = infrastructure::diagnostics::transfer::record_event(
+                            app.handle(),
+                            infrastructure::diagnostics::transfer::Event::InterruptedTransferDetected {
+                                story_refs,
+                            },
+                        );
+                    }
+                }
+                Err(source) => {
+                    // Log the probe read failure (a support-visible degradation of the
+                    // trace surface) instead of swallowing it — boot still continues.
+                    let _ = infrastructure::diagnostics::transfer::record_event(
+                        app.handle(),
+                        infrastructure::diagnostics::transfer::Event::InterruptedTransferProbeFailed {
+                            source,
+                        },
+                    );
+                }
+            }
+
             app.manage(AppState {
                 db: std::sync::Arc::new(Mutex::new(db)),
                 device_scanner: std::sync::Arc::new(
@@ -199,6 +266,7 @@ pub fn run() {
             commands::story::apply_recovery,
             commands::story::create_story,
             commands::story::discard_draft,
+            commands::transfer::discard_transfer_outcome,
             commands::import_export::export_story_with_save_dialog,
             commands::library::get_library_overview,
             commands::catalog::get_official_catalog_status,
@@ -211,6 +279,7 @@ pub fn run() {
             commands::transfer::read_preparation_state,
             commands::story::read_recoverable_draft,
             commands::device::read_story_validation,
+            commands::transfer::read_transfer_outcome,
             commands::device::read_transfer_preview,
             commands::transfer::read_transfer_state,
             commands::catalog::refresh_official_catalog,
@@ -222,4 +291,78 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use infrastructure::db;
+
+    fn seed_story(handle: &db::DbHandle, id: &str) {
+        handle
+            .conn()
+            .execute(
+                "INSERT INTO stories (id, title, schema_version, structure_json, content_checksum, created_at, updated_at) \
+                 VALUES (?1, 'Dummy', 1, '{\"schemaVersion\":1,\"nodes\":[]}', \
+                 '0000000000000000000000000000000000000000000000000000000000000000', \
+                 '2026-06-23T00:00:00.000Z', '2026-06-23T00:00:00.000Z')",
+                rusqlite::params![id],
+            )
+            .expect("seed story");
+    }
+
+    fn seed_outcome(handle: &db::DbHandle, story_id: &str, terminal_kind: &str, recorded_at: &str) {
+        handle
+            .conn()
+            .execute(
+                "INSERT INTO transfer_jobs (story_id, job_id, terminal_kind, message, user_action, recorded_at) \
+                 VALUES (?1, 'job', ?2, 'm', 'a', ?3)",
+                rusqlite::params![story_id, terminal_kind, recorded_at],
+            )
+            .expect("seed outcome");
+    }
+
+    #[test]
+    fn boot_probe_excludes_verified_and_keeps_non_success_terminals() {
+        let mut handle = db::open_in_memory().expect("open");
+        db::run_migrations(&mut handle).expect("migrate");
+        seed_story(&handle, "s-verified");
+        seed_story(&handle, "s-retryable");
+        seed_story(&handle, "s-incomplete");
+        // A quit-after-success leaves a `verified` row — it must NOT be probed.
+        seed_outcome(
+            &handle,
+            "s-verified",
+            "verified",
+            "2026-06-23T00:00:03.000Z",
+        );
+        seed_outcome(
+            &handle,
+            "s-retryable",
+            "retryable",
+            "2026-06-23T00:00:02.000Z",
+        );
+        seed_outcome(
+            &handle,
+            "s-incomplete",
+            "incomplete",
+            "2026-06-23T00:00:01.000Z",
+        );
+
+        let pending = collect_pending_transfer_outcomes(&handle).expect("probe");
+        // Only the NON-success terminals, most-recent first; `verified` is excluded.
+        assert_eq!(pending, vec!["s-retryable", "s-incomplete"]);
+    }
+
+    #[test]
+    fn boot_probe_is_empty_when_only_verified_rows_remain() {
+        let mut handle = db::open_in_memory().expect("open");
+        db::run_migrations(&mut handle).expect("migrate");
+        seed_story(&handle, "s1");
+        seed_outcome(&handle, "s1", "verified", "2026-06-23T00:00:00.000Z");
+
+        assert!(collect_pending_transfer_outcomes(&handle)
+            .expect("probe")
+            .is_empty());
+    }
 }

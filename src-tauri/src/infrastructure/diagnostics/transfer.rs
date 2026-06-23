@@ -60,6 +60,30 @@ pub enum Event {
         verify_verdict: Option<&'static str>,
         elapsed_ms: u64,
     },
+    /// A terminal outcome was UPSERTed into the durable `transfer_jobs` memory.
+    /// `terminal_kind` is the stable
+    /// [`PersistedTerminalKind`](crate::domain::transfer::PersistedTerminalKind)
+    /// tag (`verified` / `partial` / `retryable` / `incomplete`).
+    TransferOutcomeRecorded {
+        story_ref: String,
+        terminal_kind: &'static str,
+    },
+    /// The durable memory was purged on `Abandonner`.
+    TransferOutcomeAbandoned { story_ref: String },
+    /// A durable-memory read/write DEGRADED (best-effort observability — the terminal
+    /// itself already reached the UI). `source` is the closed `details.source` of the
+    /// underlying transport error (`sqlite_upsert` / `sqlite_select` / `sqlite_delete`
+    /// / `story_missing` / `other`).
+    TransferOutcomeUnavailable {
+        story_ref: String,
+        source: &'static str,
+    },
+    /// Boot probe: one or more durable transfer outcomes survived the previous
+    /// session. Emitted ONCE at startup with the (hashed, capped) story refs.
+    InterruptedTransferDetected { story_refs: Vec<String> },
+    /// Boot probe: `transfer_jobs` could not be read. `source` is the stage
+    /// (`boot_probe_prepare` / `boot_probe_query` / `boot_probe_collect`).
+    InterruptedTransferProbeFailed { source: &'static str },
 }
 
 /// Short, stable, PII-free reference to a story id (first 16 hex of its
@@ -109,8 +133,11 @@ fn trace_unavailable(source: &'static str) -> AppError {
 }
 
 fn trace_unavailable_with(source: &str, kind: &str) -> AppError {
-    AppError::preparation_failed(
-        "Trace de préparation indisponible.",
+    // The transfer/outcome trace channel is unavailable. Mapped to the persistence
+    // transport code so a diagnostics-channel failure surfaces under the same stable
+    // discriminant as the durable memory it observes (it is best-effort either way).
+    AppError::transfer_outcome_unavailable(
+        "Trace de transfert indisponible.",
         "Vérifie l'espace disque et les permissions puis réessaie.",
     )
     .with_details(serde_json::json!({
@@ -203,6 +230,51 @@ mod tests {
         assert_eq!(v["verify_verdict"], "partial");
         assert!(v.get("cause").is_none());
         assert!(v.get("completeness").is_none());
+    }
+
+    #[test]
+    fn resume_events_serialize_with_category_tag() {
+        let v = serde_json::to_value(Event::TransferOutcomeRecorded {
+            story_ref: "abcd".into(),
+            terminal_kind: "retryable",
+        })
+        .expect("ser");
+        assert_eq!(v["category"], "transfer_outcome_recorded");
+        assert_eq!(v["terminal_kind"], "retryable");
+
+        let v = serde_json::to_value(Event::TransferOutcomeAbandoned {
+            story_ref: "abcd".into(),
+        })
+        .expect("ser");
+        assert_eq!(v["category"], "transfer_outcome_abandoned");
+        assert_eq!(v["story_ref"], "abcd");
+
+        let v = serde_json::to_value(Event::InterruptedTransferDetected {
+            story_refs: vec!["abcd".into(), "ef01".into()],
+        })
+        .expect("ser");
+        assert_eq!(v["category"], "interrupted_transfer_detected");
+        assert_eq!(v["story_refs"][0], "abcd");
+        assert_eq!(v["story_refs"][1], "ef01");
+    }
+
+    #[test]
+    fn degradation_events_serialize_with_category_tag() {
+        let v = serde_json::to_value(Event::TransferOutcomeUnavailable {
+            story_ref: "abcd".into(),
+            source: "sqlite_upsert",
+        })
+        .expect("ser");
+        assert_eq!(v["category"], "transfer_outcome_unavailable");
+        assert_eq!(v["story_ref"], "abcd");
+        assert_eq!(v["source"], "sqlite_upsert");
+
+        let v = serde_json::to_value(Event::InterruptedTransferProbeFailed {
+            source: "boot_probe_query",
+        })
+        .expect("ser");
+        assert_eq!(v["category"], "interrupted_transfer_probe_failed");
+        assert_eq!(v["source"], "boot_probe_query");
     }
 
     #[test]

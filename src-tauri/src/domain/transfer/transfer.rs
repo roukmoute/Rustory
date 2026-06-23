@@ -74,6 +74,22 @@ impl TransferFailureCause {
         }
     }
 
+    /// Parse the camelCase [`wire_cause`](Self::wire_cause) tag back into the
+    /// closed cause — the inverse used when re-hydrating a persisted terminal from
+    /// the durable `transfer_jobs` memory. `None` for any value outside the set
+    /// (a drifted / corrupt stored tag the read path treats as "no memory").
+    pub fn from_wire_cause(tag: &str) -> Option<Self> {
+        match tag {
+            "writeNotAuthorized" => Some(Self::WriteNotAuthorized),
+            "notPrepared" => Some(Self::NotPrepared),
+            "notTransferable" => Some(Self::NotTransferable),
+            "deviceChanged" => Some(Self::DeviceChanged),
+            "writeRejected" => Some(Self::WriteRejected),
+            "interrupted" => Some(Self::Interrupted),
+            _ => None,
+        }
+    }
+
     /// Frozen severity per cause (reuses the canonical-validity vocabulary). It
     /// does NOT change the UI rendering — every transfer failure surfaces as
     /// `échec récupérable` with `Relancer` — but it labels the cause for traces
@@ -150,6 +166,17 @@ impl TransferCompleteness {
             Self::Incomplete => "incomplete",
         }
     }
+
+    /// Parse the [`diagnostic_tag`](Self::diagnostic_tag) back into the closed
+    /// completeness — the inverse used when re-hydrating a persisted terminal.
+    /// `None` for any value outside the set.
+    pub fn from_diagnostic_tag(tag: &str) -> Option<Self> {
+        match tag {
+            "failed" => Some(Self::Failed),
+            "incomplete" => Some(Self::Incomplete),
+            _ => None,
+        }
+    }
 }
 
 /// Classify a transfer failure by whether the DEVICE write reached its mutation
@@ -198,6 +225,18 @@ impl VerifyVerdict {
             Self::Verified => "verified",
             Self::Partial => "partial",
             Self::Failed => "failed",
+        }
+    }
+
+    /// Parse the [`diagnostic_tag`](Self::diagnostic_tag) back into the closed
+    /// verdict — the inverse used when re-hydrating a persisted terminal. `None`
+    /// for any value outside the set.
+    pub fn from_diagnostic_tag(tag: &str) -> Option<Self> {
+        match tag {
+            "verified" => Some(Self::Verified),
+            "partial" => Some(Self::Partial),
+            "failed" => Some(Self::Failed),
+            _ => None,
         }
     }
 

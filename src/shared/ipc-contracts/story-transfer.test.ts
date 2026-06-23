@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   isStartTransferAcceptedDto,
+  isTransferOutcomeDto,
   isTransferStateDto,
 } from "./story-transfer";
 
@@ -184,6 +185,136 @@ describe("isStartTransferAcceptedDto", () => {
   it("rejects an extra key", () => {
     expect(
       isStartTransferAcceptedDto({ jobId: JOB, storyId: STORY, x: 1 }),
+    ).toBe(false);
+  });
+});
+
+describe("isTransferOutcomeDto", () => {
+  const RECORDED_AT = "2026-06-23T00:00:00.000Z";
+  const base = {
+    storyId: STORY,
+    message: "Un message.",
+    userAction: "Une action.",
+    recordedAt: RECORDED_AT,
+  };
+
+  it("accepts a verified outcome with a summary and no cause", () => {
+    expect(
+      isTransferOutcomeDto({ ...base, terminalKind: "verified", summary }),
+    ).toBe(true);
+  });
+
+  it("accepts a write retryable outcome with a cause and no summary", () => {
+    expect(
+      isTransferOutcomeDto({
+        ...base,
+        terminalKind: "retryable",
+        cause: "deviceChanged",
+      }),
+    ).toBe(true);
+  });
+
+  it("accepts a verify retryable outcome with neither cause nor summary", () => {
+    // The verify `failed` verdict folds onto `retryable` carrying no write cause.
+    expect(isTransferOutcomeDto({ ...base, terminalKind: "retryable" })).toBe(
+      true,
+    );
+  });
+
+  it("accepts a partial outcome with neither cause nor summary", () => {
+    expect(isTransferOutcomeDto({ ...base, terminalKind: "partial" })).toBe(
+      true,
+    );
+  });
+
+  it("requires a cause on an incomplete outcome", () => {
+    expect(
+      isTransferOutcomeDto({
+        ...base,
+        terminalKind: "incomplete",
+        cause: "writeRejected",
+      }),
+    ).toBe(true);
+    expect(isTransferOutcomeDto({ ...base, terminalKind: "incomplete" })).toBe(
+      false,
+    );
+  });
+
+  it("rejects an unknown terminalKind", () => {
+    expect(isTransferOutcomeDto({ ...base, terminalKind: "transferring" })).toBe(
+      false,
+    );
+  });
+
+  it("rejects a summary on a non-verified terminal and a missing summary on verified", () => {
+    expect(
+      isTransferOutcomeDto({ ...base, terminalKind: "partial", summary }),
+    ).toBe(false);
+    expect(isTransferOutcomeDto({ ...base, terminalKind: "verified" })).toBe(
+      false,
+    );
+  });
+
+  it("rejects a cause on a verified or partial terminal", () => {
+    expect(
+      isTransferOutcomeDto({
+        ...base,
+        terminalKind: "verified",
+        summary,
+        cause: "writeRejected",
+      }),
+    ).toBe(false);
+    expect(
+      isTransferOutcomeDto({
+        ...base,
+        terminalKind: "partial",
+        cause: "writeRejected",
+      }),
+    ).toBe(false);
+  });
+
+  it("rejects an unrecognized cause", () => {
+    expect(
+      isTransferOutcomeDto({
+        ...base,
+        terminalKind: "retryable",
+        cause: "bogus",
+      }),
+    ).toBe(false);
+  });
+
+  it("rejects a non-UTC-millisecond recordedAt", () => {
+    expect(
+      isTransferOutcomeDto({
+        ...base,
+        terminalKind: "partial",
+        recordedAt: "2026-06-23T00:00:00Z",
+      }),
+    ).toBe(false);
+    expect(
+      isTransferOutcomeDto({
+        ...base,
+        terminalKind: "partial",
+        recordedAt: "yesterday",
+      }),
+    ).toBe(false);
+  });
+
+  it("rejects an empty message / userAction and an extra key", () => {
+    expect(
+      isTransferOutcomeDto({ ...base, terminalKind: "partial", message: "" }),
+    ).toBe(false);
+    expect(
+      isTransferOutcomeDto({ ...base, terminalKind: "partial", userAction: "" }),
+    ).toBe(false);
+    expect(
+      isTransferOutcomeDto({ ...base, terminalKind: "partial", extra: 1 }),
+    ).toBe(false);
+  });
+
+  it("rejects a malformed storyId", () => {
+    expect(
+      isTransferOutcomeDto({ ...base, storyId: "x", terminalKind: "partial" }),
     ).toBe(false);
   });
 });

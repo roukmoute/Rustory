@@ -20,6 +20,10 @@ pub const MIGRATIONS: &[(u32, &str)] = &[
         4,
         include_str!("../../../migrations/0004_pack_metadata.sql"),
     ),
+    (
+        5,
+        include_str!("../../../migrations/0005_transfer_jobs.sql"),
+    ),
 ];
 
 /// Thin wrapper over a [`rusqlite::Connection`]. Exposes only the operations
@@ -562,6 +566,156 @@ mod tests {
             .conn()
             .execute(
                 "INSERT INTO story_drafts (story_id, draft_title, draft_at) VALUES ('orphan', 'D', '2026-04-25T00:00:00.000Z')",
+                [],
+            )
+            .expect_err("orphan story_id must be rejected by FK");
+        let message = err.to_string().to_lowercase();
+        assert!(
+            message.contains("foreign key") || message.contains("foreignkey"),
+            "expected FK constraint failure, got: {message}"
+        );
+    }
+
+    #[test]
+    fn migration_v5_creates_transfer_jobs_table() {
+        let mut db = open_in_memory().expect("open");
+        run_migrations(&mut db).expect("migrate");
+
+        let mut stmt = db
+            .conn()
+            .prepare("PRAGMA table_info(transfer_jobs)")
+            .expect("prepare");
+        let columns: Vec<String> = stmt
+            .query_map([], |row| row.get::<_, String>(1))
+            .expect("query")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("collect");
+        assert_eq!(
+            columns,
+            vec![
+                "story_id",
+                "job_id",
+                "device_identifier",
+                "terminal_kind",
+                "cause",
+                "completeness",
+                "verify_verdict",
+                "message",
+                "user_action",
+                "summary_changed",
+                "summary_unchanged",
+                "recorded_at",
+            ],
+            "schema must match the canonical column set"
+        );
+    }
+
+    #[test]
+    fn transfer_jobs_primary_key_is_story_id() {
+        let mut db = open_in_memory().expect("open");
+        run_migrations(&mut db).expect("migrate");
+        insert_dummy_story(&db, "story-1");
+
+        db.conn()
+            .execute(
+                "INSERT INTO transfer_jobs (story_id, job_id, terminal_kind, message, user_action, recorded_at) \
+                 VALUES ('story-1', 'job-a', 'verified', 'm', 'a', '2026-06-23T00:00:00.000Z')",
+                [],
+            )
+            .expect("first insert");
+        let err = db
+            .conn()
+            .execute(
+                "INSERT INTO transfer_jobs (story_id, job_id, terminal_kind, message, user_action, recorded_at) \
+                 VALUES ('story-1', 'job-b', 'retryable', 'm', 'a', '2026-06-23T00:00:01.000Z')",
+                [],
+            )
+            .expect_err("second insert with same PK must fail");
+        let message = err.to_string().to_lowercase();
+        assert!(
+            message.contains("unique") || message.contains("primary"),
+            "expected primary-key conflict, got: {message}"
+        );
+    }
+
+    #[test]
+    fn transfer_jobs_check_rejects_unknown_terminal_kind() {
+        let mut db = open_in_memory().expect("open");
+        run_migrations(&mut db).expect("migrate");
+        insert_dummy_story(&db, "story-kind");
+
+        let err = db
+            .conn()
+            .execute(
+                "INSERT INTO transfer_jobs (story_id, job_id, terminal_kind, message, user_action, recorded_at) \
+                 VALUES ('story-kind', 'job-a', 'transferring', 'm', 'a', '2026-06-23T00:00:00.000Z')",
+                [],
+            )
+            .expect_err("an in-flight terminal_kind must trip the CHECK");
+        let message = err.to_string().to_lowercase();
+        assert!(
+            message.contains("check"),
+            "expected CHECK constraint failure, got: {message}"
+        );
+    }
+
+    #[test]
+    fn transfer_jobs_cascade_delete_on_story_removal() {
+        let mut db = open_in_memory().expect("open");
+        run_migrations(&mut db).expect("migrate");
+        insert_dummy_story(&db, "story-cascade");
+        db.conn()
+            .execute(
+                "INSERT INTO transfer_jobs (story_id, job_id, terminal_kind, message, user_action, recorded_at) \
+                 VALUES ('story-cascade', 'job-a', 'verified', 'm', 'a', '2026-06-23T00:00:00.000Z')",
+                [],
+            )
+            .expect("insert outcome");
+
+        db.conn()
+            .execute("DELETE FROM stories WHERE id = 'story-cascade'", [])
+            .expect("delete parent");
+
+        let count: u32 = db
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM transfer_jobs WHERE story_id = 'story-cascade'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count");
+        assert_eq!(
+            count, 0,
+            "FK ON DELETE CASCADE must remove the outcome when the story is deleted"
+        );
+    }
+
+    #[test]
+    fn transfer_jobs_idx_recorded_at_exists() {
+        let mut db = open_in_memory().expect("open");
+        run_migrations(&mut db).expect("migrate");
+
+        let count: u32 = db
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'idx_transfer_jobs__recorded_at'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("query sqlite_master");
+        assert_eq!(count, 1, "recorded_at index must exist after v5 migration");
+    }
+
+    #[test]
+    fn transfer_jobs_rejects_orphan_story_id_via_fk() {
+        let mut db = open_in_memory().expect("open");
+        run_migrations(&mut db).expect("migrate");
+        // Do NOT insert a parent story — this row should be rejected.
+        let err = db
+            .conn()
+            .execute(
+                "INSERT INTO transfer_jobs (story_id, job_id, terminal_kind, message, user_action, recorded_at) \
+                 VALUES ('orphan', 'job-a', 'verified', 'm', 'a', '2026-06-23T00:00:00.000Z')",
                 [],
             )
             .expect_err("orphan story_id must be rejected by FK");

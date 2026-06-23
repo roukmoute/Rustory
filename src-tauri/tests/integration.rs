@@ -50,3 +50,6 @@ mod story_preparation;
 
 #[path = "integration/story_transfer.rs"]
 mod story_transfer;
+
+#[path = "integration/transfer_outcome.rs"]
+mod transfer_outcome;

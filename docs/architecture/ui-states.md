@@ -784,9 +784,16 @@ so a relaunch converges safely.
 transfer hook, kept sticky (a late `job:progress` never regresses it) — until the
 user chooses `Relancer` (full cycle) or `Abandonner` (back to a stable library,
 draft intact). It is NOT carried by the job-shell store (which holds only
-phase / progress) and is NOT persisted to disk: there is no `transfer_jobs` table
-and no migration. Durable cross-session memory (recovering the outcome after an
-app restart) is a later flow.
+phase / progress).
+
+**Durable cross-session memory (AC2).** The LAST terminal outcome ALSO survives an
+app restart and a later return to the library / device panel: it is persisted to a
+minimal `transfer_jobs` table (one row per story, PK `story_id`, FK `stories(id) ON
+DELETE CASCADE`, UPSERT "latest wins" — the exact shape of `story_drafts`). Only
+TERMINALS are written (`verified` / `partial` / `retryable` / `incomplete`), never
+an in-flight `transferring` / `verifying` phase (it would be a lie after a restart —
+the job died with the app). The full rules — reconciliation, consumption / purge,
+boot probe — live in the **Transfer Resume Contract** below.
 
 **Closed write-error taxonomy.** `fs_write` (write / space failure on the device),
 `device_changed` (the live re-scan no longer resolves to the requested device),
@@ -825,9 +832,14 @@ non-color signal (glyph + text). The story-card badge reflects `en transfert` /
 `transférée et vérifiée` / `état partiel` / `échec récupérable` / `transfert
 incomplet` through the existing `StateChip`.
 
-**No new persistence.** Like the preview / verdict / preparation, the transfer is
-not resumable, so there is no job table and no migration — the appliance is the
-truth (re-scan), the state is re-derived via the authoritative re-read.
+**Durable resume memory.** Unlike the preview / verdict / preparation, the LAST
+terminal outcome IS persisted (the minimal `transfer_jobs` table, migration
+`0005_transfer_jobs.sql`), so the panel can re-offer `Relancer` / `Abandonner`
+after an app restart — see the **Transfer Resume Contract**. The live appliance
+stays the truth for a `verified` re-derivation (re-scan + re-checksum via
+`read_transfer_state`); the durable memory only fills the gap the appliance cannot
+reproduce (the non-success terminals), and a `Relancer` is always a full fresh
+cycle (never a hidden partial resume).
 
 **Error contract.** The transfer states (`transferring` / `verify` / `verified` /
 `partial` / `retryable`) are outcomes of a **successful** read, never an error.
@@ -894,14 +906,47 @@ pre-write identifier — and never recomposes the text in React. `aria-live="pol
 never a toast / modal. `état partiel` and `échec récupérable` are shown
 `role="alert"` in-context with `Relancer` / `Abandonner`.
 
-**No new persistence.** The verdict lives in the live transfer-hook state (sticky
+**Durable resume memory.** The verdict lives in the live transfer-hook state (sticky
 via the same settle/teardown discipline); the `verified` success is settled from
 the `job:completed` summary, and `read_transfer_state` can also re-derive `verified`
 on demand (same re-scan + re-checksum) for a re-mount with a freshly detected id. A
 transient `partial` / `failed` verdict is NOT reproduced by the passive re-read — it
-belongs to the live session, like the write failure. There is no `transfer_jobs`
-table and no migration; durable cross-session memory (recovering the verdict after
-an app restart) is a later flow.
+belongs to the live session, but it IS now remembered across an app restart by the
+durable `transfer_jobs` memory (migration `0005_transfer_jobs.sql`): on re-mount the
+panel re-hydrates the last `état partiel` / `échec récupérable` / `transfert
+incomplet` terminal so the user can still `Relancer` / `Abandonner`. The
+reconciliation rule still forbids promoting an `idle` live read to `verified` from
+memory (no false success) — see the **Transfer Resume Contract**.
+
+## Transfer Resume Contract
+
+A transfer's last TERMINAL outcome can survive an app restart (or a later return to
+the library / device panel). When the story is selected again, the panel re-hydrates
+the surviving outcome so the parent can still `Relancer` (a full fresh cycle) or
+`Abandonner` (purge the memory, library intact). The canonical story is never touched
+(FR18); a relaunch is never a hidden partial resume.
+
+| Aspect | Value |
+| --- | --- |
+| Trigger rule | When a story is selected, `useStoryTransfer` calls `read_transfer_outcome({ storyId })` and seeds its sticky state with a remembered NON-success terminal (`partial` / `retryable` / `incomplete`) so the panel re-shows `état partiel` / `échec récupérable` / `transfert incomplet` + `Relancer` / `Abandonner`, exactly as if the `job:failed` had just fired. `settledRef` is preserved, so a remembered terminal is never regressed by a late live re-read. |
+| Reconciliation rule | The live `read_transfer_state` ALWAYS wins for `verified`: a connected device that proves the pack present + byte-faithful is `transférée et vérifiée`, whatever the memory says. The memory only supplies what the live read cannot reproduce: the non-success terminals, and — when NO device is connected — the last known result, presented as a RECALL of the last transfer, never as a live device truth. It is FORBIDDEN to promote an `idle` live read to `verified` from memory (that would be a false success). |
+| Detection rule | At boot, `lib.rs::run().setup` queries `SELECT story_id FROM transfer_jobs WHERE terminal_kind <> 'verified' ORDER BY recorded_at DESC` (capped) and emits a single `interrupted_transfer_detected` event into `{app_data_dir}/diagnostics/transfer.jsonl`. `verified` rows are EXCLUDED — a quit-after-success has nothing pending to acknowledge (it is never re-surfaced by `hydrate`), so it must not raise a false interruption; the `verified` row is kept only for the "latest wins" overwrite of a failure by a successful relaunch. The boot probe never blocks on a log write failure. The per-story re-hydration is driven by the route-level read, not the probe. |
+| Surface | The remembered terminal is rendered in the panel's anchored transfer region (`role="alert"` for a non-success, `aria-live="polite"` for a recalled `verified`), never a toast / modal; the story-card badge reflects the remembered outcome through the existing `StateChip`. No UI jargon (`job` / `write` / `staging` / `.pi` / `checksum` / `verify` / `transfer_jobs`). |
+| Badge derivation (scope) | The story-card badge is derived from the SINGLE tracked transfer-hook state and is re-hydrated PER SELECTION (the route effect keyed on the selected story), NOT seeded at boot. So after a restart, a story with a remembered recoverable terminal shows its badge only once it has been selected at least once (re-visiting the story restores it — AC2). The boot probe only emits one `interrupted_transfer_detected` trace; it does not push per-story badges to the front. Seeding every visible story's badge at boot is a deliberate non-goal (it would mean reading the whole table eagerly for a cosmetic anchor). |
+| Relaunch rule | `Relancer` re-runs the WHOLE cycle (`preflight → prepare → transfer → verify`) from the preserved local draft via the existing send path, with the CURRENT/fresh `writableDeviceId` — never the stored `device_identifier` (a write mutated `.pi`, so the stored identity is stale by construction). Gated on `writableDeviceId !== null`; otherwise the panel shows `Rebranche la Lunii pour relancer` (the fail-closed mirror of the send gate) while keeping `Abandonner`. Single-flight: `Relancer` is disabled while a job is in flight. |
+| Consumption / auto-clear rule | A terminal UPSERTs the row (`BEGIN IMMEDIATE`, the DB lock released BEFORE any diagnostics write — the `recovery.rs` discipline). `Abandonner` purges the row (idempotent DELETE) and returns to a stable library, draft intact. A successful relaunch ending `verified` sets the row to `verified` (the last useful result becomes the success). Quitting without acting keeps the row for the next session. |
+| Persisted terminals | `verified` (carries `summary_changed` / `summary_unchanged`), `partial` (`verify_verdict = "partial"`), `retryable` (`cause` + `completeness = "failed"`, plus `verify_verdict = "failed"` when the verify re-read could not confirm), `incomplete` (`cause` + `completeness = "incomplete"`). An in-flight `transferring` / `verifying` phase is NEVER persisted. |
+| Stable diagnostic categories | The transfer log adds `interrupted_transfer_detected` to its closed category set (alongside `transfer_started` / `transfer_completed` / `transfer_failed`). The category is the stable identifier — never a localized message, never a free-form string. |
+| Degradation rule | Reading the memory on mount is BEST-EFFORT: a read failure is logged and treated as "no memory" (it never breaks the flow or blocks the UI — this is operational observability). A write / purge failure (and the explicit `Abandonner`, where a purge failure must be visible) surfaces the new `TRANSFER_OUTCOME_UNAVAILABLE` error code, RESERVED for the persistence transport (SQLite / diagnostics) — never for a functional transfer failure (which stays a job terminal). |
+| Forbidden | No modal. No toast. No automatic relaunch without a user choice. No promoting an `idle` live read to `verified` from memory. No mutation of the canonical story or its draft by the memory or the relaunch. |
+
+### Error payloads — transfer resume flow
+
+- `record_transfer_outcome` UPSERT fails — `TRANSFER_OUTCOME_UNAVAILABLE`, `details.source = "sqlite_upsert"`. A FK violation (the story vanished) re-maps to `LIBRARY_INCONSISTENT` with `details.source = "story_missing"`.
+- `read_transfer_outcome` SELECT fails — best-effort on mount: the command LOGS a `transfer_outcome_unavailable` trace (`source = "sqlite_select"`) and returns `null` (the hook treats it as "no memory"); the read never rejects for a transport failure.
+- `discard_transfer_outcome` DELETE fails — `TRANSFER_OUTCOME_UNAVAILABLE`, `details.source = "sqlite_delete"`.
+- A blocking worker that cannot be joined (panic / cancel) — `TRANSFER_OUTCOME_UNAVAILABLE`, `details.source = "spawn_blocking_join"` (the read additionally logs the trace and resolves to `null`).
+- `transfer_log` write fails — `TRANSFER_OUTCOME_UNAVAILABLE`, `details.source ∈ { diagnostics_dir, diagnostics_open, diagnostics_write, diagnostics_serialize, diagnostics_clock, diagnostics_rotate, diagnostics_path_invalid, diagnostics_app_data_dir }`.
 
 ## Official Catalog Contract
 

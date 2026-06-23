@@ -271,6 +271,23 @@ export function LibraryRoute(): React.JSX.Element {
     }
   };
 
+  // Re-hydrate the durable transfer memory for the selected story (Transfer Resume
+  // Contract / AC2): on selecting a story, re-offer any remembered NON-success
+  // terminal (`échec récupérable` / `transfert incomplet` / `état partiel`) with
+  // `Relancer` / `Abandonner`, exactly as if the `job:failed` had just fired —
+  // surviving an app restart and a re-visit. The hook reconciles with the live
+  // read (a remembered `verified` is never shown as a live success), never
+  // disturbs an in-flight write, and treats a read failure as "no memory".
+  const hydrateTransfer = storyTransfer.hydrate;
+  useEffect(() => {
+    if (singleSelectedStoryId) {
+      // Pass the writable device id so the hook reconciles with the LIVE read: a
+      // device that proves the pack (live `verified`) always wins over the memory,
+      // and a remembered `verified` is never shown as a live success without proof.
+      hydrateTransfer(singleSelectedStoryId, writableDeviceId);
+    }
+  }, [singleSelectedStoryId, writableDeviceId, hydrateTransfer]);
+
   // Reflect the in-flight / failed preparation as a discreet card badge (AC2),
   // keyed on the job's TARGET story (from the hook state) — never the current
   // selection — so it survives the user selecting another story. The panel stays

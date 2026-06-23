@@ -9,6 +9,8 @@ vi.mock("../../../ipc/commands/story-transfer", async () => {
     ...actual,
     startTransferStory: vi.fn(),
     readTransferState: vi.fn(),
+    readTransferOutcome: vi.fn(),
+    discardTransferOutcome: vi.fn(),
   };
 });
 
@@ -17,6 +19,8 @@ vi.mock("../../../ipc/events/job-events", () => ({
 }));
 
 import {
+  discardTransferOutcome,
+  readTransferOutcome,
   readTransferState,
   startTransferStory,
   TransferContractDriftError,
@@ -122,6 +126,12 @@ describe("useStoryTransfer", () => {
     unsubscribeSpies = [];
     vi.mocked(startTransferStory).mockReset();
     vi.mocked(readTransferState).mockReset();
+    vi.mocked(readTransferOutcome).mockReset();
+    vi.mocked(discardTransferOutcome).mockReset();
+    // Defaults: no durable memory, and a purge that succeeds. Individual tests
+    // override these to script a remembered terminal or a purge failure.
+    vi.mocked(readTransferOutcome).mockResolvedValue(null);
+    vi.mocked(discardTransferOutcome).mockResolvedValue(undefined);
     vi.mocked(subscribeJobEvents).mockReset();
     vi.mocked(subscribeJobEvents).mockImplementation((sub) => {
       subscriptions.push(sub);
@@ -447,5 +457,265 @@ describe("useStoryTransfer", () => {
     // A late progress event from the FIRST (superseded) job must be ignored.
     act(() => firstSub.onProgress(progress("transfer", 9)));
     expect(result.current.state.kind).toBe("transferring");
+  });
+
+  // --- Re-hydration of the durable memory (Transfer Resume Contract, AC2/AC3) ---
+
+  const rememberedRetryable = {
+    storyId: STORY,
+    terminalKind: "retryable" as const,
+    cause: "deviceChanged" as const,
+    message: "Envoi interrompu : l'appareil connecté a changé.",
+    userAction: "Rebranche la Lunii souhaitée puis relance l'envoi.",
+    recordedAt: "2026-06-23T00:00:00.000Z",
+  };
+  const rememberedIncomplete = {
+    storyId: STORY,
+    terminalKind: "incomplete" as const,
+    cause: "writeRejected" as const,
+    message: "Envoi incomplet : l'appareil peut contenir une copie partielle.",
+    userAction: "Relance l'envoi pour rétablir un état sûr.",
+    recordedAt: "2026-06-23T00:00:00.000Z",
+  };
+  const rememberedPartial = {
+    storyId: STORY,
+    terminalKind: "partial" as const,
+    message:
+      "Envoi dans un état partiel : certains éléments n'ont pas pu être confirmés sur la Lunii.",
+    userAction: "Relance l'envoi pour rétablir un état sûr.",
+    recordedAt: "2026-06-23T00:00:00.000Z",
+  };
+  const rememberedVerified = {
+    storyId: STORY,
+    terminalKind: "verified" as const,
+    message: SUMMARY.changed,
+    userAction: SUMMARY.unchanged,
+    summary: SUMMARY,
+    recordedAt: "2026-06-23T00:00:00.000Z",
+  };
+
+  it("hydrate re-seeds a remembered retryable terminal after a restart (AC2)", async () => {
+    vi.mocked(readTransferOutcome).mockResolvedValue(rememberedRetryable);
+    const { result } = renderHook(() => useStoryTransfer());
+    act(() => result.current.hydrate(STORY));
+    await waitFor(() => expect(result.current.state.kind).toBe("retryable"));
+    expect(readTransferOutcome).toHaveBeenCalledWith({ storyId: STORY });
+    if (result.current.state.kind === "retryable") {
+      expect(result.current.state.storyId).toBe(STORY);
+      expect(result.current.state.cause).toBe("deviceChanged");
+      expect(result.current.state.message).toMatch(/l'appareil connecté a changé/i);
+    }
+  });
+
+  it("hydrate re-seeds a remembered incomplete terminal carrying its cause (AC2)", async () => {
+    vi.mocked(readTransferOutcome).mockResolvedValue(rememberedIncomplete);
+    const { result } = renderHook(() => useStoryTransfer());
+    act(() => result.current.hydrate(STORY));
+    await waitFor(() => expect(result.current.state.kind).toBe("incomplete"));
+    if (result.current.state.kind === "incomplete") {
+      expect(result.current.state.cause).toBe("writeRejected");
+      expect(result.current.state.message).toMatch(/copie partielle/i);
+    }
+  });
+
+  it("hydrate re-seeds a remembered partial terminal (état partiel), no cause (F6)", async () => {
+    vi.mocked(readTransferOutcome).mockResolvedValue(rememberedPartial);
+    const { result } = renderHook(() => useStoryTransfer());
+    act(() => result.current.hydrate(STORY));
+    await waitFor(() => expect(result.current.state.kind).toBe("partial"));
+    if (result.current.state.kind === "partial") {
+      expect(result.current.state.message).toMatch(/état partiel/i);
+    }
+  });
+
+  it("hydrate NEVER promotes a remembered verified to a live success (no false success)", async () => {
+    // A remembered `verified` + a passive mount (no live proof) must NOT show
+    // `transférée et vérifiée`: the live read is the sole authority for a success.
+    vi.mocked(readTransferOutcome).mockResolvedValue(rememberedVerified);
+    const { result } = renderHook(() => useStoryTransfer());
+    await act(async () => {
+      result.current.hydrate(STORY);
+    });
+    expect(result.current.state.kind).toBe("idle");
+    expect(result.current.state.kind).not.toBe("verified");
+  });
+
+  it("hydrate leaves the panel untouched when there is no durable memory", async () => {
+    vi.mocked(readTransferOutcome).mockResolvedValue(null);
+    const { result } = renderHook(() => useStoryTransfer());
+    await act(async () => {
+      result.current.hydrate(STORY);
+    });
+    expect(result.current.state.kind).toBe("idle");
+  });
+
+  it("hydrate degrades to no-op on a memory-read failure (best-effort, §6)", async () => {
+    vi.mocked(readTransferOutcome).mockRejectedValue({
+      code: "TRANSFER_OUTCOME_UNAVAILABLE",
+      message: "Mémoire de transfert indisponible.",
+      userAction: "Réessaie.",
+      details: null,
+    });
+    const { result } = renderHook(() => useStoryTransfer());
+    await act(async () => {
+      result.current.hydrate(STORY);
+    });
+    // A read failure is "no memory" — it never blocks the panel with an error.
+    expect(result.current.state.kind).toBe("idle");
+  });
+
+  it("hydrate does NOT disturb an in-flight transfer (the live session wins)", async () => {
+    vi.mocked(startTransferStory).mockReturnValue(new Promise(() => undefined));
+    vi.mocked(readTransferOutcome).mockResolvedValue(rememberedRetryable);
+    const { result } = renderHook(() => useStoryTransfer());
+    act(() => result.current.send(STORY, DEVICE));
+    expect(result.current.state.kind).toBe("transferring");
+    await act(async () => {
+      result.current.hydrate("0197a5d0-0000-7000-8000-0000000000ff");
+    });
+    // The in-flight write is untouched and the memory was never even read.
+    expect(result.current.state.kind).toBe("transferring");
+    expect(readTransferOutcome).not.toHaveBeenCalled();
+  });
+
+  it("hydrate yields to a live verified when reconciling a remembered non-success (F1/§2)", async () => {
+    // The device now proves the pack present + byte-faithful: the live `verified`
+    // ALWAYS wins over a remembered failure (no stale failure over a real success).
+    vi.mocked(readTransferOutcome).mockResolvedValue(rememberedRetryable);
+    vi.mocked(readTransferState).mockResolvedValue(verifiedState);
+    const { result } = renderHook(() => useStoryTransfer());
+    act(() => result.current.hydrate(STORY, DEVICE));
+    await waitFor(() => expect(result.current.state.kind).toBe("verified"));
+    expect(readTransferState).toHaveBeenCalledWith({
+      storyId: STORY,
+      deviceIdentifier: DEVICE,
+    });
+  });
+
+  it("hydrate renders a remembered verified when the live device confirms it (F2/§2)", async () => {
+    vi.mocked(readTransferOutcome).mockResolvedValue(rememberedVerified);
+    vi.mocked(readTransferState).mockResolvedValue(verifiedState);
+    const { result } = renderHook(() => useStoryTransfer());
+    act(() => result.current.hydrate(STORY, DEVICE));
+    await waitFor(() => expect(result.current.state.kind).toBe("verified"));
+    if (result.current.state.kind === "verified") {
+      expect(result.current.state.summary.changed).toContain("Mon histoire");
+    }
+  });
+
+  it("hydrate restores a remembered non-success when the live read is idle", async () => {
+    // The device cannot prove the pack (live idle): the remembered failure — which a
+    // passive read cannot reproduce — is restored with its Relancer / Abandonner.
+    vi.mocked(readTransferOutcome).mockResolvedValue(rememberedRetryable);
+    vi.mocked(readTransferState).mockResolvedValue({ kind: "idle" });
+    const { result } = renderHook(() => useStoryTransfer());
+    act(() => result.current.hydrate(STORY, DEVICE));
+    await waitFor(() => expect(result.current.state.kind).toBe("retryable"));
+  });
+
+  it("hydrate never shows a false verified when the live read is idle (device present, F2)", async () => {
+    vi.mocked(readTransferOutcome).mockResolvedValue(rememberedVerified);
+    vi.mocked(readTransferState).mockResolvedValue({ kind: "idle" });
+    const { result } = renderHook(() => useStoryTransfer());
+    await act(async () => {
+      result.current.hydrate(STORY, DEVICE);
+    });
+    expect(result.current.state.kind).toBe("idle");
+    expect(result.current.state.kind).not.toBe("verified");
+  });
+
+  it("hydrate falls back to the memory when the live reconcile read fails", async () => {
+    vi.mocked(readTransferOutcome).mockResolvedValue(rememberedRetryable);
+    vi.mocked(readTransferState).mockRejectedValue({
+      code: "DEVICE_SCAN_FAILED",
+      message: "m",
+      userAction: "a",
+      details: null,
+    });
+    const { result } = renderHook(() => useStoryTransfer());
+    act(() => result.current.hydrate(STORY, DEVICE));
+    await waitFor(() => expect(result.current.state.kind).toBe("retryable"));
+  });
+
+  it("dismiss is a no-op while a transfer is in flight (F5 guard)", async () => {
+    vi.mocked(startTransferStory).mockReturnValue(new Promise(() => undefined));
+    const { result } = renderHook(() => useStoryTransfer());
+    act(() => result.current.send(STORY, DEVICE));
+    expect(result.current.state.kind).toBe("transferring");
+    act(() => result.current.dismiss());
+    // Still transferring — dismiss did not abandon mid-flight, and never purged.
+    expect(result.current.state.kind).toBe("transferring");
+    expect(discardTransferOutcome).not.toHaveBeenCalled();
+  });
+
+  it("hydrate short-circuits a repeat for the same story's terminal (no redundant re-read)", async () => {
+    vi.mocked(readTransferOutcome).mockResolvedValue(rememberedRetryable);
+    const { result } = renderHook(() => useStoryTransfer());
+    act(() => result.current.hydrate(STORY)); // no device → restore the terminal
+    await waitFor(() => expect(result.current.state.kind).toBe("retryable"));
+    expect(readTransferOutcome).toHaveBeenCalledTimes(1);
+    // A repeat hydrate for the SAME story (e.g. the route effect re-firing on a
+    // writableDeviceId change) is a no-op — no re-read, no reconcile read.
+    act(() => result.current.hydrate(STORY, DEVICE));
+    expect(readTransferOutcome).toHaveBeenCalledTimes(1);
+    expect(readTransferState).not.toHaveBeenCalled();
+    expect(result.current.state.kind).toBe("retryable");
+  });
+
+  it("a redundant hydrate while a terminal is shown does not swallow a later dismiss purge error (§6)", async () => {
+    vi.mocked(readTransferOutcome).mockResolvedValue(rememberedRetryable);
+    vi.mocked(discardTransferOutcome).mockRejectedValue({
+      code: "TRANSFER_OUTCOME_UNAVAILABLE",
+      message: "La mémoire de transfert n'a pas pu être effacée.",
+      userAction: "Réessaie.",
+      details: null,
+    });
+    const { result } = renderHook(() => useStoryTransfer());
+    act(() => result.current.hydrate(STORY));
+    await waitFor(() => expect(result.current.state.kind).toBe("retryable"));
+    // A redundant hydrate (device churn) while the terminal is shown is a no-op,
+    // so it does not bump the call id…
+    act(() => result.current.hydrate(STORY, DEVICE));
+    // …and a subsequent Abandonner's purge failure still surfaces in-context.
+    await act(async () => {
+      result.current.dismiss();
+    });
+    await waitFor(() => expect(result.current.state.kind).toBe("error"));
+    if (result.current.state.kind === "error") {
+      expect(result.current.state.error.code).toBe("TRANSFER_OUTCOME_UNAVAILABLE");
+    }
+  });
+
+  it("dismiss purges the durable memory then returns to idle (Abandonner)", async () => {
+    vi.mocked(readTransferOutcome).mockResolvedValue(rememberedRetryable);
+    const { result } = renderHook(() => useStoryTransfer());
+    act(() => result.current.hydrate(STORY));
+    await waitFor(() => expect(result.current.state.kind).toBe("retryable"));
+
+    act(() => result.current.dismiss());
+    expect(result.current.state.kind).toBe("idle");
+    expect(discardTransferOutcome).toHaveBeenCalledWith({ storyId: STORY });
+  });
+
+  it("dismiss surfaces a purge failure in-context (§6)", async () => {
+    vi.mocked(readTransferOutcome).mockResolvedValue(rememberedRetryable);
+    vi.mocked(discardTransferOutcome).mockRejectedValue({
+      code: "TRANSFER_OUTCOME_UNAVAILABLE",
+      message: "La mémoire de transfert n'a pas pu être effacée.",
+      userAction: "Réessaie.",
+      details: null,
+    });
+    const { result } = renderHook(() => useStoryTransfer());
+    act(() => result.current.hydrate(STORY));
+    await waitFor(() => expect(result.current.state.kind).toBe("retryable"));
+
+    await act(async () => {
+      result.current.dismiss();
+    });
+    await waitFor(() => expect(result.current.state.kind).toBe("error"));
+    if (result.current.state.kind === "error") {
+      expect(result.current.state.error.code).toBe("TRANSFER_OUTCOME_UNAVAILABLE");
+      expect(result.current.state.storyId).toBe(STORY);
+    }
   });
 });

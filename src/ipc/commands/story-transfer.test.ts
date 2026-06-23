@@ -5,6 +5,8 @@ vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 import { invoke } from "@tauri-apps/api/core";
 
 import {
+  discardTransferOutcome,
+  readTransferOutcome,
   readTransferState,
   startTransferStory,
   TransferContractDriftError,
@@ -77,5 +79,60 @@ describe("readTransferState", () => {
     await expect(
       readTransferState({ storyId: STORY, deviceIdentifier: DEVICE }),
     ).rejects.toBeInstanceOf(TransferContractDriftError);
+  });
+});
+
+describe("readTransferOutcome", () => {
+  beforeEach(() => vi.mocked(invoke).mockReset());
+
+  const outcome = {
+    storyId: STORY,
+    terminalKind: "retryable",
+    cause: "deviceChanged",
+    message: "Envoi interrompu : l'appareil connecté a changé.",
+    userAction: "Rebranche la Lunii souhaitée puis relance l'envoi.",
+    recordedAt: "2026-06-23T00:00:00.000Z",
+  };
+
+  it("wraps the input under { input } and returns the remembered outcome", async () => {
+    vi.mocked(invoke).mockResolvedValue(outcome);
+    const read = await readTransferOutcome({ storyId: STORY });
+    expect(invoke).toHaveBeenCalledWith("read_transfer_outcome", {
+      input: { storyId: STORY },
+    });
+    expect(read).toEqual(outcome);
+  });
+
+  it("returns null when there is no durable memory", async () => {
+    vi.mocked(invoke).mockResolvedValue(null);
+    await expect(readTransferOutcome({ storyId: STORY })).resolves.toBeNull();
+  });
+
+  it("throws a drift error on a bad shape", async () => {
+    vi.mocked(invoke).mockResolvedValue({ terminalKind: "weird" });
+    await expect(
+      readTransferOutcome({ storyId: STORY }),
+    ).rejects.toBeInstanceOf(TransferContractDriftError);
+  });
+});
+
+describe("discardTransferOutcome", () => {
+  beforeEach(() => vi.mocked(invoke).mockReset());
+
+  it("wraps the input under { input } and resolves void on success", async () => {
+    vi.mocked(invoke).mockResolvedValue(undefined);
+    await expect(
+      discardTransferOutcome({ storyId: STORY }),
+    ).resolves.toBeUndefined();
+    expect(invoke).toHaveBeenCalledWith("discard_transfer_outcome", {
+      input: { storyId: STORY },
+    });
+  });
+
+  it("normalizes a rejection to an AppError", async () => {
+    vi.mocked(invoke).mockRejectedValueOnce(new Error("boom"));
+    await expect(discardTransferOutcome({ storyId: STORY })).rejects.toMatchObject(
+      { code: "UNKNOWN" },
+    );
   });
 });

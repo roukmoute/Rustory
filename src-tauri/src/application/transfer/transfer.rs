@@ -236,7 +236,11 @@ pub fn transfer_story(
         );
     };
 
-    emitter.progress(PreparationPhase::Transfer, None, next_sequence(&sequence));
+    // PREPARE phase: re-assemble the descriptor FRESH (read-only) + re-verify its
+    // integrity. Emitting `Prepare` here makes a relaunch a visible FULL cycle
+    // `preflight → prepare → transfer → verify` (AC1), distinct from the device
+    // `Transfer` write below — the local assembly is not yet a device mutation.
+    emitter.progress(PreparationPhase::Prepare, None, next_sequence(&sequence));
 
     // Re-assemble the descriptor FRESH (read-only) and re-verify its integrity
     // against the recorded baseline before writing a single byte. A failure here
@@ -273,6 +277,11 @@ pub fn transfer_story(
             Ok(path) => path,
             Err(cause) => return fail(emitter, &sequence, cause, TransferCompleteness::Failed),
         };
+
+    // TRANSFER phase: the actual device write begins now, after the local PREPARE
+    // assembly and the fresh identity re-validation. Emitting the transition here
+    // keeps `en transfert` honest — named only while bytes are really moving.
+    emitter.progress(PreparationPhase::Transfer, None, next_sequence(&sequence));
 
     // The opaque pack bytes live under the LOCAL imports folder — the writer
     // reproduces them on the device (round-trip, no decryption). The writer
@@ -1146,14 +1155,18 @@ mod tests {
                         sequence: 1
                     },
                     Recorded::Progress {
-                        phase: PreparationPhase::Transfer,
+                        phase: PreparationPhase::Prepare,
                         sequence: 2
                     },
                     Recorded::Progress {
-                        phase: PreparationPhase::Verify,
+                        phase: PreparationPhase::Transfer,
                         sequence: 3
                     },
-                    Recorded::Completed { sequence: 4 },
+                    Recorded::Progress {
+                        phase: PreparationPhase::Verify,
+                        sequence: 4
+                    },
+                    Recorded::Completed { sequence: 5 },
                 ],
                 "md v{version}"
             );
@@ -1213,16 +1226,20 @@ mod tests {
                     sequence: 1
                 },
                 Recorded::Progress {
-                    phase: PreparationPhase::Transfer,
+                    phase: PreparationPhase::Prepare,
                     sequence: 2
                 },
                 Recorded::Progress {
-                    phase: PreparationPhase::Verify,
+                    phase: PreparationPhase::Transfer,
                     sequence: 3
+                },
+                Recorded::Progress {
+                    phase: PreparationPhase::Verify,
+                    sequence: 4
                 },
                 Recorded::FailedVerify {
                     verdict: "partial".to_string(),
-                    sequence: 4
+                    sequence: 5
                 },
             ]
         );
@@ -1273,7 +1290,7 @@ mod tests {
             emitter.recorded().last(),
             Some(&Recorded::FailedVerify {
                 verdict: "failed".to_string(),
-                sequence: 4
+                sequence: 5
             })
         );
         assert_eq!(
@@ -1664,7 +1681,7 @@ mod tests {
             1,
             "the writer ran and reported failure"
         );
-        // Preflight → Transfer → failed: the transfer phase WAS entered.
+        // Preflight → Prepare → Transfer → failed: the write phase WAS entered.
         assert_eq!(
             emitter.recorded(),
             vec![
@@ -1673,10 +1690,14 @@ mod tests {
                     sequence: 1
                 },
                 Recorded::Progress {
-                    phase: PreparationPhase::Transfer,
+                    phase: PreparationPhase::Prepare,
                     sequence: 2
                 },
-                Recorded::Failed { sequence: 3 },
+                Recorded::Progress {
+                    phase: PreparationPhase::Transfer,
+                    sequence: 3
+                },
+                Recorded::Failed { sequence: 4 },
             ]
         );
     }

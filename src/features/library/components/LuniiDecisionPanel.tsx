@@ -628,8 +628,9 @@ function renderTransfer(
           ? "vérification de l'appareil"
           : view.phase === "transfer"
             ? "envoi en cours"
-            : // Before the 1st job:progress (optimistic window, phase unknown) name a
-              // NEUTRAL phase — never the wrong "envoi en cours" (C2/AC1).
+            : // The `prepare` phase (local re-assembly, before any device write) AND
+              // the optimistic window before the 1st job:progress both name a NEUTRAL
+              // "preparing" phase — never the wrong "envoi en cours" (C2/AC1).
               "préparation de l'envoi…";
       const percent =
         view.progress != null

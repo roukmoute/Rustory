@@ -21,6 +21,8 @@ const mockStartPrepare = vi.fn();
 const mockReadPreparation = vi.fn();
 const mockStartTransfer = vi.fn();
 const mockReadTransfer = vi.fn();
+const mockReadTransferOutcome = vi.fn();
+const mockDiscardTransferOutcome = vi.fn();
 
 vi.mock("../../ipc/commands/library", () => ({
   getLibraryOverview: () => ({
@@ -117,6 +119,8 @@ vi.mock("../../ipc/commands/story-transfer", async () => {
     ...actual,
     startTransferStory: (input: unknown) => mockStartTransfer(input),
     readTransferState: (input: unknown) => mockReadTransfer(input),
+    readTransferOutcome: (input: unknown) => mockReadTransferOutcome(input),
+    discardTransferOutcome: (input: unknown) => mockDiscardTransferOutcome(input),
   };
 });
 
@@ -206,6 +210,12 @@ describe("<LibraryRoute />", () => {
     });
     mockReadTransfer.mockReset();
     mockReadTransfer.mockResolvedValue({ kind: "idle" });
+    // Default: no durable transfer memory, and a purge that succeeds. Tests that
+    // exercise re-hydration / Abandonner override these.
+    mockReadTransferOutcome.mockReset();
+    mockReadTransferOutcome.mockResolvedValue(null);
+    mockDiscardTransferOutcome.mockReset();
+    mockDiscardTransferOutcome.mockResolvedValue(undefined);
     // The hooks keep module-local stale-while-revalidate caches; reset
     // them between tests so no stray snapshot bleeds across cases.
     invalidateLibraryOverviewCache();
@@ -2482,6 +2492,192 @@ describe("<LibraryRoute />", () => {
       deviceIdentifier: writableOrigine.deviceIdentifier,
     });
     expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  // --- Durable transfer memory: re-hydration / relaunch / abandon ---
+
+  const rememberedFailure = {
+    storyId: "s1",
+    terminalKind: "retryable" as const,
+    cause: "deviceChanged" as const,
+    message: "Envoi interrompu : l'appareil connecté a changé.",
+    userAction: "Rebranche la Lunii souhaitée puis relance l'envoi.",
+    recordedAt: "2026-06-23T00:00:00.000Z",
+  };
+
+  it("re-hydrates a remembered recoverable failure for the selected story with Relancer + Abandonner and a card badge (AC2/AC3)", async () => {
+    const user = userEvent.setup();
+    mockGet.mockResolvedValueOnce({ stories: [{ id: "s1", title: "Le soleil" }] });
+    mockDevice.mockResolvedValue(writableOrigine);
+    mockReadTransferOutcome.mockResolvedValue(rememberedFailure);
+    renderLibrary();
+
+    await user.click(await screen.findByRole("button", { name: /le soleil/i }));
+    const panel = screen.getByRole("complementary", {
+      name: /panneau de décision/i,
+    });
+
+    // The remembered terminal is re-offered in-context, exactly as if the
+    // `job:failed` had just fired — surviving a restart / re-visit.
+    await waitFor(() =>
+      expect(
+        within(panel).getByText(/l'appareil connecté a changé/i),
+      ).toBeInTheDocument(),
+    );
+    expect(mockReadTransferOutcome).toHaveBeenCalledWith({ storyId: "s1" });
+    expect(
+      within(panel).getByRole("button", { name: "Relancer le transfert" }),
+    ).toBeInTheDocument();
+    expect(
+      within(panel).getByRole("button", { name: "Abandonner le transfert" }),
+    ).toBeInTheDocument();
+    // The StoryCard badge reflects the remembered issue (the persistent anchor).
+    const card = screen.getByRole("button", { name: /le soleil/i });
+    expect(within(card).getByText(/échec récupérable/i)).toBeInTheDocument();
+  });
+
+  it("Relancer on a re-hydrated terminal restarts a full cycle with the FRESH writable device id (AC1)", async () => {
+    const user = userEvent.setup();
+    mockGet.mockResolvedValueOnce({ stories: [{ id: "s1", title: "Le soleil" }] });
+    mockDevice.mockResolvedValue(writableOrigine);
+    mockReadTransferOutcome.mockResolvedValue(rememberedFailure);
+    renderLibrary();
+
+    await user.click(await screen.findByRole("button", { name: /le soleil/i }));
+    const panel = screen.getByRole("complementary", {
+      name: /panneau de décision/i,
+    });
+    const relancer = await within(panel).findByRole("button", {
+      name: "Relancer le transfert",
+    });
+    await user.click(relancer);
+
+    // A relaunch is a full new cycle through the send path, with the CURRENT
+    // writable device id — never the stored (now-stale) identifier.
+    expect(mockStartTransfer).toHaveBeenCalledWith({
+      storyId: "s1",
+      deviceIdentifier: writableOrigine.deviceIdentifier,
+    });
+  });
+
+  it("Abandonner on a re-hydrated terminal purges the durable memory and clears the panel terminal (AC3)", async () => {
+    const user = userEvent.setup();
+    mockGet.mockResolvedValueOnce({ stories: [{ id: "s1", title: "Le soleil" }] });
+    mockDevice.mockResolvedValue(writableOrigine);
+    mockReadTransferOutcome.mockResolvedValue({
+      ...rememberedFailure,
+      terminalKind: "incomplete" as const,
+      cause: "writeRejected" as const,
+      message: "Envoi incomplet : l'appareil peut contenir une copie partielle.",
+      userAction: "Relance l'envoi pour rétablir un état sûr.",
+    });
+    renderLibrary();
+
+    await user.click(await screen.findByRole("button", { name: /le soleil/i }));
+    const panel = screen.getByRole("complementary", {
+      name: /panneau de décision/i,
+    });
+    const abandon = await within(panel).findByRole("button", {
+      name: "Abandonner le transfert",
+    });
+    await user.click(abandon);
+
+    expect(mockDiscardTransferOutcome).toHaveBeenCalledWith({ storyId: "s1" });
+    await waitFor(() =>
+      expect(within(panel).queryByText(/copie partielle/i)).toBeNull(),
+    );
+  });
+
+  it("never re-hydrates a remembered verified as a live success when the device read is idle (no false success)", async () => {
+    const user = userEvent.setup();
+    mockGet.mockResolvedValueOnce({ stories: [{ id: "s1", title: "Le soleil" }] });
+    mockDevice.mockResolvedValue(writableOrigine);
+    mockReadTransfer.mockResolvedValue({ kind: "idle" });
+    mockReadTransferOutcome.mockResolvedValue({
+      storyId: "s1",
+      terminalKind: "verified" as const,
+      message: "« Le soleil » est maintenant sur la Lunii.",
+      userAction: "2 autres histoires de l'appareil restent inchangées.",
+      summary: {
+        changed: "« Le soleil » est maintenant sur la Lunii.",
+        unchanged: "2 autres histoires de l'appareil restent inchangées.",
+      },
+      recordedAt: "2026-06-23T00:00:00.000Z",
+    });
+    renderLibrary();
+
+    await user.click(await screen.findByRole("button", { name: /le soleil/i }));
+    const panel = screen.getByRole("complementary", {
+      name: /panneau de décision/i,
+    });
+    await waitFor(() =>
+      expect(mockReadTransferOutcome).toHaveBeenCalledWith({ storyId: "s1" }),
+    );
+    // A remembered success is NEVER promoted to a live `transférée et vérifiée`.
+    expect(within(panel).queryByText(/transférée et vérifiée/i)).toBeNull();
+  });
+
+  it("re-hydration yields to a live verified — the device proves the pack over a remembered failure (F1/§2)", async () => {
+    const user = userEvent.setup();
+    mockGet.mockResolvedValueOnce({ stories: [{ id: "s1", title: "Le soleil" }] });
+    mockDevice.mockResolvedValue(writableOrigine);
+    // Memory remembers a failure, but the connected device proves the pack present
+    // + byte-faithful: the LIVE `verified` always wins (no stale failure over a real
+    // success, no false success either way).
+    mockReadTransferOutcome.mockResolvedValue(rememberedFailure);
+    mockReadTransfer.mockResolvedValue({
+      kind: "verified",
+      deviceIdentifier: writableOrigine.deviceIdentifier,
+      story: { id: "s1", title: "Le soleil" },
+      summary: {
+        changed: "« Le soleil » est maintenant sur la Lunii.",
+        unchanged: "Aucune autre histoire de l'appareil n'a été modifiée.",
+      },
+    });
+    renderLibrary();
+
+    await user.click(await screen.findByRole("button", { name: /le soleil/i }));
+    const panel = screen.getByRole("complementary", {
+      name: /panneau de décision/i,
+    });
+    await waitFor(() =>
+      expect(
+        within(panel).getByText(/transférée et vérifiée/i),
+      ).toBeInTheDocument(),
+    );
+    // The remembered failure is NOT shown — the live success superseded it.
+    expect(
+      within(panel).queryByText(/l'appareil connecté a changé/i),
+    ).toBeNull();
+  });
+
+  it("offers the reconnect hint instead of an inert Relancer when no writable device is connected (C1 gate)", async () => {
+    const user = userEvent.setup();
+    mockGet.mockResolvedValueOnce({ stories: [{ id: "s1", title: "Le soleil" }] });
+    mockDevice.mockResolvedValue(supportedV3); // readable but NOT writable
+    mockReadTransferOutcome.mockResolvedValue(rememberedFailure);
+    renderLibrary();
+
+    await user.click(await screen.findByRole("button", { name: /le soleil/i }));
+    const panel = screen.getByRole("complementary", {
+      name: /panneau de décision/i,
+    });
+    await waitFor(() =>
+      expect(
+        within(panel).getByText(/l'appareil connecté a changé/i),
+      ).toBeInTheDocument(),
+    );
+    // No writable device → the reconnect hint replaces an inert Relancer (C1);
+    // Abandonner stays available.
+    expect(
+      within(panel).getByText(/rebranche la lunii pour relancer/i),
+    ).toBeInTheDocument();
+    expect(
+      within(panel).queryByRole("button", { name: "Relancer le transfert" }),
+    ).toBeNull();
+    expect(
+      within(panel).getByRole("button", { name: "Abandonner le transfert" }),
+    ).toBeInTheDocument();
   });
 
   it("blocks the Envoyer CTA when the story was Préparée for a DIFFERENT device (re-prepare required, F6)", async () => {

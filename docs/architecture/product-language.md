@@ -99,7 +99,9 @@ The UI should favor these labels when they are user-visible:
 | Write started then interrupted; the device may hold a partial copy and a relaunch restores a safe state | `transfert incomplet` |
 | Verification re-read the device and confirmed only an incoherent/incomplete result — neither a success nor necessarily a failure. Distinct from `transfert incomplet` (a write interruption), `échec récupérable` (device untouched) and `Contenu incomplet` (a device pack with a missing payload) | `état partiel` |
 | Inspect the in-flight transfer detail (secondary, non-destructive) | `Consulter le détail` |
+| Relaunch a failed / incomplete transfer from the preserved local draft — a full fresh cycle (preflight → prepare → transfer → verify), never a hidden partial resume (action). Avoid `retry`, `recommencer`, `reprendre` (`reprendre` is reserved for editing) | `Relancer` |
 | Abandon a failed / incomplete transfer (local draft intact) | `Abandonner` |
+| Relaunch is gated — no writable device is connected | `Rebranche la Lunii pour relancer.` |
 | No device is connected | `Aucun appareil connecté` |
 | Supported device detected | `Appareil prêt — {famille} {cohort}` |
 | Detected device but profile not allow-listed | `Profil non supporté` |
