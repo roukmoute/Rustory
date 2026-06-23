@@ -93,7 +93,7 @@ describe("subscribeJobEvents", () => {
   it("ignores a malformed payload", () => {
     const sub = makeSubscription();
     subscribeJobEvents(sub);
-    fire("job:progress", { ...progress(1), phase: "verify" }); // reserved phase — invalid
+    fire("job:progress", { ...progress(1), phase: "bogus" }); // unknown phase — invalid
     fire("job:failed", { jobId: "j1" }); // missing fields
     expect(sub.onProgress).not.toHaveBeenCalled();
     expect(sub.onFailed).not.toHaveBeenCalled();

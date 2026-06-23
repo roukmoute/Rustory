@@ -21,11 +21,10 @@ use crate::domain::story::{CanonicalBlocker, Severity};
 /// strategy). It stays `1` for the whole MVP — no real consumer caches yet.
 pub const PREPARATION_PIPELINE_VERSION: u32 = 1;
 
-/// The observable phases of the transfer state machine. `Preflight` and
-/// `Prepare` are emitted by the preparation flow; `Transfer` is emitted by the
-/// device-write flow. `Verify` belongs to the machine too but is OUT OF SCOPE
-/// (a later verification step owns it) — deliberately NOT represented so no
-/// caller can emit false coverage.
+/// The observable phases of the transfer state machine: `Preflight` and
+/// `Prepare` (preparation flow), `Transfer` (device-write flow) and `Verify`,
+/// the FINAL phase of the same `transfer_story` job — emitted automatically
+/// after a successful write to re-read the device and confirm what landed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PreparationPhase {
     /// Re-runs the read-only validation + authoritative device re-scan before
@@ -36,6 +35,12 @@ pub enum PreparationPhase {
     /// Device write of the prepared pack (story 3.x write flow). Maps to the
     /// `en transfert` UI label.
     Transfer,
+    /// Read-only re-read of the device after a successful write, confirming the
+    /// pack landed (indexed + content present + byte-faithful). The transient
+    /// "écriture effectuée — vérification à venir" label belongs HERE — it is no
+    /// longer a resting terminal; the resting terminals are the `verify`
+    /// verdicts (`transférée et vérifiée` / `état partiel` / `échec récupérable`).
+    Verify,
 }
 
 impl PreparationPhase {
@@ -46,6 +51,7 @@ impl PreparationPhase {
             Self::Preflight => "preflight",
             Self::Prepare => "prepare",
             Self::Transfer => "transfer",
+            Self::Verify => "verify",
         }
     }
 }
@@ -374,6 +380,7 @@ mod tests {
         assert_eq!(PreparationPhase::Preflight.wire_tag(), "preflight");
         assert_eq!(PreparationPhase::Prepare.wire_tag(), "prepare");
         assert_eq!(PreparationPhase::Transfer.wire_tag(), "transfer");
+        assert_eq!(PreparationPhase::Verify.wire_tag(), "verify");
     }
 
     #[test]

@@ -2703,9 +2703,10 @@ describe("<LibraryRoute />", () => {
         true,
       ),
     ).toEqual({ kind: "transferring", progress: null, phase: null });
+    // The FINAL verify phase maps to the transient verifying view.
     expect(
       mapTransferView(
-        { kind: "transferred", storyId: STORY_A },
+        { kind: "transferring", storyId: STORY_A, progress: null, phase: "verify" },
         STORY_A,
         1,
         "idle",
@@ -2713,7 +2714,51 @@ describe("<LibraryRoute />", () => {
         true,
         true,
       ),
-    ).toEqual({ kind: "transferred" });
+    ).toEqual({ kind: "verifying" });
+    // The proven success terminal carries the AC2 summary lines (composed in Rust).
+    expect(
+      mapTransferView(
+        {
+          kind: "verified",
+          storyId: STORY_A,
+          summary: {
+            changed: "« Mon histoire » est maintenant sur la Lunii.",
+            unchanged: "3 autres histoires de l'appareil restent inchangées.",
+          },
+        },
+        STORY_A,
+        1,
+        "idle",
+        true,
+        true,
+        true,
+      ),
+    ).toEqual({
+      kind: "verified",
+      changed: "« Mon histoire » est maintenant sur la Lunii.",
+      unchanged: "3 autres histoires de l'appareil restent inchangées.",
+    });
+    // The honest état partiel terminal.
+    expect(
+      mapTransferView(
+        {
+          kind: "partial",
+          storyId: STORY_A,
+          message: "État partiel.",
+          userAction: "Relance.",
+        },
+        STORY_A,
+        1,
+        "idle",
+        true,
+        true,
+        true,
+      ),
+    ).toEqual({
+      kind: "partial",
+      message: "État partiel.",
+      userAction: "Relance.",
+    });
     expect(
       mapTransferView(
         {

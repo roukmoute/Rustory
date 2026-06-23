@@ -5,11 +5,12 @@
  * `jobType = "transfer_story"` and the `transfer` phase.
  *
  * The transfer state is COMPOSED by Rust and only PRESENTED here. The `transferring`
- * variant describes the in-flight phase the hook derives from `job:progress`;
- * `read_transfer_state` itself returns `idle` / `transferring` / `transferred` /
- * `retryable`. The terminal `transferred` is deliberately NON-SUCCESS ("écriture
- * effectuée — vérification à venir") — verification is a later flow. Cross-stack
- * contract tests keep the shapes symmetric.
+ * variant describes the in-flight phase the hook derives from `job:progress` (incl.
+ * the final `verify` phase); `read_transfer_state` itself returns `idle` or
+ * `verified`. The success terminal `verified` (`transférée et vérifiée`) only ever
+ * appears AFTER the `verify` phase proved the write (indexed + content present +
+ * byte-faithful); it carries the AC2 summary. Cross-stack contract tests keep the
+ * shapes symmetric.
  */
 
 import type { PreparationStory } from "./story-preparation";
@@ -17,6 +18,16 @@ import type { PreparationStory } from "./story-preparation";
 /** The selected local story identified in the transfer state. Same shape as the
  *  preparation story (canonical lowercase UUID + the local title). */
 export type TransferStory = PreparationStory;
+
+/** The `verified` confirmation summary (AC2/FR15), composed in Rust and rendered
+ *  VERBATIM — the user-facing lines arrive ready-made so React never reinterprets
+ *  them. `changed` = what changed (+ final state), `unchanged` = what stayed. */
+export interface TransferVerifiedSummary {
+  /** "« <Titre> » est maintenant sur la Lunii." */
+  changed: string;
+  /** "N autres histoires de l'appareil restent inchangées." */
+  unchanged: string;
+}
 
 /**
  * Closed set of functional transfer-failure causes (AC2/AC3). Mirror of the Rust
@@ -40,12 +51,14 @@ export type TransferStateDto =
       progress: number | null;
     }
   | {
-      // Terminal NON-SUCCESS: the bytes were written, but nothing is verified
-      // yet. NEVER carries success vocabulary (`transférée et vérifiée` is a
-      // later flow).
-      kind: "transferred";
+      // Terminal SUCCESS: the write landed AND the verify phase confirmed it
+      // (indexed + content present + byte-faithful). The ONLY state that carries
+      // `transférée et vérifiée` — proven, never claimed. `summary` is the AC2
+      // confirmation (what stayed unchanged), composed in Rust.
+      kind: "verified";
       deviceIdentifier: string;
       story: TransferStory;
+      summary: TransferVerifiedSummary;
     }
   | {
       kind: "retryable";
@@ -88,7 +101,7 @@ const ALLOWED_KEYS: ReadonlyMap<string, ReadonlySet<string>> = new Map([
     "transferring",
     new Set(["kind", "deviceIdentifier", "story", "progress"]),
   ],
-  ["transferred", new Set(["kind", "deviceIdentifier", "story"])],
+  ["verified", new Set(["kind", "deviceIdentifier", "story", "summary"])],
   [
     "retryable",
     new Set(["kind", "story", "cause", "message", "userAction", "completeness"]),
@@ -98,6 +111,10 @@ const ALLOWED_KEYS: ReadonlyMap<string, ReadonlySet<string>> = new Map([
 const COMPLETENESS: ReadonlySet<string> = new Set(["failed", "incomplete"]);
 
 const ALLOWED_STORY_KEYS: ReadonlySet<string> = new Set(["id", "title"]);
+const ALLOWED_SUMMARY_KEYS: ReadonlySet<string> = new Set([
+  "changed",
+  "unchanged",
+]);
 
 function hasOnlyAllowedKeys(
   value: Record<string, unknown>,
@@ -121,6 +138,13 @@ function isTransferStory(value: unknown): value is TransferStory {
   if (typeof s.id !== "string" || !STORY_ID_PATTERN.test(s.id)) return false;
   if (typeof s.title !== "string" || s.title.length === 0) return false;
   return true;
+}
+
+function isVerifiedSummary(value: unknown): value is TransferVerifiedSummary {
+  if (typeof value !== "object" || value === null) return false;
+  const s = value as Record<string, unknown>;
+  if (!hasOnlyAllowedKeys(s, ALLOWED_SUMMARY_KEYS)) return false;
+  return isNonEmptyString(s.changed) && isNonEmptyString(s.unchanged);
 }
 
 function isDeviceIdentifier(value: unknown): value is string {
@@ -156,8 +180,12 @@ export function isTransferStateDto(value: unknown): value is TransferStateDto {
         isTransferStory(c.story) &&
         isProgress(c.progress)
       );
-    case "transferred":
-      return isDeviceIdentifier(c.deviceIdentifier) && isTransferStory(c.story);
+    case "verified":
+      return (
+        isDeviceIdentifier(c.deviceIdentifier) &&
+        isTransferStory(c.story) &&
+        isVerifiedSummary(c.summary)
+      );
     case "retryable":
       if (!isTransferStory(c.story)) return false;
       if (typeof c.cause !== "string" || !CAUSES.has(c.cause)) return false;

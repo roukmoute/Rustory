@@ -284,10 +284,16 @@ export function LibraryRoute(): React.JSX.Element {
       map.set(prep.storyId, "retryable");
     }
     // A transfer badge takes precedence for its target story — a write in flight
-    // (or its recoverable failure) is past preparation.
+    // (or its terminal verdict) is past preparation. The verdicts are sticky
+    // anchors across selection changes (the panel restores the full context on
+    // re-select).
     const tx = storyTransfer.state;
     if (tx.kind === "transferring") {
       map.set(tx.storyId, "transferring");
+    } else if (tx.kind === "verified") {
+      map.set(tx.storyId, "verified");
+    } else if (tx.kind === "partial") {
+      map.set(tx.storyId, "partial");
     } else if (tx.kind === "retryable") {
       map.set(tx.storyId, "retryable");
     } else if (tx.kind === "incomplete") {
@@ -694,7 +700,9 @@ export function mapPreparationView(
  * every other case is a standardized "Envoi indisponible: …" reason. An active /
  * terminal transfer is shown ONLY for the story it targets (so it stays
  * consultable while that story is selected; the card badge keeps the other story
- * flagged). The terminal `transferred` is NON-SUCCESS — verification is later.
+ * flagged). The success terminal `verified` (`transférée et vérifiée`) appears
+ * only after the verify proof; `partial` / the verify `failed` verdict are honest
+ * non-successes.
  *
  * A native story (no device-format pack) is detected BEFORE click via the
  * prepared state's `transferable` flag and disables the CTA with its own reason.
@@ -718,13 +726,23 @@ export function mapTransferView(
   if (state.kind !== "idle" && state.storyId === selectedStoryId) {
     switch (state.kind) {
       case "transferring":
+        // The final `verify` phase gets its own TRANSIENT "écriture effectuée —
+        // vérification à venir" view, distinct from the calm "en transfert".
+        return state.phase === "verify"
+          ? { kind: "verifying" }
+          : { kind: "transferring", progress: state.progress, phase: state.phase };
+      case "verified":
         return {
-          kind: "transferring",
-          progress: state.progress,
-          phase: state.phase,
+          kind: "verified",
+          changed: state.summary.changed,
+          unchanged: state.summary.unchanged,
         };
-      case "transferred":
-        return { kind: "transferred" };
+      case "partial":
+        return {
+          kind: "partial",
+          message: state.message,
+          userAction: state.userAction,
+        };
       case "retryable":
         return {
           kind: "retryable",

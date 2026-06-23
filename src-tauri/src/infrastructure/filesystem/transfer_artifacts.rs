@@ -30,8 +30,8 @@ use std::time::{Duration, Instant};
 use sha2::{Digest, Sha256};
 
 use crate::domain::device::{
-    validate_pack_inventory, PackEntry, PackEntryKind, PackValidationIssue, MAX_IMPORT_PACK_FILES,
-    MAX_PACK_ASSET_DEPTH,
+    validate_pack_inventory, PackEntry, PackEntryKind, PackValidationIssue, LUNII_CONTENT_DIR,
+    MAX_IMPORT_PACK_FILES, MAX_PACK_ASSET_DEPTH,
 };
 use crate::domain::story::content_checksum;
 use crate::domain::transfer::{
@@ -63,9 +63,16 @@ pub enum AssemblySource {
     ImportedPack,
 }
 
-/// Read-only assembler of the transfer-artifact descriptor. MUST respect the
-/// wall-clock `budget` so a stalled disk cannot keep a `spawn_blocking` worker
-/// alive past the command budget.
+/// The integrity authority for transfer artifacts. Read-only by contract; MUST
+/// respect the wall-clock `budget` so a stalled disk cannot keep a
+/// `spawn_blocking` worker alive past the command budget.
+///
+/// Beyond assembling the LOCAL descriptor, it also re-checksums the DEVICE copy
+/// of an imported pack ([`reaggregate_device_pack`]) — the `verify` phase reads
+/// the bytes that landed on the Lunii and reproduces the same aggregate to prove
+/// byte fidelity against the prepared baseline.
+///
+/// [`reaggregate_device_pack`]: TransferArtifactSource::reaggregate_device_pack
 pub trait TransferArtifactSource: Send + Sync + 'static {
     fn assemble(
         &self,
@@ -73,6 +80,18 @@ pub trait TransferArtifactSource: Send + Sync + 'static {
         plan: &AssemblyPlan,
         budget: Duration,
     ) -> Result<TransferArtifactDescriptor, PreparationFailureCause>;
+
+    /// Re-checksum the pack written under `.content/<SHORT_ID>` on the device
+    /// `mount_path`, returning its aggregate hex. Uses the EXACT import
+    /// aggregation, so the caller can compare it to the prepared
+    /// `aggregate_checksum` to confirm byte fidelity (`verify` phase). Read-only:
+    /// never copies bytes off the device, never decrypts.
+    fn reaggregate_device_pack(
+        &self,
+        mount_path: &Path,
+        short_id: &str,
+        budget: Duration,
+    ) -> Result<String, PreparationFailureCause>;
 }
 
 /// Production assembler: stdlib filesystem reads + SHA-256.
@@ -90,6 +109,16 @@ impl TransferArtifactSource for SystemTransferArtifactSource {
             AssemblySource::Native { structure_json } => Ok(assemble_native(plan, structure_json)),
             AssemblySource::ImportedPack => assemble_imported_pack(app_data_dir, plan, budget),
         }
+    }
+
+    fn reaggregate_device_pack(
+        &self,
+        mount_path: &Path,
+        short_id: &str,
+        budget: Duration,
+    ) -> Result<String, PreparationFailureCause> {
+        let pack_dir = mount_path.join(LUNII_CONTENT_DIR).join(short_id);
+        aggregate_pack_dir(&pack_dir, budget).map(|(aggregate, _)| aggregate)
     }
 }
 
@@ -123,12 +152,33 @@ fn assemble_imported_pack(
     plan: &AssemblyPlan,
     budget: Duration,
 ) -> Result<TransferArtifactDescriptor, PreparationFailureCause> {
-    let started = Instant::now();
     let pack_dir = resolve_import_story_dir(app_data_dir, &plan.story_id);
+    let (aggregate_checksum, artifacts) = aggregate_pack_dir(&pack_dir, budget)?;
+    Ok(TransferArtifactDescriptor {
+        story_id: plan.story_id.clone(),
+        target_cohort: plan.target_cohort.clone(),
+        pipeline_version: PREPARATION_PIPELINE_VERSION,
+        artifacts,
+        aggregate_checksum,
+    })
+}
 
-    // The promoted pack folder must still be a real directory. Absence is the
-    // recoverable "the imported artifacts went missing" branch.
-    match fs::symlink_metadata(&pack_dir) {
+/// Read-only walk + structural re-validation + aggregate re-checksum of a pack
+/// directory, in the import's EXACT aggregation (`rel_path` + NUL + bytes, in
+/// [`validate_pack_inventory`] manifest order). Shared by the LOCAL imports
+/// assembler and the DEVICE re-checksum the `verify` phase runs, so both
+/// reproduce the import's `pack_checksum` byte-for-byte. Strictly read-only:
+/// never copies, never decrypts, never writes. Returns the aggregate hex + the
+/// per-file artifacts (the device verify ignores the latter).
+fn aggregate_pack_dir(
+    pack_dir: &Path,
+    budget: Duration,
+) -> Result<(String, Vec<PreparedArtifact>), PreparationFailureCause> {
+    let started = Instant::now();
+
+    // The pack folder must still be a real directory. Absence is the recoverable
+    // "the artifacts went missing" branch (a verify reads this as "not present").
+    match fs::symlink_metadata(pack_dir) {
         Ok(meta) if meta.is_dir() => {}
         Ok(_) => return Err(PreparationFailureCause::ArtifactCorrupt),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
@@ -138,7 +188,7 @@ fn assemble_imported_pack(
     }
 
     let mut entries: Vec<PackEntry> = Vec::new();
-    walk(&pack_dir, &mut Vec::new(), &mut entries, started, budget)?;
+    walk(pack_dir, &mut Vec::new(), &mut entries, started, budget)?;
 
     // Reuse the SAME deterministic ordering + structural rules as the import, so
     // the re-hash lines up with the stored checksum and a missing required file
@@ -156,7 +206,7 @@ fn assemble_imported_pack(
         aggregate.update(file.rel_path.as_bytes());
         aggregate.update([0u8]);
 
-        let src = join_rel_path(&pack_dir, &file.rel_path);
+        let src = join_rel_path(pack_dir, &file.rel_path);
         let (size, per_file_checksum) = stream_file(&src, &mut aggregate, started, budget)?;
         artifacts.push(PreparedArtifact {
             kind: PreparedArtifactKind::PackFile,
@@ -166,13 +216,7 @@ fn assemble_imported_pack(
         });
     }
 
-    Ok(TransferArtifactDescriptor {
-        story_id: plan.story_id.clone(),
-        target_cohort: plan.target_cohort.clone(),
-        pipeline_version: PREPARATION_PIPELINE_VERSION,
-        artifacts,
-        aggregate_checksum: format!("{:x}", aggregate.finalize()),
-    })
+    Ok((format!("{:x}", aggregate.finalize()), artifacts))
 }
 
 /// Recursive bounded read-only walk, mirroring the import enumerator so the
@@ -310,13 +354,16 @@ fn map_issue(issue: &PackValidationIssue) -> PreparationFailureCause {
     }
 }
 
-/// Test double scripting assembly results without touching the filesystem.
+/// Test double scripting assembly + device re-checksum results without touching
+/// the filesystem.
 #[cfg(test)]
 #[derive(Default)]
 pub struct MockTransferArtifactSource {
     responses: std::sync::Mutex<
         std::collections::VecDeque<Result<TransferArtifactDescriptor, PreparationFailureCause>>,
     >,
+    reaggregations:
+        std::sync::Mutex<std::collections::VecDeque<Result<String, PreparationFailureCause>>>,
 }
 
 #[cfg(test)]
@@ -327,6 +374,17 @@ impl MockTransferArtifactSource {
 
     pub fn enqueue(&self, response: Result<TransferArtifactDescriptor, PreparationFailureCause>) {
         self.responses
+            .lock()
+            .expect("mock lock")
+            .push_back(response);
+    }
+
+    /// Script the next [`reaggregate_device_pack`] result (the device-side
+    /// re-checksum the `verify` phase compares to the prepared baseline).
+    ///
+    /// [`reaggregate_device_pack`]: TransferArtifactSource::reaggregate_device_pack
+    pub fn enqueue_reaggregate(&self, response: Result<String, PreparationFailureCause>) {
+        self.reaggregations
             .lock()
             .expect("mock lock")
             .push_back(response);
@@ -346,6 +404,19 @@ impl TransferArtifactSource for MockTransferArtifactSource {
             .expect("mock lock")
             .pop_front()
             .expect("MockTransferArtifactSource: no scripted response enqueued")
+    }
+
+    fn reaggregate_device_pack(
+        &self,
+        _mount_path: &Path,
+        _short_id: &str,
+        _budget: Duration,
+    ) -> Result<String, PreparationFailureCause> {
+        self.reaggregations
+            .lock()
+            .expect("mock lock")
+            .pop_front()
+            .expect("MockTransferArtifactSource: no scripted reaggregation enqueued")
     }
 }
 
@@ -522,5 +593,63 @@ mod tests {
             .assemble(app_data.path(), &imported_plan(story_id), Duration::ZERO)
             .expect_err("zero budget must abort");
         assert_eq!(err, PreparationFailureCause::Interrupted);
+    }
+
+    #[test]
+    fn reaggregate_device_pack_reproduces_the_import_aggregate() {
+        // The device re-checksum the `verify` phase runs must reproduce the EXACT
+        // aggregate the local import/assembly recorded — same algorithm, same
+        // files, same order — so a faithful round-trip compares equal.
+        let story_id = "66666666-6666-7666-8666-666666666666";
+        let app_data = seed_pack(story_id);
+        let local = SystemTransferArtifactSource
+            .assemble(app_data.path(), &imported_plan(story_id), budget())
+            .expect("assemble local");
+
+        // Lay the SAME pack under a device-style `.content/<SHORT_ID>` mount.
+        let mount = tempfile::tempdir().expect("mount");
+        let short_id = "FAC5562D";
+        write_pack(&mount.path().join(LUNII_CONTENT_DIR).join(short_id));
+
+        let device_aggregate = SystemTransferArtifactSource
+            .reaggregate_device_pack(mount.path(), short_id, budget())
+            .expect("reaggregate device pack");
+        assert_eq!(
+            device_aggregate, local.aggregate_checksum,
+            "the device re-checksum matches the import aggregate byte-for-byte"
+        );
+    }
+
+    #[test]
+    fn reaggregate_device_pack_diverges_when_a_device_byte_is_flipped() {
+        let story_id = "77777777-7777-7777-8777-777777777777";
+        let app_data = seed_pack(story_id);
+        let baseline = SystemTransferArtifactSource
+            .assemble(app_data.path(), &imported_plan(story_id), budget())
+            .expect("assemble local")
+            .aggregate_checksum;
+
+        let mount = tempfile::tempdir().expect("mount");
+        let short_id = "FAC5562D";
+        let pack_dir = mount.path().join(LUNII_CONTENT_DIR).join(short_id);
+        write_pack(&pack_dir);
+        std::fs::write(pack_dir.join("ni"), vec![0x00; 512]).expect("tamper ni on device");
+
+        let device_aggregate = SystemTransferArtifactSource
+            .reaggregate_device_pack(mount.path(), short_id, budget())
+            .expect("reaggregate tampered device pack");
+        assert_ne!(
+            device_aggregate, baseline,
+            "a flipped device byte makes the re-checksum diverge — caught by verify"
+        );
+    }
+
+    #[test]
+    fn reaggregate_device_pack_reports_missing_when_absent() {
+        let mount = tempfile::tempdir().expect("mount");
+        let err = SystemTransferArtifactSource
+            .reaggregate_device_pack(mount.path(), "DEADBEEF", budget())
+            .expect_err("absent device pack must fail");
+        assert_eq!(err, PreparationFailureCause::ArtifactMissing);
     }
 }

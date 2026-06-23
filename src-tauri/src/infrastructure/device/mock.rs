@@ -52,6 +52,24 @@ impl MockDeviceScanner {
         self.enqueue(Ok(report));
     }
 
+    /// A supported Lunii at a DISTINCT mount path + volume serial — models a device
+    /// SWAPPED for another supported Lunii (e.g. between a write and the `verify`
+    /// re-scan), so callers can prove the continuity check refuses it.
+    pub fn enqueue_supported_lunii_swapped(&self, metadata_version: u8) {
+        let report = DeviceScanReport {
+            candidates: vec![DeviceCandidate {
+                mount_path: std::path::PathBuf::from("/mock/lunii_other"),
+                metadata_payload: vec![metadata_version],
+                pi_payload: b"OTHER_PI".to_vec(),
+                has_bt: true,
+                volume_serial: Some("OTHER_SERIAL".into()),
+            }],
+            elapsed: Duration::from_millis(2),
+            truncated_due_to_timeout: false,
+        };
+        self.enqueue(Ok(report));
+    }
+
     pub fn enqueue_unsupported_metadata(&self, metadata_version: u8) {
         // Same shape as `enqueue_supported_lunii`; the application layer
         // is responsible for classifying based on version.

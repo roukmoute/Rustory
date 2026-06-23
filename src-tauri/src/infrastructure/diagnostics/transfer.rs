@@ -35,18 +35,29 @@ pub enum Event {
     },
     /// A transfer (device-write) job was accepted and started.
     TransferStarted { story_ref: String },
-    /// A transfer job wrote the pack (non-success terminal "écriture effectuée —
-    /// vérification à venir").
-    TransferCompleted { story_ref: String, elapsed_ms: u64 },
-    /// A transfer job reached a `retryable` / transport failure. `cause` is the
-    /// stable diagnostic tag of [`TransferFailureCause`](crate::domain::transfer::TransferFailureCause);
-    /// `completeness` is `"failed"` (device intact) or `"incomplete"` (a possible
-    /// partial copy) — the stable tag of
-    /// [`TransferCompleteness`](crate::domain::transfer::TransferCompleteness).
+    /// A transfer job wrote the pack AND the `verify` phase confirmed it.
+    /// `verify_verdict` is the stable tag of
+    /// [`VerifyVerdict`](crate::domain::transfer::VerifyVerdict) — always
+    /// `"verified"` here (a `completed` terminal only fires on a confirmed write).
+    TransferCompleted {
+        story_ref: String,
+        verify_verdict: &'static str,
+        elapsed_ms: u64,
+    },
+    /// A transfer job reached a non-success terminal. A WRITE-phase failure carries
+    /// `cause` (the stable [`TransferFailureCause`](crate::domain::transfer::TransferFailureCause)
+    /// tag) + `completeness` (`"failed"` device intact / `"incomplete"` a possible
+    /// partial copy). A VERIFY-phase terminal carries `verify_verdict`
+    /// (`"partial"` / `"failed"`, the [`VerifyVerdict`](crate::domain::transfer::VerifyVerdict)
+    /// tag) instead. Each field is omitted when not applicable — PII-free either way.
     TransferFailed {
         story_ref: String,
-        cause: &'static str,
-        completeness: &'static str,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cause: Option<&'static str>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        completeness: Option<&'static str>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        verify_verdict: Option<&'static str>,
         elapsed_ms: u64,
     },
 }
@@ -157,21 +168,41 @@ mod tests {
 
         let v = serde_json::to_value(Event::TransferCompleted {
             story_ref: "abcd".into(),
+            verify_verdict: "verified",
             elapsed_ms: 9,
         })
         .expect("ser");
         assert_eq!(v["category"], "transfer_completed");
+        assert_eq!(v["verify_verdict"], "verified");
 
         let v = serde_json::to_value(Event::TransferFailed {
             story_ref: "abcd".into(),
-            cause: "write_not_authorized",
-            completeness: "failed",
+            cause: Some("write_not_authorized"),
+            completeness: Some("failed"),
+            verify_verdict: None,
             elapsed_ms: 3,
         })
         .expect("ser");
         assert_eq!(v["category"], "transfer_failed");
         assert_eq!(v["cause"], "write_not_authorized");
         assert_eq!(v["completeness"], "failed");
+        assert!(
+            v.get("verify_verdict").is_none(),
+            "a write-phase failure carries no verify verdict"
+        );
+
+        // A verify-phase terminal carries the verdict instead of a write cause.
+        let v = serde_json::to_value(Event::TransferFailed {
+            story_ref: "abcd".into(),
+            cause: None,
+            completeness: None,
+            verify_verdict: Some("partial"),
+            elapsed_ms: 4,
+        })
+        .expect("ser");
+        assert_eq!(v["verify_verdict"], "partial");
+        assert!(v.get("cause").is_none());
+        assert!(v.get("completeness").is_none());
     }
 
     #[test]

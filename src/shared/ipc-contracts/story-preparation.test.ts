@@ -170,9 +170,10 @@ describe("job event guards", () => {
   it("accepts a valid progress event", () => {
     expect(isJobProgressEvent(validProgress)).toBe(true);
   });
-  it("accepts the transfer phase (shared job channel) but rejects the reserved verify phase", () => {
+  it("accepts every live phase on the shared job channel (transfer + verify), rejects an unknown one", () => {
     expect(isJobProgressEvent({ ...validProgress, phase: "transfer" })).toBe(true);
-    expect(isJobProgressEvent({ ...validProgress, phase: "verify" })).toBe(false);
+    expect(isJobProgressEvent({ ...validProgress, phase: "verify" })).toBe(true);
+    expect(isJobProgressEvent({ ...validProgress, phase: "bogus" })).toBe(false);
   });
   it("rejects a negative sequence", () => {
     expect(isJobProgressEvent({ ...validProgress, sequence: -1 })).toBe(false);
@@ -243,6 +244,98 @@ describe("job event guards", () => {
         errorMessage: "m",
         userAction: "a",
         completeness: "partial",
+      }),
+    ).toBe(false);
+  });
+  it("accepts a completed event carrying the verified summary", () => {
+    expect(
+      isJobCompletedEvent({
+        jobId: "j",
+        jobType: "transfer_story",
+        targetStoryId: STORY,
+        sequence: 4,
+        summary: {
+          changed: "« Mon histoire » est maintenant sur la Lunii.",
+          unchanged: "2 autres histoires de l'appareil restent inchangées.",
+        },
+      }),
+    ).toBe(true);
+  });
+  it("rejects a completed event with a malformed summary", () => {
+    const base = {
+      jobId: "j",
+      jobType: "transfer_story",
+      targetStoryId: STORY,
+      sequence: 4,
+    };
+    // Missing `unchanged`, empty line, and an extra key are all drift.
+    expect(isJobCompletedEvent({ ...base, summary: { changed: "c" } })).toBe(
+      false,
+    );
+    expect(
+      isJobCompletedEvent({ ...base, summary: { changed: "", unchanged: "u" } }),
+    ).toBe(false);
+    expect(
+      isJobCompletedEvent({
+        ...base,
+        summary: { changed: "c", unchanged: "u", extra: 1 },
+      }),
+    ).toBe(false);
+  });
+  it("accepts a failed event carrying a verify verdict (alone)", () => {
+    for (const verifyVerdict of ["partial", "failed"]) {
+      expect(
+        isJobFailedEvent({
+          jobId: "j",
+          jobType: "transfer_story",
+          targetStoryId: STORY,
+          sequence: 4,
+          errorCode: "TRANSFER_FAILED",
+          errorMessage: "m",
+          userAction: "a",
+          verifyVerdict,
+        }),
+      ).toBe(true);
+    }
+  });
+  it("rejects a failed event with an unknown verify verdict", () => {
+    expect(
+      isJobFailedEvent({
+        jobId: "j",
+        jobType: "transfer_story",
+        targetStoryId: STORY,
+        sequence: 4,
+        errorCode: "TRANSFER_FAILED",
+        errorMessage: "m",
+        userAction: "a",
+        verifyVerdict: "verified",
+      }),
+    ).toBe(false);
+  });
+  it("rejects a failed event mixing verifyVerdict with completeness/cause (F6)", () => {
+    const base = {
+      jobId: "j",
+      jobType: "transfer_story",
+      targetStoryId: STORY,
+      sequence: 4,
+      errorCode: "TRANSFER_FAILED",
+      errorMessage: "m",
+      userAction: "a",
+    };
+    // A verify terminal carries ONLY `verifyVerdict`; a write failure carries ONLY
+    // `completeness` / `cause`. Mixing them is impossible — reject the drift.
+    expect(
+      isJobFailedEvent({
+        ...base,
+        verifyVerdict: "partial",
+        completeness: "incomplete",
+      }),
+    ).toBe(false);
+    expect(
+      isJobFailedEvent({
+        ...base,
+        verifyVerdict: "partial",
+        cause: "writeRejected",
       }),
     ).toBe(false);
   });

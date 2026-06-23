@@ -7,12 +7,12 @@
 //! `src/shared/ipc-contracts/story-transfer.ts` — drift is enforced by the
 //! contract tests + the runtime guards.
 //!
-//! The OS mount path NEVER crosses this boundary. The terminal `transferred` is
-//! the HONEST non-success "écriture effectuée — vérification à venir" — it
-//! carries NO success vocabulary (verification belongs to a later story). The
+//! The OS mount path NEVER crosses this boundary. The success terminal
+//! `verified` (`transférée et vérifiée`) is only ever produced AFTER the `verify`
+//! phase proved the write (indexed + content present + byte-faithful). The
 //! `transferring` and `retryable` variants describe the in-flight phase and the
 //! event-driven failure terminal the frontend renders from `job:*`; the Rust
-//! re-read itself only ever produces `idle` or `transferred`.
+//! re-read itself only ever produces `idle` or `verified`.
 
 use serde::{Deserialize, Serialize};
 
@@ -73,10 +73,23 @@ pub enum TransferCompletenessDto {
     Incomplete,
 }
 
+/// The `verified` confirmation summary (AC2/FR15), COMPOSED in Rust and rendered
+/// VERBATIM by the panel — the user-facing lines travel ready-made so React never
+/// reinterprets them. `changed` states what changed (+ the final state), `unchanged`
+/// states what stayed untouched.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TransferVerifiedSummaryDto {
+    /// "« <Titre> » est maintenant sur la Lunii." — what changed + final state.
+    pub changed: String,
+    /// "N autres histoires de l'appareil restent inchangées." — what stayed.
+    pub unchanged: String,
+}
+
 /// Wire shape of the transfer state. Tagged enum on `kind`. The `transferring`
 /// variant describes the in-flight phase the frontend derives from
 /// `job:progress`; the `retryable` variant is built from the `job:failed` event;
-/// `read_transfer_state` itself only ever produces `idle` or `transferred`.
+/// `read_transfer_state` itself only ever produces `idle` or `verified`.
 #[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum TransferStateDto {
@@ -90,13 +103,15 @@ pub enum TransferStateDto {
         story: PreparationStoryDto,
         progress: Option<f32>,
     },
-    /// The pack was written (`écriture effectuée — vérification à venir`). NOT a
-    /// verified success — the send is not "transférée et vérifiée" (reserved for
-    /// a later story), and nothing here carries success vocabulary.
+    /// The write landed AND the `verify` phase confirmed it (indexed + content
+    /// present + byte-faithful): the legitimate success `transférée et vérifiée`
+    /// (promoted from reserved to ACTIVE by this flow). `summary` carries the AC2
+    /// confirmation (what stayed unchanged), composed in Rust, rendered verbatim.
     #[serde(rename_all = "camelCase")]
-    Transferred {
+    Verified {
         device_identifier: String,
         story: PreparationStoryDto,
+        summary: TransferVerifiedSummaryDto,
     },
     /// A recoverable failure consultable in context, with the canonical message +
     /// next gesture. `completeness` distinguishes `échec récupérable` (the device
@@ -113,19 +128,25 @@ pub enum TransferStateDto {
 
 impl TransferStateDto {
     /// Map the authoritative read-only view to the wire shape. The view only ever
-    /// resolves to `idle` or `transferred`.
+    /// resolves to `idle` or `verified` (a passive re-read never reconstructs a
+    /// `partial` / `retryable` verdict — those live in the event-driven session).
     pub fn from_view(view: TransferStateView) -> Self {
         match view {
             TransferStateView::Idle => Self::Idle,
-            TransferStateView::Transferred {
+            TransferStateView::Verified {
                 device_identifier,
                 story_id,
                 story_title,
-            } => Self::Transferred {
+                summary,
+            } => Self::Verified {
                 device_identifier,
                 story: PreparationStoryDto {
                     id: story_id,
                     title: story_title,
+                },
+                summary: TransferVerifiedSummaryDto {
+                    changed: summary.changed,
+                    unchanged: summary.unchanged,
                 },
             },
         }
@@ -193,19 +214,30 @@ mod tests {
     }
 
     #[test]
-    fn transferred_round_trips_camel_case_without_success_vocabulary() {
-        let dto = TransferStateDto::from_view(TransferStateView::Transferred {
+    fn verified_round_trips_camel_case_with_summary() {
+        let dto = TransferStateDto::from_view(TransferStateView::Verified {
             device_identifier: VALID_ID.into(),
             story_id: STORY.into(),
             story_title: "Mon histoire".into(),
+            summary: crate::domain::transfer::VerifiedSummary {
+                changed: "« Mon histoire » est maintenant sur la Lunii.".into(),
+                unchanged: "3 autres histoires de l'appareil restent inchangées.".into(),
+            },
         });
         let v = serde_json::to_value(&dto).expect("ser");
-        assert_eq!(v["kind"], "transferred");
+        assert_eq!(v["kind"], "verified");
         assert_eq!(v["deviceIdentifier"], VALID_ID);
         assert_eq!(v["story"]["id"], STORY);
-        // No success vocabulary leaks: the terminal is neutral, carrying no
-        // message that could read as "transférée et vérifiée".
-        assert!(v.get("message").is_none());
+        assert_eq!(v["story"]["title"], "Mon histoire");
+        // The AC2 summary lines travel READY-MADE (composed in Rust), camelCase.
+        assert_eq!(
+            v["summary"]["changed"],
+            "« Mon histoire » est maintenant sur la Lunii."
+        );
+        assert_eq!(
+            v["summary"]["unchanged"],
+            "3 autres histoires de l'appareil restent inchangées."
+        );
         assert!(v.get("device_identifier").is_none(), "no snake_case leak");
     }
 

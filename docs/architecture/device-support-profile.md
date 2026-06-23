@@ -366,6 +366,21 @@ coherence is enforced: the descriptor's target cohort must match the connected
 device's cohort. No new `SupportedOperation` is added — `WriteStory` already
 exists; the transfer only flips it to `true` for the write-authorized cohorts.
 
+Verification (story transfer, final phase): after a successful write the same job
+runs a read-only **`verify`** phase. It re-scans the device and re-reads its
+inventory through the `ReadLibrary` gate (true for every supported cohort) — **no
+new `SupportedOperation`**: verification is a *re-read*, not a new capability. For
+an opaque imported pack it proves, offline and key-free: the UUID is indexed in
+`.pi`, the `.content/<SHORT_ID>` folder is present, and the written bytes
+re-checksum to the prepared artifact's baseline (the exact import aggregation). It
+**cannot** decrypt, parse `ni/li/ri/si`, or inspect media — `transférée et
+vérifiée` means byte fidelity + indexing confirmed, never a semantic content
+validation. Because `verify` only runs after a write (gated `WriteStory`), the
+success path is demonstrable on **Origine v1 / Mid-Gen v2 or a fake mount only**;
+**V3 stays write-blocked**, so it never reaches `verify` (it keeps refusing before
+the write). The verify verdicts (`verified` / `partial` / `failed`) are job states,
+never new `SupportedOperation`s or error codes.
+
 Adding a new operation:
 
 1. Add a boolean field on `SupportedOperations`.

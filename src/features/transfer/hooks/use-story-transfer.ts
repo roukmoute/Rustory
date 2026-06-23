@@ -7,6 +7,7 @@ import {
 } from "../../../ipc/commands/story-transfer";
 import { subscribeJobEvents } from "../../../ipc/events/job-events";
 import { toAppError, type AppError } from "../../../shared/errors/app-error";
+import type { TransferVerifiedSummary } from "../../../shared/ipc-contracts/story-transfer";
 import { useJobShell } from "../../../shell/state/job-shell-store";
 
 /** `jobType` of the transfer flow — mirrors the Rust `JOB_TYPE_TRANSFER_STORY`. */
@@ -25,13 +26,15 @@ const DRIFT_ERROR: AppError = {
  * targets so the surface stays tied to the STORY being sent, not the transient
  * library selection: an in-flight write or a recoverable failure stays
  * consultable when the user selects another story. `transferring` is driven by
- * `job:progress` (both the `preflight` gate phase and the `transfer` write phase
- * map to it — the 3.4 scope shows a single calm "en transfert"); the terminal
- * `transferred` / `retryable` come from the AUTHORITATIVE re-read (never
- * reconstructed from events alone); `error` is a transport failure.
+ * `job:progress` (the `preflight` gate, the `transfer` write AND the final
+ * `verify` phase all map to it — the panel names the phase); the terminals come
+ * from the events + the AUTHORITATIVE re-read (never reconstructed from events
+ * alone); `error` is a transport failure.
  *
- * `transferred` is a NON-SUCCESS terminal: the bytes were written, nothing is
- * verified yet. No success vocabulary is ever produced here.
+ * `verified` is the ONLY success terminal (`transférée et vérifiée`) — reached
+ * solely when the verify phase PROVED the write. `partial` (`état partiel`) and
+ * the verify `failed` verdict (rendered as `retryable` / `échec récupérable`) are
+ * honest non-successes, never dressed up as a success.
  */
 export type StoryTransferState =
   | { kind: "idle" }
@@ -43,7 +46,26 @@ export type StoryTransferState =
        *  name it honestly even when no reliable % is known (AC1). */
       phase: string | null;
     }
-  | { kind: "transferred"; storyId: string }
+  | {
+      // Verify CONFIRMED the write — the success terminal `transférée et vérifiée`.
+      // `summary` carries the AC2 confirmation lines (what changed / stayed
+      // unchanged), composed in Rust and rendered verbatim. The ONLY place success
+      // vocabulary is ever produced, and only after proof.
+      kind: "verified";
+      storyId: string;
+      summary: TransferVerifiedSummary;
+    }
+  | {
+      // Verify found the device mutated + present but INCOHERENT — `état partiel`.
+      // A non-success, never a silent success; distinct from `incomplete`
+      // (`transfert incomplet`, a write interruption) and from `retryable`.
+      // It carries NO structured `cause`: per the F6 contract a verify terminal
+      // ships ONLY `verifyVerdict`, never a write-phase `completeness` / `cause`.
+      kind: "partial";
+      storyId: string;
+      message: string;
+      userAction: string;
+    }
   | {
       kind: "retryable";
       storyId: string;
@@ -75,8 +97,8 @@ export interface UseStoryTransfer {
   retry: () => void;
   /** Abandon the current outcome: return to `idle` WITHOUT clearing the last
    *  request, so `retry()` / `send()` stay available. Wired to the "Abandonner"
-   *  action on a `retryable` / `incomplete` terminal; the local draft is never
-   *  touched (AC3). */
+   *  action on a `partial` / `retryable` / `incomplete` terminal; the local draft
+   *  is never touched (AC3). */
   dismiss: () => void;
 }
 
@@ -122,8 +144,8 @@ export function useStoryTransfer(): UseStoryTransfer {
     }
   }, []);
 
-  // Authoritative re-read of the terminal state. Reaching a terminal (transferred
-  // / retryable / error) SETTLES the job: it stops the live subscription and
+  // Authoritative re-read of the terminal state. Reaching a terminal (verified /
+  // retryable / error) SETTLES the job: it stops the live subscription and
   // marks the call settled, so a late `job:progress` can never regress the panel
   // back to a transient phase. `onIdle` runs when the re-read cannot yet derive a
   // definitive state (device gone): the caller keeps the event-derived outcome
@@ -159,13 +181,16 @@ export function useStoryTransfer(): UseStoryTransfer {
           ) {
             return;
           }
-          if (dto.kind === "transferred") {
+          if (dto.kind === "verified") {
             settle();
-            setState({ kind: "transferred", storyId: sid });
+            // The authoritative re-read PROVED the write (indexed + content present
+            // + byte-faithful): the success terminal, carrying the AC2 summary lines
+            // composed in Rust.
+            setState({ kind: "verified", storyId: sid, summary: dto.summary });
           } else if (dto.kind === "retryable") {
             settle();
-            // `read_transfer_state` normally folds to idle/transferred, but if it
-            // ever carries the device-mutation nuance, honor it.
+            // `read_transfer_state` normally folds to idle/verified, but if it ever
+            // carries the device-mutation nuance, honor it.
             setState(
               dto.completeness === "incomplete"
                 ? {
@@ -254,11 +279,22 @@ export function useStoryTransfer(): UseStoryTransfer {
             onCompleted: (event) => {
               if (!mountedRef.current || callId !== activeJobRef.current) return;
               teardown();
-              // AC3 — the device is the truth at terminal: render `transferred`
-              // ONLY when the authoritative re-read CONFIRMS it. If the re-read
-              // folds to idle (device unplugged / state unprovable), do NOT claim
-              // "écriture effectuée" — surface an honest, recoverable UNCONFIRMED
-              // terminal. Re-running is safe: the write is idempotent.
+              // F1 — `job:completed` fires ONLY when verify CONFIRMED the write, and
+              // carries the AC2 summary ON the terminal. Settle the verified success
+              // STRAIGHT from the event: never via a re-read with the now-stale
+              // pre-write identifier (the write mutated `.pi`, so that identifier no
+              // longer resolves the device → the re-read would fold to idle and lose
+              // a legitimate success). The summary is composed in Rust, rendered
+              // verbatim.
+              if (event.summary) {
+                settledRef.current = callId;
+                clearJob(event.jobId);
+                setState({ kind: "verified", storyId, summary: event.summary });
+                return;
+              }
+              // Defensive fallback (a transfer completion always carries a summary):
+              // an authoritative re-read, and an honest unconfirmed terminal if it
+              // cannot derive a definitive success.
               reread(callId, event.jobId, storyId, deviceIdentifier, () =>
                 setState({
                   kind: "retryable",
@@ -272,30 +308,40 @@ export function useStoryTransfer(): UseStoryTransfer {
               if (!mountedRef.current || callId !== activeJobRef.current) return;
               teardown();
               // AC2/AC3 — the failure terminal is AUTHORITATIVE from the event: a
-              // `job:failed` must NEVER be flipped to `transferred` by a re-read (a
-              // pack present after e.g. a post-promote fsync failure is exactly the
-              // `incomplete` case, not a success). Settle directly from the event:
-              // `incomplete` (write started — the Lunii may hold a partial copy) vs
-              // `retryable` / `échoué` (device untouched), carrying the structured
-              // cause for the in-context decision.
+              // `job:failed` must NEVER be flipped to a success by a re-read.
+              // Settle directly from the event, distinguishing FOUR honest
+              // non-successes by their discriminant:
+              //   - verify `partial`  → `état partiel` (mutated + present but incoherent)
+              //   - verify `failed`   → `échec récupérable` (falls through to retryable)
+              //   - write `incomplete`→ `transfert incomplet` (a write interruption)
+              //   - write `failed`    → `échec récupérable` (device untouched)
               settledRef.current = callId;
               clearJob(event.jobId);
               setState(
-                event.completeness === "incomplete"
+                event.verifyVerdict === "partial"
                   ? {
-                      kind: "incomplete",
+                      // A verify `partial` terminal carries NO write `cause` (F6):
+                      // `event.cause` is always undefined here, so it is omitted.
+                      kind: "partial",
                       storyId,
-                      cause: event.cause,
                       message: event.errorMessage,
                       userAction: event.userAction,
                     }
-                  : {
-                      kind: "retryable",
-                      storyId,
-                      cause: event.cause,
-                      message: event.errorMessage,
-                      userAction: event.userAction,
-                    },
+                  : event.completeness === "incomplete"
+                    ? {
+                        kind: "incomplete",
+                        storyId,
+                        cause: event.cause,
+                        message: event.errorMessage,
+                        userAction: event.userAction,
+                      }
+                    : {
+                        kind: "retryable",
+                        storyId,
+                        cause: event.cause,
+                        message: event.errorMessage,
+                        userAction: event.userAction,
+                      },
               );
             },
           });

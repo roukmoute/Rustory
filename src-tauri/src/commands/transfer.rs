@@ -33,9 +33,9 @@ use crate::ipc::dto::{
     StartTransferStoryInputDto, TransferStateDto,
 };
 use crate::ipc::events::{
-    JobCompletedEvent, JobFailedEvent, JobProgressEvent, EVENT_JOB_COMPLETED, EVENT_JOB_FAILED,
-    EVENT_JOB_PROGRESS, JOB_TYPE_PREPARE_STORY, JOB_TYPE_TRANSFER_STORY, PREPARATION_FAILED_CODE,
-    TRANSFER_FAILED_CODE,
+    JobCompletedEvent, JobCompletedSummary, JobFailedEvent, JobProgressEvent, EVENT_JOB_COMPLETED,
+    EVENT_JOB_FAILED, EVENT_JOB_PROGRESS, JOB_TYPE_PREPARE_STORY, JOB_TYPE_TRANSFER_STORY,
+    PREPARATION_FAILED_CODE, TRANSFER_FAILED_CODE,
 };
 use crate::AppState;
 
@@ -76,12 +76,32 @@ impl PreparationEventEmitter for TauriJobEmitter {
                 job_type: self.job_type.to_string(),
                 target_story_id: self.story_id.clone(),
                 sequence,
+                summary: None,
+            },
+        );
+    }
+
+    fn completed_verified(&self, changed: &str, unchanged: &str, sequence: u64) {
+        // Carry the AC2 confirmation summary ON the terminal so the UI renders the
+        // verified success straight from the event — never via a re-read with the
+        // now-stale pre-write device identifier (F1).
+        let _ = self.app.emit(
+            EVENT_JOB_COMPLETED,
+            JobCompletedEvent {
+                job_id: self.job_id.clone(),
+                job_type: self.job_type.to_string(),
+                target_story_id: self.story_id.clone(),
+                sequence,
+                summary: Some(JobCompletedSummary {
+                    changed: changed.to_string(),
+                    unchanged: unchanged.to_string(),
+                }),
             },
         );
     }
 
     fn failed(&self, message: &str, user_action: &str, sequence: u64) {
-        self.emit_failed(message, user_action, None, None, sequence);
+        self.emit_failed(message, user_action, None, None, None, sequence);
     }
 
     fn failed_with_completeness(
@@ -97,6 +117,20 @@ impl PreparationEventEmitter for TauriJobEmitter {
             user_action,
             completeness.map(str::to_string),
             cause.map(str::to_string),
+            None,
+            sequence,
+        );
+    }
+
+    fn failed_verify(&self, message: &str, user_action: &str, verdict: &str, sequence: u64) {
+        // A verify terminal carries ONLY the verify verdict — no write-phase
+        // completeness/cause (those describe how a WRITE ended, not a re-read).
+        self.emit_failed(
+            message,
+            user_action,
+            None,
+            None,
+            Some(verdict.to_string()),
             sequence,
         );
     }
@@ -112,6 +146,7 @@ impl TauriJobEmitter {
         user_action: &str,
         completeness: Option<String>,
         cause: Option<String>,
+        verify_verdict: Option<String>,
         sequence: u64,
     ) {
         let _ = self.app.emit(
@@ -126,6 +161,7 @@ impl TauriJobEmitter {
                 user_action: user_action.to_string(),
                 completeness,
                 cause,
+                verify_verdict,
             },
         );
     }
@@ -237,6 +273,7 @@ pub async fn start_prepare_story(
                         user_action: "Relance la préparation.".to_string(),
                         completeness: None,
                         cause: None,
+                        verify_verdict: None,
                     },
                 );
                 transfer_log::Event::PreparationFailed {
@@ -368,8 +405,17 @@ pub async fn start_transfer_story(
         let elapsed_ms = started.elapsed().as_millis() as u64;
         let story_ref = transfer_log::story_ref(&emitter_story_id);
         let trace = match &outcome {
-            Ok(TransferOutcome::Transferred { .. }) => transfer_log::Event::TransferCompleted {
+            Ok(TransferOutcome::Verified { .. }) => transfer_log::Event::TransferCompleted {
                 story_ref,
+                verify_verdict: "verified",
+                elapsed_ms,
+            },
+            // A verify terminal records the verdict, not a write-phase cause.
+            Ok(TransferOutcome::Unverified { verdict }) => transfer_log::Event::TransferFailed {
+                story_ref,
+                cause: None,
+                completeness: None,
+                verify_verdict: Some(verdict.diagnostic_tag()),
                 elapsed_ms,
             },
             Ok(TransferOutcome::Retryable {
@@ -377,14 +423,16 @@ pub async fn start_transfer_story(
                 completeness,
             }) => transfer_log::Event::TransferFailed {
                 story_ref,
-                cause: cause.diagnostic_tag(),
-                completeness: completeness.diagnostic_tag(),
+                cause: Some(cause.diagnostic_tag()),
+                completeness: Some(completeness.diagnostic_tag()),
+                verify_verdict: None,
                 elapsed_ms,
             },
             Ok(TransferOutcome::Transport { .. }) => transfer_log::Event::TransferFailed {
                 story_ref,
-                cause: "transport",
-                completeness: "failed",
+                cause: Some("transport"),
+                completeness: Some("failed"),
+                verify_verdict: None,
                 elapsed_ms,
             },
             Err(_join) => {
@@ -411,12 +459,14 @@ pub async fn start_transfer_story(
                         user_action: "Relance l'envoi pour rétablir un état sûr.".to_string(),
                         completeness: Some("incomplete".to_string()),
                         cause: None,
+                        verify_verdict: None,
                     },
                 );
                 transfer_log::Event::TransferFailed {
                     story_ref,
-                    cause: "interrupted",
-                    completeness: "incomplete",
+                    cause: Some("interrupted"),
+                    completeness: Some("incomplete"),
+                    verify_verdict: None,
                     elapsed_ms,
                 }
             }

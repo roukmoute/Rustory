@@ -648,8 +648,9 @@ phases; the rest/failure outcomes reuse the existing MVP states:
 | `prepared` | rest state: keeps `présumée transférable` + a discreet `Préparée` indicator | Artifacts assembled and fresh. NOT a transfer success — it never enables the send. |
 | `retryable` | `échec récupérable` | Keep enough context for `Relancer`. |
 
-The `transfer` and `verify` phases of the machine are **declared but never
-emitted here** (a later write / verification step owns them) — no false coverage.
+The `transfer` and `verify` phases of the machine are **never emitted by the
+preparation flow** — they belong to the device-write flow (see the `Story
+Transfer Contract` and the `Story Verification Contract` below, both implemented).
 In MVP there is **no media transcoding** to perform (the available stories are
 raw imported packs already in device format, or minimal native stories with an
 empty `nodes`): the media transformer is declared but has no live implementation,
@@ -742,21 +743,25 @@ single clear target), disabled everywhere else with a standardized
 `Envoi indisponible: …` reason. **No confirmation modal** is shown when the
 context and target are unambiguous (single local selection + one writable device).
 
-**Observable phase.** The transfer branches the machine's `transfer` phase
-(declared by the preparation contract, emitted here):
+**Observable phase.** The transfer drives the machine's `transfer` then `verify`
+phases on the same job (the `verify` phase is the FINAL phase — see the `Story
+Verification Contract` below):
 
 | Internal phase / state | UI Label | Notes |
 | --- | --- | --- |
 | `transferring` | `en transfert` + honest progress | The write runs in the background; the library stays usable. A `%` bar appears ONLY during the measurable content copy — never a fake value nor 100 % before the terminal; a named phase otherwise. A non-destructive `Consulter le détail` discloses the phase / progress in-context (no cancel — out of scope). |
-| terminal (write done) | non-success line `écriture effectuée — vérification à venir` | NEVER `transférée et vérifiée` / `état partiel` (a verification step owns those). |
-| `retryable` (`échoué`) | `échec récupérable` | The device was left UNTOUCHED. Keep enough context for `Relancer` / `Abandonner`. The local draft is preserved in full. |
+| `verify` (TRANSIENT, not a resting terminal) | `écriture effectuée — vérification à venir` | The write is done; the read-only verification re-read is running. It settles to one of the verdicts below. |
+| `verified` (terminal) | `transférée et vérifiée` | Verification PROVED the write (indexed + content present + byte-faithful). The sober success + the AC2 summary (what changed / stayed unchanged / final state). |
+| `partial` (terminal) | `état partiel` | Verification re-read the device but confirmed only an incoherent/incomplete result. Never collapsed into success. Distinct from `transfert incomplet`. `Relancer` / `Abandonner`. |
+| `retryable` (`échoué`) | `échec récupérable` | The device was left UNTOUCHED (a write-phase refusal), OR the verification could not confirm the result (device gone / unreadable during `verify`). Keep enough context for `Relancer` / `Abandonner`. The local draft is preserved in full. |
 | `incomplete` | `transfert incomplet` | The write STARTED then was interrupted (device mutated): the Lunii may hold a partial copy; a relaunch (full cycle) restores a safe state. Distinct from `état partiel`. `Relancer` / `Abandonner`. |
 
-**No false success (AC3).** No success is communicated until BOTH the write AND a
-verification have completed. After a successful write the job reaches an **honest,
-non-success** terminal (`écriture effectuée — vérification à venir`); the
-`transférée et vérifiée` and `état partiel` labels stay reserved for a later
-verification flow. An interruption / failure (device unplugged mid-write,
+**No false success (AC3).** No success is communicated until BOTH the write AND the
+verification have completed. After a successful write the job enters the TRANSIENT
+`verify` phase (`écriture effectuée — vérification à venir`), which settles to
+`transférée et vérifiée` (proof passed), `état partiel` (re-read incoherent) or
+`échec récupérable` (re-read could not confirm) — `transférée et vérifiée` is
+**never** shown without the verification proof. An interruption / failure (device unplugged mid-write,
 `.content` not writable, no space, a stale / corrupt descriptor, a native story
 with no device-format pack) is the terminal `retryable` state: the canonical story
 is **never** mutated (FR18), there is **no partial resume** (a failed transfer
@@ -806,25 +811,97 @@ On a terminal event the UI performs an **authoritative re-read**
 **Surface.** The transfer block lives **inside** the decision panel, in a
 `<section aria-label="Transfert" aria-live="polite">`, sibling to the preparation
 region. It renders: `transferring` → a `StateChip` `en transfert` + honest
-progress + a non-destructive `Consulter le détail` disclosure; the write-done
-terminal → the factual non-success line; `retryable` (`échoué`) → `échec
-récupérable`; `incomplete` → the distinct `transfert incomplet` chip (its own
-glyph) + the partial-copy message; both failure terminals offer `Relancer` AND
-`Abandonner`; transport `error` → the in-context message + `Réessayer`; never a
-toast. Each state uses a non-color signal (glyph + text). The story-card badge
-reflects `en transfert` / `échec récupérable` / `transfert incomplet` through the
-existing `StateChip`.
+progress + a non-destructive `Consulter le détail` disclosure; the TRANSIENT
+`verify` phase → the factual `écriture effectuée — vérification à venir` line;
+`verified` → a `success` `StateChip` `transférée et vérifiée` + the sober summary
+(`« <Titre> » est maintenant sur la Lunii` + how many other stories stayed
+unchanged), `aria-live="polite"`, never an alert; `partial` → a `warning`
+`StateChip` `état partiel` (distinct text from `transfert incomplet`) in
+`role="alert"`; `retryable` (`échoué`) → `échec récupérable`; `incomplete` → the
+distinct `transfert incomplet` chip (its own glyph) + the partial-copy message;
+the non-success failure terminals offer `Relancer` AND `Abandonner`; transport
+`error` → the in-context message + `Réessayer`; never a toast. Each state uses a
+non-color signal (glyph + text). The story-card badge reflects `en transfert` /
+`transférée et vérifiée` / `état partiel` / `échec récupérable` / `transfert
+incomplet` through the existing `StateChip`.
 
 **No new persistence.** Like the preview / verdict / preparation, the transfer is
 not resumable, so there is no job table and no migration — the appliance is the
 truth (re-scan), the state is re-derived via the authoritative re-read.
 
-**Error contract.** The transfer states (`transferring` / write-done terminal /
-`retryable`) are outcomes of a **successful** read, never an error. Only a
-**transport** failure that prevents even producing a terminal job outcome becomes
-an `AppError` — a new code `TRANSFER_FAILED`, reserved for transport (the exact
-parallel of `PREPARATION_FAILED`). A **functional** transfer failure is the
-terminal `retryable` state of the job, not a raw `AppError`.
+**Error contract.** The transfer states (`transferring` / `verify` / `verified` /
+`partial` / `retryable`) are outcomes of a **successful** read, never an error.
+Only a **transport** failure that prevents even producing a terminal job outcome
+becomes an `AppError` — `TRANSFER_FAILED`, reserved for transport (the exact
+parallel of `PREPARATION_FAILED`). A **functional** transfer/verify failure is a
+terminal job state (`retryable` / `partial`), not a raw `AppError`; the verify
+verdicts are job states too, never new error codes.
+
+## Story Verification Contract
+
+The **`verify` phase is the FINAL phase of the same `transfer_story` job**, emitted
+automatically after a successful write — never a separate command or job. It is the
+explicit proof the reliability NFR requires ("no success shown before the required
+verification step completes"): it PROVES what the write CLAIMS.
+
+**Read-only re-read, gated `ReadLibrary`.** Verification re-scans the device, then
+reads its inventory through the proven `read_library` path. It reuses the
+`ReadLibrary` capability (true for every MVP cohort) — there is **no new
+`SupportedOperation`**. Because the write itself is gated `WriteStory` (V1/V2 ✅,
+V3 ❌), `verify` only ever runs after a write on a write-authorized cohort, so the
+success path (`verified`) is demonstrable on V1/V2 or a fake mount; V3 keeps
+blocking **before** the write, never reaching `verify`. It writes nothing — the
+device and the canonical draft are never mutated (FR18).
+
+**Three honest verdicts.** From the re-read facts:
+
+| Verdict | UI Label | When |
+| --- | --- | --- |
+| `verified` | `transférée et vérifiée` | The UUID is indexed in `.pi`, the `.content/<SHORT_ID>` folder is present, AND the device bytes re-checksum to the prepared baseline (byte fidelity). |
+| `partial` | `état partiel` | The device was mutated and the pack is present but NOT fully coherent (e.g. indexed but the bytes diverge, or content present but not indexed). A non-success, never a silent success. |
+| `failed` | `échec récupérable` | The re-read PROVES the write did not land (pack absent) OR cannot confirm it (device gone / unreadable during `verify`). A reconnected relaunch re-verifies. |
+
+**What is really verifiable.** On an opaque imported pack, verification proves —
+offline, key-free — that the UUID is indexed, the content folder is present, and
+the written bytes re-checksum to the prepared artifact's baseline (the EXACT import
+aggregation: `rel_path` + NUL + bytes, in manifest order). It does **not** decrypt,
+inspect media, or validate the internal pack structure. `transférée et vérifiée`
+means **byte fidelity + indexing confirmed — nothing more**; it never implies a
+semantic content validation.
+
+**Continuity, not pre-write identity.** A successful write mutates `.pi`, so the
+device identity Rustory derives from it legitimately CHANGES across the write —
+the pre-write identifier can no longer be re-pinned. The in-job verify therefore
+binds to the device it WROTE TO via a STABLE proof that survives the `.pi`
+mutation: the USB **volume serial** (falling back to the written **mount path**
+when no serial is available). A Lunii swapped after the write for ANOTHER
+supported device — even one that already holds the same pack + bytes — fails this
+continuity check and ends `failed`, so `verified` is never attributed to the wrong
+device; a vanished / ambiguous device is `failed` too. Content presence is probed
+on `.content/<SHORT_ID>` INDEPENDENTLY of the `.pi` index (a promoted-but-unindexed
+pack reads as present ⇒ `état partiel`, not a false `failed`); a readable byte
+DIVERGENCE is `état partiel`, while an ABSENT pack or an UNCONFIRMABLE re-checksum
+is `failed`. The later authoritative `read_transfer_state` is pinned to the
+(re-detected) target device.
+
+**Confirmation summary (FR15), composed in Rust, carried on the terminal.** On
+`verified` the panel shows a sober confirmation summarizing what changed (`« <Titre>
+» est maintenant sur la Lunii`) and what stayed unchanged (the N other device
+stories — reusing the comparison's `unchanged_count`). Both lines are **composed in
+Rust** and travel READY-MADE on the `job:completed` event, so the UI renders the
+success straight from the terminal — never via a re-read with the now-stale
+pre-write identifier — and never recomposes the text in React. `aria-live="polite"`,
+never a toast / modal. `état partiel` and `échec récupérable` are shown
+`role="alert"` in-context with `Relancer` / `Abandonner`.
+
+**No new persistence.** The verdict lives in the live transfer-hook state (sticky
+via the same settle/teardown discipline); the `verified` success is settled from
+the `job:completed` summary, and `read_transfer_state` can also re-derive `verified`
+on demand (same re-scan + re-checksum) for a re-mount with a freshly detected id. A
+transient `partial` / `failed` verdict is NOT reproduced by the passive re-read — it
+belongs to the live session, like the write failure. There is no `transfer_jobs`
+table and no migration; durable cross-session memory (recovering the verdict after
+an app restart) is a later flow.
 
 ## Official Catalog Contract
 

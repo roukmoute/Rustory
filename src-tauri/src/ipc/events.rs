@@ -55,6 +55,17 @@ pub struct JobProgressEvent {
     pub message: Option<String>,
 }
 
+/// The `verified` confirmation summary carried on a transfer `job:completed`
+/// (AC2/FR15) — composed in Rust, rendered VERBATIM by the panel.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct JobCompletedSummary {
+    /// "« <Titre> » est maintenant sur la Lunii." — what changed + final state.
+    pub changed: String,
+    /// "N autres histoires de l'appareil restent inchangées." — what stayed.
+    pub unchanged: String,
+}
+
 /// `job:completed` payload — a successful terminal state.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -63,6 +74,11 @@ pub struct JobCompletedEvent {
     pub job_type: String,
     pub target_story_id: String,
     pub sequence: u64,
+    /// Transfer-`verified`-only: the AC2 confirmation summary. The UI renders the
+    /// success straight from this event (no stale-identifier re-read). ABSENT for
+    /// preparation `job:completed` (no verified summary).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub summary: Option<JobCompletedSummary>,
 }
 
 /// `job:failed` payload — a failure terminal state with a non-empty
@@ -90,6 +106,13 @@ pub struct JobFailedEvent {
     /// non-classifiable defensive terminal.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cause: Option<String>,
+    /// Verify-only: the `verify` verdict discriminant — `"partial"` (`état
+    /// partiel`) or `"failed"` (`échec récupérable`). PRESENT only on a
+    /// verify-phase terminal so the UI renders the right non-success label,
+    /// DISTINCT from a write-phase `transfert incomplet` / `échec récupérable`.
+    /// ABSENT for write-phase failures and for preparation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub verify_verdict: Option<String>,
 }
 
 #[cfg(test)]
@@ -125,17 +148,45 @@ mod tests {
     }
 
     #[test]
-    fn completed_serializes_camel_case() {
+    fn completed_serializes_camel_case_and_omits_absent_summary() {
         let ev = JobCompletedEvent {
             job_id: "j1".into(),
             job_type: JOB_TYPE_PREPARE_STORY.into(),
             target_story_id: "s1".into(),
             sequence: 3,
+            summary: None,
         };
         let v = serde_json::to_value(&ev).expect("ser");
         assert_eq!(v["jobId"], "j1");
         assert_eq!(v["targetStoryId"], "s1");
         assert_eq!(v["sequence"], 3);
+        assert!(
+            v.get("summary").is_none(),
+            "a preparation completion carries no verified summary"
+        );
+    }
+
+    #[test]
+    fn completed_carries_the_verified_summary_when_present() {
+        let ev = JobCompletedEvent {
+            job_id: "j1".into(),
+            job_type: JOB_TYPE_TRANSFER_STORY.into(),
+            target_story_id: "s1".into(),
+            sequence: 4,
+            summary: Some(JobCompletedSummary {
+                changed: "« Mon histoire » est maintenant sur la Lunii.".into(),
+                unchanged: "2 autres histoires de l'appareil restent inchangées.".into(),
+            }),
+        };
+        let v = serde_json::to_value(&ev).expect("ser");
+        assert_eq!(
+            v["summary"]["changed"],
+            "« Mon histoire » est maintenant sur la Lunii."
+        );
+        assert_eq!(
+            v["summary"]["unchanged"],
+            "2 autres histoires de l'appareil restent inchangées."
+        );
     }
 
     #[test]
@@ -150,6 +201,7 @@ mod tests {
             user_action: "Relance la préparation.".into(),
             completeness: None,
             cause: None,
+            verify_verdict: None,
         };
         let v = serde_json::to_value(&ev).expect("ser");
         assert_eq!(v["errorCode"], "PREPARATION_FAILED");
@@ -162,6 +214,10 @@ mod tests {
             "completeness omitted when None"
         );
         assert!(v.get("cause").is_none(), "cause omitted when None");
+        assert!(
+            v.get("verifyVerdict").is_none(),
+            "verifyVerdict omitted when None"
+        );
     }
 
     #[test]
@@ -176,10 +232,37 @@ mod tests {
             user_action: "Relance l'envoi.".into(),
             completeness: Some("incomplete".into()),
             cause: Some("writeRejected".into()),
+            verify_verdict: None,
         };
         let v = serde_json::to_value(&ev).expect("ser");
         assert_eq!(v["completeness"], "incomplete");
         assert_eq!(v["cause"], "writeRejected");
+        assert!(
+            v.get("verifyVerdict").is_none(),
+            "a write-phase failure carries no verify verdict"
+        );
+    }
+
+    #[test]
+    fn failed_carries_the_verify_verdict_when_present() {
+        let ev = JobFailedEvent {
+            job_id: "j1".into(),
+            job_type: JOB_TYPE_TRANSFER_STORY.into(),
+            target_story_id: "s1".into(),
+            sequence: 4,
+            error_code: TRANSFER_FAILED_CODE.into(),
+            error_message: "Envoi dans un état partiel.".into(),
+            user_action: "Relance l'envoi.".into(),
+            // A verify terminal carries ONLY the verdict — never a write-phase
+            // completeness/cause (those describe how a WRITE ended, not a re-read).
+            completeness: None,
+            cause: None,
+            verify_verdict: Some("partial".into()),
+        };
+        let v = serde_json::to_value(&ev).expect("ser");
+        assert_eq!(v["verifyVerdict"], "partial");
+        assert!(v.get("completeness").is_none());
+        assert!(v.get("cause").is_none());
     }
 
     #[test]

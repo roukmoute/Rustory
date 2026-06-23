@@ -80,6 +80,11 @@ pub(crate) struct ResolvedScan {
     /// Present ONLY when `outcome` is `Supported` with exactly one
     /// candidate.
     pub(crate) supported_mount_path: Option<PathBuf>,
+    /// The supported candidate's USB volume serial, when the scanner could read
+    /// it. STABLE across a `.pi` mutation (unlike `device_identifier`, which hashes
+    /// `.pi`), so the transfer `verify` phase uses it to prove device continuity
+    /// after a write changed `.pi`. Present ONLY alongside `supported_mount_path`.
+    pub(crate) supported_volume_serial: Option<String>,
     pub(crate) mount_attempts: Vec<MountAttempt>,
 }
 
@@ -119,11 +124,12 @@ pub(crate) fn resolve_connected_lunii(
         return Ok(ResolvedScan {
             outcome: ConnectedLuniiOutcome::None,
             supported_mount_path: None,
+            supported_volume_serial: None,
             mount_attempts,
         });
     }
 
-    let mut supported: Vec<(DeviceProfile, PathBuf)> = Vec::new();
+    let mut supported: Vec<(DeviceProfile, PathBuf, Option<String>)> = Vec::new();
     let mut unsupported: Vec<(UnsupportedReason, Option<String>)> = Vec::new();
 
     for candidate in report.candidates {
@@ -149,7 +155,7 @@ pub(crate) fn resolve_connected_lunii(
             compute_device_identifier(&candidate.pi_payload, candidate.volume_serial.as_deref());
         match classify_lunii(metadata_version, true, candidate.has_bt, &identifier) {
             DeviceProfileClassification::Supported(profile) => {
-                supported.push((profile, candidate.mount_path))
+                supported.push((profile, candidate.mount_path, candidate.volume_serial))
             }
             DeviceProfileClassification::Unsupported {
                 reason,
@@ -165,13 +171,15 @@ pub(crate) fn resolve_connected_lunii(
                 candidate_count: supported.len() as u32,
             },
             supported_mount_path: None,
+            supported_volume_serial: None,
             mount_attempts,
         });
     }
-    if let Some((profile, mount_path)) = supported.into_iter().next() {
+    if let Some((profile, mount_path, volume_serial)) = supported.into_iter().next() {
         return Ok(ResolvedScan {
             outcome: ConnectedLuniiOutcome::Supported(profile),
             supported_mount_path: Some(mount_path),
+            supported_volume_serial: volume_serial,
             mount_attempts,
         });
     }
@@ -182,12 +190,14 @@ pub(crate) fn resolve_connected_lunii(
                 firmware_hint: hint,
             },
             supported_mount_path: None,
+            supported_volume_serial: None,
             mount_attempts,
         });
     }
     Ok(ResolvedScan {
         outcome: ConnectedLuniiOutcome::None,
         supported_mount_path: None,
+        supported_volume_serial: None,
         mount_attempts,
     })
 }

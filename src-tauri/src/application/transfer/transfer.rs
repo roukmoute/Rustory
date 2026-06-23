@@ -36,9 +36,11 @@ use crate::domain::device::SupportedOperation;
 use crate::domain::shared::AppError;
 use crate::domain::story::{validate_canonical, CanonicalBlocker, CanonicalStoryFacts};
 use crate::domain::transfer::{
-    build_write_plan, classify, ensure_cohort_coherent, ensure_descriptor_coherent, failure_copy,
-    gate_prepare, short_id_from_pack_uuid, verify_aggregate, PreparationPhase,
-    TransferArtifactDescriptor, TransferCompleteness, TransferFailureCause,
+    build_write_plan, classify, classify_verify, compose_verified_summary, ensure_cohort_coherent,
+    ensure_descriptor_coherent, failure_copy, gate_prepare, short_id_from_pack_uuid,
+    verify_aggregate, ChecksumProbe, PreparationFailureCause, PreparationPhase,
+    TransferArtifactDescriptor, TransferCompleteness, TransferFailureCause, VerifiedSummary,
+    VerifyVerdict,
 };
 use crate::infrastructure::db::DbHandle;
 use crate::infrastructure::device::{
@@ -50,20 +52,25 @@ use crate::infrastructure::filesystem::{
 
 use super::prepare::PreparationEventEmitter;
 
-/// What the background write job produced — returned to the command for a local
-/// trace only (the UI learns the truth from the events + the authoritative
+/// What the background write+verify job produced — returned to the command for a
+/// local trace only (the UI learns the truth from the events + the authoritative
 /// re-read).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TransferOutcome {
-    /// The pack was written to the device. This is the HONEST non-success
-    /// terminal "écriture effectuée — vérification à venir" — NOT a verified
-    /// success (verification belongs to a later story).
-    Transferred {
+    /// The write landed AND the `verify` phase confirmed it (indexed + content
+    /// present + byte-faithful) — the legitimate success `transférée et vérifiée`.
+    /// `summary` carries the AC2/FR15 confirmation lines (composed in Rust).
+    Verified {
         device_identifier: String,
         story_id: String,
         story_title: String,
+        summary: VerifiedSummary,
     },
-    /// A functional failure — a terminal `retryable` job state (NOT an
+    /// The write landed but the `verify` phase did NOT confirm it: `Partial`
+    /// (`état partiel`) or `Failed` (`échec récupérable`) — a non-success terminal,
+    /// never dressed up as a success. The canonical draft is preserved.
+    Unverified { verdict: VerifyVerdict },
+    /// A WRITE-phase functional failure — a terminal `retryable` job state (NOT an
     /// `AppError`). The canonical draft is preserved. `completeness` distinguishes
     /// a device left intact (`Failed` → `échec récupérable`) from one that may
     /// hold a partial copy (`Incomplete` → `transfert incomplet`).
@@ -77,23 +84,25 @@ pub enum TransferOutcome {
 }
 
 /// The authoritative re-read state. Read-only and idempotent, it reports only
-/// what the DEVICE proves: whether the selected story's pack is currently
-/// present on the connected writable device. The transient `transferring` phase
-/// and the `retryable` failure terminal are EVENT-driven (the frontend holds
-/// them from `job:*`); a passive re-read never reconstructs a failure (the write
-/// failure modes only happen during the write itself), so it resolves to `Idle`
-/// or `Transferred`.
+/// what the DEVICE proves: whether the selected story's pack is currently present
+/// on the connected writable device AND byte-faithful (re-checksum). The
+/// transient `transferring` / `verifying` phases and the `partial` / `retryable`
+/// terminals are EVENT-driven (the frontend holds them from `job:*`); a passive
+/// re-read never reconstructs a non-success verdict (they belong to the live
+/// session), so it resolves to `Idle` or `Verified`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TransferStateView {
     /// No writable device, the story is not transferable, or its pack is not
-    /// (yet) present on the device.
+    /// (yet) present + byte-faithful on the device.
     Idle,
-    /// The story's pack is present on the connected writable device ("écriture
-    /// effectuée — vérification à venir"). NOT a verified success.
-    Transferred {
+    /// The story's pack is present on the connected writable device AND its bytes
+    /// re-checksum to the prepared baseline — `transférée et vérifiée`.
+    /// `summary` carries the AC2 confirmation lines (composed in Rust).
+    Verified {
         device_identifier: String,
         story_id: String,
         story_title: String,
+        summary: VerifiedSummary,
     },
 }
 
@@ -112,6 +121,19 @@ struct ConfirmedTransfer {
     /// Whether the story's pack is already present on the device (UUID indexed +
     /// its `.content` folder there). Used by the read-only re-read.
     pack_present: bool,
+    /// The FRESH mount path of the confirmed device (never crosses IPC). The
+    /// read-only re-read re-checksums the device pack here without a second scan.
+    mount_path: PathBuf,
+    /// The confirmed device's USB volume serial (when available) — STABLE across
+    /// the write's `.pi` mutation. The `verify` phase uses it to prove it is
+    /// re-reading the SAME device it wrote to, not a swapped Lunii.
+    volume_serial: Option<String>,
+    /// Total device-resident stories — the base for the AC2 `unchanged_count`.
+    device_entry_count: usize,
+    /// How many inventory entries match this story's pack UUID (≥ 1 ⇒ a send
+    /// touches that content; ALL occurrences, incl. a `.pi`/`.pi.hidden`
+    /// duplicate, are excluded from the unchanged count — the 3.1 precedent).
+    pack_match_count: usize,
 }
 
 /// Outcome of the read-only transfer preflight. `NotConfirmed` carries the HONEST
@@ -277,11 +299,63 @@ pub fn transfer_story(
         &report,
     ) {
         Ok(()) => {
-            emitter.completed(next_sequence(&sequence));
-            TransferOutcome::Transferred {
-                device_identifier: confirmed.device_identifier,
-                story_id: story_id.to_string(),
-                story_title: confirmed.story_title,
+            // The writer reports success; PROVE it (NFR: "no success without
+            // explicit verification of the expected result"). Enter the FINAL
+            // `verify` phase of the SAME job: re-read the device and re-checksum
+            // what landed, then classify the verdict. "écriture effectuée —
+            // vérification à venir" is now the TRANSIENT label of this phase.
+            emitter.progress(PreparationPhase::Verify, None, next_sequence(&sequence));
+            let facts = verify_written_pack(
+                scanner,
+                library_reader,
+                artifact_source,
+                &pack_uuid,
+                &short_id,
+                &confirmed.expected_aggregate,
+                &mount_path,
+                confirmed.volume_serial.as_deref(),
+                write_budget,
+            );
+            match classify_verify(
+                facts.indexed,
+                facts.content_present,
+                facts.checksum,
+                facts.readable,
+            ) {
+                VerifyVerdict::Verified => {
+                    // Compose the AC2 summary in Rust and carry it ON the terminal
+                    // event (F1/F5): the UI renders `verified` straight from the
+                    // event, never via a re-read with the now-stale pre-write
+                    // identifier, and never re-composes the lines in React.
+                    let summary =
+                        compose_verified_summary(&confirmed.story_title, facts.unchanged_count);
+                    emitter.completed_verified(
+                        &summary.changed,
+                        &summary.unchanged,
+                        next_sequence(&sequence),
+                    );
+                    TransferOutcome::Verified {
+                        device_identifier: confirmed.device_identifier,
+                        story_id: story_id.to_string(),
+                        story_title: confirmed.story_title,
+                        summary,
+                    }
+                }
+                // Honest non-success: NEVER dressed up as a success, NEVER the
+                // `transfert incomplet` write-phase wording. Reuse the failure
+                // channel carrying the verify-verdict discriminant so the UI
+                // renders `état partiel` (partial) vs `échec récupérable` (failed).
+                verdict @ (VerifyVerdict::Partial | VerifyVerdict::Failed) => {
+                    let (message, action) =
+                        verdict.copy().expect("a non-success verdict carries copy");
+                    emitter.failed_verify(
+                        message,
+                        action,
+                        verdict.diagnostic_tag(),
+                        next_sequence(&sequence),
+                    );
+                    TransferOutcome::Unverified { verdict }
+                }
             }
         }
         // The writer reports whether the device was already mutated; the domain
@@ -313,6 +387,122 @@ fn fail(
     TransferOutcome::Retryable {
         cause,
         completeness,
+    }
+}
+
+/// Facts the read-only `verify` re-read produces, consumed by [`classify_verify`].
+struct VerifyFacts {
+    /// The device re-read succeeded AND is the device we wrote to (re-scan +
+    /// supported + `ReadLibrary` + continuity). `false` ⇒ device gone / unreadable
+    /// / swapped ⇒ cannot confirm ⇒ `Failed`.
+    readable: bool,
+    /// The pack UUID is listed in the device inventory (`.pi` / `.pi.hidden`).
+    indexed: bool,
+    /// The pack's `.content/<SHORT_ID>` folder is present on the device — probed
+    /// INDEPENDENTLY of the index (so a promoted-but-unindexed pack is detected).
+    content_present: bool,
+    /// The device-pack re-checksum outcome (match / readable divergence / unable).
+    checksum: ChecksumProbe,
+    /// How many OTHER device stories a send left untouched (AC2/FR15 summary).
+    unchanged_count: u32,
+}
+
+/// Read-only `verify` re-read run AFTER a successful write: re-scan the device,
+/// confirm the SAME device we wrote to is still present (gate `ReadLibrary` +
+/// continuity), read its inventory and re-checksum the written pack against the
+/// prepared baseline. Produces the facts [`classify_verify`] turns into a verdict.
+///
+/// **Continuity, not pre-write identity (F1/F2).** The write itself mutates `.pi`,
+/// so the device's derived `device_identifier` legitimately CHANGES across the
+/// write — it cannot be re-pinned. Instead the verify binds to the device we wrote
+/// to via its STABLE USB `volume_serial` (falling back to the written mount path
+/// when no serial is available): a Lunii swapped after the write for ANOTHER
+/// supported device — even one that already holds the same pack + bytes — fails the
+/// continuity check (`readable == false` ⇒ `Failed`), so `verified` is never
+/// attributed to the wrong device. Strictly read-only (FR18).
+#[allow(clippy::too_many_arguments)]
+fn verify_written_pack(
+    scanner: &dyn DeviceScanner,
+    library_reader: &dyn DeviceLibraryReader,
+    artifact_source: &dyn TransferArtifactSource,
+    pack_uuid: &str,
+    short_id: &str,
+    expected_aggregate: &str,
+    written_mount_path: &Path,
+    expected_serial: Option<&str>,
+    budget: Duration,
+) -> VerifyFacts {
+    let unreadable = VerifyFacts {
+        readable: false,
+        indexed: false,
+        content_present: false,
+        checksum: ChecksumProbe::Unavailable,
+        unchanged_count: 0,
+    };
+
+    let started = Instant::now();
+    let resolved = match resolve_connected_lunii(scanner, budget) {
+        Ok(resolved) => resolved,
+        Err(_) => return unreadable,
+    };
+    let profile = match resolved.outcome {
+        ConnectedLuniiOutcome::Supported(profile) => profile,
+        _ => return unreadable,
+    };
+    if check_operation_allowed(&profile, SupportedOperation::ReadLibrary).is_err() {
+        return unreadable;
+    }
+    let mount_path = match resolved.supported_mount_path {
+        Some(path) => path,
+        None => return unreadable,
+    };
+    // F2 — continuity proof that survives the write's `.pi` mutation: the volume
+    // serial (stable) when available, else the written mount path. A swap to a
+    // different device (different serial) is NOT the device we wrote to.
+    let bound = match (expected_serial, resolved.supported_volume_serial.as_deref()) {
+        (Some(expected), Some(seen)) => expected == seen,
+        _ => mount_path == written_mount_path,
+    };
+    if !bound {
+        return unreadable;
+    }
+    let remaining = budget.saturating_sub(started.elapsed());
+    let library = match library_reader.read_library(&mount_path, remaining) {
+        Ok(library) => library,
+        Err(_) => return unreadable,
+    };
+
+    let indexed = library.entries.iter().any(|e| e.uuid == pack_uuid);
+    let pack_match_count = library
+        .entries
+        .iter()
+        .filter(|e| e.uuid == pack_uuid)
+        .count();
+    let unchanged_count = (library.entries.len() as u32).saturating_sub(pack_match_count as u32);
+
+    // F3/F4 — probe `.content/<SHORT_ID>` INDEPENDENTLY of the `.pi` index by
+    // re-reading the content folder directly, and distinguish a readable DIVERGENCE
+    // (present but incoherent ⇒ `Partial`) from an ABSENT pack or an UNCONFIRMABLE
+    // re-read (⇒ `Failed`). The re-checksum reads the folder regardless of whether
+    // the UUID is indexed, so a promoted-but-unindexed pack reads as present.
+    let remaining = budget.saturating_sub(started.elapsed());
+    let (content_present, checksum) =
+        match artifact_source.reaggregate_device_pack(&mount_path, short_id, remaining) {
+            Ok(aggregate) if aggregate == expected_aggregate => (true, ChecksumProbe::Match),
+            Ok(_) => (true, ChecksumProbe::Diverged),
+            // The content folder is absent — the write provably did not land here.
+            Err(PreparationFailureCause::ArtifactMissing) => (false, ChecksumProbe::Unavailable),
+            // The folder exists but its bytes could not be re-read (corrupt /
+            // interrupted / timed out): present but UNCONFIRMABLE.
+            Err(_) => (true, ChecksumProbe::Unavailable),
+        };
+
+    VerifyFacts {
+        readable: true,
+        indexed,
+        content_present,
+        checksum,
+        unchanged_count,
     }
 }
 
@@ -366,22 +556,45 @@ pub fn read_transfer_state(
         Ok(descriptor) => descriptor,
         Err(_) => return Ok(TransferStateView::Idle),
     };
-    let transferable = confirmed
+    let short_id = confirmed
         .pack_uuid
         .as_deref()
-        .and_then(short_id_from_pack_uuid)
-        .map(|short_id| build_write_plan(&descriptor, &short_id).is_ok())
+        .and_then(short_id_from_pack_uuid);
+    let transferable = short_id
+        .as_deref()
+        .map(|sid| build_write_plan(&descriptor, sid).is_ok())
         .unwrap_or(false);
 
+    // Authoritative `Verified` re-derivation: the pack must be PRESENT (uuid
+    // indexed + `.content` there) AND its bytes must re-checksum to the prepared
+    // baseline. Presence alone is not enough — that would be the old, weaker
+    // "écriture effectuée" claim; `verified` requires proven byte fidelity (NFR).
     if transferable && confirmed.pack_present {
-        Ok(TransferStateView::Transferred {
-            device_identifier: confirmed.device_identifier,
-            story_id: story_id.to_string(),
-            story_title: confirmed.story_title,
-        })
-    } else {
-        Ok(TransferStateView::Idle)
+        let short_id = short_id.expect("a transferable pack has a short id");
+        let byte_faithful = matches!(
+            artifact_source.reaggregate_device_pack(
+                &confirmed.mount_path,
+                &short_id,
+                assembly_budget,
+            ),
+            Ok(aggregate) if aggregate == confirmed.expected_aggregate
+        );
+        if byte_faithful {
+            let unchanged_count = (confirmed.device_entry_count as u32)
+                .saturating_sub(confirmed.pack_match_count as u32);
+            let summary = compose_verified_summary(&confirmed.story_title, unchanged_count);
+            return Ok(TransferStateView::Verified {
+                device_identifier: confirmed.device_identifier,
+                story_id: story_id.to_string(),
+                story_title: confirmed.story_title,
+                summary,
+            });
+        }
+        // Present but NOT byte-faithful: a `partial` / `failed` verdict belongs to
+        // the LIVE session (the hook holds the `job:*` terminal), never a passive
+        // re-read — fold to idle here (the open-question default).
     }
+    Ok(TransferStateView::Idle)
 }
 
 /// Assemble the descriptor, verify its integrity against the recorded baseline,
@@ -508,6 +721,14 @@ fn run_transfer_preflight(
                 .any(|entry| entry.uuid == uuid && entry.content_present)
         })
         .unwrap_or(false);
+    // Count EVERY entry matching the pack (a `.pi` + `.pi.hidden` duplicate yields
+    // two): all are excluded from the unchanged count, mirroring 3.1.
+    let pack_match_count = facts
+        .pack_uuid
+        .as_deref()
+        .map(|uuid| library.entries.iter().filter(|e| e.uuid == uuid).count())
+        .unwrap_or(0);
+    let device_entry_count = library.entries.len();
 
     Ok(TransferPreflight::Confirmed(Box::new(ConfirmedTransfer {
         device_identifier: profile.device_identifier,
@@ -522,6 +743,10 @@ fn run_transfer_preflight(
         expected_aggregate,
         blockers,
         pack_present,
+        mount_path,
+        volume_serial: resolved.supported_volume_serial,
+        device_entry_count,
+        pack_match_count,
     })))
 }
 
@@ -740,6 +965,36 @@ mod tests {
         reader
     }
 
+    /// The inventory the `verify` re-read sees after a successful write: the
+    /// imported pack (uuid + content present) ALONGSIDE two other untouched
+    /// stories — so `unchanged_count` is a meaningful 2.
+    fn verify_library_with_pack() -> crate::domain::device::DeviceLibrary {
+        use crate::domain::device::{DeviceLibrary, DeviceStoryEntry};
+        DeviceLibrary {
+            entries: vec![
+                DeviceStoryEntry {
+                    uuid: PACK_UUID.into(),
+                    short_id: "FAC5562D".into(),
+                    hidden: false,
+                    content_present: true,
+                },
+                DeviceStoryEntry {
+                    uuid: "11111111-1111-1111-1111-111111111111".into(),
+                    short_id: "11111111".into(),
+                    hidden: false,
+                    content_present: true,
+                },
+                DeviceStoryEntry {
+                    uuid: "22222222-2222-2222-2222-222222222222".into(),
+                    short_id: "22222222".into(),
+                    hidden: false,
+                    content_present: true,
+                },
+            ],
+            had_trailing_bytes: false,
+        }
+    }
+
     #[derive(Default)]
     struct CapturingEmitter {
         events: Mutex<Vec<Recorded>>,
@@ -756,6 +1011,10 @@ mod tests {
             sequence: u64,
         },
         Failed {
+            sequence: u64,
+        },
+        FailedVerify {
+            verdict: String,
             sequence: u64,
         },
     }
@@ -780,6 +1039,12 @@ mod tests {
                 .unwrap()
                 .push(Recorded::Failed { sequence });
         }
+        fn failed_verify(&self, _message: &str, _user_action: &str, verdict: &str, sequence: u64) {
+            self.events.lock().unwrap().push(Recorded::FailedVerify {
+                verdict: verdict.to_string(),
+                sequence,
+            });
+        }
     }
 
     impl CapturingEmitter {
@@ -793,6 +1058,7 @@ mod tests {
                     Recorded::Progress { sequence, .. } => *sequence,
                     Recorded::Completed { sequence } => *sequence,
                     Recorded::Failed { sequence } => *sequence,
+                    Recorded::FailedVerify { sequence, .. } => *sequence,
                 })
                 .collect()
         }
@@ -812,7 +1078,7 @@ mod tests {
     }
 
     #[test]
-    fn transferred_for_imported_story_on_writable_device() {
+    fn verified_for_imported_story_on_writable_device() {
         let dir = tempfile::tempdir().expect("app data");
         // V1 (md v3) and V2 (md v6) are writable.
         for (version, cohort) in [(3u8, "origine_v1"), (6u8, "mid_gen_v2")] {
@@ -822,9 +1088,15 @@ mod tests {
             let scanner = supported_scanner(version);
             // F5 re-validates the device identity again right before the write.
             scanner.enqueue_supported_lunii(version);
-            let reader = readable_reader();
+            // The verify phase re-scans the device after the write.
+            scanner.enqueue_supported_lunii(version);
+            let reader = MockDeviceLibraryReader::new();
+            reader.enqueue_library_with(1); // preflight readability proof
+            reader.enqueue(Ok(verify_library_with_pack())); // verify sees the landed pack
             let artifacts = MockTransferArtifactSource::new();
             artifacts.enqueue(Ok(imported_descriptor("s1", cohort)));
+            // The device bytes re-checksum to the prepared baseline (byte fidelity).
+            artifacts.enqueue_reaggregate(Ok(PACK_CHECKSUM.to_string()));
             let writer = MockDevicePackWriter::new();
             writer.enqueue_success();
             let emitter = CapturingEmitter::default();
@@ -842,11 +1114,30 @@ mod tests {
                 budget(),
                 &emitter,
             );
-            assert!(
-                matches!(outcome, TransferOutcome::Transferred { .. }),
-                "md v{version}: {outcome:?}"
+            match outcome {
+                TransferOutcome::Verified {
+                    story_title,
+                    summary,
+                    ..
+                } => {
+                    assert_eq!(story_title, "Mon histoire", "md v{version}");
+                    assert!(
+                        summary.changed.contains("Mon histoire"),
+                        "md v{version}: the changed line names the story"
+                    );
+                    assert!(
+                        summary.unchanged.starts_with("2 autres histoires"),
+                        "md v{version}: the two other device stories stay unchanged"
+                    );
+                }
+                other => panic!("md v{version}: expected Verified, got {other:?}"),
+            }
+            assert_eq!(
+                writer.call_count(),
+                1,
+                "the writer must run exactly once (verify never writes)"
             );
-            assert_eq!(writer.call_count(), 1, "the writer must run once");
+            // The job emits preflight → transfer → verify, THEN the verified terminal.
             assert_eq!(
                 emitter.recorded(),
                 vec![
@@ -858,12 +1149,313 @@ mod tests {
                         phase: PreparationPhase::Transfer,
                         sequence: 2
                     },
-                    Recorded::Completed { sequence: 3 },
+                    Recorded::Progress {
+                        phase: PreparationPhase::Verify,
+                        sequence: 3
+                    },
+                    Recorded::Completed { sequence: 4 },
                 ],
                 "md v{version}"
             );
             assert!(is_monotonic(&emitter.sequences()));
         }
+    }
+
+    #[test]
+    fn verify_partial_when_the_device_bytes_diverge() {
+        // The write lands, the pack is present + indexed, but the device re-checksum
+        // disagrees with the prepared baseline → the honest `Partial` (état partiel),
+        // never a silent success, never the `transfert incomplet` write wording.
+        let dir = tempfile::tempdir().expect("app data");
+        let db = fresh_db();
+        insert_story(&db, "s1");
+        insert_import(&db, "s1");
+        let scanner = supported_scanner(3);
+        scanner.enqueue_supported_lunii(3); // F5
+        scanner.enqueue_supported_lunii(3); // verify re-scan
+        let reader = MockDeviceLibraryReader::new();
+        reader.enqueue_library_with(1);
+        reader.enqueue(Ok(verify_library_with_pack()));
+        let artifacts = MockTransferArtifactSource::new();
+        artifacts.enqueue(Ok(imported_descriptor("s1", "origine_v1")));
+        // The bytes on the device DIVERGE from the baseline.
+        artifacts.enqueue_reaggregate(Ok("f".repeat(64)));
+        let writer = MockDevicePackWriter::new();
+        writer.enqueue_success();
+        let emitter = CapturingEmitter::default();
+
+        let outcome = transfer_story(
+            &db,
+            &scanner,
+            &reader,
+            &artifacts,
+            &writer,
+            dir.path(),
+            "s1",
+            &mock_identifier(),
+            budget(),
+            budget(),
+            &emitter,
+        );
+        assert_eq!(
+            outcome,
+            TransferOutcome::Unverified {
+                verdict: VerifyVerdict::Partial
+            }
+        );
+        // verify was entered, then the non-success verify terminal (not a plain
+        // `failed`, not `completed`).
+        assert_eq!(
+            emitter.recorded(),
+            vec![
+                Recorded::Progress {
+                    phase: PreparationPhase::Preflight,
+                    sequence: 1
+                },
+                Recorded::Progress {
+                    phase: PreparationPhase::Transfer,
+                    sequence: 2
+                },
+                Recorded::Progress {
+                    phase: PreparationPhase::Verify,
+                    sequence: 3
+                },
+                Recorded::FailedVerify {
+                    verdict: "partial".to_string(),
+                    sequence: 4
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn verify_failed_when_the_device_is_gone_during_verify() {
+        // The write lands, but the device vanishes before verify can re-read it →
+        // `Failed` (échec récupérable): the write MAY have succeeded but it cannot
+        // be PROVEN, so no false success — a reconnected relaunch re-verifies.
+        let dir = tempfile::tempdir().expect("app data");
+        let db = fresh_db();
+        insert_story(&db, "s1");
+        insert_import(&db, "s1");
+        let scanner = supported_scanner(3);
+        scanner.enqueue_supported_lunii(3); // F5
+        scanner.enqueue_no_device(); // verify re-scan: the device is gone
+        let reader = MockDeviceLibraryReader::new();
+        reader.enqueue_library_with(1); // preflight only (verify never reads)
+        let artifacts = MockTransferArtifactSource::new();
+        artifacts.enqueue(Ok(imported_descriptor("s1", "origine_v1")));
+        // No reaggregate scripted — verify never reaches the re-checksum.
+        let writer = MockDevicePackWriter::new();
+        writer.enqueue_success();
+        let emitter = CapturingEmitter::default();
+
+        let before = read_story_row(&db, "s1");
+        let outcome = transfer_story(
+            &db,
+            &scanner,
+            &reader,
+            &artifacts,
+            &writer,
+            dir.path(),
+            "s1",
+            &mock_identifier(),
+            budget(),
+            budget(),
+            &emitter,
+        );
+        assert_eq!(
+            outcome,
+            TransferOutcome::Unverified {
+                verdict: VerifyVerdict::Failed
+            }
+        );
+        assert_eq!(
+            emitter.recorded().last(),
+            Some(&Recorded::FailedVerify {
+                verdict: "failed".to_string(),
+                sequence: 4
+            })
+        );
+        assert_eq!(
+            read_story_row(&db, "s1"),
+            before,
+            "verify never mutates the canonical draft (FR18)"
+        );
+    }
+
+    #[test]
+    fn verify_failed_when_the_device_is_swapped_after_write() {
+        // F2: a Lunii swapped after the write for ANOTHER supported device fails the
+        // continuity check (different volume serial), so verify never attributes a
+        // `verified` to the wrong device — even one already holding the same pack.
+        let dir = tempfile::tempdir().expect("app data");
+        let db = fresh_db();
+        insert_story(&db, "s1");
+        insert_import(&db, "s1");
+        let scanner = supported_scanner(3);
+        scanner.enqueue_supported_lunii(3); // F5 (still the target)
+        scanner.enqueue_supported_lunii_swapped(3); // verify re-scan: a DIFFERENT device
+        let reader = MockDeviceLibraryReader::new();
+        reader.enqueue_library_with(1); // preflight readability proof
+        let artifacts = MockTransferArtifactSource::new();
+        artifacts.enqueue(Ok(imported_descriptor("s1", "origine_v1")));
+        // The continuity check refuses BEFORE the verify read/recheck — neither the
+        // verify library nor the re-checksum is consulted.
+        let writer = MockDevicePackWriter::new();
+        writer.enqueue_success();
+        let emitter = CapturingEmitter::default();
+
+        let outcome = transfer_story(
+            &db,
+            &scanner,
+            &reader,
+            &artifacts,
+            &writer,
+            dir.path(),
+            "s1",
+            &mock_identifier(),
+            budget(),
+            budget(),
+            &emitter,
+        );
+        assert_eq!(
+            outcome,
+            TransferOutcome::Unverified {
+                verdict: VerifyVerdict::Failed
+            }
+        );
+    }
+
+    #[test]
+    fn verify_partial_when_content_present_but_not_indexed() {
+        // F3: `.content/<short>` is promoted (byte-faithful) but the UUID is NOT in
+        // `.pi` — the device is mutated + present but incoherent ⇒ `Partial`, not the
+        // `Failed` the old library-only `content_present` produced.
+        let dir = tempfile::tempdir().expect("app data");
+        let db = fresh_db();
+        insert_story(&db, "s1");
+        insert_import(&db, "s1");
+        let scanner = supported_scanner(3);
+        scanner.enqueue_supported_lunii(3); // F5
+        scanner.enqueue_supported_lunii(3); // verify re-scan
+        let reader = MockDeviceLibraryReader::new();
+        reader.enqueue_library_with(1); // preflight
+        reader.enqueue_library_with(1); // verify: generic packs, NO PACK_UUID → not indexed
+        let artifacts = MockTransferArtifactSource::new();
+        artifacts.enqueue(Ok(imported_descriptor("s1", "origine_v1")));
+        // The content folder reads back byte-faithful (present + Match), but it is
+        // not indexed in `.pi` above.
+        artifacts.enqueue_reaggregate(Ok(PACK_CHECKSUM.to_string()));
+        let writer = MockDevicePackWriter::new();
+        writer.enqueue_success();
+        let emitter = CapturingEmitter::default();
+
+        let outcome = transfer_story(
+            &db,
+            &scanner,
+            &reader,
+            &artifacts,
+            &writer,
+            dir.path(),
+            "s1",
+            &mock_identifier(),
+            budget(),
+            budget(),
+            &emitter,
+        );
+        assert_eq!(
+            outcome,
+            TransferOutcome::Unverified {
+                verdict: VerifyVerdict::Partial
+            }
+        );
+    }
+
+    #[test]
+    fn verify_failed_when_indexed_but_content_absent() {
+        // F4: the UUID lingers in `.pi` but `.content/<short>` is absent — the pack
+        // did NOT land ⇒ `Failed` (pack absent), never `Partial`.
+        let dir = tempfile::tempdir().expect("app data");
+        let db = fresh_db();
+        insert_story(&db, "s1");
+        insert_import(&db, "s1");
+        let scanner = supported_scanner(3);
+        scanner.enqueue_supported_lunii(3); // F5
+        scanner.enqueue_supported_lunii(3); // verify re-scan
+        let reader = MockDeviceLibraryReader::new();
+        reader.enqueue_library_with(1); // preflight
+        reader.enqueue(Ok(verify_library_with_pack())); // verify: UUID indexed in `.pi`
+        let artifacts = MockTransferArtifactSource::new();
+        artifacts.enqueue(Ok(imported_descriptor("s1", "origine_v1")));
+        // The content folder is gone → the re-read proves the pack did not land.
+        artifacts.enqueue_reaggregate(Err(PreparationFailureCause::ArtifactMissing));
+        let writer = MockDevicePackWriter::new();
+        writer.enqueue_success();
+        let emitter = CapturingEmitter::default();
+
+        let outcome = transfer_story(
+            &db,
+            &scanner,
+            &reader,
+            &artifacts,
+            &writer,
+            dir.path(),
+            "s1",
+            &mock_identifier(),
+            budget(),
+            budget(),
+            &emitter,
+        );
+        assert_eq!(
+            outcome,
+            TransferOutcome::Unverified {
+                verdict: VerifyVerdict::Failed
+            }
+        );
+    }
+
+    #[test]
+    fn verify_failed_when_the_recheck_cannot_run() {
+        // F4: the content folder is present but its bytes cannot be re-read (corrupt
+        // / interrupted) — the result is UNCONFIRMABLE ⇒ `Failed`, never a guessed
+        // `Partial`.
+        let dir = tempfile::tempdir().expect("app data");
+        let db = fresh_db();
+        insert_story(&db, "s1");
+        insert_import(&db, "s1");
+        let scanner = supported_scanner(3);
+        scanner.enqueue_supported_lunii(3); // F5
+        scanner.enqueue_supported_lunii(3); // verify re-scan
+        let reader = MockDeviceLibraryReader::new();
+        reader.enqueue_library_with(1); // preflight
+        reader.enqueue(Ok(verify_library_with_pack())); // verify: UUID indexed
+        let artifacts = MockTransferArtifactSource::new();
+        artifacts.enqueue(Ok(imported_descriptor("s1", "origine_v1")));
+        // Present but unreadable bytes → the re-checksum cannot run.
+        artifacts.enqueue_reaggregate(Err(PreparationFailureCause::ArtifactCorrupt));
+        let writer = MockDevicePackWriter::new();
+        writer.enqueue_success();
+        let emitter = CapturingEmitter::default();
+
+        let outcome = transfer_story(
+            &db,
+            &scanner,
+            &reader,
+            &artifacts,
+            &writer,
+            dir.path(),
+            "s1",
+            &mock_identifier(),
+            budget(),
+            budget(),
+            &emitter,
+        );
+        assert_eq!(
+            outcome,
+            TransferOutcome::Unverified {
+                verdict: VerifyVerdict::Failed
+            }
+        );
     }
 
     #[test]
@@ -1239,7 +1831,7 @@ mod tests {
     }
 
     #[test]
-    fn read_transfer_state_reports_transferred_when_pack_present_on_device() {
+    fn read_transfer_state_reports_verified_when_pack_present_and_byte_faithful() {
         let dir = tempfile::tempdir().expect("app data");
         let db = fresh_db();
         insert_story(&db, "s1");
@@ -1258,6 +1850,8 @@ mod tests {
         }));
         let artifacts = MockTransferArtifactSource::new();
         artifacts.enqueue(Ok(imported_descriptor("s1", "origine_v1")));
+        // The device bytes re-checksum to the baseline → upgrade presence to verified.
+        artifacts.enqueue_reaggregate(Ok(PACK_CHECKSUM.to_string()));
 
         let view = read_transfer_state(
             &db,
@@ -1272,11 +1866,58 @@ mod tests {
         )
         .expect("read state");
         match view {
-            TransferStateView::Transferred { story_title, .. } => {
+            TransferStateView::Verified {
+                story_title,
+                summary,
+                ..
+            } => {
                 assert_eq!(story_title, "Mon histoire");
+                assert!(
+                    summary.unchanged.to_lowercase().contains("aucune autre"),
+                    "the only device pack is the verified one → none others changed"
+                );
             }
-            other => panic!("expected Transferred, got {other:?}"),
+            other => panic!("expected Verified, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn read_transfer_state_is_idle_when_present_but_not_byte_faithful() {
+        // A passive re-read never claims a non-success verdict: a present-but-
+        // divergent pack folds to idle (the `partial` verdict lives in the live
+        // session, not a passive read).
+        let dir = tempfile::tempdir().expect("app data");
+        let db = fresh_db();
+        insert_story(&db, "s1");
+        insert_import(&db, "s1");
+        let scanner = supported_scanner(3);
+        let reader = MockDeviceLibraryReader::new();
+        reader.enqueue(Ok(crate::domain::device::DeviceLibrary {
+            entries: vec![crate::domain::device::DeviceStoryEntry {
+                uuid: PACK_UUID.into(),
+                short_id: "FAC5562D".into(),
+                hidden: false,
+                content_present: true,
+            }],
+            had_trailing_bytes: false,
+        }));
+        let artifacts = MockTransferArtifactSource::new();
+        artifacts.enqueue(Ok(imported_descriptor("s1", "origine_v1")));
+        artifacts.enqueue_reaggregate(Ok("f".repeat(64))); // diverges from baseline
+
+        let view = read_transfer_state(
+            &db,
+            &scanner,
+            &reader,
+            &artifacts,
+            dir.path(),
+            "s1",
+            &mock_identifier(),
+            budget(),
+            budget(),
+        )
+        .expect("read state");
+        assert_eq!(view, TransferStateView::Idle);
     }
 
     #[test]
@@ -1353,9 +1994,13 @@ mod tests {
         insert_import(&db, "s1");
         let scanner = supported_scanner(3);
         scanner.enqueue_supported_lunii(3); // F5 re-validation before the write
-        let reader = readable_reader();
+        scanner.enqueue_supported_lunii(3); // verify re-scan after the write
+        let reader = MockDeviceLibraryReader::new();
+        reader.enqueue_library_with(1); // preflight readability proof
+        reader.enqueue(Ok(verify_library_with_pack())); // verify sees the landed pack
         let artifacts = MockTransferArtifactSource::new();
         artifacts.enqueue(Ok(imported_descriptor("s1", "origine_v1")));
+        artifacts.enqueue_reaggregate(Ok(PACK_CHECKSUM.to_string()));
         let writer = MockDevicePackWriter::new();
         writer.enqueue_success_with_progress();
         let emitter = CapturingEmitter::default();
@@ -1373,7 +2018,7 @@ mod tests {
             budget(),
             &emitter,
         );
-        assert!(matches!(outcome, TransferOutcome::Transferred { .. }));
+        assert!(matches!(outcome, TransferOutcome::Verified { .. }));
         let fractions = emitter.transfer_fractions();
         assert_eq!(fractions.len(), 2, "two progress steps were reported");
         assert!(

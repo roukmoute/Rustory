@@ -169,12 +169,17 @@ fn job_completed_event_wire_shape() {
         job_type: JOB_TYPE_PREPARE_STORY.into(),
         target_story_id: STORY.into(),
         sequence: 3,
+        summary: None,
     })
     .expect("ser");
     assert_eq!(v["jobId"], "j1");
     assert_eq!(v["jobType"], "prepare_story");
     assert_eq!(v["targetStoryId"], STORY);
     assert_eq!(v["sequence"], 3);
+    assert!(
+        v.get("summary").is_none(),
+        "a preparation completion carries no verified summary"
+    );
 }
 
 #[test]
@@ -189,6 +194,7 @@ fn job_failed_event_carries_non_empty_message_and_action() {
         user_action: "Relance la préparation.".into(),
         completeness: None,
         cause: None,
+        verify_verdict: None,
     })
     .expect("ser");
     assert_eq!(v["errorCode"], "PREPARATION_FAILED");

@@ -45,7 +45,10 @@ function lastUnsubscribe(): () => void {
   return fn;
 }
 
-const progress = (phase: "preflight" | "transfer", sequence: number) => ({
+const progress = (
+  phase: "preflight" | "transfer" | "verify",
+  sequence: number,
+) => ({
   jobId: "j1",
   jobType: "transfer_story",
   targetStoryId: STORY,
@@ -81,6 +84,37 @@ const failedIncomplete = (sequence: number) => ({
   completeness: "incomplete" as const,
   cause: "writeRejected" as const,
 });
+
+// A `job:failed` carrying the verify `partial` verdict (état partiel) — distinct
+// from a write-phase `incomplete`.
+const failedPartial = (sequence: number) => ({
+  ...failed(sequence),
+  errorMessage:
+    "Envoi dans un état partiel : certains éléments n'ont pas pu être confirmés sur la Lunii.",
+  userAction: "Relance l'envoi pour rétablir un état sûr.",
+  verifyVerdict: "partial" as const,
+});
+
+// The AC2 summary lines, composed in Rust (here scripted as ready-made strings).
+const SUMMARY = {
+  changed: "« Mon histoire » est maintenant sur la Lunii.",
+  unchanged: "2 autres histoires de l'appareil restent inchangées.",
+};
+
+// A transfer `job:completed` carrying the verified summary ON the terminal (F1).
+const completedVerified = (sequence: number) => ({
+  ...completed(sequence),
+  summary: SUMMARY,
+});
+
+// The authoritative re-read confirming the verify success, carrying the AC2
+// summary lines (used by the catch-up / standalone re-read path).
+const verifiedState = {
+  kind: "verified" as const,
+  deviceIdentifier: DEVICE,
+  story: { id: STORY, title: "Mon histoire" },
+  summary: SUMMARY,
+};
 
 describe("useStoryTransfer", () => {
   beforeEach(() => {
@@ -121,15 +155,12 @@ describe("useStoryTransfer", () => {
     });
   });
 
-  it("drives the live phase then reaches the non-success transferred terminal", async () => {
+  it("drives the live phases (incl. verify) then settles verified FROM the completed event (F1)", async () => {
     vi.mocked(startTransferStory).mockResolvedValue({ jobId: "j1", storyId: STORY });
-    vi.mocked(readTransferState)
-      .mockResolvedValueOnce({ kind: "idle" }) // catch-up — no-op
-      .mockResolvedValueOnce({
-        kind: "transferred",
-        deviceIdentifier: DEVICE,
-        story: { id: STORY, title: "Mon histoire" },
-      });
+    // The re-read folds to idle (the pre-write identifier no longer resolves the
+    // device after `.pi` changed) — yet the success must NOT be lost: it is settled
+    // straight from the terminal event's summary.
+    vi.mocked(readTransferState).mockResolvedValue({ kind: "idle" });
 
     const { result } = renderHook(() => useStoryTransfer());
     act(() => result.current.send(STORY, DEVICE));
@@ -139,15 +170,46 @@ describe("useStoryTransfer", () => {
     expect(result.current.state.kind).toBe("transferring");
     act(() => lastSubscription().onProgress(progress("transfer", 2)));
     expect(result.current.state.kind).toBe("transferring");
+    // The FINAL verify phase stays a transient `transferring` carrying phase=verify
+    // (the panel renders the distinct "écriture effectuée — vérification à venir").
+    act(() => lastSubscription().onProgress(progress("verify", 3)));
+    expect(result.current.state).toMatchObject({
+      kind: "transferring",
+      phase: "verify",
+    });
 
-    act(() => lastSubscription().onCompleted(completed(3)));
-    await waitFor(() => expect(result.current.state.kind).toBe("transferred"));
-    if (result.current.state.kind === "transferred") {
+    act(() => lastSubscription().onCompleted(completedVerified(4)));
+    await waitFor(() => expect(result.current.state.kind).toBe("verified"));
+    if (result.current.state.kind === "verified") {
       expect(result.current.state.storyId).toBe(STORY);
+      // The summary lines are rendered verbatim (composed in Rust).
+      expect(result.current.state.summary.changed).toContain("Mon histoire");
+      expect(result.current.state.summary.unchanged).toMatch(
+        /2 autres histoires/i,
+      );
     }
   });
 
-  it("never claims transferred when the completed re-read cannot confirm the device (folds to idle) — honest recoverable instead (F1/AC3)", async () => {
+  it("maps a job:failed with verifyVerdict 'partial' to the partial terminal, distinct from incomplete/retryable (AC3)", async () => {
+    vi.mocked(startTransferStory).mockResolvedValue({ jobId: "j1", storyId: STORY });
+    vi.mocked(readTransferState).mockResolvedValue({ kind: "idle" });
+
+    const { result } = renderHook(() => useStoryTransfer());
+    act(() => result.current.send(STORY, DEVICE));
+    await waitFor(() => expect(subscribeJobEvents).toHaveBeenCalled());
+    act(() => lastSubscription().onFailed(failedPartial(4)));
+
+    await waitFor(() => expect(result.current.state.kind).toBe("partial"));
+    expect(result.current.state.kind).not.toBe("incomplete");
+    expect(result.current.state.kind).not.toBe("retryable");
+    if (result.current.state.kind === "partial") {
+      expect(result.current.state.storyId).toBe(STORY);
+      expect(result.current.state.message).toMatch(/état partiel/i);
+      expect(result.current.state.userAction).toMatch(/rétablir un état sûr/i);
+    }
+  });
+
+  it("never claims verified when the completed re-read cannot confirm the device (folds to idle) — honest recoverable instead (F1/AC3)", async () => {
     vi.mocked(startTransferStory).mockResolvedValue({ jobId: "j1", storyId: STORY });
     // Both the catch-up and the onCompleted re-read fold to idle (device gone):
     // the device cannot confirm the write, so success must NOT be claimed.
@@ -159,7 +221,7 @@ describe("useStoryTransfer", () => {
     act(() => lastSubscription().onCompleted(completed(3)));
 
     await waitFor(() => expect(result.current.state.kind).toBe("retryable"));
-    expect(result.current.state.kind).not.toBe("transferred");
+    expect(result.current.state.kind).not.toBe("verified");
     if (result.current.state.kind === "retryable") {
       expect(result.current.state.storyId).toBe(STORY);
       // Honest "non confirmé" — never any success vocabulary.
@@ -169,35 +231,27 @@ describe("useStoryTransfer", () => {
     }
   });
 
-  it("the catch-up re-read reconciles to the terminal when the event is missed", async () => {
+  it("the catch-up re-read reconciles to the verified terminal when the event is missed", async () => {
     vi.mocked(startTransferStory).mockResolvedValue({ jobId: "j1", storyId: STORY });
-    // The write finished before the subscription registered: NO event fires,
-    // but the catch-up re-read still reaches the terminal.
-    vi.mocked(readTransferState).mockResolvedValue({
-      kind: "transferred",
-      deviceIdentifier: DEVICE,
-      story: { id: STORY, title: "Mon histoire" },
-    });
+    // The write+verify finished before the subscription registered: NO event fires,
+    // but the catch-up re-read still reaches the verified terminal.
+    vi.mocked(readTransferState).mockResolvedValue(verifiedState);
 
     const { result } = renderHook(() => useStoryTransfer());
     act(() => result.current.send(STORY, DEVICE));
-    await waitFor(() => expect(result.current.state.kind).toBe("transferred"));
+    await waitFor(() => expect(result.current.state.kind).toBe("verified"));
   });
 
   it("a late progress event never regresses a settled terminal", async () => {
     vi.mocked(startTransferStory).mockResolvedValue({ jobId: "j1", storyId: STORY });
-    vi.mocked(readTransferState).mockResolvedValue({
-      kind: "transferred",
-      deviceIdentifier: DEVICE,
-      story: { id: STORY, title: "Mon histoire" },
-    });
+    vi.mocked(readTransferState).mockResolvedValue(verifiedState);
 
     const { result } = renderHook(() => useStoryTransfer());
     act(() => result.current.send(STORY, DEVICE));
-    await waitFor(() => expect(result.current.state.kind).toBe("transferred"));
+    await waitFor(() => expect(result.current.state.kind).toBe("verified"));
     expect(lastUnsubscribe()).toHaveBeenCalled();
-    act(() => lastSubscription().onProgress(progress("transfer", 9)));
-    expect(result.current.state.kind).toBe("transferred");
+    act(() => lastSubscription().onProgress(progress("verify", 9)));
+    expect(result.current.state.kind).toBe("verified");
   });
 
   it("pins the authoritative re-read to the targeted device (C1)", async () => {
@@ -217,31 +271,27 @@ describe("useStoryTransfer", () => {
 
   it("ignores a second re-read once the job is settled (C2)", async () => {
     vi.mocked(startTransferStory).mockResolvedValue({ jobId: "j1", storyId: STORY });
-    // Catch-up re-read confirms `transferred` (settles the job); the later
+    // Catch-up re-read confirms `verified` (settles the job); the later
     // onCompleted re-read folds to idle and MUST be ignored — never flipping the
     // already-settled terminal nor re-running a redundant scan.
     vi.mocked(readTransferState)
-      .mockResolvedValueOnce({
-        kind: "transferred",
-        deviceIdentifier: DEVICE,
-        story: { id: STORY, title: "Mon histoire" },
-      })
+      .mockResolvedValueOnce(verifiedState)
       .mockResolvedValue({ kind: "idle" });
 
     const { result } = renderHook(() => useStoryTransfer());
     act(() => result.current.send(STORY, DEVICE));
-    await waitFor(() => expect(result.current.state.kind).toBe("transferred"));
+    await waitFor(() => expect(result.current.state.kind).toBe("verified"));
 
     act(() => lastSubscription().onCompleted(completed(3)));
     await waitFor(() => expect(readTransferState).toHaveBeenCalledTimes(2));
     // The settled terminal is NOT flipped by the second (idle) re-read.
-    expect(result.current.state.kind).toBe("transferred");
+    expect(result.current.state.kind).toBe("verified");
   });
 
-  it("settles a job:failed from the event without a re-read, never flipping to transferred (F1/AC2)", async () => {
+  it("settles a job:failed from the event without a re-read, never flipping to verified (F1/AC2)", async () => {
     vi.mocked(startTransferStory).mockResolvedValue({ jobId: "j1", storyId: STORY });
     // The catch-up re-read returns idle; the failure terminal must come straight
-    // from the EVENT — a `job:failed` is never re-read into a false `transferred`
+    // from the EVENT — a `job:failed` is never re-read into a false success
     // (a pack present after a post-promote fsync failure is the `incomplete` case).
     vi.mocked(readTransferState).mockResolvedValue({ kind: "idle" });
 
@@ -252,7 +302,7 @@ describe("useStoryTransfer", () => {
     act(() => lastSubscription().onFailed(failed(2)));
 
     await waitFor(() => expect(result.current.state.kind).toBe("retryable"));
-    expect(result.current.state.kind).not.toBe("transferred");
+    expect(result.current.state.kind).not.toBe("verified");
     // No extra re-read on the failure path — only the earlier catch-up ran.
     expect(readTransferState).toHaveBeenCalledTimes(1);
     if (result.current.state.kind === "retryable") {

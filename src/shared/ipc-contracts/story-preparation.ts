@@ -64,8 +64,9 @@ export interface StartPreparationAcceptedDto {
 
 /** Phase carried by a `job:progress` event (the in-flight phases). Shared by
  *  the preparation flow (`preflight` / `prepare`) and the transfer flow
- *  (`transfer`, on the same job channel). `verify` stays out of scope. */
-export type JobPhase = "preflight" | "prepare" | "transfer";
+ *  (`transfer` then `verify`, on the same job channel). `verify` is the FINAL
+ *  phase of a transfer — the read-only confirmation after a successful write. */
+export type JobPhase = "preflight" | "prepare" | "transfer" | "verify";
 
 export interface JobProgressEvent {
   jobId: string;
@@ -82,6 +83,10 @@ export interface JobCompletedEvent {
   jobType: string;
   targetStoryId: string;
   sequence: number;
+  /** Transfer-`verified`-only: the AC2 confirmation summary, composed in Rust and
+   *  rendered verbatim. The UI renders the success straight from this terminal
+   *  (no stale-identifier re-read). Absent for preparation completions. */
+  summary?: { changed: string; unchanged: string };
 }
 
 export interface JobFailedEvent {
@@ -101,6 +106,11 @@ export interface JobFailedEvent {
    *  "cause + issue + next action" in context, not only the message. Absent for
    *  preparation and the non-classifiable defensive terminal. */
   cause?: string;
+  /** Verify-only (3.6): the `verify` verdict — `"partial"` (`état partiel`) or
+   *  `"failed"` (`échec récupérable`). PRESENT only on a verify-phase terminal so
+   *  the UI renders the right non-success label, DISTINCT from a write-phase
+   *  `transfert incomplet`. Absent for write-phase failures and preparation. */
+  verifyVerdict?: "partial" | "failed";
 }
 
 const CAUSES: ReadonlySet<string> = new Set([
@@ -112,9 +122,14 @@ const CAUSES: ReadonlySet<string> = new Set([
 ]);
 
 // The generic job channel accepts every live phase Rustory emits: `preflight` /
-// `prepare` (preparation) and `transfer` (the write flow). `verify` is reserved
-// and stays rejected until its flow exists.
-const PHASES: ReadonlySet<string> = new Set(["preflight", "prepare", "transfer"]);
+// `prepare` (preparation), `transfer` and `verify` (the write flow, where
+// `verify` is the final read-only confirmation phase).
+const PHASES: ReadonlySet<string> = new Set([
+  "preflight",
+  "prepare",
+  "transfer",
+  "verify",
+]);
 
 const DEVICE_IDENTIFIER_PATTERN = /^[0-9a-f]{32}$/;
 const STORY_ID_PATTERN =
@@ -152,6 +167,11 @@ const ALLOWED_COMPLETED_KEYS: ReadonlySet<string> = new Set([
   "jobType",
   "targetStoryId",
   "sequence",
+  "summary",
+]);
+const ALLOWED_COMPLETED_SUMMARY_KEYS: ReadonlySet<string> = new Set([
+  "changed",
+  "unchanged",
 ]);
 const ALLOWED_FAILED_KEYS: ReadonlySet<string> = new Set([
   "jobId",
@@ -163,9 +183,11 @@ const ALLOWED_FAILED_KEYS: ReadonlySet<string> = new Set([
   "userAction",
   "completeness",
   "cause",
+  "verifyVerdict",
 ]);
 
 const COMPLETENESS: ReadonlySet<string> = new Set(["failed", "incomplete"]);
+const VERIFY_VERDICTS: ReadonlySet<string> = new Set(["partial", "failed"]);
 
 function hasOnlyAllowedKeys(
   value: Record<string, unknown>,
@@ -286,11 +308,26 @@ export function isJobProgressEvent(value: unknown): value is JobProgressEvent {
   return c.message === null || typeof c.message === "string";
 }
 
+function isCompletedSummary(
+  value: unknown,
+): value is { changed: string; unchanged: string } {
+  if (typeof value !== "object" || value === null) return false;
+  const s = value as Record<string, unknown>;
+  if (!hasOnlyAllowedKeys(s, ALLOWED_COMPLETED_SUMMARY_KEYS)) return false;
+  return isNonEmptyString(s.changed) && isNonEmptyString(s.unchanged);
+}
+
 export function isJobCompletedEvent(value: unknown): value is JobCompletedEvent {
   if (typeof value !== "object" || value === null) return false;
   const c = value as Record<string, unknown>;
   if (!hasOnlyAllowedKeys(c, ALLOWED_COMPLETED_KEYS)) return false;
-  return isJobBaseShape(c);
+  if (!isJobBaseShape(c)) return false;
+  // `summary` is optional (transfer-`verified`-only); when present it must carry
+  // exactly the two composed lines as non-empty strings.
+  if (c.summary !== undefined && !isCompletedSummary(c.summary)) {
+    return false;
+  }
+  return true;
 }
 
 export function isJobFailedEvent(value: unknown): value is JobFailedEvent {
@@ -306,6 +343,24 @@ export function isJobFailedEvent(value: unknown): value is JobFailedEvent {
   // `cause` is optional (transfer-only); when present it must be a non-empty
   // string (the closed transfer cause set lives in the transfer contract).
   if (c.cause !== undefined && !isNonEmptyString(c.cause)) {
+    return false;
+  }
+  // `verifyVerdict` is optional (verify-only); when present it must be a known
+  // verdict (`partial` / `failed` — `verified` travels via `job:completed`).
+  if (
+    c.verifyVerdict !== undefined &&
+    !VERIFY_VERDICTS.has(c.verifyVerdict as string)
+  ) {
+    return false;
+  }
+  // Mutually exclusive (Rust contract): a VERIFY terminal carries ONLY
+  // `verifyVerdict`; a WRITE-phase failure carries ONLY `completeness` / `cause`.
+  // A payload mixing them is drift — reject it so a drifted `completeness:
+  // "incomplete"` can never be masked by the hook's `verifyVerdict` precedence.
+  if (
+    c.verifyVerdict !== undefined &&
+    (c.completeness !== undefined || c.cause !== undefined)
+  ) {
     return false;
   }
   return (

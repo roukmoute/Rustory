@@ -8,6 +8,10 @@ import {
 const DEVICE = "0123456789abcdef0123456789abcdef";
 const STORY = "0197a5d0-0000-7000-8000-000000000000";
 const story = { id: STORY, title: "Mon histoire" };
+const summary = {
+  changed: "« Mon histoire » est maintenant sur la Lunii.",
+  unchanged: "2 autres histoires de l'appareil restent inchangées.",
+};
 
 describe("isTransferStateDto", () => {
   it("accepts each valid variant", () => {
@@ -22,9 +26,10 @@ describe("isTransferStateDto", () => {
     ).toBe(true);
     expect(
       isTransferStateDto({
-        kind: "transferred",
+        kind: "verified",
         deviceIdentifier: DEVICE,
         story,
+        summary,
       }),
     ).toBe(true);
     expect(
@@ -42,15 +47,33 @@ describe("isTransferStateDto", () => {
     expect(isTransferStateDto({ kind: "weird" })).toBe(false);
   });
 
-  it("rejects an extra key on transferred", () => {
+  it("rejects an extra key on verified", () => {
     expect(
       isTransferStateDto({
-        kind: "transferred",
+        kind: "verified",
         deviceIdentifier: DEVICE,
         story,
+        summary,
         extra: 1,
       }),
     ).toBe(false);
+  });
+
+  it("rejects a verified with a malformed summary (missing line / empty / extra key)", () => {
+    const base = { kind: "verified", deviceIdentifier: DEVICE, story };
+    expect(isTransferStateDto(base)).toBe(false); // missing summary
+    expect(
+      isTransferStateDto({ ...base, summary: { changed: "c" } }),
+    ).toBe(false); // missing `unchanged`
+    expect(
+      isTransferStateDto({ ...base, summary: { changed: "", unchanged: "u" } }),
+    ).toBe(false); // empty line
+    expect(
+      isTransferStateDto({
+        ...base,
+        summary: { changed: "c", unchanged: "u", extra: 1 },
+      }),
+    ).toBe(false); // extra key
   });
 
   it("rejects a malformed deviceIdentifier", () => {
@@ -130,9 +153,10 @@ describe("isTransferStateDto", () => {
   it("rejects a malformed story id", () => {
     expect(
       isTransferStateDto({
-        kind: "transferred",
+        kind: "verified",
         deviceIdentifier: DEVICE,
         story: { id: "x", title: "t" },
+        summary,
       }),
     ).toBe(false);
   });

@@ -4,10 +4,11 @@
 //! (`src/shared/ipc-contracts/story-transfer.ts`) must stay byte-compatible.
 
 use rustory_lib::application::transfer::TransferStateView;
-use rustory_lib::domain::transfer::{TransferCompleteness, TransferFailureCause};
+use rustory_lib::domain::transfer::{TransferCompleteness, TransferFailureCause, VerifiedSummary};
 use rustory_lib::ipc::dto::{PreparationStoryDto, StartTransferAcceptedDto, TransferStateDto};
 use rustory_lib::ipc::events::{
-    JobFailedEvent, JobProgressEvent, JOB_TYPE_TRANSFER_STORY, TRANSFER_FAILED_CODE,
+    JobCompletedEvent, JobCompletedSummary, JobFailedEvent, JobProgressEvent,
+    JOB_TYPE_TRANSFER_STORY, TRANSFER_FAILED_CODE,
 };
 use serde_json::json;
 
@@ -43,21 +44,28 @@ fn transferring_wire_shape_is_camel_case() {
 }
 
 #[test]
-fn transferred_wire_shape_carries_no_success_vocabulary() {
-    let dto = TransferStateDto::from_view(TransferStateView::Transferred {
+fn verified_wire_shape_carries_the_summary() {
+    let dto = TransferStateDto::from_view(TransferStateView::Verified {
         device_identifier: DEVICE.into(),
         story_id: STORY.into(),
         story_title: "Mon histoire".into(),
+        summary: VerifiedSummary {
+            changed: "« Mon histoire » est maintenant sur la Lunii.".into(),
+            unchanged: "4 autres histoires de l'appareil restent inchangées.".into(),
+        },
     });
     let v = serde_json::to_value(&dto).expect("ser");
-    assert_eq!(v["kind"], "transferred");
+    assert_eq!(v["kind"], "verified");
     assert_eq!(v["deviceIdentifier"], DEVICE);
     assert_eq!(v["story"]["title"], "Mon histoire");
-    // The terminal is the honest "écriture effectuée — vérification à venir":
-    // it carries NO message, so no "transférée et vérifiée" can leak.
-    assert!(
-        v.get("message").is_none(),
-        "no success message on the terminal"
+    // The AC2 summary travels as READY-MADE lines (composed in Rust), camelCase.
+    assert_eq!(
+        v["summary"]["changed"],
+        "« Mon histoire » est maintenant sur la Lunii."
+    );
+    assert_eq!(
+        v["summary"]["unchanged"],
+        "4 autres histoires de l'appareil restent inchangées."
     );
 }
 
@@ -182,6 +190,7 @@ fn job_failed_event_uses_the_transfer_error_code() {
         user_action: "Relance l'envoi.".into(),
         completeness: Some("incomplete".into()),
         cause: Some("writeRejected".into()),
+        verify_verdict: None,
     })
     .expect("ser");
     assert_eq!(v["errorCode"], "TRANSFER_FAILED");
@@ -190,4 +199,74 @@ fn job_failed_event_uses_the_transfer_error_code() {
     assert!(!v["errorMessage"].as_str().expect("message").is_empty());
     assert!(!v["userAction"].as_str().expect("userAction").is_empty());
     assert!(v.get("error_code").is_none(), "no snake_case leak");
+}
+
+#[test]
+fn job_completed_event_carries_the_verified_summary() {
+    // F1/F5: the verified success travels ON the terminal as ready-made lines, so
+    // the UI renders it without a stale-identifier re-read and without recomposing
+    // the text in React.
+    let v = serde_json::to_value(JobCompletedEvent {
+        job_id: "j1".into(),
+        job_type: JOB_TYPE_TRANSFER_STORY.into(),
+        target_story_id: STORY.into(),
+        sequence: 4,
+        summary: Some(JobCompletedSummary {
+            changed: "« Mon histoire » est maintenant sur la Lunii.".into(),
+            unchanged: "2 autres histoires de l'appareil restent inchangées.".into(),
+        }),
+    })
+    .expect("ser");
+    assert_eq!(
+        v["summary"]["changed"],
+        "« Mon histoire » est maintenant sur la Lunii."
+    );
+    assert_eq!(
+        v["summary"]["unchanged"],
+        "2 autres histoires de l'appareil restent inchangées."
+    );
+}
+
+#[test]
+fn job_progress_event_carries_the_verify_phase() {
+    // The `verify` phase is the FINAL phase of the same `transfer_story` job.
+    let v = serde_json::to_value(JobProgressEvent {
+        job_id: "j1".into(),
+        job_type: JOB_TYPE_TRANSFER_STORY.into(),
+        target_story_id: STORY.into(),
+        phase: "verify".into(),
+        progress: None,
+        sequence: 3,
+        message: None,
+    })
+    .expect("ser");
+    assert_eq!(v["phase"], "verify");
+    assert_eq!(v["progress"], json!(null));
+}
+
+#[test]
+fn job_failed_event_carries_the_verify_partial_verdict() {
+    // The `partial` terminal reuses the failure channel with the verify-verdict
+    // discriminant ONLY — never a write-phase completeness/cause.
+    let v = serde_json::to_value(JobFailedEvent {
+        job_id: "j1".into(),
+        job_type: JOB_TYPE_TRANSFER_STORY.into(),
+        target_story_id: STORY.into(),
+        sequence: 4,
+        error_code: TRANSFER_FAILED_CODE.into(),
+        error_message: "Envoi dans un état partiel : certains éléments n'ont pas pu être confirmés sur la Lunii.".into(),
+        user_action: "Relance l'envoi pour rétablir un état sûr.".into(),
+        completeness: None,
+        cause: None,
+        verify_verdict: Some("partial".into()),
+    })
+    .expect("ser");
+    assert_eq!(v["verifyVerdict"], "partial");
+    assert!(
+        v.get("completeness").is_none(),
+        "no write-phase completeness"
+    );
+    assert!(v.get("cause").is_none(), "no write-phase cause");
+    assert!(!v["errorMessage"].as_str().expect("message").is_empty());
+    assert!(!v["userAction"].as_str().expect("userAction").is_empty());
 }

@@ -55,6 +55,16 @@ pub trait PreparationEventEmitter {
     fn progress(&self, phase: PreparationPhase, progress: Option<f32>, sequence: u64);
     /// Successful terminal state.
     fn completed(&self, sequence: u64);
+    /// Successful VERIFIED terminal carrying the composed confirmation summary
+    /// (AC2: `changed` + `unchanged` lines, composed in Rust). The UI renders the
+    /// success straight from this terminal — never via a re-read with the stale
+    /// pre-write identifier. Defaults to dropping the summary and delegating to
+    /// [`completed`](Self::completed); only the transfer command's runtime emitter
+    /// overrides this to carry the summary onto the `job:completed` event
+    /// (preparation has no verified summary).
+    fn completed_verified(&self, _changed: &str, _unchanged: &str, sequence: u64) {
+        self.completed(sequence);
+    }
     /// Failure terminal state, with the canonical message + next gesture.
     fn failed(&self, message: &str, user_action: &str, sequence: u64);
     /// Failure terminal carrying the device COMPLETENESS (`"failed"` /
@@ -71,6 +81,16 @@ pub trait PreparationEventEmitter {
         _cause: Option<&str>,
         sequence: u64,
     ) {
+        self.failed(message, user_action, sequence);
+    }
+    /// Verify-phase non-success terminal: the write landed but the `verify` phase
+    /// did NOT confirm it. `verdict` is the verify-verdict wire tag (`"partial"` →
+    /// `état partiel`, `"failed"` → `échec récupérable`) so the UI renders the
+    /// right label, DISTINCT from a write-phase failure (`transfert incomplet` /
+    /// `échec récupérable`). Defaults to dropping the verdict and delegating to
+    /// [`failed`](Self::failed); only the transfer command's runtime emitter
+    /// overrides this to carry the discriminant onto the `job:failed` event.
+    fn failed_verify(&self, message: &str, user_action: &str, _verdict: &str, sequence: u64) {
         self.failed(message, user_action, sequence);
     }
 }

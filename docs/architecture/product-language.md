@@ -93,11 +93,11 @@ The UI should favor these labels when they are user-visible:
 | Preparation is in flight | `Préparation en cours…` |
 | Preparation finished and artifacts are fresh | `Préparée` |
 | Write/send is running | `en transfert` |
-| Write done, not yet verified (NON-success terminal) | `écriture effectuée — vérification à venir` |
-| End result was explicitly confirmed | `transférée et vérifiée` |
+| Write done, the verification re-read is running (TRANSIENT, not a resting terminal) | `écriture effectuée — vérification à venir` |
+| Verification confirmed the result — present, indexed and byte-faithful. The sober success terminal, never shown before the verification proves it | `transférée et vérifiée` |
 | Failure can be retried safely (device left untouched) | `échec récupérable` |
 | Write started then interrupted; the device may hold a partial copy and a relaunch restores a safe state | `transfert incomplet` |
-| Result is incomplete and not a success (a verification verdict) | `état partiel` |
+| Verification re-read the device and confirmed only an incoherent/incomplete result — neither a success nor necessarily a failure. Distinct from `transfert incomplet` (a write interruption), `échec récupérable` (device untouched) and `Contenu incomplet` (a device pack with a missing payload) | `état partiel` |
 | Inspect the in-flight transfer detail (secondary, non-destructive) | `Consulter le détail` |
 | Abandon a failed / incomplete transfer (local draft intact) | `Abandonner` |
 | No device is connected | `Aucun appareil connecté` |

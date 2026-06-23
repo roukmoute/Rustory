@@ -80,20 +80,24 @@ export type PreparationView =
   | { kind: "error"; error: AppError };
 
 /**
- * Transfer (real device WRITE) state, composed by Rust and only PRESENTED here
- * (AC1/AC2/AC3). `unavailable` shows the disabled `Envoyer vers la Lunii` CTA +
- * the standardized "Envoi indisponible: …" reason (fail-closed: the default
- * until a writable cohort + a `Préparée` story + a clear target are all proven);
- * `ready` shows the active CTA (no confirmation modal — AC1). `transferring`
- * comes from `job:progress`; `transferred` is the AUTHORITATIVE re-read terminal
- * — a NON-SUCCESS "écriture effectuée — vérification à venir" (verification is a
- * later flow, never `transférée et vérifiée`).
+ * Transfer (real device WRITE + VERIFY) state, composed by Rust and only
+ * PRESENTED here (AC1/AC2/AC3). `unavailable` shows the disabled `Envoyer vers la
+ * Lunii` CTA + the standardized "Envoi indisponible: …" reason (fail-closed: the
+ * default until a writable cohort + a `Préparée` story + a clear target are all
+ * proven); `ready` shows the active CTA (no confirmation modal — AC1).
+ * `transferring` comes from `job:progress`; `verifying` is the TRANSIENT
+ * "écriture effectuée — vérification à venir" during the `verify` phase. The
+ * resting terminals are `verified` (`transférée et vérifiée` + the AC2 summary),
+ * `partial` (`état partiel`) and the verify `failed` verdict (reusing
+ * `retryable` / `échec récupérable`).
  */
 export type TransferView =
   | { kind: "unavailable"; reason: string }
   | { kind: "ready" }
   | { kind: "transferring"; progress: number | null; phase: string | null }
-  | { kind: "transferred" }
+  | { kind: "verifying" }
+  | { kind: "verified"; changed: string; unchanged: string }
+  | { kind: "partial"; message: string; userAction: string }
   | { kind: "retryable"; message: string; userAction: string }
   | { kind: "incomplete"; message: string; userAction: string }
   | { kind: "error"; error: AppError };
@@ -658,15 +662,41 @@ function renderTransfer(
         </>
       );
     }
-    case "transferred":
-      // NON-SUCCESS terminal (AC3): the bytes were written, nothing is verified
-      // yet. NEVER "transférée et vérifiée" / "état partiel" (a later flow).
+    case "verifying":
+      // TRANSIENT (AC1): the write is done, the verify re-read is running. The
+      // honest "écriture effectuée — vérification à venir" — no invented %, and
+      // NOT a resting terminal (it settles to verified / état partiel / échoué).
       return (
         <div className="lunii-panel__transfer-done">
           <StateChip tone="neutral" label="écriture effectuée" />
           <p className="lunii-panel__reason">
             Écriture effectuée — vérification à venir.
           </p>
+        </div>
+      );
+    case "verified":
+      // SUCCESS terminal (AC2): the FIRST appearance of `transférée et vérifiée`,
+      // shown only after the verify proof. Both summary lines are COMPOSED IN RUST
+      // and rendered VERBATIM here (no React reinterpretation). `aria-live="polite"`
+      // (the section), never a toast.
+      return (
+        <div className="lunii-panel__transfer-verified">
+          <StateChip tone="success" label="transférée et vérifiée" />
+          <p className="lunii-panel__comparison-verdict">{view.changed}</p>
+          <p className="lunii-panel__reason">{view.unchanged}</p>
+        </div>
+      );
+    case "partial":
+      // `état partiel` (AC3): verify found the device mutated + present but
+      // INCOHERENT. A non-success IN CONTEXT (role="alert"), never a toast, never
+      // success vocabulary. Warning tone like `incomplete` but a DISTINCT label
+      // (`état partiel` ≠ `transfert incomplet`). Same two recovery gestures.
+      return (
+        <div role="alert" className="lunii-panel__transfer-error">
+          <StateChip tone="warning" label="état partiel" />
+          <p>{view.message}</p>
+          <p className="lunii-panel__reason">{view.userAction}</p>
+          {renderTransferRecovery(onRetryTransfer, onDismissTransfer)}
         </div>
       );
     case "retryable":

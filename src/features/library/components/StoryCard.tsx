@@ -15,7 +15,9 @@ export type StoryPreparationBadge =
   | "preparing"
   | "retryable"
   | "transferring"
-  | "incomplete";
+  | "incomplete"
+  | "verified"
+  | "partial";
 
 export interface StoryCardProps {
   story: StoryCardDto;
@@ -125,13 +127,7 @@ export function StoryCard({
         <h3 className="story-card__title">{story.title}</h3>
         {preparationBadge ? (
           <StateChip
-            tone={
-              preparationBadge === "retryable"
-                ? "error"
-                : preparationBadge === "incomplete"
-                  ? "warning"
-                  : "neutral"
-            }
+            tone={badgeTone(preparationBadge)}
             label={badgeLabel(preparationBadge)}
             className="story-card__preparation-chip"
           />
@@ -153,5 +149,27 @@ function badgeLabel(badge: StoryPreparationBadge): string {
       return "échec récupérable";
     case "incomplete":
       return "transfert incomplet";
+    case "verified":
+      return "transférée et vérifiée";
+    case "partial":
+      return "état partiel";
+  }
+}
+
+/** Non-color-only tone per badge (paired with the distinct label above). */
+function badgeTone(
+  badge: StoryPreparationBadge,
+): "neutral" | "info" | "success" | "warning" | "error" {
+  switch (badge) {
+    case "verified":
+      return "success";
+    case "retryable":
+      return "error";
+    case "incomplete":
+    case "partial":
+      return "warning";
+    case "preparing":
+    case "transferring":
+      return "neutral";
   }
 }

@@ -168,6 +168,148 @@ pub fn classify(
     }
 }
 
+/// The verdict of the `verify` phase — the read-only re-read that PROVES what a
+/// successful write CLAIMS (the NFR "no success without explicit verification").
+/// Orthogonal to both [`TransferFailureCause`] (a write-phase functional cause)
+/// and [`TransferCompleteness`] (whether the WRITE mutated the device): a verdict
+/// describes what the RE-READ found, not how the write ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VerifyVerdict {
+    /// Presence (uuid indexed) + content present + byte fidelity (re-checksum)
+    /// all confirm the write. The legitimate success: `transférée et vérifiée`.
+    Verified,
+    /// The device was mutated and the pack is present but NOT fully coherent
+    /// (content promoted but not indexed, or a divergent re-checksum): the honest
+    /// non-success `état partiel` — never a silent success. DISTINCT from
+    /// [`TransferCompleteness::Incomplete`] (`transfert incomplet`, a `transfer`
+    /// phase interruption).
+    Partial,
+    /// The re-read PROVES the write did not land (pack absent) OR verification
+    /// cannot run/confirm (device gone / unreadable during `verify`): the
+    /// recoverable `échec récupérable`. A reconnected relaunch re-verifies.
+    Failed,
+}
+
+impl VerifyVerdict {
+    /// Stable snake_case wire/log tag — the closed identifier traces record and
+    /// the `job:failed` event carries, never a localized message.
+    pub const fn diagnostic_tag(self) -> &'static str {
+        match self {
+            Self::Verified => "verified",
+            Self::Partial => "partial",
+            Self::Failed => "failed",
+        }
+    }
+
+    /// Canonical FR state label (product-language). Internal mapping anchor — the
+    /// UI renders these exact words; the wire tag never reaches the user.
+    pub const fn state_label(self) -> &'static str {
+        match self {
+            Self::Verified => "transférée et vérifiée",
+            Self::Partial => "état partiel",
+            Self::Failed => "échec récupérable",
+        }
+    }
+
+    /// Single canonical FR `(message, userAction)` for a NON-success verdict.
+    /// `Verified` carries `None` — its confirmation summary (what changed / stayed
+    /// unchanged / final state) is composed from the comparison facts, not a fixed
+    /// failure copy. The UI renders both strings verbatim and adds the
+    /// `Relancer` / `Abandonner` gestures. No technical jargon leaks.
+    pub const fn copy(self) -> Option<(&'static str, &'static str)> {
+        match self {
+            Self::Verified => None,
+            Self::Partial => Some((
+                "Envoi dans un état partiel : certains éléments n'ont pas pu être confirmés sur la Lunii.",
+                "Relance l'envoi pour rétablir un état sûr.",
+            )),
+            Self::Failed => Some((
+                "La vérification de l'envoi n'a pas pu être confirmée.",
+                "Rebranche la Lunii puis relance l'envoi pour vérifier le résultat.",
+            )),
+        }
+    }
+}
+
+/// Outcome of the device-pack re-checksum during `verify`. Distinguishes a
+/// READABLE divergence (the bytes were read and disagree) from an IMPOSSIBLE
+/// re-checksum (the content is absent or could not be re-read) — the two must NOT
+/// collapse to one "checksum failed" bool: a readable divergence is `Partial`
+/// (present but incoherent), an impossible re-checksum is `Failed` (unconfirmable).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChecksumProbe {
+    /// The device bytes re-checksum to the prepared baseline (byte fidelity).
+    Match,
+    /// The device bytes were read but disagree with the baseline.
+    Diverged,
+    /// The re-checksum could not be computed (content absent, or unreadable /
+    /// structurally invalid) — verification is unconfirmable.
+    Unavailable,
+}
+
+/// Classify the `verify` verdict from the facts the read-only re-read produces.
+/// Cardinal rule (NFR): NO `Verified` without proof, and a `Partial` / `Failed`
+/// is never dressed up as a success.
+///
+/// - `readable == false` (device gone / unreadable / not the written device) ⇒
+///   cannot confirm ⇒ [`VerifyVerdict::Failed`] (a reconnected relaunch re-verifies).
+/// - `content_present == false` (pack absent — incl. an index entry without its
+///   content) ⇒ the write provably did not land ⇒ [`VerifyVerdict::Failed`].
+/// - `checksum == Unavailable` (content present but the bytes could not be
+///   re-read) ⇒ unconfirmable ⇒ [`VerifyVerdict::Failed`].
+/// - `checksum == Diverged` (bytes read but disagree) ⇒ present but incoherent ⇒
+///   [`VerifyVerdict::Partial`].
+/// - `checksum == Match` AND `indexed` ⇒ [`VerifyVerdict::Verified`].
+/// - `checksum == Match` but NOT `indexed` (content promoted, UUID absent from
+///   `.pi`) ⇒ present but incoherent ⇒ [`VerifyVerdict::Partial`].
+pub const fn classify_verify(
+    indexed: bool,
+    content_present: bool,
+    checksum: ChecksumProbe,
+    readable: bool,
+) -> VerifyVerdict {
+    if !readable {
+        return VerifyVerdict::Failed;
+    }
+    if !content_present {
+        return VerifyVerdict::Failed;
+    }
+    match checksum {
+        ChecksumProbe::Unavailable => VerifyVerdict::Failed,
+        ChecksumProbe::Diverged => VerifyVerdict::Partial,
+        ChecksumProbe::Match => {
+            if indexed {
+                VerifyVerdict::Verified
+            } else {
+                VerifyVerdict::Partial
+            }
+        }
+    }
+}
+
+/// The `verified` confirmation summary (AC2/FR15), COMPOSED in Rust and rendered
+/// VERBATIM by the panel (no frontend reinterpretation): what CHANGED (the story
+/// is now on the device) and what stayed UNCHANGED (the other device stories).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedSummary {
+    /// "« <Titre> » est maintenant sur la Lunii." — what changed + the final state.
+    pub changed: String,
+    /// "N autres histoires de l'appareil restent inchangées." — what stayed.
+    pub unchanged: String,
+}
+
+/// Compose the `verified` summary lines in Rust (AC2/FR15). `unchanged_count`
+/// reuses the 3.1 comparison count. The panel renders both strings verbatim.
+pub fn compose_verified_summary(story_title: &str, unchanged_count: u32) -> VerifiedSummary {
+    let changed = format!("« {story_title} » est maintenant sur la Lunii.");
+    let unchanged = match unchanged_count {
+        0 => "Aucune autre histoire de l'appareil n'a été modifiée.".to_string(),
+        1 => "1 autre histoire de l'appareil reste inchangée.".to_string(),
+        n => format!("{n} autres histoires de l'appareil restent inchangées."),
+    };
+    VerifiedSummary { changed, unchanged }
+}
+
 /// The single canonical FR `(message, userAction)` for a failure terminal,
 /// combining the cause with the device completeness. An `Incomplete` outcome
 /// carries the device-state nuance (a partial copy may exist; relaunching is
@@ -560,6 +702,122 @@ mod tests {
         ] {
             assert!(!m_a.contains(bad), "no jargon: {bad}");
             assert!(!a_a.contains(bad), "no jargon: {bad}");
+        }
+    }
+
+    #[test]
+    fn classify_verify_truth_table() {
+        use ChecksumProbe::*;
+        use VerifyVerdict::*;
+        // Indexed + content present + byte-faithful ⇒ the only Verified case.
+        assert_eq!(classify_verify(true, true, Match, true), Verified);
+        // Not readable / not the written device ⇒ Failed regardless of the rest.
+        assert_eq!(classify_verify(true, true, Match, false), Failed);
+        assert_eq!(classify_verify(false, false, Unavailable, false), Failed);
+        // Pack absent (content not present) ⇒ Failed, even if an index entry lingers.
+        assert_eq!(
+            classify_verify(false, false, Unavailable, true),
+            Failed,
+            "pack absent"
+        );
+        assert_eq!(
+            classify_verify(true, false, Unavailable, true),
+            Failed,
+            "uuid indexed but content folder missing ⇒ Failed (pack absent)"
+        );
+        // Content present but the re-checksum could not run ⇒ Failed (unconfirmable).
+        assert_eq!(
+            classify_verify(true, true, Unavailable, true),
+            Failed,
+            "present but unconfirmable"
+        );
+        // Content present + readable divergence ⇒ Partial, regardless of `indexed`
+        // — a safety-critical classifier ("no success without proof"): `Diverged`
+        // must never become `indexed`-dependent, so BOTH index states are locked.
+        assert_eq!(
+            classify_verify(true, true, Diverged, true),
+            Partial,
+            "present + indexed but the bytes diverge"
+        );
+        assert_eq!(
+            classify_verify(false, true, Diverged, true),
+            Partial,
+            "diverging bytes on a promoted-but-unindexed content ⇒ Partial"
+        );
+        // Content present + byte-faithful but NOT indexed ⇒ Partial.
+        assert_eq!(
+            classify_verify(false, true, Match, true),
+            Partial,
+            "content promoted but uuid not indexed"
+        );
+    }
+
+    #[test]
+    fn compose_verified_summary_composes_changed_and_unchanged_lines() {
+        let zero = compose_verified_summary("Mon histoire", 0);
+        assert!(zero.changed.contains("Mon histoire"));
+        assert!(zero.changed.contains("sur la Lunii"));
+        assert!(zero.unchanged.to_lowercase().contains("aucune autre"));
+
+        let one = compose_verified_summary("T", 1);
+        assert!(one.unchanged.starts_with("1 autre histoire"));
+        assert!(one.unchanged.contains("reste inchangée"));
+
+        let many = compose_verified_summary("T", 3);
+        assert!(many.unchanged.starts_with("3 autres histoires"));
+        assert!(many.unchanged.contains("restent inchangées"));
+    }
+
+    #[test]
+    fn verify_verdict_tags_and_labels_are_stable_and_distinct() {
+        let tags = [
+            VerifyVerdict::Verified.diagnostic_tag(),
+            VerifyVerdict::Partial.diagnostic_tag(),
+            VerifyVerdict::Failed.diagnostic_tag(),
+        ];
+        assert_eq!(tags, ["verified", "partial", "failed"]);
+        // The canonical state labels are the promoted/new ones.
+        assert_eq!(
+            VerifyVerdict::Verified.state_label(),
+            "transférée et vérifiée"
+        );
+        assert_eq!(VerifyVerdict::Partial.state_label(), "état partiel");
+        assert_eq!(VerifyVerdict::Failed.state_label(), "échec récupérable");
+    }
+
+    #[test]
+    fn verify_partial_is_not_the_transfer_incomplete_wording() {
+        // `état partiel` (a verify verdict) must never be confused with
+        // `transfert incomplet` (a `transfer`-phase interruption, 3.5). Distinct
+        // labels AND distinct copy.
+        assert_ne!(VerifyVerdict::Partial.state_label(), "transfert incomplet");
+        let (partial_msg, _) = VerifyVerdict::Partial.copy().expect("partial has copy");
+        let (incomplete_msg, _) = failure_copy(
+            TransferFailureCause::WriteRejected,
+            TransferCompleteness::Incomplete,
+        );
+        assert_ne!(
+            partial_msg, incomplete_msg,
+            "partial and incomplete must read differently"
+        );
+    }
+
+    #[test]
+    fn verify_verdict_copy_is_present_for_non_success_only_and_jargon_free() {
+        assert!(
+            VerifyVerdict::Verified.copy().is_none(),
+            "a verified success carries no failure copy"
+        );
+        for verdict in [VerifyVerdict::Partial, VerifyVerdict::Failed] {
+            let (message, action) = verdict.copy().expect("non-success verdict has copy");
+            assert!(!message.is_empty(), "{verdict:?} message empty");
+            assert!(!action.is_empty(), "{verdict:?} userAction empty");
+            for bad in [
+                "checksum", "promote", "index", ".pi", ".content", "write", "job", "payload",
+            ] {
+                assert!(!message.contains(bad), "{verdict:?} jargon: {bad}");
+                assert!(!action.contains(bad), "{verdict:?} jargon: {bad}");
+            }
         }
     }
 }

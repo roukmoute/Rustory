@@ -11,7 +11,7 @@
 //! crate, so the mounts + a capturing emitter are built inline.
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -24,7 +24,8 @@ use rustory_lib::domain::device::{format_pack_uuid, pack_short_id, parse_pack_in
 use rustory_lib::domain::shared::AppError;
 use rustory_lib::domain::story::content_checksum;
 use rustory_lib::domain::transfer::{
-    PackWritePlan, PreparationPhase, TransferCompleteness, TransferFailureCause,
+    append_pack_uuid, pack_uuid_bytes, PackWritePlan, PreparationPhase, TransferCompleteness,
+    TransferFailureCause, VerifyVerdict,
 };
 use rustory_lib::infrastructure::db::{self, DbHandle};
 use rustory_lib::infrastructure::device::{
@@ -190,23 +191,30 @@ fn transfers_an_imported_pack_to_a_writable_device() {
         budget(),
         &emitter,
     );
-    assert!(
-        matches!(outcome, TransferOutcome::Transferred { .. }),
-        "{outcome:?}"
-    );
-    // The job reports preflight, then HONEST in-flight progress during the write,
-    // then the non-success terminal.
+    match outcome {
+        TransferOutcome::Verified { summary, .. } => assert!(
+            summary.unchanged.starts_with("1 autre histoire"),
+            "the target's pre-existing pack stays unchanged alongside the new one: {summary:?}"
+        ),
+        other => panic!("expected Verified, got {other:?}"),
+    }
+    // The job reports preflight, HONEST in-flight progress during the write, the
+    // FINAL verify phase, then the verified terminal.
     let events = emitter.events();
     assert_eq!(
         events.first().map(String::as_str),
         Some("progress:preflight:1")
     );
     assert!(
+        events.iter().any(|e| e.starts_with("progress:verify:")),
+        "the verify phase is emitted before the terminal: {events:?}"
+    );
+    assert!(
         events
             .last()
             .map(|e| e.starts_with("completed:"))
             .unwrap_or(false),
-        "ends with the completed (non-success) terminal: {events:?}"
+        "ends with the verified terminal: {events:?}"
     );
     let fractions = emitter.fractions();
     assert!(
@@ -502,8 +510,8 @@ fn read_transfer_state_is_idle_when_the_pack_is_on_a_non_target_device() {
     )
     .expect("read state");
     assert!(
-        matches!(view, TransferStateView::Transferred { .. }),
-        "the targeted device that holds the pack reads as transferred: {view:?}"
+        matches!(view, TransferStateView::Verified { .. }),
+        "the targeted device that holds a byte-faithful pack reads as verified: {view:?}"
     );
 }
 
@@ -535,6 +543,7 @@ fn transfer_trace_channel_records_a_closed_pii_free_event_set() {
         &path,
         transfer_log::Event::TransferCompleted {
             story_ref: story_ref.clone(),
+            verify_verdict: "verified",
             elapsed_ms: 12,
         },
     )
@@ -542,19 +551,33 @@ fn transfer_trace_channel_records_a_closed_pii_free_event_set() {
     transfer_log::record_event_at_path(
         &path,
         transfer_log::Event::TransferFailed {
-            story_ref,
-            cause: "write_not_authorized",
-            completeness: "failed",
+            story_ref: story_ref.clone(),
+            cause: Some("write_not_authorized"),
+            completeness: Some("failed"),
+            verify_verdict: None,
             elapsed_ms: 3,
         },
     )
     .expect("failed");
+    transfer_log::record_event_at_path(
+        &path,
+        transfer_log::Event::TransferFailed {
+            story_ref,
+            cause: None,
+            completeness: None,
+            verify_verdict: Some("partial"),
+            elapsed_ms: 4,
+        },
+    )
+    .expect("verify partial");
 
     let contents = std::fs::read_to_string(&path).expect("read log");
-    assert_eq!(contents.lines().count(), 3);
+    assert_eq!(contents.lines().count(), 4);
     assert!(contents.contains("transfer_started"));
     assert!(contents.contains("transfer_completed"));
     assert!(contents.contains("transfer_failed"));
+    assert!(contents.contains("\"verify_verdict\":\"verified\""));
+    assert!(contents.contains("\"verify_verdict\":\"partial\""));
     // PII-free: the raw story id never appears, only its short hash.
     assert!(!contents.contains("0197a5d0-0000-7000-8000-000000000000"));
 }
@@ -604,7 +627,10 @@ fn holds_no_db_lock_during_scan() {
         budget(),
         &CapturingEmitter::default(),
     );
-    assert!(matches!(outcome, TransferOutcome::Transferred { .. }));
+    assert!(
+        matches!(outcome, TransferOutcome::Verified { .. }),
+        "{outcome:?}"
+    );
     assert!(
         lock_free.load(Ordering::SeqCst),
         "the DB mutex must be free during the device scan"
@@ -742,7 +768,10 @@ fn relaunching_a_transfer_converges_without_clobber() {
         budget(),
         &CapturingEmitter::default(),
     );
-    assert!(matches!(first, TransferOutcome::Transferred { .. }));
+    assert!(
+        matches!(first, TransferOutcome::Verified { .. }),
+        "{first:?}"
+    );
     let short = pack_short_id(&pack_bytes);
     let content_after_first =
         std::fs::read(target_root.join(".content").join(&short).join("ni")).expect("ni");
@@ -766,8 +795,8 @@ fn relaunching_a_transfer_converges_without_clobber() {
         &CapturingEmitter::default(),
     );
     assert!(
-        matches!(second, TransferOutcome::Transferred { .. }),
-        "a relaunch converges to the non-success terminal: {second:?}"
+        matches!(second, TransferOutcome::Verified { .. }),
+        "a relaunch converges to the verified terminal: {second:?}"
     );
     assert_eq!(
         std::fs::read(target_root.join(".content").join(&short).join("ni")).expect("ni"),
@@ -785,4 +814,271 @@ fn relaunching_a_transfer_converges_without_clobber() {
         .filter(|u| **u == pack_bytes)
         .count();
     assert_eq!(count, 1, "the transferred UUID is indexed exactly once");
+}
+
+/// A writer that promotes content with bytes that DIVERGE from the prepared pack
+/// AND indexes the UUID, then succeeds — so the `verify` re-read finds the pack
+/// present + indexed but byte-DIVERGENT, yielding the honest `Partial` verdict.
+struct ByteDivergentWriter;
+
+impl DevicePackWriter for ByteDivergentWriter {
+    fn write_pack(
+        &self,
+        mount_path: &Path,
+        _source_pack_dir: &Path,
+        pack_uuid: &str,
+        plan: &PackWritePlan,
+        _budget: Duration,
+        _progress: &dyn Fn(WriteProgress),
+    ) -> Result<(), WriteFailure> {
+        let target = mount_path.join(".content").join(&plan.short_id);
+        std::fs::create_dir_all(&target).expect("create promoted dir");
+        for file in &plan.files {
+            let dst = target.join(&file.rel_path);
+            if let Some(parent) = dst.parent() {
+                std::fs::create_dir_all(parent).expect("create parent");
+            }
+            // Non-empty (keeps the structure valid) but DIVERGENT from the prepared
+            // bytes, so the re-checksum disagrees with the baseline.
+            std::fs::write(&dst, vec![0x00u8; 8]).expect("write divergent file");
+        }
+        // Index the UUID so the verify re-read surfaces the pack (indexed + content
+        // present) — only the bytes diverge.
+        let pi_path = mount_path.join(".pi");
+        let pi = std::fs::read(&pi_path).unwrap_or_default();
+        let uuid_bytes = pack_uuid_bytes(pack_uuid).expect("canonical pack uuid");
+        std::fs::write(&pi_path, append_pack_uuid(&pi, &uuid_bytes)).expect("write .pi");
+        Ok(())
+    }
+}
+
+#[test]
+fn a_byte_divergent_write_verifies_as_partial() {
+    // AC3 `partial`: the write lands and the pack is present + indexed, but the
+    // device bytes do not re-checksum to the prepared baseline → `état partiel`,
+    // never a silent success; the canonical draft stays intact (FR18).
+    let db_tmp = tempfile::tempdir().expect("db dir");
+    let app_data = tempfile::tempdir().expect("app data");
+    let db = Mutex::new(open_db(&db_tmp));
+    let (story_id, _pack, _src) = import_one(&db, app_data.path(), uuid([0x3C, 0x3C, 0x3C, 0x3C]));
+
+    let (_target, target_root, target_id, _) =
+        build_mount_with_pack(3, uuid([0x04, 0x04, 0x04, 0x04]));
+    let canonical_before = read_story_row(&db, &story_id);
+    let scanner = SystemDeviceScanner::with_explicit_mount_roots(vec![target_root]);
+
+    let outcome = transfer_story(
+        &db,
+        &scanner,
+        &SystemDeviceLibraryReader,
+        &SystemTransferArtifactSource,
+        &ByteDivergentWriter,
+        app_data.path(),
+        &story_id,
+        &target_id,
+        budget(),
+        budget(),
+        &CapturingEmitter::default(),
+    );
+    assert_eq!(
+        outcome,
+        TransferOutcome::Unverified {
+            verdict: VerifyVerdict::Partial
+        }
+    );
+    assert_eq!(
+        read_story_row(&db, &story_id),
+        canonical_before,
+        "verify never mutates the canonical draft"
+    );
+}
+
+/// A scanner that resolves the device for the preflight + the pre-write
+/// re-validation, then reports NO device for the `verify` re-scan — modelling a
+/// Lunii unplugged in the window between the write and the verification.
+struct VanishBeforeVerifyScanner {
+    inner: SystemDeviceScanner,
+    scans: AtomicUsize,
+}
+
+impl DeviceScanner for VanishBeforeVerifyScanner {
+    fn scan(&self, budget: Duration) -> Result<DeviceScanReport, AppError> {
+        // Scans 1 (preflight) + 2 (F5 re-validation) see the device; scan 3
+        // (verify) sees nothing.
+        let n = self.scans.fetch_add(1, Ordering::SeqCst);
+        if n >= 2 {
+            return Ok(DeviceScanReport::empty(Duration::from_millis(1)));
+        }
+        self.inner.scan(budget)
+    }
+}
+
+#[test]
+fn a_device_gone_during_verify_yields_failed() {
+    // AC3 `failed`: the write may have landed, but the device is gone before the
+    // verify re-read can confirm it → `échec récupérable` (never a false success).
+    let db_tmp = tempfile::tempdir().expect("db dir");
+    let app_data = tempfile::tempdir().expect("app data");
+    let db = Mutex::new(open_db(&db_tmp));
+    let (story_id, _pack, _src) = import_one(&db, app_data.path(), uuid([0x4D, 0x4D, 0x4D, 0x4D]));
+
+    let (_target, target_root, target_id, _) =
+        build_mount_with_pack(3, uuid([0x05, 0x05, 0x05, 0x05]));
+    let scanner = VanishBeforeVerifyScanner {
+        inner: SystemDeviceScanner::with_explicit_mount_roots(vec![target_root]),
+        scans: AtomicUsize::new(0),
+    };
+
+    let outcome = transfer_story(
+        &db,
+        &scanner,
+        &SystemDeviceLibraryReader,
+        &SystemTransferArtifactSource,
+        &SystemDevicePackWriter,
+        app_data.path(),
+        &story_id,
+        &target_id,
+        budget(),
+        budget(),
+        &CapturingEmitter::default(),
+    );
+    assert_eq!(
+        outcome,
+        TransferOutcome::Unverified {
+            verdict: VerifyVerdict::Failed
+        }
+    );
+}
+
+/// A writer that promotes BYTE-FAITHFUL content under `.content/<SHORT_ID>` but
+/// NEVER updates `.pi` (the index step "did not run"), then succeeds — models a
+/// pack present + faithful on the device yet UNINDEXED.
+struct PromoteWithoutIndexWriter;
+
+impl DevicePackWriter for PromoteWithoutIndexWriter {
+    fn write_pack(
+        &self,
+        mount_path: &Path,
+        _source_pack_dir: &Path,
+        _pack_uuid: &str,
+        plan: &PackWritePlan,
+        _budget: Duration,
+        _progress: &dyn Fn(WriteProgress),
+    ) -> Result<(), WriteFailure> {
+        // The standard plausible pack equals the import baseline, so the verify
+        // re-checksum reads it back as byte-faithful — only the index is missing.
+        write_pack(&mount_path.join(".content").join(&plan.short_id));
+        Ok(())
+    }
+}
+
+#[test]
+fn content_promoted_but_unindexed_verifies_as_partial() {
+    // F3 (real): a byte-faithful `.content/<short>` whose UUID is NOT in `.pi` is
+    // the device "mutated + present but incoherent" case ⇒ `état partiel`, never a
+    // `Failed` (the verify probes the content folder independently of the index).
+    let db_tmp = tempfile::tempdir().expect("db dir");
+    let app_data = tempfile::tempdir().expect("app data");
+    let db = Mutex::new(open_db(&db_tmp));
+    let pack = uuid([0x6C, 0x6C, 0x6C, 0x6C]);
+    let (story_id, pack_bytes, _src) = import_one(&db, app_data.path(), pack);
+
+    let (_target, target_root, target_id, _) =
+        build_mount_with_pack(3, uuid([0x06, 0x06, 0x06, 0x06]));
+    let scanner = SystemDeviceScanner::with_explicit_mount_roots(vec![target_root.clone()]);
+
+    let outcome = transfer_story(
+        &db,
+        &scanner,
+        &SystemDeviceLibraryReader,
+        &SystemTransferArtifactSource,
+        &PromoteWithoutIndexWriter,
+        app_data.path(),
+        &story_id,
+        &target_id,
+        budget(),
+        budget(),
+        &CapturingEmitter::default(),
+    );
+    assert_eq!(
+        outcome,
+        TransferOutcome::Unverified {
+            verdict: VerifyVerdict::Partial
+        }
+    );
+    // The promoted content IS present on the device, but its UUID is NOT indexed.
+    let short = pack_short_id(&pack_bytes);
+    assert!(target_root.join(".content").join(&short).is_dir());
+    let pi = std::fs::read(target_root.join(".pi")).expect("read .pi");
+    assert!(
+        !parse_pack_index(&pi).uuids.iter().any(|u| u == &pack_bytes),
+        "the promoted-but-unindexed pack must NOT be in .pi"
+    );
+}
+
+/// A scanner that resolves device A for the preflight + the pre-write
+/// re-validation, then resolves a DIFFERENT device B for the `verify` re-scan —
+/// models a Lunii swapped after the write for another supported device.
+struct SwapBeforeVerifyScanner {
+    target: SystemDeviceScanner,
+    swapped: SystemDeviceScanner,
+    scans: AtomicUsize,
+}
+
+impl DeviceScanner for SwapBeforeVerifyScanner {
+    fn scan(&self, budget: Duration) -> Result<DeviceScanReport, AppError> {
+        let n = self.scans.fetch_add(1, Ordering::SeqCst);
+        if n >= 2 {
+            self.swapped.scan(budget)
+        } else {
+            self.target.scan(budget)
+        }
+    }
+}
+
+#[test]
+fn a_device_swapped_before_verify_yields_failed() {
+    // F2 (real): after the write lands on device A, the Lunii is swapped for ANOTHER
+    // supported device B that ALREADY holds the same pack + bytes. Without the
+    // continuity check the three proofs would pass on B and emit a false `verified`
+    // for the wrong device; the verify binds to the written device (mount/serial),
+    // so the swap ends `Failed`.
+    let db_tmp = tempfile::tempdir().expect("db dir");
+    let app_data = tempfile::tempdir().expect("app data");
+    let db = Mutex::new(open_db(&db_tmp));
+    let pack = uuid([0x7C, 0x7C, 0x7C, 0x7C]);
+    let (story_id, _pack_bytes, _src) = import_one(&db, app_data.path(), pack);
+
+    // Device A: the write target (a different pre-existing pack).
+    let (_a, root_a, target_id, _) = build_mount_with_pack(3, uuid([0x07, 0x07, 0x07, 0x07]));
+    // Device B: a DIFFERENT Lunii that already holds the SAME pack + bytes.
+    let (_b, root_b, _b_id, _) = build_mount_with_pack(3, pack);
+    assert_ne!(root_a, root_b);
+
+    let scanner = SwapBeforeVerifyScanner {
+        target: SystemDeviceScanner::with_explicit_mount_roots(vec![root_a]),
+        swapped: SystemDeviceScanner::with_explicit_mount_roots(vec![root_b]),
+        scans: AtomicUsize::new(0),
+    };
+
+    let outcome = transfer_story(
+        &db,
+        &scanner,
+        &SystemDeviceLibraryReader,
+        &SystemTransferArtifactSource,
+        &SystemDevicePackWriter,
+        app_data.path(),
+        &story_id,
+        &target_id,
+        budget(),
+        budget(),
+        &CapturingEmitter::default(),
+    );
+    assert_eq!(
+        outcome,
+        TransferOutcome::Unverified {
+            verdict: VerifyVerdict::Failed
+        },
+        "a swap to another device — even one holding the same pack — is not the written device"
+    );
 }

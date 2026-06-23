@@ -206,7 +206,9 @@ describe("<LuniiDecisionPanel />", () => {
     const nonReady: TransferView[] = [
       { kind: "unavailable", reason: "Envoi indisponible: profil non supporté" },
       { kind: "transferring", progress: null, phase: null },
-      { kind: "transferred" },
+      { kind: "verifying" },
+      { kind: "verified", changed: "« Mon histoire » est sur la Lunii.", unchanged: "m" },
+      { kind: "partial", message: "m", userAction: "a" },
       { kind: "retryable", message: "m", userAction: "a" },
       {
         kind: "error",
@@ -1011,20 +1013,89 @@ describe("<LuniiDecisionPanel /> — transfer", () => {
     expect(within(region).queryByText(/%/)).toBeNull();
   });
 
-  it("renders the NON-SUCCESS terminal — never 'transférée et vérifiée'", () => {
+  it("renders the TRANSIENT verifying state — 'écriture effectuée — vérification à venir', not yet a success", () => {
     render(
       <LuniiDecisionPanel
         deviceState="idle"
-        transfer={{ kind: "transferred" }}
+        transfer={{ kind: "verifying" }}
         onEdit={noop}
       />,
     );
     const region = screen.getByRole("region", { name: /^transfert$/i });
     expect(region).toHaveTextContent(/écriture effectuée/i);
     expect(region).toHaveTextContent(/vérification à venir/i);
-    // The success vocabulary reserved for verification must NEVER appear here.
+    // The success vocabulary is reserved for the proven `verified` terminal.
     expect(region).not.toHaveTextContent(/transférée et vérifiée/i);
     expect(region).not.toHaveTextContent(/état partiel/i);
+  });
+
+  it("renders the 'transférée et vérifiée' success terminal with the AC2 summary (polite, never a toast)", () => {
+    render(
+      <LuniiDecisionPanel
+        deviceState="idle"
+        transfer={{
+          kind: "verified",
+          // Composed-in-Rust lines, rendered VERBATIM by the panel.
+          changed: "« Mon histoire » est maintenant sur la Lunii.",
+          unchanged: "2 autres histoires de l'appareil restent inchangées.",
+        }}
+        onEdit={noop}
+      />,
+    );
+    const region = screen.getByRole("region", { name: /^transfert$/i });
+    // The FIRST appearance of the canonical success label, success-toned glyph.
+    const chip = within(region)
+      .getByText(/transférée et vérifiée/i)
+      .closest(".ds-chip");
+    expect(chip).toHaveClass("ds-chip--success");
+    // The summary lines are rendered verbatim (what changed + what stayed).
+    expect(region).toHaveTextContent(/«\s*Mon histoire\s*».*sur la lunii/i);
+    expect(region).toHaveTextContent(/2 autres histoires.*restent inchangées/i);
+    // A confirmation is polite, never an alert/toast.
+    expect(within(region).queryByRole("alert")).toBeNull();
+    expect(screen.queryAllByRole("status")).toHaveLength(0);
+  });
+
+  it("renders the 'état partiel' terminal distinct from 'transfert incomplet' AND 'échec récupérable', with Relancer + Abandonner (AC3)", async () => {
+    const onRetryTransfer = vi.fn();
+    const onDismissTransfer = vi.fn();
+    render(
+      <LuniiDecisionPanel
+        deviceState="idle"
+        transfer={{
+          kind: "partial",
+          message:
+            "Envoi dans un état partiel : certains éléments n'ont pas pu être confirmés sur la Lunii.",
+          userAction: "Relance l'envoi pour rétablir un état sûr.",
+        }}
+        onRetryTransfer={onRetryTransfer}
+        onDismissTransfer={onDismissTransfer}
+        onEdit={noop}
+      />,
+    );
+    const alert = screen.getByRole("alert");
+    // The DISTINCT canonical label (never the 3.5 / pack wordings). Exact match on
+    // the chip — the message paragraph also contains "état partiel".
+    expect(within(alert).getByText("état partiel")).toBeInTheDocument();
+    expect(within(alert).queryByText(/transfert incomplet/i)).toBeNull();
+    expect(within(alert).queryByText(/échec récupérable/i)).toBeNull();
+    // Tone/glyph: warning (like `incomplete`) but NEVER error nor success — the
+    // label text carries the distinction (non-color-only).
+    const chip = within(alert).getByText("état partiel").closest(".ds-chip");
+    expect(chip).toHaveClass("ds-chip--warning");
+    expect(chip).not.toHaveClass("ds-chip--error");
+    expect(chip).not.toHaveClass("ds-chip--success");
+    // NEVER success / verification vocabulary on this non-success terminal.
+    expect(alert).not.toHaveTextContent(/transférée et vérifiée/i);
+    // Both recovery gestures (AC3): Relancer (full cycle) AND Abandonner.
+    await userEvent.click(
+      screen.getByRole("button", { name: /relancer le transfert/i }),
+    );
+    expect(onRetryTransfer).toHaveBeenCalledTimes(1);
+    await userEvent.click(
+      screen.getByRole("button", { name: /abandonner le transfert/i }),
+    );
+    expect(onDismissTransfer).toHaveBeenCalledTimes(1);
   });
 
   it("renders a recoverable failure in-context with Relancer (never a toast)", async () => {
