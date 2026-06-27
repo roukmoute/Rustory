@@ -392,7 +392,7 @@ mod tests {
     use crate::infrastructure::db;
     use crate::ipc::dto::import_export::{ImportCategoryDto, ImportableContentDto};
 
-    const CANONICAL_STRUCTURE: &str = "{\"schemaVersion\":1,\"nodes\":[]}";
+    const CANONICAL_STRUCTURE: &str = "{\"schemaVersion\":2,\"nodes\":[{\"id\":\"n1\",\"text\":\"\",\"label\":\"\",\"imageAssetId\":null,\"audioAssetId\":null}]}";
 
     fn fresh_db() -> DbHandle {
         let mut db = db::open_in_memory().expect("open in-memory db");
@@ -408,7 +408,7 @@ mod tests {
                 exported_by: "rustory/0.1.0".into(),
             },
             story: ExportedStoryV1 {
-                schema_version: 1,
+                schema_version: 2,
                 title: title.into(),
                 structure_json: CANONICAL_STRUCTURE.into(),
                 content_checksum: content_checksum(CANONICAL_STRUCTURE),
@@ -495,11 +495,11 @@ mod tests {
 
         // The story is re-openable WITHOUT the artifact, with PRESERVED
         // timestamps (fidelity of the AC3 re-openable story).
-        let detail = get_story_detail(&db, &card.id)
+        let detail = get_story_detail(&db, &std::env::temp_dir(), &card.id)
             .expect("read detail")
             .expect("row present");
         assert_eq!(detail.title, "Mon Histoire");
-        assert_eq!(detail.schema_version, 1);
+        assert_eq!(detail.schema_version, 2);
         assert_eq!(detail.structure_json, CANONICAL_STRUCTURE);
         assert_eq!(detail.created_at, "2026-06-20T10:00:00.000Z");
         assert_eq!(detail.updated_at, "2026-06-24T14:15:00.000Z");
@@ -687,14 +687,14 @@ mod tests {
             },
         )
         .expect("create native");
-        let before = get_story_detail(&db, &native.id)
+        let before = get_story_detail(&db, &std::env::temp_dir(), &native.id)
             .expect("read")
             .expect("present");
 
         let analysis = analyze_artifact(&clean_artifact_bytes("Importée"), "i.rustory".into());
         accept_import(&mut db, &accept_input_from(&analysis)).expect("accept");
 
-        let after = get_story_detail(&db, &native.id)
+        let after = get_story_detail(&db, &std::env::temp_dir(), &native.id)
             .expect("read")
             .expect("present");
         assert_eq!(before.title, after.title);

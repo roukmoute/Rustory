@@ -37,7 +37,7 @@ use rustory_lib::infrastructure::diagnostics::transfer as transfer_log;
 use rustory_lib::infrastructure::filesystem::SystemTransferArtifactSource;
 use tempfile::TempDir;
 
-const HEALTHY_JSON: &str = "{\"schemaVersion\":1,\"nodes\":[]}";
+const HEALTHY_JSON: &str = "{\"schemaVersion\":2,\"nodes\":[{\"id\":\"n1\",\"text\":\"\",\"label\":\"\",\"imageAssetId\":null,\"audioAssetId\":null}]}";
 
 fn uuid(tail: [u8; 4]) -> [u8; 16] {
     let mut b = [0xAB; 16];
@@ -130,7 +130,7 @@ fn insert_native_story(db: &Mutex<DbHandle>, id: &str) {
         .conn()
         .execute(
             "INSERT INTO stories (id, title, schema_version, structure_json, content_checksum, created_at, updated_at) \
-             VALUES (?1, 'Mon histoire', 1, ?2, ?3, '2026-06-22T00:00:00.000Z', '2026-06-22T00:00:00.000Z')",
+             VALUES (?1, 'Mon histoire', 2, ?2, ?3, '2026-06-22T00:00:00.000Z', '2026-06-22T00:00:00.000Z')",
             rusqlite::params![id, HEALTHY_JSON, content_checksum(HEALTHY_JSON)],
         )
         .expect("insert story");

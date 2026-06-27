@@ -19,6 +19,8 @@ pub enum AppErrorCode {
     TransferFailed,
     TransferOutcomeUnavailable,
     OfficialCatalogUnavailable,
+    MediaInvalid,
+    MediaProcessingFailed,
 }
 
 /// Normalized application error crossing the IPC boundary.
@@ -211,6 +213,37 @@ impl AppError {
     ) -> Self {
         Self {
             code: AppErrorCode::OfficialCatalogUnavailable,
+            message: message.into(),
+            user_action: Some(user_action.into()),
+            details: None,
+        }
+    }
+
+    /// Constructed when a node media file is REFUSED at attach: an unsupported
+    /// format, an unreadable/corrupt file, or one over the byte ceiling. A real
+    /// block (`bloquée`) surfaced INLINE at the media slot — never a toast. The
+    /// stage is carried by `details.stage` (`unsupported_format` / `oversize` /
+    /// `unreadable`) from a closed set, PII-free (no path, no raw OS message).
+    pub fn media_invalid(message: impl Into<String>, user_action: impl Into<String>) -> Self {
+        Self {
+            code: AppErrorCode::MediaInvalid,
+            message: message.into(),
+            user_action: Some(user_action.into()),
+            details: None,
+        }
+    }
+
+    /// Constructed when the node-media STORE itself fails to stage, promote or
+    /// read the bytes — a TRANSPORT failure of the media store (filesystem /
+    /// dialog / blocking worker), not a rejection of the file's content. The
+    /// stage is carried by `details.stage` (`staging` / `promote` / `read` /
+    /// `app_data_unavailable` / `dialog_failed` / `spawn_blocking_join`).
+    pub fn media_processing_failed(
+        message: impl Into<String>,
+        user_action: impl Into<String>,
+    ) -> Self {
+        Self {
+            code: AppErrorCode::MediaProcessingFailed,
             message: message.into(),
             user_action: Some(user_action.into()),
             details: None,
@@ -487,6 +520,34 @@ mod tests {
         assert_eq!(v["code"], "OFFICIAL_CATALOG_UNAVAILABLE");
         assert_eq!(v["details"]["source"], "network");
         assert_eq!(v["details"]["stage"], "fetch");
+    }
+
+    #[test]
+    fn media_invalid_serializes_with_stable_code_and_details() {
+        let err = AppError::media_invalid("Format non pris en charge.", "Choisis un PNG ou JPEG.")
+            .with_details(
+                serde_json::json!({ "source": "media_invalid", "stage": "unsupported_format" }),
+            );
+        let v = serde_json::to_value(&err).expect("serialize");
+        assert_eq!(v["code"], "MEDIA_INVALID");
+        assert_eq!(v["message"], "Format non pris en charge.");
+        assert_eq!(v["details"]["stage"], "unsupported_format");
+        assert!(v.get("user_action").is_none(), "snake_case must not leak");
+    }
+
+    #[test]
+    fn media_processing_failed_serializes_with_stable_code_and_details() {
+        let err = AppError::media_processing_failed(
+            "Média indisponible: stockage local en échec.",
+            "Réessaie dans un instant.",
+        )
+        .with_details(
+            serde_json::json!({ "source": "media_processing_failed", "stage": "promote" }),
+        );
+        let v = serde_json::to_value(&err).expect("serialize");
+        assert_eq!(v["code"], "MEDIA_PROCESSING_FAILED");
+        assert_eq!(v["details"]["stage"], "promote");
+        assert_eq!(v["userAction"], "Réessaie dans un instant.");
     }
 
     #[test]

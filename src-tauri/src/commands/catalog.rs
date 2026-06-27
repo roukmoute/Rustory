@@ -21,6 +21,7 @@ use crate::application::device::catalog::{
     self, import_official_catalog_from_bytes, DEFAULT_CATALOG_LOCALE, MAX_CATALOG_BYTES,
 };
 use crate::application::device::title::count_official_catalog;
+use crate::commands::shared::base64_encode;
 use crate::domain::device::is_canonical_pack_uuid;
 use crate::domain::shared::AppError;
 use crate::infrastructure::filesystem::{
@@ -152,33 +153,6 @@ fn catalog_storage_error(stage: &'static str) -> AppError {
     .with_details(serde_json::json!({ "source": "storage", "stage": stage }))
 }
 
-/// Minimal standard-alphabet base64 encoder (no padding omitted). Kept
-/// dependency-free — the only use is wrapping a small cached cover into a
-/// `data:` URL for the webview.
-fn base64_encode(data: &[u8]) -> String {
-    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
-    for chunk in data.chunks(3) {
-        let b0 = chunk[0] as u32;
-        let b1 = *chunk.get(1).unwrap_or(&0) as u32;
-        let b2 = *chunk.get(2).unwrap_or(&0) as u32;
-        let n = (b0 << 16) | (b1 << 8) | b2;
-        out.push(ALPHABET[((n >> 18) & 63) as usize] as char);
-        out.push(ALPHABET[((n >> 12) & 63) as usize] as char);
-        out.push(if chunk.len() > 1 {
-            ALPHABET[((n >> 6) & 63) as usize] as char
-        } else {
-            '='
-        });
-        out.push(if chunk.len() > 2 {
-            ALPHABET[(n & 63) as usize] as char
-        } else {
-            '='
-        });
-    }
-    out
-}
-
 /// Import the official catalog from a user-picked file (100%-offline path).
 /// Opens a native open-file dialog, reads the chosen file (bounded), parses
 /// and caches it. A cancelled dialog resolves with `{ kind: "cancelled" }`.
@@ -269,17 +243,5 @@ mod tests {
             assert_eq!(v["details"]["source"], "import");
             assert_eq!(v["details"]["stage"], stage);
         }
-    }
-
-    #[test]
-    fn base64_encode_matches_known_vectors() {
-        // RFC 4648 test vectors.
-        assert_eq!(base64_encode(b""), "");
-        assert_eq!(base64_encode(b"f"), "Zg==");
-        assert_eq!(base64_encode(b"fo"), "Zm8=");
-        assert_eq!(base64_encode(b"foo"), "Zm9v");
-        assert_eq!(base64_encode(b"foob"), "Zm9vYg==");
-        assert_eq!(base64_encode(b"fooba"), "Zm9vYmE=");
-        assert_eq!(base64_encode(b"foobar"), "Zm9vYmFy");
     }
 }

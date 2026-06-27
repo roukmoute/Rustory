@@ -82,6 +82,9 @@ The UI must never:
 - use the same visual label for `bloquée` and `échec récupérable`
 - treat `état partiel` as a silent success
 - hide a critical issue only in a `toast`
+- carry a node media block only in a `toast` — it lives inline at its slot
+- paint a node `Enregistré` while one of its fields or media is still blocked
+- show an editable node field or media action that cannot be saved (an imported story's node is read-only)
 
 ## Disabled Actions and Reasons
 
@@ -137,6 +140,17 @@ Preferred patterns:
 - `Préparation indisponible: aucun appareil connecté`
 - `Préparation indisponible: profil non supporté`
 - `Préparation indisponible: corrige les blocages d'abord`
+
+For an imported story the node editor HIDES its write affordances (it renders
+the projection read-only with a named `Histoire importée (lecture seule)` note)
+rather than showing a disabled control with a reason; `Aperçu` / `Retirer` only
+render when a media is present, so they are never shown-but-disabled either.
+
+Node-media error payloads carry a stable `details.source` so support can triage
+without parsing the user-facing message:
+
+- `media_invalid` — the chosen file is refused at attach: `details.stage` is one of `unsupported_format`, `oversize`, `non_filesystem_path`, `unknown_slot`. Surfaces as `MEDIA_INVALID` at the media slot, never a toast.
+- `media_processing_failed` — a transport failure of the media store: `details.stage` is one of `staging`, `promote`, `read`, `db`, `invalid_name`, `app_data_unavailable`, `dialog_failed`, `spawn_blocking_join`. Surfaces as `MEDIA_PROCESSING_FAILED`.
 
 Error payloads that surface in the autosave alert carry a stable
 `details.source` discriminator so support can triage the cause without
@@ -560,6 +574,9 @@ both strings, React renders them verbatim.
 | `structure` | `schemaUnsupported` | blocking | Cette histoire utilise un format plus récent que celui pris en charge par cette version de Rustory. | Mets à jour Rustory pour transférer cette histoire. |
 | `structure` | `structureCorrupt` | blocking | La structure interne de l'histoire est illisible ou incohérente. | Restaure une version saine de l'histoire puis relance la vérification. |
 | `structure` | `checksumMismatch` | blocking | Les données locales de l'histoire ont changé de façon inattendue (corruption détectée). | Restaure une sauvegarde saine de l'histoire avant de la transférer. |
+| `media` | `mediaUnsupported` | blocking | Ce média utilise un format non pris en charge. | Choisis une image PNG ou JPEG, ou un son MP3, WAV ou OGG. |
+| `media` | `mediaUnreadable` | blocking | Ce média est illisible ou dépasse la taille autorisée. | Choisis un fichier plus léger et lisible puis réessaie. |
+| `media` | `mediaSourceMissing` | fixable | Le fichier d'un média associé n'est plus accessible. | Ré-associe le média ou retire-le ; le reste du nœud reste modifiable. |
 | `deviceProfile` | `metadataUnsupported` | blocking | Le profil de la Lunii connectée n'est pas pris en charge. | Consulte le profil de support pour voir les Lunii compatibles. |
 | `deviceProfile` | `metadataCorrupt` | blocking | Les marqueurs de la Lunii connectée sont incomplets ou illisibles. | Rebranche la Lunii puis relance la vérification. |
 | `deviceProfile` | `familyUnknown` | blocking | La famille de l'appareil connecté n'est pas reconnue. | Branche une Lunii prise en charge puis relance la vérification. |
@@ -567,21 +584,30 @@ both strings, React renders them verbatim.
 | `deviceProfile` | `firmwareUnsupported` | blocking | Le firmware de la Lunii connectée n'est pas pris en charge. | Consulte le profil de support pour les firmwares compatibles. |
 | `deviceProfile` | `operationNotAuthorized` | blocking | Le profil détecté n'autorise pas la lecture de la bibliothèque de l'appareil. | Consulte le profil de support pour comprendre ce qui est permis. |
 
-**`media`, `filesystem` AND `deviceProfile` are declared but have NO live
-emitter in MVP Phase 1** (the `deviceProfile` causes above are part of the
-closed wire taxonomy, ready for a future device-format validation). The reasons:
-media validation arrives with the media-preparation step; filesystem failures
-surface as transport `AppError`s; and the `deviceProfile` axis only ever applies
-to a CONFIRMED readable supported device — which is compatible by construction in
-MVP (a supported profile passes by definition, see
+**The `media` axis now has a LIVE emitter — the `Story Node Editor`** (see
+`Story Node Editor Contract`), which is where a parent attaches and validates a
+node's source media. That is where the `(axis = media, cause)` blockers above
+are produced and surfaced inline, with the `needs attention` vs `blocked`
+distinction. The TRANSFER preflight panel itself does not re-emit media blockers
+for a native single-node story: such a story is structurally coherent for the
+canonical checks, and converting its source media to a device pack is a
+preparation/transfer concern, not a canonical-validity one. The `media` causes
+are nonetheless part of the closed wire taxonomy so the verdict surface stays
+consistent across both contexts.
+
+**`filesystem` AND `deviceProfile` are still declared without a live emitter
+here** (the `deviceProfile` causes above are part of the closed wire taxonomy,
+ready for a future device-format validation): filesystem failures surface as
+transport `AppError`s; and the `deviceProfile` axis only ever applies to a
+CONFIRMED readable supported device — which is compatible by construction in MVP
+(a supported profile passes by definition, see
 [device-support-profile.md](./device-support-profile.md)). A verdict is composed
 ONLY when the live re-scan resolves to the requested readable supported device
 (its identity matched). If the re-scan finds no device, an unsupported device, or
 more than one (ambiguous), the present device's identity cannot be confirmed as
 the one the UI asked about, so the read surfaces a recoverable `device_changed`
 (see "No new error code") rather than a compatibility verdict on an unconfirmed
-device — never false coverage, never a stale verdict. So in MVP only the
-`structure` axis carries live blockers.
+device — never false coverage, never a stale verdict.
 
 **Verdict ⟂ send gate.** The verdict answers "did this story pass the canonical
 + profile checks?"; it is INDEPENDENT of whether a transfer is enabled. The
@@ -1067,22 +1093,28 @@ without losing the global context. It is the same route the library opens on
 double-click / `Éditer` (see `Story Card Interaction Contract`) and leaves
 through `Retour à la bibliothèque` (see `Library Routing Contract`, which
 already preserves selection and filters across the round trip). The shell
-opens identically for a native story and for an imported one — both are
-canonical `stories` rows read by `get_story_detail`.
+opens for a native story and for an imported one — both are canonical
+`stories` rows read by `get_story_detail`. A native story's current node is
+editable; an imported story's node is projected **read-only** (its declared
+edit scope is a later iteration), so the shell never shows an editable control
+that cannot be saved.
 
 This contract owns the SHELL: the three-zone frame, its entry/exit, and its
 keyboard model. The behaviors hosted inside it keep their own contracts — the
-title field (`Story Autosave Contract`), export (`Story Export Contract`), and
-draft recovery (`Story Recovery Contract`). Editing the content of a node, and
-reorganizing the structure / option links, are NOT part of this shell yet: it
-ships the frame plus a read-only projection of the structure.
+title field (`Story Autosave Contract`), the current-node editor
+(`Story Node Editor Contract`), export (`Story Export Contract`), and draft
+recovery (`Story Recovery Contract`). Editing the **content** of the current
+node (its text, metadata, image and audio) now lives in the shell through the
+`Story Node Editor Contract`; reorganizing the structure and option links
+across multiple nodes stays out of scope (it ships the single current node,
+not a node tree).
 
 | Aspect | Value |
 | --- | --- |
 | Three coexisting zones | The shell shows, at once: the global structure (`Story Structure Navigator`), the current node (host zone), and the story state + actions. None is hidden behind a tab or a click — all three are visible together so the global context is never lost while editing. |
-| Honest empty states (v1) | The v1 canonical model is empty (`{"schemaVersion":1,"nodes":[]}` — no season, no node). Each zone renders a NAMED empty state (`Structure de l'histoire` with "no season or node yet", `Nœud courant` with "no node to edit yet"), never blank, never disguised, never a fake current node. |
-| Structure projection (read-only) | The navigator parses `detail.structureJson` for DISPLAY ONLY: it shows the story as the structure root plus the named empty state. It NEVER re-serializes or reformats those bytes (they are covered byte-for-byte by `content_checksum`); any future mutation goes through Rust commands. A parse failure — near-impossible since Rust is authoritative and checksum-guarded — falls back to a NAMED degraded state (`Structure illisible`), never a crash. The frontend models no node tree; when a real node model lands it will be projected FROM Rust (a future structure DTO), never recomposed in React. |
-| Current-node zone | A host reserved for the future node editor. v1 renders a NAMED empty state only; no node is selectable because none exists. |
+| Content states (v2) | The v2 canonical model carries exactly one current node. Each zone renders honest, NAMED states (`Structure de l'histoire` shows the story root + the current node; `Nœud courant` shows the editor for that node, with named empty states for an empty field or an absent optional media), never blank, never disguised, never a fake node. A new story (or a migrated one) starts with an empty current node — that is a valid starting state, not an error. |
+| Structure projection (read-only, from Rust) | The navigator consumes the current node PROJECTED by Rust (`detail.node`, see `Story Node Editor Contract`): it shows the story as the structure root plus the current node, clearly identified by its stable id. It NEVER re-serializes or reformats `structureJson` (covered byte-for-byte by `content_checksum`); every mutation goes through a Rust command. When Rust cannot project a node (a corrupt / drifted structure — near-impossible since Rust is authoritative and checksum-guarded) the zone falls back to a NAMED degraded state (`Structure illisible`), never a crash, never a fake node. |
+| Current-node zone | The `Story Node Editor` (see `Story Node Editor Contract`): the labelled text and metadata fields plus the image and audio media slots of the current node. For a native story the fields and media actions are active; for an imported story the same projection renders read-only. |
 | Story state + actions | The persisted title (`<h1>`, mirrors `detail.title`), the editable title field + autosave chip (`Story Autosave Contract`), the draft recovery banner when present (`Story Recovery Contract`, which keeps priority over the field), and the global actions `Retour à la bibliothèque` (+ `Exporter l'histoire`). |
 | Global actions scope | `Retour` and `Exporter` only. Sending a story to a device stays ANCHORED IN THE LIBRARY — it is never an editor action. No node-level or preflight validation lives in the shell (preflight is a transfer flow). |
 | Keyboard & focus | Stable focus order: structure → current node → global actions. Focus is visible on every zone (the global `:focus-visible` ring). Meaning is never carried by color alone (glyph + text). A problem is never carried in a toast alone. |
@@ -1093,15 +1125,18 @@ ships the frame plus a read-only projection of the structure.
 ## Story Autosave Contract
 
 A persisted story is editable from the `/story/:storyId/edit` route, inside
-the `Story Editor Shell` (see `Story Editor Shell Contract`). The title is the
-one editable field at this stage; the shell also frames the global structure
-(a read-only projection) and the current-node zone. Editing the content of a
-node, its media, and option links remains deferred.
+the `Story Editor Shell` (see `Story Editor Shell Contract`). The **title** is
+autosaved by this contract; the **content of the current node** (text,
+metadata, image and audio) is autosaved by the `Story Node Editor Contract`,
+which reuses this exact engine (the `500 ms` debounce, the `150 ms` recovery
+buffer, `flushAutoSave`, the call-correlation guards, and the overview
+invalidation). Reorganizing the structure and option links across multiple
+nodes remains deferred.
 
 | Aspect | Value |
 | --- | --- |
 | Read rule | `useStoryEditor` calls `get_story_detail` on mount and on every `storyId` change. The overview cache never substitutes for this authoritative read. A `null` return maps to the `Histoire introuvable` surface; a rejection maps to `Reprise indisponible`. |
-| Write rule | Each `setDraftTitle` plans a single autosave `500 ms` after the last keystroke. The debounce cancels on every new keystroke so only the latest value survives. The save fires `update_story({ id, title })` in a `BEGIN IMMEDIATE` SQLite transaction. `structure_json` and `content_checksum` are never modified by an autosave. |
+| Write rule | Each `setDraftTitle` plans a single autosave `500 ms` after the last keystroke. The debounce cancels on every new keystroke so only the latest value survives. The save fires `update_story({ id, title })` in a `BEGIN IMMEDIATE` SQLite transaction. The **title** path never modifies `structure_json` or `content_checksum`. Node **content** (text / metadata) takes a SEPARATE path — `update_node_content`, owned by the `Story Node Editor Contract` — which DOES re-serialize `structure_json` and recompute `content_checksum` in Rust, behind the `schema_version` v2 model. The two write paths never share a command: the title-only `update_story` is forbidden from touching the canonical body. |
 | No-op rule | Typing a value that normalizes (NFC + trim) back to the persisted title cancels any pending save, clears any stale failure alert, and settles the chip back to `Brouillon local`. |
 | Authoritative validation | Rust re-validates on every `update_story` call with the same rules as `create_story`; an invalid title is refused via `AppError { code: "INVALID_STORY_TITLE" }` and leaves the row untouched. |
 | State chip mapping | `idle → Brouillon local (info)`, `pending → Modifications en attente (neutral)`, `saving → Enregistrement… (neutral)`, `saved → Enregistré (success)`, `failed → Enregistrement en échec (error)`. The `saved` state is announced via an `aria-live="polite"` region; transient states stay silent to avoid AT chatter. |
@@ -1112,6 +1147,47 @@ node, its media, and option links remains deferred.
 | Missing id rule | `update_story` on an id no longer in `stories` returns `AppError { code: "LIBRARY_INCONSISTENT" }` with `details.source = "story_missing"`. The UI surfaces it through the same `role="alert"` flow as any other save failure. |
 | Flush rule | Clicking `Retour à la bibliothèque` (or any route-level unmount) calls `flushAutoSave()`: a pending debounce is cancelled and the save is fired before the synchronous `navigate(...)`. The IPC call itself still resolves asynchronously — the UI will have unmounted before the Rust response arrives, so the save is "fire and commit in Rust, forget in UI". A success is observed on the next `/library` read; a failure after unmount is not re-surfaced to the user (the route is gone) and the prior persisted state remains the source of truth. Durable recovery of a draft that never flushed (crash, kill -9) is a separate feature and not covered by this contract. |
 | Persisted-vs-draft invariant | `detail.title` is the source of truth, refreshed from Rust on mount. `draftTitle` is the live Field value. They diverge only while `saveStatus.kind === "failed"`; any other transition reconciles them. |
+
+## Story Node Editor Contract
+
+The `Story Node Editor` fills the current-node zone of the `Story Editor Shell`
+(see `Story Editor Shell Contract`). It edits the **content of the single
+current node**: its narrative **text**, its **metadata** (a human-readable
+label), and two optional **media** — an **image** and an **audio**. It does NOT
+add, move, delete or relink nodes (that is a separate, deferred flow): there is
+exactly one current node, projected by Rust, and this contract edits it in
+place.
+
+**Projection from Rust (AC3).** The node is PROJECTED by the Rust core inside
+`get_story_detail` as `detail.node` (a `NodeContentDto`), never recomposed in
+React from `structureJson`. The projection carries the node's stable `id`, its
+`text`, its `label`, and a resolved state for each media slot (see below). The
+frontend consumes the projection; it never parses or rewrites `structureJson`
+(those bytes stay opaque and are covered by `content_checksum`). The stable
+`id` is what keeps the current node clearly identified across a long edit
+session — no identity drift after N edits. When Rust cannot project a node
+(corrupt / drifted structure) `detail.node` is `null` and the zone renders the
+named degraded state (`Structure illisible`), never a fabricated node.
+
+**Editability.** A native story's node is editable. An imported story's node is
+projected **read-only** with a named reason (its declared edit scope is a later
+iteration) — the editor NEVER shows a text field or a media action that cannot
+be saved.
+
+| Aspect | Value |
+| --- | --- |
+| Supported fields | The narrative **text** (a multi-line field) and the node **metadata label** (a single-line field). Both may be empty — an empty node is a valid starting state, not an error. |
+| Text / metadata autosave | Reuses the `Story Autosave Contract` engine verbatim: a `500 ms` debounce after the last keystroke, the `150 ms` recovery buffer, `flushAutoSave` on `Retour` / unmount, the call-correlation guards, and the overview invalidation on a terminal save. The save fires `update_node_content({ storyId, nodeId, text, label })`, which re-validates the canonical structure, re-serializes `structure_json` and recomputes `content_checksum` in a single `BEGIN IMMEDIATE` transaction. It NEVER reuses the title-only `update_story`. |
+| Media machine | Each media slot (image, audio) is an explicit action set — `Ajouter` / `Aperçu` / `Remplacer` / `Retirer` — persisted IMMEDIATELY on the action (not debounced like text). `Ajouter` / `Remplacer` open a native file picker (non-blocking), validate the chosen file in Rust, store its bytes under Rust infrastructure, and write the node's asset reference. `Retirer` clears the reference. `Aperçu` reads the stored bytes back through a Rust command for presentation only — the frontend never owns the media bytes. |
+| Acknowledgement < 1 s (NFR3) | Adding or replacing a media produces a VISIBLE acknowledgement (a preview / a named state) in under one second; any heavier work (hashing a large file) continues in the background without freezing the UI (NFR5). |
+| Supported source formats | Images **PNG / JPEG**; audio **MP3 / WAV / OGG**. Recognized by magic bytes (signature), never by file extension. The set is declared in [device-support-profile.md](./device-support-profile.md). No transcoding happens here — converting to a device pack stays a transfer/preparation concern. |
+| Validation — attention vs blocking (AC2) | Rust is the authority (the UI validates only for ergonomics). The node editor is the FIRST living emitter of the `media` axis of the validation taxonomy (see `Story Validation / Preflight Contract`). Two distinct levels: **`needs attention`** (`à corriger`, repairable — e.g. a referenced media whose source file is no longer readable; does NOT block autosaving the rest of the node) and **`blocked`** (`bloquée`, a real block — e.g. an unsupported / unreadable / oversize file at attach time; that media slot is NOT saved until corrected). Each level names the cause, the impact, and the next gesture. |
+| Localized errors | An error lives INLINE next to the field / media slot it concerns, in a `role="alert"` surface — NEVER a lone toast, NEVER color alone (glyph + text). A media block lives at its slot; a text validation issue lives at the text field. A partial state is never disguised as a success. |
+| Error codes | A media attach / read failure rejects with `MEDIA_INVALID` (unsupported format, unreadable, oversize — a real block surfaced at the slot) or `MEDIA_PROCESSING_FAILED` (a transport failure of the media store: staging / promotion / read). Both carry a closed `details.source` and are PII-safe (no absolute path, no raw OS message). |
+| State chip mapping | The node editor reuses the autosave chip for text / metadata (`idle → Brouillon local`, `pending`, `saving`, `saved → Enregistré`, `failed`). A media slot carries its own named state: `Aucune image` / `Aucun audio` (empty), a preview/identity when present, `Média à corriger` (attention), `Média bloqué` (blocked). |
+| Recovery (NFR8) | The `150 ms` recovery buffer extends to the node's in-progress text so a hard kill (kill -9) mid-edit does not lose the typed value, mirroring the title recovery. The buffered node text is offered back on the next open through the `Story Recovery Contract` surface. |
+| Atomicity (NFR9) | The editor never paints `Enregistré` over an unsaved change: the same source-of-truth reconciliation as the title autosave applies. A failed node save leaves the previous canonical body untouched (the `BEGIN IMMEDIATE` transaction commits or rolls back whole). The canonical body of ANY OTHER story is never touched. |
+| Keyboard & focus | Stable tab order: structure → node fields / media slots → global actions. A disabled media action carries a standardized reason (see `Disabled Actions and Reasons`). Focus is visible everywhere (the global `:focus-visible` ring). |
 
 ## Story Export Contract
 

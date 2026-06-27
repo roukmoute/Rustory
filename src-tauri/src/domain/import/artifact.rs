@@ -17,7 +17,8 @@ use crate::domain::export::{
     RustoryArtifactV1, RUSTORY_ARTIFACT_EXTENSION, RUSTORY_ARTIFACT_FORMAT_VERSION,
 };
 use crate::domain::story::{
-    normalize_title, validate_canonical, CanonicalCause, CanonicalStoryFacts,
+    canonical_structure_json, content_checksum, normalize_title, validate_canonical,
+    CanonicalCause, CanonicalStoryFacts, CanonicalStructure, CANONICAL_STORY_SCHEMA_VERSION,
 };
 
 use super::recognition::{
@@ -132,18 +133,54 @@ impl ArtifactAnalysis {
     }
 }
 
+/// The canonical v1 empty structure. Every v1 story carried this EXACT shape
+/// (`nodes` was always empty, guaranteed by the type), so an artifact exported
+/// before the v2 bump can be upgraded losslessly.
+const LEGACY_V1_STRUCTURE: &str = "{\"schemaVersion\":1,\"nodes\":[]}";
+
+/// Bring a LEGACY v1 canonical body up to the current v2 shape so a `.rustory`
+/// exported before the v2 bump still imports (backward compatibility). The v1
+/// structure was always the empty `nodes` list, so the upgrade injects the same
+/// empty starting node the local v1→v2 migration backfills and recomputes the
+/// checksum — lossless. Anything other than the exact canonical v1 empty body
+/// is left untouched (a genuinely corrupt / non-canonical v1 stays blocked).
+fn upgrade_legacy_v1(
+    schema_version: u32,
+    structure_json: &str,
+    content_checksum_in: &str,
+) -> (u32, String, String) {
+    if schema_version == 1 && structure_json == LEGACY_V1_STRUCTURE {
+        let json = canonical_structure_json(&CanonicalStructure::minimal());
+        let checksum = content_checksum(&json);
+        (CANONICAL_STORY_SCHEMA_VERSION, json, checksum)
+    } else {
+        (
+            schema_version,
+            structure_json.to_string(),
+            content_checksum_in.to_string(),
+        )
+    }
+}
+
 /// Analyze a parsed `.rustory` v1 artifact. Pure: no I/O, deterministic on
-/// its input. Delegates to [`analyze_components`] with the envelope's
-/// declared format version.
+/// its input. A legacy v1 canonical body is upgraded to v2 (lossless — the v1
+/// structure was always empty) so older artifacts remain importable, then
+/// delegates to [`analyze_components`] with the envelope's declared format
+/// version.
 pub fn analyze_rustory_artifact(artifact: &RustoryArtifactV1) -> ArtifactAnalysis {
     let story = &artifact.story;
+    let (schema_version, structure_json, content_checksum) = upgrade_legacy_v1(
+        story.schema_version,
+        &story.structure_json,
+        &story.content_checksum,
+    );
     analyze_components(
         artifact.rustory_artifact.format_version,
         &CanonicalContent {
             title: story.title.clone(),
-            schema_version: story.schema_version,
-            structure_json: story.structure_json.clone(),
-            content_checksum: story.content_checksum.clone(),
+            schema_version,
+            structure_json,
+            content_checksum,
             created_at: story.created_at.clone(),
             updated_at: story.updated_at.clone(),
         },
@@ -303,7 +340,7 @@ mod tests {
     use crate::domain::import::recognition::RecognitionCategory;
     use crate::domain::story::content_checksum;
 
-    const CANONICAL_STRUCTURE: &str = "{\"schemaVersion\":1,\"nodes\":[]}";
+    const CANONICAL_STRUCTURE: &str = "{\"schemaVersion\":2,\"nodes\":[{\"id\":\"n1\",\"text\":\"\",\"label\":\"\",\"imageAssetId\":null,\"audioAssetId\":null}]}";
 
     /// A pristine artifact as Rustory's own export would produce it: a
     /// normalized title, canonical timestamps, a checksum over the
@@ -316,7 +353,7 @@ mod tests {
                 exported_by: "rustory/0.1.0".into(),
             },
             story: ExportedStoryV1 {
-                schema_version: 1,
+                schema_version: 2,
                 title: "Le Soleil Couchant".into(),
                 structure_json: CANONICAL_STRUCTURE.into(),
                 content_checksum: content_checksum(CANONICAL_STRUCTURE),
@@ -379,6 +416,41 @@ mod tests {
     }
 
     #[test]
+    fn a_legacy_v1_artifact_is_upgraded_and_imports_clean() {
+        // An artifact exported BEFORE the v2 bump (a v1 empty body) must remain
+        // importable: it is upgraded losslessly to the v2 starting node, exactly
+        // like the local v1→v2 migration backfills it.
+        let mut artifact = clean_artifact();
+        artifact.story.schema_version = 1;
+        artifact.story.structure_json = LEGACY_V1_STRUCTURE.into();
+        artifact.story.content_checksum = content_checksum(LEGACY_V1_STRUCTURE);
+
+        let analysis = analyze_rustory_artifact(&artifact);
+        assert_eq!(
+            analysis.quality,
+            RecognitionQuality::Clean,
+            "a legacy v1 artifact imports clean after the upgrade"
+        );
+        let content = analysis.importable.expect("importable after upgrade");
+        let expected = canonical_structure_json(&CanonicalStructure::minimal());
+        assert_eq!(content.structure_json, expected);
+        assert_eq!(content.content_checksum, content_checksum(&expected));
+    }
+
+    #[test]
+    fn a_non_canonical_v1_structure_is_not_upgraded() {
+        // Only the EXACT canonical v1 empty body is upgraded — a v1 with an
+        // unexpected structure is genuinely corrupt and stays blocked.
+        let mut artifact = clean_artifact();
+        let tampered = "{\"schemaVersion\":1,\"nodes\":[{}]}";
+        artifact.story.schema_version = 1;
+        artifact.story.structure_json = tampered.into();
+        artifact.story.content_checksum = content_checksum(tampered);
+        let analysis = analyze_rustory_artifact(&artifact);
+        assert_eq!(analysis.quality, RecognitionQuality::Unusable);
+    }
+
+    #[test]
     fn a_non_normalized_title_is_partial_needs_review_but_importable() {
         let mut artifact = clean_artifact();
         artifact.story.title = "  Le Soleil Couchant  ".into(); // leading/trailing spaces
@@ -431,7 +503,7 @@ mod tests {
     #[test]
     fn a_non_canonical_structure_is_unusable_blocked() {
         let mut artifact = clean_artifact();
-        let tampered = "{\"schemaVersion\":1,\"nodes\":[{}]}"; // non-empty nodes leave v1
+        let tampered = "{\"schemaVersion\":2,\"nodes\":[]}"; // zero nodes leaves the single-node v2 model
         artifact.story.structure_json = tampered.into();
         artifact.story.content_checksum = content_checksum(tampered);
         let analysis = analyze_rustory_artifact(&artifact);
@@ -445,8 +517,8 @@ mod tests {
     #[test]
     fn a_schema_above_supported_is_unusable_blocked_on_schema_version() {
         let mut artifact = clean_artifact();
-        let future = "{\"schemaVersion\":2,\"nodes\":[]}";
-        artifact.story.schema_version = 2;
+        let future = "{\"schemaVersion\":3,\"nodes\":[]}";
+        artifact.story.schema_version = 3;
         artifact.story.structure_json = future.into();
         artifact.story.content_checksum = content_checksum(future);
         let analysis = analyze_rustory_artifact(&artifact);

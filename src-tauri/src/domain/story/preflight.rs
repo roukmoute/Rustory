@@ -8,12 +8,17 @@
 //! with a frozen severity. Reuses the existing integrity / schema / validation
 //! helpers — nothing is re-implemented here.
 //!
-//! Scope reminder (MVP Phase 1): the canonical model is
-//! `{ "schemaVersion": 1, "nodes": [] }` with `nodes` ALWAYS empty — an
-//! empty-`nodes` story is VALID, never a block (content authoring is a later
-//! phase). The `Media` and `Filesystem` axes are declared for AC1's two-axis
-//! taxonomy but have NO detector here (media validation arrives with the
-//! media-preparation step; filesystem failures surface as transport errors).
+//! Scope reminder: the canonical model is now schema v2 —
+//! `{ "schemaVersion": 2, "nodes": [<one current node>] }` with EXACTLY ONE
+//! node. A single-node story (even an empty one) is VALID, never a block;
+//! zero nodes or more than one node leaves the supported single-node model and
+//! is a `StructureCorrupt` block (multi-node authoring is a later phase). The
+//! `Media` axis is no longer dormant: [`MediaCause`] gives it a real taxonomy
+//! that the application layer emits when it resolves a node's media against the
+//! asset store. `validate_canonical` itself stays pure (no filesystem access),
+//! so it never emits a `Media` blocker — it validates the STRUCTURE; the media
+//! detector lives where the bytes do. The `Filesystem` axis is still declared
+//! without a detector (filesystem failures surface as transport errors).
 
 use crate::domain::story::schema::{CanonicalStructure, CANONICAL_STORY_SCHEMA_VERSION};
 use crate::domain::story::{content_checksum, normalize_title, validate_title};
@@ -24,13 +29,14 @@ use crate::domain::story::{content_checksum, normalize_title, validate_title};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Axis {
     Structure,
-    /// Declared for the two-axis taxonomy; NO detector in MVP Phase 1 (media
-    /// validation arrives with the media-preparation step). `validate_canonical`
-    /// never emits it.
+    /// The node-media axis. Has a LIVE taxonomy ([`MediaCause`]) emitted by the
+    /// application layer when it resolves a node's media against the asset store
+    /// (the node editor is the first living emitter). `validate_canonical` stays
+    /// pure and never emits it — the structure check has no filesystem access.
     Media,
-    /// Declared for the two-axis taxonomy; NO detector in MVP Phase 1
-    /// (filesystem failures surface as transport `AppError`s, not verdict
-    /// blockers). `validate_canonical` never emits it.
+    /// Declared for the taxonomy; NO detector (filesystem failures surface as
+    /// transport `AppError`s, not verdict blockers). `validate_canonical` never
+    /// emits it.
     Filesystem,
     DeviceProfile,
 }
@@ -69,6 +75,34 @@ impl CanonicalCause {
             Self::SchemaUnsupported | Self::StructureCorrupt | Self::ChecksumMismatch => {
                 Severity::Blocking
             }
+        }
+    }
+}
+
+/// Closed set of node-media causes (axis `Media`). The first LIVING emitter of
+/// the `Media` axis: the application layer constructs these when it validates a
+/// file at attach time and when it resolves a node's stored media references.
+/// Severity follows the AC2 split — `attention requise` (`Fixable`) vs `blocage
+/// réel` (`Blocking`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MediaCause {
+    /// The chosen file is not a supported media format (sniffed by magic bytes,
+    /// never by extension). A real block — the file is never stored.
+    UnsupportedFormat,
+    /// The chosen file is unreadable or exceeds the byte ceiling. A real block.
+    Unreadable,
+    /// A node references a stored asset whose source bytes can no longer be
+    /// resolved. Repairable (`attention`): the rest of the node stays editable;
+    /// the user re-associates or removes the media.
+    SourceMissing,
+}
+
+impl MediaCause {
+    /// Frozen severity per media cause.
+    pub const fn severity(self) -> Severity {
+        match self {
+            Self::UnsupportedFormat | Self::Unreadable => Severity::Blocking,
+            Self::SourceMissing => Severity::Fixable,
         }
     }
 }
@@ -152,21 +186,24 @@ pub fn validate_canonical(facts: &CanonicalStoryFacts) -> Vec<CanonicalBlocker> 
         structure_flagged_corrupt = true;
     }
 
-    // 2b. Shape coherence with the current model. In the v1 canonical form
-    //     `nodes` is ALWAYS empty (`CanonicalNode` is unit; content authoring is
-    //     a later phase). A row stamped with the CURRENT schema but carrying
-    //     `nodes` leaves the supported model — that is a structural incoherence,
-    //     not "format too recent" (the version IS the current one) — so it is a
-    //     `StructureCorrupt` block. Only checked for the current version (a
-    //     future schema may legitimately carry nodes) and only when the structure
-    //     was not already flagged corrupt (avoid a duplicate blocker).
-    if structure.schema_version == CANONICAL_STORY_SCHEMA_VERSION
-        && !structure.nodes.is_empty()
-        && !structure_flagged_corrupt
-    {
-        blockers.push(CanonicalBlocker::structure(
-            CanonicalCause::StructureCorrupt,
-        ));
+    // 2b. Shape coherence with the current model. In the v2 canonical form a
+    //     story carries EXACTLY ONE current node. Zero nodes (nothing to edit)
+    //     or more than one node (multi-node authoring is a later phase) leaves
+    //     the supported single-node model — a structural incoherence, not
+    //     "format too recent" (the version IS the current one) — so it is a
+    //     `StructureCorrupt` block. The single node must also be structurally
+    //     sound (a non-empty stable id, needed to target writes and keep the
+    //     current node identified). Only checked for the current version (a
+    //     future schema may legitimately carry several nodes) and only when the
+    //     structure was not already flagged corrupt (avoid a duplicate blocker).
+    if structure.schema_version == CANONICAL_STORY_SCHEMA_VERSION && !structure_flagged_corrupt {
+        let single_sound_node =
+            structure.nodes.len() == 1 && !structure.nodes[0].id.trim().is_empty();
+        if !single_sound_node {
+            blockers.push(CanonicalBlocker::structure(
+                CanonicalCause::StructureCorrupt,
+            ));
+        }
     }
 
     // 3. Integrity: recompute the checksum over `structure_json` ALONE (the
@@ -181,10 +218,11 @@ pub fn validate_canonical(facts: &CanonicalStoryFacts) -> Vec<CanonicalBlocker> 
     // 4. Title re-guard (defense in depth). Fixable: the user can rename.
     push_title_blocker(&mut blockers, &facts.title);
 
-    // NOTE: an EMPTY `nodes` is VALID in v1 — we deliberately emit NO "story
-    // without content" block (that would make `présumée transférable`
-    // unreachable). The check above only rejects a NON-empty `nodes`, which
-    // leaves the v1 model rather than being legitimately content-free.
+    // NOTE: a single EMPTY node (no text, no media) is VALID in v2 — we
+    // deliberately emit NO "story without content" block (that would make
+    // `présumée transférable` unreachable). The check above only rejects a
+    // node COUNT other than one, which leaves the single-node model rather
+    // than being a legitimately empty starting node.
 
     blockers
 }
@@ -199,12 +237,12 @@ fn push_title_blocker(blockers: &mut Vec<CanonicalBlocker>, title: &str) {
 mod tests {
     use super::*;
 
-    const HEALTHY_JSON: &str = "{\"schemaVersion\":1,\"nodes\":[]}";
+    const HEALTHY_JSON: &str = "{\"schemaVersion\":2,\"nodes\":[{\"id\":\"n1\",\"text\":\"\",\"label\":\"\",\"imageAssetId\":null,\"audioAssetId\":null}]}";
 
     fn healthy_facts() -> CanonicalStoryFacts {
         CanonicalStoryFacts {
             title: "Mon histoire".into(),
-            schema_version: 1,
+            schema_version: 2,
             structure_json: HEALTHY_JSON.into(),
             content_checksum: content_checksum(HEALTHY_JSON),
         }
@@ -216,23 +254,37 @@ mod tests {
     }
 
     #[test]
-    fn empty_nodes_is_valid_never_a_block() {
-        // The v1 canonical form is `nodes: []`; it must produce zero blockers
-        // (otherwise `présumée transférable` would be unreachable).
+    fn single_empty_node_is_valid_never_a_block() {
+        // The v2 canonical form is a single empty starting node; it must
+        // produce zero blockers (otherwise `présumée transférable` would be
+        // unreachable for a brand-new or migrated story).
         let facts = healthy_facts();
         assert_eq!(facts.structure_json, HEALTHY_JSON);
         assert!(validate_canonical(&facts).is_empty());
     }
 
     #[test]
-    fn non_empty_nodes_in_schema_v1_is_structure_corrupt() {
-        // A row stamped v1 but carrying nodes leaves the supported v1 model
-        // (nodes are always empty in v1). Even with a coherent checksum it must
-        // NOT be presumed transferable — it is a structural incoherence.
-        let json = "{\"schemaVersion\":1,\"nodes\":[{}]}";
+    fn filled_single_node_with_media_is_valid() {
+        // A node carrying text, a label and media references is canonically
+        // valid — the structure check does not resolve the media (no FS here).
+        let json = "{\"schemaVersion\":2,\"nodes\":[{\"id\":\"n1\",\"text\":\"Bonjour\",\"label\":\"Début\",\"imageAssetId\":\"img\",\"audioAssetId\":\"aud\"}]}";
         let facts = CanonicalStoryFacts {
-            title: "Hors modèle v1".into(),
-            schema_version: 1,
+            title: "Pleine".into(),
+            schema_version: 2,
+            structure_json: json.into(),
+            content_checksum: content_checksum(json),
+        };
+        assert!(validate_canonical(&facts).is_empty());
+    }
+
+    #[test]
+    fn zero_nodes_in_v2_is_structure_corrupt() {
+        // v2 needs exactly one current node; an empty list has nothing to edit
+        // and leaves the supported model.
+        let json = "{\"schemaVersion\":2,\"nodes\":[]}";
+        let facts = CanonicalStoryFacts {
+            title: "Sans nœud".into(),
+            schema_version: 2,
             structure_json: json.into(),
             content_checksum: content_checksum(json),
         };
@@ -243,13 +295,45 @@ mod tests {
     }
 
     #[test]
-    fn non_empty_nodes_does_not_double_report_structure_corrupt() {
-        // A column↔JSON schema disagreement already flags StructureCorrupt; a
-        // non-empty `nodes` on top must not push a SECOND identical blocker.
-        let json = "{\"schemaVersion\":0,\"nodes\":[{}]}";
+    fn multiple_nodes_in_v2_is_structure_corrupt() {
+        // Two nodes is multi-node authoring — out of scope for the single-node
+        // model, hence a structural incoherence even with a coherent checksum.
+        let json = "{\"schemaVersion\":2,\"nodes\":[{\"id\":\"n1\",\"text\":\"\",\"label\":\"\",\"imageAssetId\":null,\"audioAssetId\":null},{\"id\":\"n2\",\"text\":\"\",\"label\":\"\",\"imageAssetId\":null,\"audioAssetId\":null}]}";
+        let facts = CanonicalStoryFacts {
+            title: "Multi".into(),
+            schema_version: 2,
+            structure_json: json.into(),
+            content_checksum: content_checksum(json),
+        };
+        let blockers = validate_canonical(&facts);
+        assert_eq!(blockers.len(), 1);
+        assert_eq!(blockers[0].cause, CanonicalCause::StructureCorrupt);
+    }
+
+    #[test]
+    fn blank_node_id_in_v2_is_structure_corrupt() {
+        // The current node needs a stable, non-blank id to target writes and
+        // stay identified.
+        let json = "{\"schemaVersion\":2,\"nodes\":[{\"id\":\"   \",\"text\":\"\",\"label\":\"\",\"imageAssetId\":null,\"audioAssetId\":null}]}";
+        let facts = CanonicalStoryFacts {
+            title: "Id vide".into(),
+            schema_version: 2,
+            structure_json: json.into(),
+            content_checksum: content_checksum(json),
+        };
+        let blockers = validate_canonical(&facts);
+        assert_eq!(blockers.len(), 1);
+        assert_eq!(blockers[0].cause, CanonicalCause::StructureCorrupt);
+    }
+
+    #[test]
+    fn wrong_node_count_does_not_double_report_structure_corrupt() {
+        // A column↔JSON schema disagreement already flags StructureCorrupt; an
+        // unexpected node shape on top must not push a SECOND identical blocker.
+        let json = "{\"schemaVersion\":0,\"nodes\":[]}";
         let facts = CanonicalStoryFacts {
             title: "Incohérente".into(),
-            schema_version: 1,
+            schema_version: 2,
             structure_json: json.into(),
             content_checksum: content_checksum(json),
         };
@@ -258,6 +342,13 @@ mod tests {
             .filter(|b| b.cause == CanonicalCause::StructureCorrupt)
             .count();
         assert_eq!(corrupt, 1, "StructureCorrupt must be reported exactly once");
+    }
+
+    #[test]
+    fn media_cause_severities_split_attention_from_blocking() {
+        assert_eq!(MediaCause::UnsupportedFormat.severity(), Severity::Blocking);
+        assert_eq!(MediaCause::Unreadable.severity(), Severity::Blocking);
+        assert_eq!(MediaCause::SourceMissing.severity(), Severity::Fixable);
     }
 
     #[test]
@@ -285,10 +376,12 @@ mod tests {
 
     #[test]
     fn schema_version_above_supported_is_schema_unsupported() {
-        let json = "{\"schemaVersion\":2,\"nodes\":[]}";
+        // A self-consistent v3 (column == JSON == 3, both above the current 2)
+        // is "format too recent" — the only path that means "update Rustory".
+        let json = "{\"schemaVersion\":3,\"nodes\":[]}";
         let facts = CanonicalStoryFacts {
             title: "Format trop récent".into(),
-            schema_version: 2,
+            schema_version: 3,
             structure_json: json.into(),
             content_checksum: content_checksum(json),
         };
@@ -300,12 +393,12 @@ mod tests {
 
     #[test]
     fn column_json_schema_disagreement_is_structure_corrupt() {
-        // The column says v1, the JSON says v0 — both within bound, but
-        // incoherent → corruption, not "format too recent".
+        // The column says v2, the JSON says v0 — incoherent → corruption, not
+        // "format too recent".
         let json = "{\"schemaVersion\":0,\"nodes\":[]}";
         let facts = CanonicalStoryFacts {
             title: "Incohérente".into(),
-            schema_version: 1,
+            schema_version: 2,
             structure_json: json.into(),
             content_checksum: content_checksum(json),
         };
@@ -320,14 +413,14 @@ mod tests {
 
     #[test]
     fn column_json_disagreement_with_newer_json_is_structure_corrupt_not_unsupported() {
-        // The column says v1 but the JSON says v2: a DISAGREEMENT is always
+        // The column says v2 but the JSON says v3: a DISAGREEMENT is always
         // corruption, never "format too recent". `SchemaUnsupported` must be
         // reserved for a self-consistent newer artifact (column == JSON > current),
         // whose `userAction` is "update Rustory" — not a diverging/tampered row.
-        let json = "{\"schemaVersion\":2,\"nodes\":[]}";
+        let json = "{\"schemaVersion\":3,\"nodes\":[]}";
         let facts = CanonicalStoryFacts {
             title: "Désaccord vers le récent".into(),
-            schema_version: 1,
+            schema_version: 2,
             structure_json: json.into(),
             content_checksum: content_checksum(json),
         };
@@ -368,7 +461,7 @@ mod tests {
         // StructureCorrupt does not mask an independent (fixable) title issue.
         let facts = CanonicalStoryFacts {
             title: String::new(),
-            schema_version: 1,
+            schema_version: 2,
             structure_json: "not json".into(),
             content_checksum: "0".repeat(64),
         };

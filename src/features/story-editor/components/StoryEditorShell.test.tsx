@@ -4,19 +4,51 @@ import { describe, expect, it, vi } from "vitest";
 
 import type { StoryDetailDto } from "../../../shared/ipc-contracts/story";
 import type { UseStoryExport } from "../../import-export/hooks/use-story-export";
+import type { UseNodeEditor } from "../hooks/use-node-editor";
 import type { UseStoryRecovery } from "../hooks/use-story-recovery";
 
 import { StoryEditorShell } from "./StoryEditorShell";
+
+vi.mock("../../../ipc/commands/story", () => ({
+  readNodeMedia: vi.fn().mockResolvedValue({ dataUrl: "data:image/png;base64,AA" }),
+}));
 
 function buildDetail(overrides: Partial<StoryDetailDto> = {}): StoryDetailDto {
   return {
     id: "abc",
     title: "Le soleil couchant",
-    schemaVersion: 1,
-    structureJson: '{"schemaVersion":1,"nodes":[]}',
+    schemaVersion: 2,
+    structureJson: '{"schemaVersion":2,"nodes":[]}',
     contentChecksum: "a".repeat(64),
     createdAt: "2026-04-23T09:00:00.000Z",
     updatedAt: "2026-04-23T09:00:00.000Z",
+    editable: true,
+    node: { id: "n1", text: "", label: "", image: null, audio: null },
+    ...overrides,
+  };
+}
+
+function stubNodeEditor(overrides: Partial<UseNodeEditor> = {}): UseNodeEditor {
+  return {
+    nodeId: "n1",
+    editable: true,
+    text: "",
+    label: "",
+    saveStatus: { kind: "idle" },
+    image: null,
+    audio: null,
+    imageError: null,
+    audioError: null,
+    imageBusy: false,
+    audioBusy: false,
+    recovery: { kind: "none" },
+    setText: vi.fn(),
+    setLabel: vi.fn(),
+    flushNodeAutoSave: vi.fn(),
+    attachMedia: vi.fn(),
+    removeMedia: vi.fn(),
+    applyRecovery: vi.fn(),
+    discardRecovery: vi.fn(),
     ...overrides,
   };
 }
@@ -50,6 +82,7 @@ function renderShell(props: Partial<Parameters<typeof StoryEditorShell>[0]> = {}
       saveStatus={props.saveStatus ?? { kind: "idle" }}
       recovery={props.recovery ?? stubRecovery()}
       exporter={props.exporter ?? stubExporter()}
+      nodeEditor={props.nodeEditor ?? stubNodeEditor()}
       onSetDraftTitle={props.onSetDraftTitle ?? vi.fn()}
       onRetrySave={props.onRetrySave ?? vi.fn()}
       onFlushAutoSave={props.onFlushAutoSave ?? onFlushAutoSave}
@@ -90,14 +123,18 @@ describe("<StoryEditorShell />", () => {
     ).toBeInTheDocument();
   });
 
-  it("renders the honest v1 empty states, named and not hidden (UX-DR38)", () => {
+  it("renders the projected node and its named empty media states (UX-DR38)", () => {
     renderShell();
+    // The node editor edits the current node's text + metadata.
     expect(
-      screen.getByText("Aucune saison ni nœud pour l'instant."),
+      screen.getByRole("textbox", { name: "Texte du nœud" }),
     ).toBeInTheDocument();
-    expect(
-      screen.getByText("Aucun nœud à éditer pour l'instant."),
-    ).toBeInTheDocument();
+    // The optional media slots are named, never hidden.
+    expect(screen.getByText("Aucune image")).toBeInTheDocument();
+    expect(screen.getByText("Aucun audio")).toBeInTheDocument();
+    // The navigator shows the current node (projected from Rust), not a
+    // "no node yet" empty state.
+    expect(screen.getByText(/en cours d'édition/i)).toBeInTheDocument();
   });
 
   it("keeps a stable focus order: structure → current node → global actions (AC3)", () => {
@@ -119,14 +156,16 @@ describe("<StoryEditorShell />", () => {
     expect(node.compareDocumentPosition(back) & following).toBe(following);
   });
 
-  it("makes each content zone a keyboard focus stop (AC3)", () => {
+  it("makes the structure root a keyboard focus stop and exposes editable node fields (AC3)", () => {
     renderShell();
     const structureRoot = screen.getByText("Le soleil couchant", {
       selector: ".story-structure-navigator__root-label",
     }).parentElement;
-    const nodeEmpty = screen.getByText("Aucun nœud à éditer pour l'instant.");
     expect(structureRoot).toHaveAttribute("tabindex", "0");
-    expect(nodeEmpty).toHaveAttribute("tabindex", "0");
+    // The node fields are inherently focusable form controls.
+    expect(
+      screen.getByRole("textbox", { name: "Texte du nœud" }),
+    ).toBeEnabled();
   });
 
   it("never mixes the library context into the editor (AC3)", () => {

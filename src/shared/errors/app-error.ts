@@ -18,6 +18,8 @@ export type AppErrorCode =
   | "TRANSFER_FAILED"
   | "TRANSFER_OUTCOME_UNAVAILABLE"
   | "OFFICIAL_CATALOG_UNAVAILABLE"
+  | "MEDIA_INVALID"
+  | "MEDIA_PROCESSING_FAILED"
   | "UNKNOWN";
 
 export interface AppError {

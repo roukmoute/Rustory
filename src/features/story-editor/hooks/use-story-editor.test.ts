@@ -41,6 +41,8 @@ function buildDetail(overrides: Partial<StoryDetailDto> = {}): StoryDetailDto {
     contentChecksum: "a".repeat(64),
     createdAt: "2026-04-23T09:00:00.000Z",
     updatedAt: "2026-04-23T09:00:00.000Z",
+    editable: true,
+    node: { id: "n1", text: "", label: "", image: null, audio: null },
     ...overrides,
   };
 }

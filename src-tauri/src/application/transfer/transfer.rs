@@ -885,7 +885,7 @@ mod tests {
     };
     use crate::infrastructure::filesystem::MockTransferArtifactSource;
 
-    const HEALTHY_JSON: &str = "{\"schemaVersion\":1,\"nodes\":[]}";
+    const HEALTHY_JSON: &str = "{\"schemaVersion\":2,\"nodes\":[{\"id\":\"n1\",\"text\":\"\",\"label\":\"\",\"imageAssetId\":null,\"audioAssetId\":null}]}";
     const PACK_UUID: &str = "abababab-abab-abab-abab-ababfac5562d";
     const PACK_CHECKSUM: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
@@ -909,7 +909,7 @@ mod tests {
             .conn()
             .execute(
                 "INSERT INTO stories (id, title, schema_version, structure_json, content_checksum, created_at, updated_at) \
-                 VALUES (?1, 'Mon histoire', 1, ?2, ?3, '2026-06-22T00:00:00.000Z', '2026-06-22T00:00:00.000Z')",
+                 VALUES (?1, 'Mon histoire', 2, ?2, ?3, '2026-06-22T00:00:00.000Z', '2026-06-22T00:00:00.000Z')",
                 rusqlite::params![id, HEALTHY_JSON, content_checksum(HEALTHY_JSON)],
             )
             .expect("insert story");

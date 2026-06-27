@@ -26,8 +26,11 @@ pub use import_export::{
 };
 pub use library::{LibraryOverviewDto, StoryCardDto};
 pub use story::{
-    ApplyRecoveryInputDto, CreateStoryInputDto, DiscardDraftInputDto, RecordDraftInputDto,
-    RecoverableDraftDto, StoryDetailDto, UpdateStoryInputDto, UpdateStoryOutputDto,
+    ApplyRecoveryInputDto, AttachNodeMediaOutcomeDto, CreateStoryInputDto, DiscardDraftInputDto,
+    DiscardNodeDraftInputDto, NodeContentDto, NodeMediaPreviewDto, NodeMediaSlotDto,
+    NodeMediaSlotInputDto, NodeWriteOutputDto, RecordDraftInputDto, RecordNodeDraftInputDto,
+    RecoverableDraftDto, RecoverableNodeDraftDto, StoryDetailDto, UpdateNodeContentInputDto,
+    UpdateStoryInputDto, UpdateStoryOutputDto,
 };
 pub use story_preparation::{
     PreparationCauseDto, PreparationStateDto, PreparationStoryDto, ReadPreparationStateInputDto,

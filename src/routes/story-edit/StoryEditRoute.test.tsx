@@ -29,6 +29,14 @@ vi.mock("../../ipc/commands/story", () => {
       this.raw = options.raw;
     }
   }
+  class NodeContractDriftError extends Error {
+    raw: unknown;
+    constructor(message: string, options: { raw: unknown }) {
+      super(message);
+      this.name = "NodeContractDriftError";
+      this.raw = options.raw;
+    }
+  }
   return {
     getStoryDetail: vi.fn(),
     saveStory: vi.fn(),
@@ -40,8 +48,18 @@ vi.mock("../../ipc/commands/story", () => {
     readRecoverableDraft: vi.fn().mockResolvedValue({ kind: "none" }),
     applyRecovery: vi.fn(),
     discardDraft: vi.fn().mockResolvedValue(undefined),
+    // Node-content commands (schema v2). Defaults are inert so the editor
+    // mounts without a recoverable node draft and never auto-saves.
+    updateNodeContent: vi.fn(),
+    attachNodeMedia: vi.fn(),
+    removeNodeMedia: vi.fn(),
+    readNodeMedia: vi.fn(),
+    recordNodeDraft: vi.fn().mockResolvedValue(undefined),
+    readRecoverableNodeDraft: vi.fn().mockResolvedValue({ kind: "none" }),
+    discardNodeDraft: vi.fn().mockResolvedValue(undefined),
     ApplyRecoveryContractDriftError,
     ReadRecoverableDraftContractDriftError,
+    NodeContractDriftError,
   };
 });
 
@@ -68,10 +86,14 @@ import { exportStoryWithSaveDialog } from "../../ipc/commands/import-export";
 import {
   applyRecovery,
   discardDraft,
+  discardNodeDraft,
   getStoryDetail,
   readRecoverableDraft,
+  readRecoverableNodeDraft,
   recordDraft,
+  recordNodeDraft,
   saveStory,
+  updateNodeContent,
 } from "../../ipc/commands/story";
 import type { StoryDetailDto } from "../../shared/ipc-contracts/story";
 import { LibraryRoute } from "../library/LibraryRoute";
@@ -88,6 +110,8 @@ function buildDetail(overrides: Partial<StoryDetailDto> = {}): StoryDetailDto {
     contentChecksum: "a".repeat(64),
     createdAt: "2026-04-23T09:00:00.000Z",
     updatedAt: "2026-04-23T09:00:00.000Z",
+    editable: true,
+    node: { id: "n1", text: "", label: "", image: null, audio: null },
     ...overrides,
   };
 }
@@ -122,6 +146,15 @@ describe("<StoryEditRoute />", () => {
     vi.mocked(applyRecovery).mockReset();
     vi.mocked(discardDraft).mockReset();
     vi.mocked(discardDraft).mockResolvedValue();
+    // Node-content recovery defaults: no node draft to recover, buffer + discard
+    // resolve. `afterEach`'s `restoreAllMocks` wipes the factory defaults, so
+    // they are re-established here exactly like the title recovery mocks.
+    vi.mocked(readRecoverableNodeDraft).mockReset();
+    vi.mocked(readRecoverableNodeDraft).mockResolvedValue({ kind: "none" });
+    vi.mocked(recordNodeDraft).mockReset();
+    vi.mocked(recordNodeDraft).mockResolvedValue();
+    vi.mocked(discardNodeDraft).mockReset();
+    vi.mocked(discardNodeDraft).mockResolvedValue();
     invalidateLibraryOverviewCacheMock.mockReset();
     // Silence unhandled rejections that escape the component when the mock
     // rejects synchronously and the test renders a different branch.
@@ -1111,5 +1144,112 @@ describe("<StoryEditRoute />", () => {
       });
       expect(field).not.toBeDisabled();
     });
+  });
+});
+
+describe("StoryEditRoute — node editor (schema v2)", () => {
+  beforeEach(() => {
+    vi.mocked(getStoryDetail).mockReset();
+    vi.mocked(getStoryDetail).mockResolvedValue(buildDetail());
+    vi.mocked(saveStory).mockReset();
+    vi.mocked(saveStory).mockResolvedValue({
+      id: STORY_ID,
+      title: "Le soleil couchant",
+      updatedAt: "2026-04-23T00:00:00.000Z",
+    });
+    vi.mocked(readRecoverableDraft).mockReset();
+    vi.mocked(readRecoverableDraft).mockResolvedValue({ kind: "none" });
+    vi.mocked(readRecoverableNodeDraft).mockReset();
+    vi.mocked(readRecoverableNodeDraft).mockResolvedValue({ kind: "none" });
+    vi.mocked(recordNodeDraft).mockReset();
+    vi.mocked(recordNodeDraft).mockResolvedValue();
+    vi.mocked(recordDraft).mockReset();
+    vi.mocked(recordDraft).mockResolvedValue();
+    vi.mocked(updateNodeContent).mockReset();
+    vi.mocked(updateNodeContent).mockImplementation(async ({ text, label }) => ({
+      id: STORY_ID,
+      updatedAt: "2026-04-23T00:00:00.000Z",
+      contentChecksum: "b".repeat(64),
+      node: { id: "n1", text, label, image: null, audio: null },
+    }));
+    invalidateLibraryOverviewCacheMock.mockReset();
+    vi.spyOn(console, "error").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("projects the current node and marks it in the navigator (AC3)", async () => {
+    renderRoute(`/story/${STORY_ID}/edit`);
+    await waitFor(() =>
+      expect(
+        screen.getByRole("textbox", { name: "Texte du nœud" }),
+      ).toBeInTheDocument(),
+    );
+    // The structure navigator marks the current node, identified by Rust.
+    expect(screen.getByText(/en cours d'édition/i)).toBeInTheDocument();
+    // Both optional media slots are named, never hidden.
+    expect(screen.getByText("Aucune image")).toBeInTheDocument();
+    expect(screen.getByText("Aucun audio")).toBeInTheDocument();
+  });
+
+  it("keeps the current node identified across successive edits (AC3 long session)", async () => {
+    renderRoute(`/story/${STORY_ID}/edit`);
+    const textarea = await screen.findByRole("textbox", {
+      name: "Texte du nœud",
+    });
+    // Several successive edits must not drift the node identity nor the
+    // hierarchy readability.
+    for (const value of ["Il", "Il était", "Il était une fois"]) {
+      fireEvent.change(textarea, { target: { value } });
+      // The current node stays clearly identified after every edit.
+      expect(screen.getByText(/en cours d'édition/i)).toBeInTheDocument();
+    }
+    expect((textarea as HTMLTextAreaElement).value).toBe("Il était une fois");
+    // The structure root (the title) is still the readable hierarchy root.
+    expect(
+      screen.getByText("Le soleil couchant", {
+        selector: ".story-structure-navigator__root-label",
+      }),
+    ).toBeInTheDocument();
+  });
+
+  it("flushes the node autosave on Retour so a mid-debounce edit is not lost", async () => {
+    const router = renderRoute(`/story/${STORY_ID}/edit`);
+    const textarea = await screen.findByRole("textbox", {
+      name: "Texte du nœud",
+    });
+    fireEvent.change(textarea, { target: { value: "à enregistrer" } });
+
+    fireEvent.click(
+      screen.getByRole("button", { name: /retour à la bibliothèque/i }),
+    );
+
+    await waitFor(() =>
+      expect(updateNodeContent).toHaveBeenCalledWith({
+        storyId: STORY_ID,
+        nodeId: "n1",
+        text: "à enregistrer",
+        label: "",
+      }),
+    );
+    expect(router.state.location.pathname).toBe("/library");
+  });
+
+  it("renders an imported story's node read-only (no editable controls)", async () => {
+    vi.mocked(getStoryDetail).mockResolvedValue(buildDetail({ editable: false }));
+    renderRoute(`/story/${STORY_ID}/edit`);
+    await waitFor(() =>
+      expect(
+        screen.getByText("Histoire importée (lecture seule)"),
+      ).toBeInTheDocument(),
+    );
+    expect(
+      screen.getByRole("textbox", { name: "Texte du nœud" }),
+    ).toBeDisabled();
+    expect(
+      screen.queryByRole("button", { name: "Ajouter" }),
+    ).not.toBeInTheDocument();
   });
 });

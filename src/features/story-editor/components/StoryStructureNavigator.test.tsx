@@ -1,132 +1,81 @@
 import { render, screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 
-import {
-  StoryStructureNavigator,
-  parseStoryStructure,
-} from "./StoryStructureNavigator";
+import type { NodeContentDto } from "../../../shared/ipc-contracts/story";
 
-const V1_STRUCTURE = '{"schemaVersion":1,"nodes":[]}';
+import { StoryStructureNavigator } from "./StoryStructureNavigator";
 
-describe("parseStoryStructure", () => {
-  it("recognizes the canonical v1 structure", () => {
-    expect(parseStoryStructure(V1_STRUCTURE)).toEqual({ kind: "ok" });
-  });
-
-  it("marks malformed JSON as unreadable instead of throwing", () => {
-    expect(parseStoryStructure("{not json")).toEqual({ kind: "unreadable" });
-  });
-
-  it("marks a payload without a nodes array as unreadable", () => {
-    expect(parseStoryStructure('{"schemaVersion":1}')).toEqual({
-      kind: "unreadable",
-    });
-    expect(parseStoryStructure('{"schemaVersion":1,"nodes":"oops"}')).toEqual({
-      kind: "unreadable",
-    });
-    expect(parseStoryStructure("null")).toEqual({ kind: "unreadable" });
-  });
-
-  it("rejects a drifted schemaVersion instead of masking it as empty", () => {
-    // Missing, future and non-numeric versions are all drift the v1 shell
-    // cannot honestly project — never a silent "normal empty structure".
-    expect(parseStoryStructure('{"nodes":[]}')).toEqual({ kind: "unreadable" });
-    expect(parseStoryStructure('{"schemaVersion":2,"nodes":[]}')).toEqual({
-      kind: "unreadable",
-    });
-    expect(parseStoryStructure('{"schemaVersion":"x","nodes":[]}')).toEqual({
-      kind: "unreadable",
-    });
-  });
-
-  it("rejects a non-empty node list as unreadable (v1 carries no node)", () => {
-    expect(parseStoryStructure('{"schemaVersion":1,"nodes":[{}]}')).toEqual({
-      kind: "unreadable",
-    });
-  });
-});
+const NODE: NodeContentDto = {
+  id: "n1",
+  text: "",
+  label: "",
+  image: null,
+  audio: null,
+};
 
 describe("<StoryStructureNavigator />", () => {
-  it("renders the named structure zone with the story as its root", () => {
+  it("shows the story root and the projected current node", () => {
     render(
       <StoryStructureNavigator
         title="Le soleil couchant"
-        structureJson={V1_STRUCTURE}
+        node={NODE}
+        currentNodeId="n1"
       />,
     );
-
     expect(
       screen.getByRole("region", { name: "Structure de l'histoire" }),
     ).toBeInTheDocument();
     expect(
-      screen.getByRole("heading", { name: "Structure de l'histoire" }),
+      screen.getByText("Le soleil couchant", {
+        selector: ".story-structure-navigator__root-label",
+      }),
     ).toBeInTheDocument();
-    // The story is shown as the structure root.
-    expect(screen.getByText("Le soleil couchant")).toBeInTheDocument();
+    // The node falls back to "Nœud courant" when its label is empty.
+    expect(screen.getByText("Nœud courant")).toBeInTheDocument();
   });
 
-  it("names the v1 empty state instead of hiding it (UX-DR38)", () => {
-    render(
-      <StoryStructureNavigator title="Histoire" structureJson={V1_STRUCTURE} />,
+  it("clearly marks the current node (AC3)", () => {
+    const { container } = render(
+      <StoryStructureNavigator title="Histoire" node={NODE} currentNodeId="n1" />,
     );
-    expect(
-      screen.getByText("Aucune saison ni nœud pour l'instant."),
-    ).toBeInTheDocument();
-  });
-
-  it("exposes the structure root as a keyboard focus stop", () => {
-    render(
-      <StoryStructureNavigator title="Histoire" structureJson={V1_STRUCTURE} />,
+    const current = container.querySelector(
+      ".story-structure-navigator__node--current",
     );
-    const root = screen.getByText("Histoire").closest("div");
-    expect(root).not.toBeNull();
-    expect(root).toHaveAttribute("tabindex", "0");
-    root?.focus();
-    expect(root).toHaveFocus();
+    expect(current).not.toBeNull();
+    expect(current).toHaveAttribute("aria-current", "true");
+    expect(current).toHaveTextContent("en cours d'édition");
   });
 
-  it("falls back to a named degraded state on a malformed payload, never a crash", () => {
-    render(
-      <StoryStructureNavigator title="Histoire" structureJson="{broken" />,
-    );
-    expect(screen.getByText("Structure illisible.")).toBeInTheDocument();
-    // No fabricated empty-node line when the payload could not be read.
-    expect(
-      screen.queryByText("Aucune saison ni nœud pour l'instant."),
-    ).not.toBeInTheDocument();
-  });
-
-  it("shows the degraded state for a drifted schema, never a silent empty view", () => {
+  it("uses the node's own label when it has one", () => {
     render(
       <StoryStructureNavigator
         title="Histoire"
-        structureJson='{"schemaVersion":2,"nodes":[]}'
+        node={{ ...NODE, label: "Le départ" }}
+        currentNodeId="n1"
       />,
     );
-    expect(screen.getByText("Structure illisible.")).toBeInTheDocument();
-    expect(
-      screen.queryByText("Aucune saison ni nœud pour l'instant."),
-    ).not.toBeInTheDocument();
+    expect(screen.getByText("Le départ")).toBeInTheDocument();
   });
 
-  it("keeps the degraded state a keyboard focus stop (AC3)", () => {
+  it("degrades to a NAMED state when no node is projected (never a crash)", () => {
     render(
-      <StoryStructureNavigator title="Histoire" structureJson="{broken" />,
+      <StoryStructureNavigator title="Histoire" node={null} currentNodeId={null} />,
     );
     const degraded = screen.getByText("Structure illisible.");
+    expect(degraded).toBeInTheDocument();
+    // The degraded state stays a keyboard focus stop.
     expect(degraded).toHaveAttribute("tabindex", "0");
-    degraded.focus();
-    expect(degraded).toHaveFocus();
   });
 
-  it("never echoes the raw structureJson bytes (display only, no reserialization)", () => {
-    const { container } = render(
-      <StoryStructureNavigator title="Histoire" structureJson={V1_STRUCTURE} />,
+  it("keeps the structure root focusable (AC3)", () => {
+    render(
+      <StoryStructureNavigator title="Histoire" node={NODE} currentNodeId="n1" />,
     );
-    // The component reads the bytes to decide what to show; it must never
-    // print them back (that would be the first step toward reformatting a
-    // checksum-covered payload).
-    expect(container.textContent ?? "").not.toContain("schemaVersion");
-    expect(container.textContent ?? "").not.toContain("nodes");
+    const root = screen
+      .getByText("Histoire", {
+        selector: ".story-structure-navigator__root-label",
+      })
+      .closest(".story-structure-navigator__root");
+    expect(root).toHaveAttribute("tabindex", "0");
   });
 });

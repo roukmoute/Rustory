@@ -1,14 +1,25 @@
 import { invoke } from "@tauri-apps/api/core";
 
 import {
+  isAttachNodeMediaOutcome,
+  isNodeMediaPreview,
+  isNodeWriteOutput,
   isRecoverableDraft,
+  isRecoverableNodeDraft,
   isUpdateStoryOutput,
   type ApplyRecoveryInput,
+  type AttachNodeMediaOutcome,
   type CreateStoryInput,
+  type NodeMediaPreview,
+  type NodeMediaSlotInput,
+  type NodeWriteOutput,
   type RecordDraftInput,
+  type RecordNodeDraftInput,
   type RecoverableDraft,
+  type RecoverableNodeDraft,
   type StoryCardDto,
   type StoryDetailDto,
+  type UpdateNodeContentInput,
   type UpdateStoryInput,
   type UpdateStoryOutput,
 } from "../../shared/ipc-contracts/story";
@@ -153,6 +164,135 @@ export function discardDraft(input: {
   expectedDraftAt?: string;
 }): Promise<void> {
   return invoke<void>("discard_draft", {
+    input: {
+      storyId: input.storyId,
+      expectedDraftAt: input.expectedDraftAt ?? null,
+    },
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Node content + media (schema v2)
+// ---------------------------------------------------------------------------
+
+/**
+ * Thrown when a node command returns a payload that does not match its
+ * wire shape. The captured `raw` value is kept for support, never surfaced.
+ */
+export class NodeContractDriftError extends Error {
+  public readonly raw: unknown;
+  constructor(message: string, options: { raw: unknown }) {
+    super(message);
+    this.name = "NodeContractDriftError";
+    this.raw = options.raw;
+  }
+}
+
+/**
+ * Write the current node's text + metadata label. The Rust core re-serializes
+ * `structureJson` and recomputes `contentChecksum`; the resolved
+ * `NodeWriteOutput` carries the re-projected node so the caller reconciles
+ * without a follow-up read.
+ */
+export async function updateNodeContent(
+  input: UpdateNodeContentInput,
+): Promise<NodeWriteOutput> {
+  const raw = await invoke<unknown>("update_node_content", { input });
+  if (!isNodeWriteOutput(raw)) {
+    throw new NodeContractDriftError(
+      "update_node_content a renvoyé une forme inattendue.",
+      { raw },
+    );
+  }
+  return raw;
+}
+
+/**
+ * Attach a source media file to the current node's slot. Opens a native file
+ * picker in Rust; a cancelled dialog resolves with `{ kind: "cancelled" }`.
+ * A refused file rejects with a `MEDIA_INVALID` `AppError`.
+ */
+export async function attachNodeMedia(
+  input: NodeMediaSlotInput,
+): Promise<AttachNodeMediaOutcome> {
+  const raw = await invoke<unknown>("attach_node_media", { input });
+  if (!isAttachNodeMediaOutcome(raw)) {
+    throw new NodeContractDriftError(
+      "attach_node_media a renvoyé une forme inattendue.",
+      { raw },
+    );
+  }
+  return raw;
+}
+
+/** Remove the media from a node's slot. */
+export async function removeNodeMedia(
+  input: NodeMediaSlotInput,
+): Promise<NodeWriteOutput> {
+  const raw = await invoke<unknown>("remove_node_media", { input });
+  if (!isNodeWriteOutput(raw)) {
+    throw new NodeContractDriftError(
+      "remove_node_media a renvoyé une forme inattendue.",
+      { raw },
+    );
+  }
+  return raw;
+}
+
+/**
+ * Read a node media's bytes for a preview, as a self-contained `data:` URL.
+ * The frontend never owns the raw bytes.
+ */
+export async function readNodeMedia(input: {
+  storyId: string;
+  assetId: string;
+}): Promise<NodeMediaPreview> {
+  const raw = await invoke<unknown>("read_node_media", {
+    storyId: input.storyId,
+    assetId: input.assetId,
+  });
+  if (!isNodeMediaPreview(raw)) {
+    throw new NodeContractDriftError(
+      "read_node_media a renvoyé une forme inattendue.",
+      { raw },
+    );
+  }
+  return raw;
+}
+
+/**
+ * Buffer the in-progress node text + label (NFR8). Best-effort: callers
+ * `.catch(() => undefined)` and proceed — the autosave is the durable path.
+ */
+export function recordNodeDraft(input: RecordNodeDraftInput): Promise<void> {
+  return invoke<void>("record_node_draft", { input });
+}
+
+/**
+ * Read the recoverable node draft for a story. `kind: "none"` is
+ * informational. Throws `NodeContractDriftError` on wire-shape drift.
+ */
+export async function readRecoverableNodeDraft(input: {
+  storyId: string;
+}): Promise<RecoverableNodeDraft> {
+  const raw = await invoke<unknown>("read_recoverable_node_draft", {
+    storyId: input.storyId,
+  });
+  if (!isRecoverableNodeDraft(raw)) {
+    throw new NodeContractDriftError(
+      "read_recoverable_node_draft a renvoyé une forme inattendue.",
+      { raw },
+    );
+  }
+  return raw;
+}
+
+/** Drop the buffered node draft. Idempotent; best-effort on the frontend. */
+export function discardNodeDraft(input: {
+  storyId: string;
+  expectedDraftAt?: string;
+}): Promise<void> {
+  return invoke<void>("discard_node_draft", {
     input: {
       storyId: input.storyId,
       expectedDraftAt: input.expectedDraftAt ?? null,

@@ -1,4 +1,5 @@
 import type React from "react";
+import { useEffect, useRef } from "react";
 
 import { ExportStatusSurface } from "../../import-export/components/ExportStatusSurface";
 import { ExportStoryButton } from "../../import-export/components/ExportStoryButton";
@@ -13,6 +14,7 @@ import { RecoveryReadErrorBanner } from "./RecoveryReadErrorBanner";
 import { StoryNodeEditorHost } from "./StoryNodeEditorHost";
 import { StoryStructureNavigator } from "./StoryStructureNavigator";
 import type { SaveStatus } from "../hooks/use-story-editor";
+import type { UseNodeEditor } from "../hooks/use-node-editor";
 import type { UseStoryRecovery } from "../hooks/use-story-recovery";
 
 import "./StoryEditorShell.css";
@@ -63,9 +65,11 @@ export interface StoryEditorShellProps {
   saveStatus: SaveStatus;
   recovery: UseStoryRecovery;
   exporter: UseStoryExport;
+  /** Current-node editor (text/metadata autosave + media actions). */
+  nodeEditor: UseNodeEditor;
   onSetDraftTitle: (next: string) => void;
   onRetrySave: () => void;
-  /** Flush a pending autosave before the export boundary opens. */
+  /** Flush BOTH the title and node autosaves before the export boundary opens. */
   onFlushAutoSave: () => void;
   /** Leave the editor (the route owns the recovery guard + flush + navigate). */
   onBack: () => void;
@@ -90,6 +94,7 @@ export function StoryEditorShell({
   saveStatus,
   recovery,
   exporter,
+  nodeEditor,
   onSetDraftTitle,
   onRetrySave,
   onFlushAutoSave,
@@ -98,6 +103,12 @@ export function StoryEditorShell({
   const presentation = presentSaveStatus(saveStatus);
   const saveStatusId = "story-edit-save-status";
   const saveAlertId = "story-edit-save-alert";
+
+  // Title field focus management. `autoFocus` only fires at mount, so a field
+  // that was disabled behind a recovery surface never regained focus once the
+  // surface dismissed (previously deferred). A `ref` + effect focuses the field
+  // at mount AND on every transition back to an editable state.
+  const titleFieldRef = useRef<HTMLInputElement>(null);
 
   // The recovery banner takes precedence over the editable Field: the user
   // must commit a decision (Apply / Discard / Retry / Dismiss) before resuming
@@ -130,6 +141,15 @@ export function StoryEditorShell({
     recovery.state.kind === "error" && recovery.state.draft === null
       ? recovery.state.error
       : null;
+
+  useEffect(() => {
+    // Focus the title field when it is (re)enabled — at mount with no recovery
+    // surface, and when a recovery surface dismisses. Focusing a disabled input
+    // is a no-op, so the guard keeps focus off the field while a surface is up.
+    if (!recoveryActive) {
+      titleFieldRef.current?.focus();
+    }
+  }, [recoveryActive]);
 
   return (
     <main className="story-editor-shell" aria-label="Éditeur d'histoire">
@@ -184,7 +204,7 @@ export function StoryEditorShell({
             value={draftTitle}
             onChange={onSetDraftTitle}
             disabled={recoveryActive}
-            autoFocus={!recoveryActive}
+            inputRef={titleFieldRef}
             // P37/D2: when a recovery surface is on screen, point
             // `aria-describedby` at the banner so AT users hear the reason
             // the Field is locked. Otherwise keep the existing wiring (save
@@ -232,15 +252,20 @@ export function StoryEditorShell({
         ) : null}
       </section>
 
-      {/* The two content zones coexist with the state bandeau (AC1). In v1
-          both render NAMED empty states — the structure and node models are
-          not built here. */}
+      {/* The two content zones coexist with the state bandeau (AC1). The
+          navigator and the node editor both consume the node PROJECTED by Rust
+          (`detail.node`), never re-parsing `structureJson`. */}
       <div className="story-editor-shell__zones">
         <StoryStructureNavigator
           title={detail.title}
-          structureJson={detail.structureJson}
+          node={detail.node}
+          currentNodeId={nodeEditor.nodeId}
         />
-        <StoryNodeEditorHost />
+        <StoryNodeEditorHost
+          storyId={detail.id}
+          editor={nodeEditor}
+          gated={recoveryActive}
+        />
       </div>
 
       <section className="story-editor-shell__actions-region">

@@ -53,6 +53,14 @@ pub async fn export_story_with_save_dialog(
 ) -> Result<ExportStoryDialogOutcomeDto, AppError> {
     validate_story_id(&input.story_id)?;
 
+    let app_data_dir = app.path().app_data_dir().map_err(|_| {
+        AppError::library_inconsistent(
+            "Export impossible: dossier de données introuvable.",
+            "Vérifie les permissions de ton dossier utilisateur puis relance Rustory.",
+        )
+        .with_details(serde_json::json!({ "source": "app_data_unavailable" }))
+    })?;
+
     let detail = {
         // Scoped block so the `MutexGuard` is dropped BEFORE the first
         // `.await`. A `MutexGuard<DbHandle>` is not `Send` on all
@@ -62,7 +70,7 @@ pub async fn export_story_with_save_dialog(
             .db
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        get_story_detail(&db, &input.story_id)?.ok_or_else(|| {
+        get_story_detail(&db, &app_data_dir, &input.story_id)?.ok_or_else(|| {
             AppError::library_inconsistent(
                 "Export impossible: histoire introuvable.",
                 "Retourne à la bibliothèque et recharge la liste.",

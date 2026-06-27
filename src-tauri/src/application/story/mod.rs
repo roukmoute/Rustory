@@ -1,3 +1,4 @@
+pub mod node;
 pub mod recovery;
 
 use rusqlite::OptionalExtension;
@@ -190,26 +191,83 @@ pub fn update_story(
 /// IO, schema mismatch, etc.) crosses the boundary as a normalized
 /// [`AppError`] so the UI never has to distinguish "row absent" from
 /// "storage broken" from shared plumbing.
-pub fn get_story_detail(db: &DbHandle, story_id: &str) -> Result<Option<StoryDetailDto>, AppError> {
-    db.conn()
+pub fn get_story_detail(
+    db: &DbHandle,
+    app_data_dir: &std::path::Path,
+    story_id: &str,
+) -> Result<Option<StoryDetailDto>, AppError> {
+    // Read the raw row first; the node projection + editability flag need
+    // follow-up reads (asset lookups, provenance) that cannot live inside the
+    // single `query_row` closure.
+    let row: Option<(String, String, u32, String, String, String, String)> = db
+        .conn()
         .query_row(
             "SELECT id, title, schema_version, structure_json, content_checksum, created_at, updated_at \
              FROM stories WHERE id = ?1",
             rusqlite::params![story_id],
             |row| {
-                Ok(StoryDetailDto {
-                    id: row.get(0)?,
-                    title: row.get(1)?,
-                    schema_version: row.get(2)?,
-                    structure_json: row.get(3)?,
-                    content_checksum: row.get(4)?,
-                    created_at: row.get(5)?,
-                    updated_at: row.get(6)?,
-                })
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                ))
             },
         )
         .optional()
-        .map_err(map_detail_read_error)
+        .map_err(map_detail_read_error)?;
+
+    let Some((id, title, schema_version, structure_json, content_checksum, created_at, updated_at)) =
+        row
+    else {
+        return Ok(None);
+    };
+
+    let editable = node::is_story_editable(db.conn(), &id);
+    // Project the current node FROM Rust. A structure that does not parse to a
+    // current-version single node — OR whose PERSISTED canonical facts are
+    // already invalid (e.g. a checksum mismatch) — degrades to `None`, which the
+    // UI renders as the named "Structure illisible" state. Never project (hence
+    // never expose as editable) a structure we would not vouch for.
+    let media_dir = crate::infrastructure::filesystem::resolve_node_media_dir(app_data_dir);
+    let persisted_facts = crate::domain::story::CanonicalStoryFacts {
+        title: title.clone(),
+        schema_version,
+        structure_json: structure_json.clone(),
+        content_checksum: content_checksum.clone(),
+    };
+    let node = if crate::domain::story::validate_canonical(&persisted_facts).is_empty() {
+        match serde_json::from_str::<CanonicalStructure>(&structure_json) {
+            Ok(structure)
+                if structure.schema_version == CANONICAL_STORY_SCHEMA_VERSION
+                    && structure.nodes.len() == 1 =>
+            {
+                Some(node::project_node_content(
+                    db.conn(),
+                    &media_dir,
+                    &structure.nodes[0],
+                ))
+            }
+            _ => None,
+        }
+    } else {
+        None
+    };
+
+    Ok(Some(StoryDetailDto {
+        id,
+        title,
+        schema_version,
+        structure_json,
+        content_checksum,
+        created_at,
+        updated_at,
+        editable,
+        node,
+    }))
 }
 
 fn map_insert_error(err: rusqlite::Error) -> AppError {
@@ -350,8 +408,11 @@ mod tests {
 
         assert_eq!(id, dto.id);
         assert_eq!(title, "Le soleil couchant");
-        assert_eq!(schema_version, 1);
-        assert_eq!(structure_json, "{\"schemaVersion\":1,\"nodes\":[]}");
+        assert_eq!(schema_version, 2);
+        assert_eq!(
+            structure_json,
+            "{\"schemaVersion\":2,\"nodes\":[{\"id\":\"n1\",\"text\":\"\",\"label\":\"\",\"imageAssetId\":null,\"audioAssetId\":null}]}"
+        );
         assert_eq!(content_checksum.len(), 64);
         assert!(content_checksum.chars().all(|c| c.is_ascii_hexdigit()));
         // UUIDv7 hex canonical form, version nibble = 7, variant nibble ∈ {8,9,a,b}
@@ -495,7 +556,8 @@ mod tests {
             "updated_at must strictly advance: {stored_updated_at} > {stored_created_at}"
         );
         assert_eq!(
-            stored_structure, "{\"schemaVersion\":1,\"nodes\":[]}",
+            stored_structure,
+            "{\"schemaVersion\":2,\"nodes\":[{\"id\":\"n1\",\"text\":\"\",\"label\":\"\",\"imageAssetId\":null,\"audioAssetId\":null}]}",
             "structure_json must remain invariant under a title-only update"
         );
         assert_eq!(
@@ -744,7 +806,7 @@ mod tests {
     #[test]
     fn get_story_detail_returns_none_for_missing_id() {
         let db = fresh_db();
-        let detail = get_story_detail(&db, "missing-id").expect("ok");
+        let detail = get_story_detail(&db, &std::env::temp_dir(), "missing-id").expect("ok");
         assert!(detail.is_none());
     }
 
@@ -759,13 +821,16 @@ mod tests {
         )
         .expect("create");
 
-        let detail = get_story_detail(&db, &created.id)
+        let detail = get_story_detail(&db, &std::env::temp_dir(), &created.id)
             .expect("ok")
             .expect("some");
         assert_eq!(detail.id, created.id);
         assert_eq!(detail.title, "Brouillon");
-        assert_eq!(detail.schema_version, 1);
-        assert_eq!(detail.structure_json, "{\"schemaVersion\":1,\"nodes\":[]}");
+        assert_eq!(detail.schema_version, 2);
+        assert_eq!(
+            detail.structure_json,
+            "{\"schemaVersion\":2,\"nodes\":[{\"id\":\"n1\",\"text\":\"\",\"label\":\"\",\"imageAssetId\":null,\"audioAssetId\":null}]}"
+        );
         assert_eq!(detail.content_checksum.len(), 64);
         assert!(detail
             .content_checksum
@@ -826,7 +891,7 @@ mod tests {
         )
         .expect("update");
 
-        let detail = get_story_detail(&db, &created.id)
+        let detail = get_story_detail(&db, &std::env::temp_dir(), &created.id)
             .expect("ok")
             .expect("some");
         assert_eq!(detail.title, "Après");

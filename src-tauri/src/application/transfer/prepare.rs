@@ -520,7 +520,7 @@ mod tests {
     };
     use crate::infrastructure::filesystem::MockTransferArtifactSource;
 
-    const HEALTHY_JSON: &str = "{\"schemaVersion\":1,\"nodes\":[]}";
+    const HEALTHY_JSON: &str = "{\"schemaVersion\":2,\"nodes\":[{\"id\":\"n1\",\"text\":\"\",\"label\":\"\",\"imageAssetId\":null,\"audioAssetId\":null}]}";
 
     fn budget() -> Duration {
         Duration::from_secs(5)
@@ -542,7 +542,7 @@ mod tests {
             .conn()
             .execute(
                 "INSERT INTO stories (id, title, schema_version, structure_json, content_checksum, created_at, updated_at) \
-                 VALUES (?1, 'Mon histoire', 1, ?2, ?3, '2026-06-22T00:00:00.000Z', '2026-06-22T00:00:00.000Z')",
+                 VALUES (?1, 'Mon histoire', 2, ?2, ?3, '2026-06-22T00:00:00.000Z', '2026-06-22T00:00:00.000Z')",
                 rusqlite::params![id, structure_json, content_checksum],
             )
             .expect("insert story");

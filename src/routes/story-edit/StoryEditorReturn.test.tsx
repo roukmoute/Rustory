@@ -130,6 +130,13 @@ vi.mock("../../ipc/commands/story", () => {
     readRecoverableDraft: vi.fn().mockResolvedValue({ kind: "none" }),
     applyRecovery: vi.fn(),
     discardDraft: vi.fn().mockResolvedValue(undefined),
+    updateNodeContent: vi.fn(),
+    attachNodeMedia: vi.fn(),
+    removeNodeMedia: vi.fn(),
+    readNodeMedia: vi.fn(),
+    recordNodeDraft: vi.fn().mockResolvedValue(undefined),
+    readRecoverableNodeDraft: vi.fn().mockResolvedValue({ kind: "none" }),
+    discardNodeDraft: vi.fn().mockResolvedValue(undefined),
     ApplyRecoveryContractDriftError,
     ReadRecoverableDraftContractDriftError,
   };
@@ -161,6 +168,8 @@ function buildDetail(): StoryDetailDto {
     contentChecksum: "a".repeat(64),
     createdAt: "2026-04-23T09:00:00.000Z",
     updatedAt: "2026-04-23T09:00:00.000Z",
+    editable: true,
+    node: { id: "n1", text: "", label: "", image: null, audio: null },
   };
 }
 

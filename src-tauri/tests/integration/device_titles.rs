@@ -30,7 +30,7 @@ fn seed_imported_story(db: &DbHandle, story_id: &str, pack_uuid: &str, title: &s
     db.conn()
         .execute(
             "INSERT INTO stories (id, title, schema_version, structure_json, content_checksum, created_at, updated_at) \
-             VALUES (?1, ?2, 1, '{\"schemaVersion\":1,\"nodes\":[]}', \
+             VALUES (?1, ?2, 2, '{\"schemaVersion\":2,\"nodes\":[{\"id\":\"n1\",\"text\":\"\",\"label\":\"\",\"imageAssetId\":null,\"audioAssetId\":null}]}', \
              '0000000000000000000000000000000000000000000000000000000000000000', \
              '2026-06-16T00:00:00.000Z', '2026-06-16T00:00:00.000Z')",
             rusqlite::params![story_id, title],

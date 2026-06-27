@@ -627,11 +627,11 @@ mod tests {
 
         // Canonical row strictly conforming to the create_story model.
         let db = h.db.lock().expect("lock");
-        let detail = get_story_detail(&db, &outcome.story.id)
+        let detail = get_story_detail(&db, &std::env::temp_dir(), &outcome.story.id)
             .expect("read detail")
             .expect("row present");
-        assert_eq!(detail.schema_version, 1);
-        assert_eq!(detail.structure_json, "{\"schemaVersion\":1,\"nodes\":[]}");
+        assert_eq!(detail.schema_version, 2);
+        assert_eq!(detail.structure_json, "{\"schemaVersion\":2,\"nodes\":[{\"id\":\"n1\",\"text\":\"\",\"label\":\"\",\"imageAssetId\":null,\"audioAssetId\":null}]}");
         assert_eq!(detail.content_checksum.len(), 64);
         assert_eq!(detail.created_at, detail.updated_at);
 

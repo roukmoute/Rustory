@@ -43,13 +43,13 @@ mod tests {
         let structure = CanonicalStructure::minimal();
         assert_eq!(
             canonical_structure_json(&structure),
-            "{\"schemaVersion\":1,\"nodes\":[]}",
+            "{\"schemaVersion\":2,\"nodes\":[{\"id\":\"n1\",\"text\":\"\",\"label\":\"\",\"imageAssetId\":null,\"audioAssetId\":null}]}",
         );
     }
 
     #[test]
     fn content_checksum_is_64_hex_chars_lowercase() {
-        let checksum = content_checksum("{\"schemaVersion\":1,\"nodes\":[]}");
+        let checksum = content_checksum("{\"schemaVersion\":2,\"nodes\":[]}");
         assert_eq!(checksum.len(), 64);
         assert!(
             checksum

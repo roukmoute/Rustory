@@ -408,6 +408,28 @@ Adding a new cohort:
 A line in the matrix that has no test is a bug — the test enforces
 that the gate behavior matches the published policy.
 
+## Node Media Source Formats
+
+The support profile also covers the **source media** a parent may associate with
+a node while editing a native story (see
+[ui-states.md#Story Node Editor Contract](./ui-states.md)). These are the user's
+own local files; the editor stores them as-is and **never transcodes** them.
+
+| Media | Accepted source formats | Recognized by |
+| --- | --- | --- |
+| Image | PNG, JPEG | magic bytes (signature), never the file extension |
+| Audio | MP3, WAV, OGG | magic bytes (signature), never the file extension |
+
+- The set is **closed**: anything not listed is refused at attach time as a real
+  block (`MEDIA_INVALID`, surfaced inline at the media slot), never written.
+- Each file is read **bounded** by a byte ceiling; an oversize or unreadable file
+  is refused the same way.
+- **No transcoding happens here.** Converting a source media to a device-format
+  pack (`rf/` images, `sf/` sounds) remains a transfer/preparation concern — the
+  media transformer stays declared but not implemented (no story type requires
+  transcoding yet). Associating a source media to a node is editing, not a device
+  capability: it introduces no `SupportedOperation`.
+
 ## Local Artifact Import Contract
 
 The support profile covers **local artifacts** as well as devices. A local
@@ -443,7 +465,7 @@ ambiguous, or blocking:
 | Envelope | JSON parses, all required fields present, no unknown field | malformed JSON, missing field, unknown field |
 | Format version | `formatVersion == 1` | `formatVersion != 1` (a newer/older artifact this build does not understand) |
 | Schema version | `schemaVersion` is the supported canonical version | a `structureJson` that fails canonical validation (`validate_canonical`) — unsupported / incoherent schema |
-| Structure | `structureJson` is canonically valid (`{ "schemaVersion": 1, "nodes": [] }` in v1) | non-canonical / corrupt structure |
+| Structure | `structureJson` is canonically valid per `validate_canonical` (the current canonical schema, one current node) | non-canonical / corrupt structure |
 | Integrity | `SHA-256(structureJson)` equals the declared `contentChecksum` | checksum divergent (silent corruption) — never recomputed/overwritten, only verified |
 | Title | normalizable to a non-empty valid title | empty after normalization / invalid characters |
 | Timestamps | `createdAt` / `updatedAt` are ISO-8601 UTC ms | — (a malformed timestamp is **ambiguous**, preserved and flagged, never blocking) |

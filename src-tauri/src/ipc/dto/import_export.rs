@@ -457,7 +457,7 @@ mod tests {
     fn importable_content() -> ImportableContentDto {
         ImportableContentDto {
             title: "Le Soleil".into(),
-            structure_json: "{\"schemaVersion\":1,\"nodes\":[]}".into(),
+            structure_json: "{\"schemaVersion\":2,\"nodes\":[{\"id\":\"n1\",\"text\":\"\",\"label\":\"\",\"imageAssetId\":null,\"audioAssetId\":null}]}".into(),
             content_checksum: "a".repeat(64),
             created_at: "2026-06-20T10:00:00.000Z".into(),
             updated_at: "2026-06-24T14:15:00.000Z".into(),
@@ -487,7 +487,7 @@ mod tests {
         assert_eq!(v["sourceName"], "histoire.rustory");
         assert_eq!(
             v["importableContent"]["structureJson"].as_str().unwrap(),
-            "{\"schemaVersion\":1,\"nodes\":[]}"
+            "{\"schemaVersion\":2,\"nodes\":[{\"id\":\"n1\",\"text\":\"\",\"label\":\"\",\"imageAssetId\":null,\"audioAssetId\":null}]}"
         );
         for snake in ["source_name", "artifact_checksum", "importable_content"] {
             assert!(v.get(snake).is_none(), "{snake} must be camelCase");
@@ -527,7 +527,7 @@ mod tests {
         let dto: AcceptArtifactImportInputDto = serde_json::from_value(serde_json::json!({
             "content": {
                 "title": "Le Soleil",
-                "structureJson": "{\"schemaVersion\":1,\"nodes\":[]}",
+                "structureJson": "{\"schemaVersion\":2,\"nodes\":[{\"id\":\"n1\",\"text\":\"\",\"label\":\"\",\"imageAssetId\":null,\"audioAssetId\":null}]}",
                 "contentChecksum": "a".repeat(64),
                 "createdAt": "2026-06-20T10:00:00.000Z",
                 "updatedAt": "2026-06-24T14:15:00.000Z",
@@ -573,7 +573,7 @@ mod tests {
     fn importable_content_json() -> serde_json::Value {
         serde_json::json!({
             "title": "Le Soleil",
-            "structureJson": "{\"schemaVersion\":1,\"nodes\":[]}",
+            "structureJson": "{\"schemaVersion\":2,\"nodes\":[{\"id\":\"n1\",\"text\":\"\",\"label\":\"\",\"imageAssetId\":null,\"audioAssetId\":null}]}",
             "contentChecksum": "a".repeat(64),
             "createdAt": "2026-06-20T10:00:00.000Z",
             "updatedAt": "2026-06-24T14:15:00.000Z",

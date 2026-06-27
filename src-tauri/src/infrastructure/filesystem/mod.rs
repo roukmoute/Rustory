@@ -1,6 +1,7 @@
 pub mod app_paths;
 pub mod catalog_covers;
 pub mod import_store;
+pub mod node_media;
 pub mod transfer_artifacts;
 
 pub use app_paths::{ensure_app_data_dir, ensure_dir_writable, resolve_db_path, DB_FILENAME};
@@ -11,6 +12,11 @@ pub use catalog_covers::{
 pub use import_store::{
     ensure_import_store, resolve_import_story_dir, resolve_imports_dir,
     resolve_imports_staging_dir, IMPORTS_DIR_NAME, IMPORTS_STAGING_DIR_NAME,
+};
+pub use node_media::{
+    ensure_node_media_store, read_media, resolve_node_media_dir, resolve_node_media_staging_dir,
+    sniff_media, store_media, sweep_node_media_staging, MediaKind, NodeMediaError, StoredMedia,
+    MAX_MEDIA_BYTES, NODE_MEDIA_DIR_NAME,
 };
 pub use transfer_artifacts::{
     AssemblyPlan, AssemblySource, SystemTransferArtifactSource, TransferArtifactSource,

@@ -1,4 +1,5 @@
 use crate::domain::shared::AppError;
+use crate::infrastructure::filesystem::MediaKind;
 
 /// Bound the accepted story id length so a hostile or malformed payload
 /// can never issue a multi-kilobyte SQL prepared-statement parameter.
@@ -36,10 +37,74 @@ pub fn validate_story_id(raw: &str) -> Result<(), AppError> {
     Ok(())
 }
 
+/// Parse a wire media-slot discriminator (`image` / `audio`) into its
+/// [`MediaKind`]. An unknown value is a `MEDIA_INVALID` block — the UI only
+/// ever sends the two known slots, so anything else is a contract drift, not a
+/// user-recoverable file issue.
+pub fn parse_media_slot(raw: &str) -> Result<MediaKind, AppError> {
+    match raw {
+        "image" => Ok(MediaKind::Image),
+        "audio" => Ok(MediaKind::Audio),
+        _ => Err(AppError::media_invalid(
+            "Emplacement de média inconnu.",
+            "Recharge l'éditeur puis réessaie.",
+        )
+        .with_details(serde_json::json!({ "source": "media_invalid", "stage": "unknown_slot" }))),
+    }
+}
+
+/// Minimal standard-alphabet base64 encoder (RFC 4648, full padding). Kept
+/// dependency-free — wraps small cached images / node media into a `data:` URL
+/// for the webview. Single source of truth shared by the catalog cover and
+/// node-media preview commands.
+pub fn base64_encode(data: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
+    for chunk in data.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = *chunk.get(1).unwrap_or(&0) as u32;
+        let b2 = *chunk.get(2).unwrap_or(&0) as u32;
+        let n = (b0 << 16) | (b1 << 8) | b2;
+        out.push(ALPHABET[((n >> 18) & 63) as usize] as char);
+        out.push(ALPHABET[((n >> 12) & 63) as usize] as char);
+        out.push(if chunk.len() > 1 {
+            ALPHABET[((n >> 6) & 63) as usize] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            ALPHABET[(n & 63) as usize] as char
+        } else {
+            '='
+        });
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::domain::shared::AppErrorCode;
+
+    #[test]
+    fn parse_media_slot_maps_known_slots_and_rejects_others() {
+        assert_eq!(parse_media_slot("image").unwrap(), MediaKind::Image);
+        assert_eq!(parse_media_slot("audio").unwrap(), MediaKind::Audio);
+        let err = parse_media_slot("video").expect_err("unknown slot");
+        assert_eq!(err.code, AppErrorCode::MediaInvalid);
+        assert_eq!(err.details.unwrap()["stage"], "unknown_slot");
+    }
+
+    #[test]
+    fn base64_encode_matches_known_vectors() {
+        assert_eq!(base64_encode(b""), "");
+        assert_eq!(base64_encode(b"f"), "Zg==");
+        assert_eq!(base64_encode(b"fo"), "Zm8=");
+        assert_eq!(base64_encode(b"foo"), "Zm9v");
+        assert_eq!(base64_encode(b"foob"), "Zm9vYg==");
+        assert_eq!(base64_encode(b"fooba"), "Zm9vYmE=");
+        assert_eq!(base64_encode(b"foobar"), "Zm9vYmFy");
+    }
 
     #[test]
     fn accepts_a_canonical_uuid_v7() {

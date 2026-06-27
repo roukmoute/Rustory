@@ -197,6 +197,18 @@ pub fn run() {
             // boot; the residues are retried at the next launch.
             let _ = application::device::import::sweep_import_artifacts(&db, &app_data_dir);
 
+            // Boot-time sweep of node-media staging residue: a crash mid-attach
+            // can leave a `.staging/*.tmp` file that was never promoted. Best
+            // effort — a sweep failure never blocks the boot.
+            infrastructure::filesystem::sweep_node_media_staging(
+                &infrastructure::filesystem::resolve_node_media_staging_dir(&app_data_dir),
+            );
+
+            // Boot-time reconciliation of PROMOTED node media: delete any file
+            // referenced by no `assets` row (a crash between commit and the GC,
+            // a GC that failed, or a promote-then-refused attach). Best-effort.
+            application::story::node::sweep_orphan_node_media(&db, &app_data_dir);
+
             // Boot-time transfer-resume probe: any durable transfer outcome
             // surviving the previous session indicates a transfer that reached a
             // terminal and was never acknowledged (Relancer / Abandonner). Emit a
@@ -266,8 +278,10 @@ pub fn run() {
             commands::import_export::accept_artifact_import,
             commands::import_export::analyze_artifact_for_import,
             commands::story::apply_recovery,
+            commands::story::attach_node_media,
             commands::story::create_story,
             commands::story::discard_draft,
+            commands::story::discard_node_draft,
             commands::transfer::discard_transfer_outcome,
             commands::import_export::export_story_with_save_dialog,
             commands::library::get_library_overview,
@@ -277,18 +291,23 @@ pub fn run() {
             commands::device::import_device_story,
             commands::device::read_connected_lunii,
             commands::device::read_device_library,
+            commands::story::read_node_media,
             commands::catalog::read_pack_cover,
             commands::transfer::read_preparation_state,
             commands::story::read_recoverable_draft,
+            commands::story::read_recoverable_node_draft,
             commands::device::read_story_validation,
             commands::transfer::read_transfer_outcome,
             commands::device::read_transfer_preview,
             commands::transfer::read_transfer_state,
             commands::catalog::refresh_official_catalog,
             commands::story::record_draft,
+            commands::story::record_node_draft,
+            commands::story::remove_node_media,
             commands::device::set_device_story_title,
             commands::transfer::start_prepare_story,
             commands::transfer::start_transfer_story,
+            commands::story::update_node_content,
             commands::story::update_story,
         ])
         .run(tauri::generate_context!())

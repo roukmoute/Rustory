@@ -5,6 +5,7 @@ import { useNavigate, useParams } from "react-router-dom";
 import { StoryEditorShell } from "../../features/story-editor/components/StoryEditorShell";
 import { useStoryExport } from "../../features/import-export/hooks/use-story-export";
 import { LibraryErrorBanner } from "../../features/library/components/LibraryErrorBanner";
+import { useNodeEditor } from "../../features/story-editor/hooks/use-node-editor";
 import { useStoryEditor } from "../../features/story-editor/hooks/use-story-editor";
 import { useStoryRecovery } from "../../features/story-editor/hooks/use-story-recovery";
 import { Button, ProgressIndicator, SurfacePanel } from "../../shared/ui";
@@ -40,6 +41,18 @@ export function StoryEditRoute(): React.JSX.Element {
   });
   const { state } = editor;
 
+  // The current node + editability are projected by Rust inside the story
+  // detail. The hook is called unconditionally (Rules of Hooks) with the
+  // projection when ready, `null` otherwise — it handles the no-node case.
+  const projectedNode = state.kind === "ready" ? state.detail.node : null;
+  const editable = state.kind === "ready" ? state.detail.editable : true;
+  const nodeEditor = useNodeEditor(storyId, projectedNode, editable);
+
+  const flushAll = (): void => {
+    editor.flushAutoSave();
+    nodeEditor.flushNodeAutoSave();
+  };
+
   const goBack = (): void => {
     // Block the navigation while a recovery apply / discard is in flight:
     // navigating mid-transaction would unmount the hook, strand the IPC, and
@@ -48,9 +61,9 @@ export function StoryEditRoute(): React.JSX.Element {
     // The button surface should already be disabled by `recoveryActive`, but a
     // programmatic call (keyboard shortcut, browser back) must also no-op here.
     if (recovery.state.kind === "applying") return;
-    // Commit a pending autosave before the route unmounts: clicking Retour at
-    // millisecond 499 of the debounce must not lose the change.
-    editor.flushAutoSave();
+    // Commit BOTH pending autosaves before the route unmounts: clicking Retour
+    // at millisecond 499 of the debounce must not lose the change.
+    flushAll();
     // `replace` keeps the browser history a single in/out transition for the
     // library ↔ edit context — back button behavior stays predictable.
     navigate("/library", { replace: true });
@@ -125,9 +138,10 @@ export function StoryEditRoute(): React.JSX.Element {
       saveStatus={state.saveStatus}
       recovery={recovery}
       exporter={exporter}
+      nodeEditor={nodeEditor}
       onSetDraftTitle={editor.setDraftTitle}
       onRetrySave={editor.retrySave}
-      onFlushAutoSave={editor.flushAutoSave}
+      onFlushAutoSave={flushAll}
       onBack={goBack}
     />
   );

@@ -1,7 +1,9 @@
 use rustory_lib::domain::shared::AppError;
 use rustory_lib::ipc::dto::{
-    ApplyRecoveryInputDto, CreateStoryInputDto, RecordDraftInputDto, RecoverableDraftDto,
-    StoryDetailDto, UpdateStoryInputDto, UpdateStoryOutputDto,
+    ApplyRecoveryInputDto, AttachNodeMediaOutcomeDto, CreateStoryInputDto, NodeContentDto,
+    NodeMediaSlotDto, NodeMediaSlotInputDto, NodeWriteOutputDto, RecordDraftInputDto,
+    RecoverableDraftDto, StoryDetailDto, UpdateNodeContentInputDto, UpdateStoryInputDto,
+    UpdateStoryOutputDto,
 };
 
 #[test]
@@ -109,20 +111,39 @@ fn story_detail_wire_shape_is_camel_case_with_all_fields() {
     let dto = StoryDetailDto {
         id: "sid".into(),
         title: "Titre".into(),
-        schema_version: 1,
-        structure_json: "{\"schemaVersion\":1,\"nodes\":[]}".into(),
+        schema_version: 2,
+        structure_json: "{\"schemaVersion\":2,\"nodes\":[]}".into(),
         content_checksum: "0".repeat(64),
         created_at: "2026-04-23T09:00:00.000Z".into(),
         updated_at: "2026-04-23T10:00:00.000Z".into(),
+        editable: true,
+        node: Some(NodeContentDto {
+            id: "n1".into(),
+            text: "Bonjour".into(),
+            label: "Début".into(),
+            image: Some(NodeMediaSlotDto {
+                asset_id: "a1".into(),
+                media_type: "image".into(),
+                state: "ready".into(),
+                format: Some("png".into()),
+                byte_size: Some(42),
+            }),
+            audio: None,
+        }),
     };
     let v = serde_json::to_value(&dto).expect("serialize");
     assert_eq!(v["id"], "sid");
     assert_eq!(v["title"], "Titre");
-    assert_eq!(v["schemaVersion"], 1);
-    assert_eq!(v["structureJson"], "{\"schemaVersion\":1,\"nodes\":[]}");
+    assert_eq!(v["schemaVersion"], 2);
+    assert_eq!(v["structureJson"], "{\"schemaVersion\":2,\"nodes\":[]}");
     assert_eq!(v["contentChecksum"].as_str().unwrap().len(), 64);
     assert_eq!(v["createdAt"], "2026-04-23T09:00:00.000Z");
     assert_eq!(v["updatedAt"], "2026-04-23T10:00:00.000Z");
+    assert_eq!(v["editable"], true);
+    assert_eq!(v["node"]["id"], "n1");
+    assert_eq!(v["node"]["image"]["assetId"], "a1");
+    assert_eq!(v["node"]["image"]["state"], "ready");
+    assert!(v["node"]["audio"].is_null());
     for snake in [
         "schema_version",
         "structure_json",
@@ -139,6 +160,94 @@ fn story_detail_option_none_serializes_as_json_null() {
     let none: Option<StoryDetailDto> = None;
     let v = serde_json::to_value(&none).expect("serialize");
     assert!(v.is_null(), "None must serialize as JSON null, got: {v:?}");
+}
+
+#[test]
+fn update_node_content_input_accepts_camel_case_and_rejects_unknown() {
+    let dto: UpdateNodeContentInputDto = serde_json::from_value(serde_json::json!({
+        "storyId": "sid", "nodeId": "n1", "text": "t", "label": "l",
+    }))
+    .expect("deser");
+    assert_eq!(dto.story_id, "sid");
+    assert_eq!(dto.node_id, "n1");
+    serde_json::from_value::<UpdateNodeContentInputDto>(serde_json::json!({
+        "storyId": "sid", "nodeId": "n1", "text": "t", "label": "l", "extra": 1,
+    }))
+    .expect_err("unknown field must fail");
+}
+
+#[test]
+fn node_media_slot_input_rejects_snake_case() {
+    serde_json::from_value::<NodeMediaSlotInputDto>(serde_json::json!({
+        "story_id": "sid", "nodeId": "n1", "slot": "image",
+    }))
+    .expect_err("snake_case storyId must fail at the boundary");
+}
+
+#[test]
+fn node_write_output_wire_shape_is_camel_case() {
+    let dto = NodeWriteOutputDto {
+        id: "sid".into(),
+        updated_at: "2026-06-27T10:00:00.000Z".into(),
+        content_checksum: "0".repeat(64),
+        node: NodeContentDto {
+            id: "n1".into(),
+            text: "t".into(),
+            label: "l".into(),
+            image: None,
+            audio: None,
+        },
+    };
+    let v = serde_json::to_value(&dto).expect("serialize");
+    assert_eq!(v["updatedAt"], "2026-06-27T10:00:00.000Z");
+    assert_eq!(v["contentChecksum"].as_str().unwrap().len(), 64);
+    assert_eq!(v["node"]["id"], "n1");
+    assert!(v.get("updated_at").is_none(), "snake_case must not leak");
+    assert!(
+        v.get("content_checksum").is_none(),
+        "snake_case must not leak"
+    );
+}
+
+#[test]
+fn attach_node_media_outcome_attached_serializes_with_kind() {
+    let dto = AttachNodeMediaOutcomeDto::Attached {
+        output: Box::new(NodeWriteOutputDto {
+            id: "sid".into(),
+            updated_at: "2026-06-27T10:00:00.000Z".into(),
+            content_checksum: "0".repeat(64),
+            node: NodeContentDto {
+                id: "n1".into(),
+                text: String::new(),
+                label: String::new(),
+                image: Some(NodeMediaSlotDto {
+                    asset_id: "a1".into(),
+                    media_type: "image".into(),
+                    state: "ready".into(),
+                    format: Some("png".into()),
+                    byte_size: Some(10),
+                }),
+                audio: None,
+            },
+        }),
+    };
+    let v = serde_json::to_value(&dto).expect("serialize");
+    assert_eq!(v["kind"], "attached");
+    assert_eq!(v["output"]["node"]["image"]["assetId"], "a1");
+}
+
+#[test]
+fn app_error_wire_shape_for_media_invalid() {
+    // The frontend matches on `code` + `details.stage` to surface a media
+    // block inline at the slot. Freezing the wire shape prevents drift.
+    let err = AppError::media_invalid(
+        "Ce média utilise un format non pris en charge.",
+        "Choisis une image PNG ou JPEG, ou un son MP3, WAV ou OGG.",
+    )
+    .with_details(serde_json::json!({ "source": "media_invalid", "stage": "unsupported_format" }));
+    let v = serde_json::to_value(&err).expect("serialize");
+    assert_eq!(v["code"], "MEDIA_INVALID");
+    assert_eq!(v["details"]["stage"], "unsupported_format");
 }
 
 #[test]

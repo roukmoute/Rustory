@@ -1,9 +1,16 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  isAttachNodeMediaOutcome,
+  isNodeContentDto,
+  isNodeMediaPreview,
+  isNodeMediaSlot,
+  isNodeWriteOutput,
   isRecoverableDraft,
+  isRecoverableNodeDraft,
   isStoryDetailDto,
   isUpdateStoryOutput,
+  type NodeContentDto,
   type StoryDetailDto,
 } from "./story";
 
@@ -15,6 +22,8 @@ const VALID_DETAIL: StoryDetailDto = {
   contentChecksum: "a".repeat(64),
   createdAt: "2026-04-23T09:00:00.000Z",
   updatedAt: "2026-04-23T10:00:00.000Z",
+  editable: true,
+  node: { id: "n1", text: "", label: "", image: null, audio: null },
 };
 
 describe("isStoryDetailDto", () => {
@@ -245,6 +254,120 @@ describe("isRecoverableDraft", () => {
   it("rejects recoverable with draftAt malformed", () => {
     expect(
       isRecoverableDraft({ ...VALID_RECOVERABLE, draftAt: "yesterday" }),
+    ).toBe(false);
+  });
+});
+
+const VALID_NODE: NodeContentDto = {
+  id: "n1",
+  text: "Bonjour",
+  label: "Début",
+  image: { assetId: "a1", mediaType: "image", state: "ready", format: "png", byteSize: 9 },
+  audio: null,
+};
+
+describe("node guards", () => {
+  it("isStoryDetailDto requires editable + a valid (or null) node", () => {
+    expect(isStoryDetailDto(VALID_DETAIL)).toBe(true);
+    // editable missing.
+    const { editable: _e, ...noEditable } = VALID_DETAIL;
+    expect(isStoryDetailDto(noEditable)).toBe(false);
+    // node may be null.
+    expect(isStoryDetailDto({ ...VALID_DETAIL, node: null })).toBe(true);
+    // a drifted node object is rejected.
+    expect(isStoryDetailDto({ ...VALID_DETAIL, node: { id: "" } })).toBe(false);
+  });
+
+  it("isNodeMediaSlot is strict on the state↔fields coupling (F11)", () => {
+    const ready = {
+      assetId: "a1",
+      mediaType: "image",
+      state: "ready",
+      format: "png",
+      byteSize: 9,
+    };
+    expect(isNodeMediaSlot(ready)).toBe(true);
+    // ready WITHOUT format / size is a drift, not a `média · 0 o` fallback.
+    expect(isNodeMediaSlot({ ...ready, format: undefined })).toBe(false);
+    expect(isNodeMediaSlot({ ...ready, byteSize: undefined })).toBe(false);
+    expect(isNodeMediaSlot({ ...ready, byteSize: -1 })).toBe(false);
+    expect(isNodeMediaSlot({ ...ready, byteSize: 1.5 })).toBe(false);
+    // attention MUST carry neither format nor size.
+    expect(
+      isNodeMediaSlot({ assetId: "a1", mediaType: "audio", state: "attention" }),
+    ).toBe(true);
+    expect(
+      isNodeMediaSlot({
+        assetId: "a1",
+        mediaType: "audio",
+        state: "attention",
+        format: "mp3",
+      }),
+    ).toBe(false);
+  });
+
+  it("isNodeContentDto validates the projected node and rejects a bad slot", () => {
+    expect(isNodeContentDto(VALID_NODE)).toBe(true);
+    expect(
+      isNodeContentDto({ ...VALID_NODE, image: { assetId: "a1", mediaType: "video", state: "ready" } }),
+    ).toBe(false);
+    expect(
+      isNodeContentDto({ ...VALID_NODE, image: { assetId: "a1", mediaType: "image", state: "weird" } }),
+    ).toBe(false);
+  });
+
+  it("isNodeWriteOutput validates the write outcome shape", () => {
+    const valid = {
+      id: "s1",
+      updatedAt: "2026-06-27T10:00:00.000Z",
+      contentChecksum: "a".repeat(64),
+      node: VALID_NODE,
+    };
+    expect(isNodeWriteOutput(valid)).toBe(true);
+    expect(isNodeWriteOutput({ ...valid, contentChecksum: "short" })).toBe(false);
+    expect(isNodeWriteOutput({ ...valid, node: { id: "" } })).toBe(false);
+  });
+
+  it("isAttachNodeMediaOutcome accepts cancelled + attached, rejects drift", () => {
+    expect(isAttachNodeMediaOutcome({ kind: "cancelled" })).toBe(true);
+    expect(
+      isAttachNodeMediaOutcome({
+        kind: "attached",
+        output: {
+          id: "s1",
+          updatedAt: "2026-06-27T10:00:00.000Z",
+          contentChecksum: "a".repeat(64),
+          node: VALID_NODE,
+        },
+      }),
+    ).toBe(true);
+    expect(isAttachNodeMediaOutcome({ kind: "attached" })).toBe(false);
+    expect(isAttachNodeMediaOutcome({ kind: "other" })).toBe(false);
+  });
+
+  it("isNodeMediaPreview requires a data URL", () => {
+    expect(isNodeMediaPreview({ dataUrl: "data:image/png;base64,AA" })).toBe(true);
+    expect(isNodeMediaPreview({ dataUrl: "https://example.com/x.png" })).toBe(false);
+    expect(isNodeMediaPreview({})).toBe(false);
+  });
+
+  it("isRecoverableNodeDraft accepts none + recoverable, rejects drift", () => {
+    expect(isRecoverableNodeDraft({ kind: "none" })).toBe(true);
+    expect(
+      isRecoverableNodeDraft({
+        kind: "recoverable",
+        storyId: "s1",
+        nodeId: "n1",
+        draftText: "x",
+        draftLabel: "",
+        draftAt: "2026-06-27T12:00:00.000Z",
+        persistedText: "",
+        persistedLabel: "",
+      }),
+    ).toBe(true);
+    expect(isRecoverableNodeDraft({ kind: "none", extra: 1 })).toBe(false);
+    expect(
+      isRecoverableNodeDraft({ kind: "recoverable", storyId: "s1" }),
     ).toBe(false);
   });
 });

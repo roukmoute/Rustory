@@ -78,9 +78,21 @@ It exists to keep the same product concepts named the same way across:
 | Import report — recognized facts header | `Ce que Rustory a reconnu` | On-demand import report header grouping the global outcome + the recognized aspects | `résumé`, `rapport`, `détails` |
 | Import report — attention header | `Points d'attention` | On-demand import report header grouping the aspects to review | `warnings`, `problèmes`, `erreurs` |
 | Story editing screen | `Éditeur d'histoire` | Dedicated screen, separate from the library, where the user resumes and edits a local story | `workspace`, `projet`, `canvas`, `editor` |
-| Editor zone — global structure | `Structure de l'histoire` | Editor zone showing the story's overall layout (seasons, nodes, branches), read-only at this stage | `arbre`, `outline`, `tree`, `plan` |
-| Editor zone — current node | `Nœud courant` | Editor zone reserved for editing the node currently in focus | `current node`, `panneau`, `étape courante` |
+| Editor zone — global structure | `Structure de l'histoire` | Editor zone showing the story's overall layout and the current node, clearly identified; read-only projection from the core (reorganizing the structure is a later step) | `arbre`, `outline`, `tree`, `plan` |
+| Editor zone — current node | `Nœud courant` | Editor zone hosting the editor for the node currently in focus (its text, metadata and media) | `current node`, `panneau`, `étape courante` |
 | Story node | `nœud` | A single step of an interactive story (a narrative moment and its choices) | `node`, `step`, `écran` |
+| Node narrative text (field) | `Texte du nœud` | The narrative text of the current node | `contenu`, `body`, `script` |
+| Node metadata label (field) | `Libellé du nœud` | The short human-readable name of the current node | `nom technique`, `id`, `tag` |
+| Node media — image | `Image` | The image associated with the current node | `visuel`, `asset`, `media image` |
+| Node media — audio | `Audio` | The audio associated with the current node | `son` used loosely, `track`, `media audio` |
+| Add a node media (action) | `Ajouter` | Associate an image or audio file with the current node | `Importer` (reserved for `.rustory`), `Charger`, `Upload` |
+| Replace a node media (action) | `Remplacer` | Swap the associated image or audio for another file | `Changer`, `Mettre à jour`, `Re-upload` |
+| Remove a node media (action) | `Retirer` | Drop the associated image or audio from the current node | `Supprimer`, `Effacer`, `Delete` |
+| Preview a node media (action) | `Aperçu` | Show the associated image, or play the associated audio, for review | `voir`, `lire`, `play`, `preview` |
+| Node media is absent (optional, expected) | `Aucune image` / `Aucun audio` | Named empty state for an unset, optional media slot — not an error | `vide`, `null`, `pas de média` |
+| Node media needs attention (repairable) | `Média à corriger` | The media is associated but its source is no longer accessible; the rest of the node stays editable | `warning`, `cassé`, `erreur média` |
+| Node media is blocked (real block) | `Média bloqué` | The chosen file is an unsupported format, unreadable, or too large; it is not saved until corrected | `erreur`, `fatal`, `rejeté` |
+| Supported node media formats | `Formats acceptés : images PNG, JPEG ; sons MP3, WAV, OGG` | The closed set of source media formats the editor accepts | listing extensions as the gate, `codecs`, `mime` |
 
 ## Preferred State Labels
 
@@ -170,9 +182,18 @@ The UI should favor these labels when they are user-visible:
 | Story editing screen (separate from the library) | `Éditeur d'histoire` |
 | Editor zone showing the global structure | `Structure de l'histoire` |
 | Editor zone hosting the current node | `Nœud courant` |
-| Structure has no season or node yet (v1 empty state) | `Aucune saison ni nœud pour l'instant.` |
 | Structure could not be read (degraded; near-impossible) | `Structure illisible.` |
-| No node to edit yet (v1 current-node empty state) | `Aucun nœud à éditer pour l'instant.` |
+| Node narrative text field (label) | `Texte du nœud` |
+| Node narrative text is empty (placeholder, valid starting state) | `Écris le texte de ce nœud…` |
+| Node metadata label field (label) | `Libellé du nœud` |
+| Node image slot (label) | `Image` |
+| Node audio slot (label) | `Audio` |
+| Optional node image is unset (named empty state, not an error) | `Aucune image` |
+| Optional node audio is unset (named empty state, not an error) | `Aucun audio` |
+| A node media is present and ready (chip, with a humanized size) | `Média ajouté · {taille}` |
+| A node media needs attention (repairable; rest of the node still saves) | `Média à corriger` |
+| A node media is blocked (unsupported / unreadable / oversize; not saved) | `Média bloqué` |
+| An imported story's node is read-only at this stage | `Histoire importée (lecture seule)` |
 
 Do not alternate freely between synonyms such as `sync`, `envoi`, `upload`, or `job`.
 When a different wording is necessary in context, it must still map back to one of the preferred labels above.
