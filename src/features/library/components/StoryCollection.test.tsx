@@ -24,6 +24,8 @@ interface HarnessProps {
   onSelectStory?: (id: string, mode: "replace" | "toggle") => void;
   onOpenStory?: (id: string) => void;
   onCreateStoryRequest?: () => void;
+  onImportArtifactRequest?: () => void;
+  isImportBusy?: boolean;
 }
 
 /** Testing harness that owns query/sort state locally so existing
@@ -49,6 +51,8 @@ function Harness(props: HarnessProps) {
       onSelectStory={props.onSelectStory}
       onOpenStory={props.onOpenStory}
       onCreateStoryRequest={props.onCreateStoryRequest}
+      onImportArtifactRequest={props.onImportArtifactRequest}
+      isImportBusy={props.isImportBusy}
     />
   );
 }
@@ -434,5 +438,34 @@ describe("<StoryCollection />", () => {
 
     await user.click(creates[1]);
     expect(onCreateStoryRequest).toHaveBeenCalledTimes(1);
+  });
+
+  it("offers an 'Importer une histoire' CTA that fires the request", async () => {
+    const user = userEvent.setup();
+    const onImportArtifactRequest = vi.fn();
+    render(<Harness onImportArtifactRequest={onImportArtifactRequest} />);
+    const button = screen.getByRole("button", {
+      name: "Importer une histoire",
+    });
+    await user.click(button);
+    expect(onImportArtifactRequest).toHaveBeenCalledTimes(1);
+  });
+
+  it("disables the import CTA while an import is in flight", () => {
+    render(
+      <Harness onImportArtifactRequest={vi.fn()} isImportBusy={true} />,
+    );
+    const button = screen.getByRole("button", {
+      name: "Importer une histoire",
+    });
+    expect(button).toBeDisabled();
+    expect(button).toHaveAttribute("aria-busy", "true");
+  });
+
+  it("hides the import CTA when no handler is provided", () => {
+    render(<Harness />);
+    expect(
+      screen.queryByRole("button", { name: "Importer une histoire" }),
+    ).not.toBeInTheDocument();
   });
 });

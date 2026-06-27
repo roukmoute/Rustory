@@ -15,6 +15,9 @@ mod story_drafts_migration;
 #[path = "integration/story_imports_migration.rs"]
 mod story_imports_migration;
 
+#[path = "integration/story_local_imports_migration.rs"]
+mod story_local_imports_migration;
+
 #[path = "integration/story_drafts_recovery.rs"]
 mod story_drafts_recovery;
 

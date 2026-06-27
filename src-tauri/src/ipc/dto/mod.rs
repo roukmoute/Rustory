@@ -19,7 +19,11 @@ pub use device_catalog::{CatalogStatusDto, ImportOfficialCatalogOutcomeDto, Pack
 pub use device_import::{ImportDeviceStoryInputDto, ImportDeviceStoryOutcomeDto};
 pub use device_library::{DeviceLibraryDto, DeviceStoryDto, PackTitleSourceDto};
 pub use device_title::{DeviceStoryTitleDto, SetDeviceStoryTitleInputDto};
-pub use import_export::{ExportStoryDialogInputDto, ExportStoryDialogOutcomeDto};
+pub use import_export::{
+    AcceptArtifactImportInputDto, ExportStoryDialogInputDto, ExportStoryDialogOutcomeDto,
+    ImportArtifactAnalysisDto, ImportAspectDto, ImportCategoryDto, ImportFindingDto,
+    ImportQualityDto, ImportStateDto, ImportableContentDto,
+};
 pub use library::{LibraryOverviewDto, StoryCardDto};
 pub use story::{
     ApplyRecoveryInputDto, CreateStoryInputDto, DiscardDraftInputDto, RecordDraftInputDto,

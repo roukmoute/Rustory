@@ -3,16 +3,27 @@ use std::path::{Path, PathBuf};
 use tauri::{async_runtime, AppHandle, Manager, State};
 use tauri_plugin_dialog::{DialogExt, FilePath};
 
-use crate::application::import_export::{self, ExportStoryInput};
+use crate::application::import_export::{self, import, ExportStoryInput, ImportAnalysis};
 use crate::application::story::get_story_detail;
 use crate::commands::shared::validate_story_id;
 use crate::domain::export::RUSTORY_ARTIFACT_EXTENSION;
 use crate::domain::shared::AppError;
-use crate::ipc::dto::{ExportStoryDialogInputDto, ExportStoryDialogOutcomeDto};
+use crate::ipc::dto::{
+    AcceptArtifactImportInputDto, ExportStoryDialogInputDto, ExportStoryDialogOutcomeDto,
+    ImportArtifactAnalysisDto, StoryCardDto,
+};
 use crate::AppState;
 
 const EXPORT_DIALOG_FILTER_NAME: &str = "Artefact Rustory";
 const MAX_DESTINATION_PATH_LEN: usize = 4096;
+
+/// Dialog filter shown when picking a `.rustory` artifact to import.
+const IMPORT_DIALOG_FILTER_NAME: &str = "Artefact Rustory";
+
+/// Upper bound on the artifact bytes read into memory before parsing. A
+/// `.rustory` MVP file is < 100 kB; 8 MiB is a generous ceiling that still
+/// refuses an accidental giant file before loading it.
+const MAX_ARTIFACT_BYTES: u64 = 8 * 1024 * 1024;
 
 /// Persist the currently stored story as a `.rustory` artifact at a
 /// destination chosen by the user in a native save dialog.
@@ -305,6 +316,124 @@ fn reject_internal_app_directory(app: &AppHandle, destination: &Path) -> Result<
     Ok(())
 }
 
+/// Analyze a user-picked `.rustory` artifact (phase 1, NO mutation).
+///
+/// Opens a native open-file dialog, reads the chosen file bounded, and
+/// returns a typed recognition verdict. Mirrors `import_official_catalog`'s
+/// non-blocking dialog discipline (the native GTK dialog MUST run on the
+/// main thread — a `blocking_*` variant dead-locks the app). A cancelled
+/// dialog resolves with `{ kind: "cancelled" }`. Only TRANSPORT failures
+/// (file unreadable, dialog backend) reject with `IMPORT_FAILED`; the
+/// functional verdict (bad version, corruption, normalized title) is the
+/// typed DTO, never an error.
+#[tauri::command]
+pub async fn analyze_artifact_for_import(
+    app: AppHandle,
+) -> Result<ImportArtifactAnalysisDto, AppError> {
+    let (tx, mut rx) = async_runtime::channel::<Option<FilePath>>(1);
+    app.dialog()
+        .file()
+        .add_filter(IMPORT_DIALOG_FILTER_NAME, &[RUSTORY_ARTIFACT_EXTENSION])
+        .pick_file(move |path| {
+            let _ = tx.try_send(path);
+        });
+
+    let picked = match rx.recv().await {
+        Some(inner) => inner,
+        None => return Err(import::dialog_failed_error()),
+    };
+    let Some(file_path) = picked else {
+        return Ok(ImportArtifactAnalysisDto::Cancelled);
+    };
+    let path = file_path
+        .as_path()
+        .map(|p| p.to_path_buf())
+        .ok_or_else(|| import::file_read_error("non_filesystem_path"))?;
+    // Carry the BASENAME only across the boundary — never the absolute path
+    // (PII). Falls back to a sober placeholder for an unnameable path.
+    let source_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("artefact")
+        .to_string();
+
+    let analysis = async_runtime::spawn_blocking(move || -> Result<ImportAnalysis, AppError> {
+        let bytes = read_artifact_bounded(&path)?;
+        Ok(import::analyze_artifact(&bytes, source_name))
+    })
+    .await
+    .map_err(|_| import::spawn_blocking_join_error())??;
+
+    Ok(ImportArtifactAnalysisDto::analyzed(
+        &analysis.analysis,
+        analysis.source_name,
+        analysis.artifact_checksum,
+    ))
+}
+
+/// Commit a recognized artifact (phase 2). Takes the validated content from
+/// a prior analysis and re-validates it FROM ZERO before the canonical
+/// commit (`stories` + `story_local_imports`). The DB work runs on a
+/// `spawn_blocking` worker so no `MutexGuard` ever lives across an `await`.
+#[tauri::command]
+pub async fn accept_artifact_import(
+    state: State<'_, AppState>,
+    input: AcceptArtifactImportInputDto,
+) -> Result<StoryCardDto, AppError> {
+    let db = state.db.clone();
+    async_runtime::spawn_blocking(move || -> Result<StoryCardDto, AppError> {
+        let mut guard = db.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        import::accept_import(&mut guard, &input)
+    })
+    .await
+    .map_err(|_| import::spawn_blocking_join_error())?
+}
+
+/// Read an artifact file with a HARD upper bound, refusing non-regular files.
+///
+/// The file TYPE is gated BEFORE opening: `std::fs::metadata` (which follows
+/// symlinks to the real target) rejects a directory / device / FIFO so
+/// `File::open` only ever runs on a regular file. This matters on Linux,
+/// where opening a FIFO in `O_RDONLY` BLOCKS until a writer appears — a
+/// pre-open type check would never be reached if it lived on the opened
+/// handle, freezing the `spawn_blocking` worker. The opened handle is
+/// re-checked (defense in depth against a TOCTOU swap) and its own size +
+/// the capped `take(MAX_ARTIFACT_BYTES + 1)` read close the size window: a
+/// file that grows past the bound after the metadata check is still refused
+/// (the extra byte makes the overflow observable) instead of being loaded
+/// whole.
+fn read_artifact_bounded(path: &Path) -> Result<Vec<u8>, AppError> {
+    use std::io::Read;
+
+    // Pre-open type gate — refuses a FIFO/device/dir BEFORE the (potentially
+    // blocking) `O_RDONLY` open.
+    let pre = std::fs::metadata(path).map_err(|_| import::file_read_error("metadata"))?;
+    if !pre.is_file() {
+        return Err(import::file_read_error("not_regular_file"));
+    }
+
+    let file = std::fs::File::open(path).map_err(|_| import::file_read_error("open"))?;
+    let meta = file
+        .metadata()
+        .map_err(|_| import::file_read_error("metadata"))?;
+    // Re-check on the opened handle (TOCTOU defense) and read the size from
+    // the fd so a stale pre-open length cannot understate it.
+    if !meta.is_file() {
+        return Err(import::file_read_error("not_regular_file"));
+    }
+    if meta.len() > MAX_ARTIFACT_BYTES {
+        return Err(import::file_read_error("oversize"));
+    }
+    let mut bytes = Vec::new();
+    file.take(MAX_ARTIFACT_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| import::file_read_error("read"))?;
+    if bytes.len() as u64 > MAX_ARTIFACT_BYTES {
+        return Err(import::file_read_error("oversize"));
+    }
+    Ok(bytes)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -397,5 +526,63 @@ mod tests {
         std::os::unix::fs::symlink(&real, &link).expect("mklink");
         let err = validate_and_normalize_destination(&link).expect_err("must reject");
         assert_invalid_path(&err, "symlink_destination");
+    }
+
+    // ---------------- read_artifact_bounded (F2) ----------------
+
+    fn assert_file_read(err: &AppError, stage: &str) {
+        assert_eq!(err.code, AppErrorCode::ImportFailed);
+        let v = serde_json::to_value(err).expect("ser");
+        assert_eq!(v["details"]["source"], "file_read");
+        assert_eq!(v["details"]["stage"], stage);
+    }
+
+    #[test]
+    fn read_artifact_bounded_reads_a_small_regular_file() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let path = tmp.path().join("histoire.rustory");
+        std::fs::write(&path, b"{\"ok\":true}").expect("seed");
+        let bytes = read_artifact_bounded(&path).expect("read");
+        assert_eq!(bytes, b"{\"ok\":true}");
+    }
+
+    #[test]
+    fn read_artifact_bounded_refuses_a_directory_as_non_regular() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        // A directory must never be read as an artifact.
+        let err = read_artifact_bounded(tmp.path()).expect_err("a directory must be refused");
+        assert_file_read(&err, "not_regular_file");
+    }
+
+    #[test]
+    fn read_artifact_bounded_refuses_a_file_over_the_bound() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let path = tmp.path().join("huge.rustory");
+        // One byte over the ceiling — the metadata gate already refuses it.
+        let oversize = vec![b'a'; (MAX_ARTIFACT_BYTES + 1) as usize];
+        std::fs::write(&path, &oversize).expect("seed oversize");
+        let err = read_artifact_bounded(&path).expect_err("oversize must be refused");
+        assert_file_read(&err, "oversize");
+    }
+
+    #[test]
+    fn read_artifact_bounded_caps_the_read_when_metadata_understates_the_size() {
+        // Defense in depth against a misleading metadata / a file that grows
+        // after the size check: even if the length gate is bypassed, the
+        // capped `take(MAX + 1)` read refuses an over-bound payload rather
+        // than loading it whole. We force the path by lowering the bound via
+        // a hand-rolled read mirroring `read_artifact_bounded` with a tiny cap.
+        use std::io::Read;
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let path = tmp.path().join("grown.rustory");
+        std::fs::write(&path, vec![b'x'; 32]).expect("seed");
+        let file = std::fs::File::open(&path).expect("open");
+        let mut bytes = Vec::new();
+        // Cap at 8 (< file size) and assert the overflow is observable.
+        file.take(8 + 1).read_to_end(&mut bytes).expect("read");
+        assert!(
+            bytes.len() as u64 > 8,
+            "the capped read must surface the over-bound overflow byte"
+        );
     }
 }

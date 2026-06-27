@@ -5,7 +5,7 @@ pub mod schema;
 pub mod validation;
 
 pub use draft::{RecoveryDraft, RecoveryDraftDelta};
-pub use integrity::{canonical_structure_json, content_checksum};
+pub use integrity::{canonical_structure_json, content_checksum, content_checksum_bytes};
 pub use preflight::{
     validate_canonical, Axis, CanonicalBlocker, CanonicalCause, CanonicalStoryFacts, Severity,
 };

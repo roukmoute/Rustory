@@ -294,10 +294,7 @@ fn commit_imported_story(
     tx.commit().map_err(|err| db_commit_error(&err, "commit"))?;
 
     Ok(ImportedDeviceStory {
-        story: StoryCardDto {
-            id: story_id.to_string(),
-            title,
-        },
+        story: StoryCardDto::native(story_id.to_string(), title),
         pack_short_id: short_id.to_string(),
         imported_at: now_iso,
         pack_file_count: acquired.manifest.files.len() as u32,

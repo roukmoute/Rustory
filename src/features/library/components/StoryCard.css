@@ -65,3 +65,55 @@
   -webkit-box-orient: vertical;
   overflow: hidden;
 }
+
+/* File-import provenance + issue marker, below the focusable selection
+ * zone so the on-demand report disclosure is a sibling of (never nested
+ * inside) the card's role="button". */
+.story-card__import {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  padding: 0 var(--space-3) var(--space-3);
+}
+
+.story-card__provenance {
+  font-size: var(--font-size-caption, 0.75rem);
+  color: var(--color-text-secondary);
+}
+
+.story-card__import-report {
+  font-size: var(--font-size-caption, 0.75rem);
+}
+
+.story-card__import-summary {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  cursor: pointer;
+  list-style: none;
+}
+
+.story-card__import-disclose {
+  color: var(--color-text-secondary);
+  text-decoration: underline;
+}
+
+.story-card__import-body {
+  margin-top: var(--space-2);
+}
+
+.story-card__import-heading {
+  margin: 0 0 var(--space-1);
+  font-weight: var(--font-weight-semibold);
+  color: var(--color-text-primary);
+}
+
+.story-card__import-issues {
+  margin: 0;
+  padding-left: var(--space-4);
+  color: var(--color-text-secondary);
+}
+
+.story-card__import-issue {
+  margin: 0;
+}

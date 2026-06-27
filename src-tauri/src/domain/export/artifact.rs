@@ -170,13 +170,15 @@ mod tests {
         assert_eq!(RUSTORY_ARTIFACT_EXTENSION, "rustory");
     }
 
-    /// Forward-compatibility guard for a future importer: a payload
-    /// declaring `formatVersion: 0` (or any value other than 1) must
-    /// be refused. The importer itself is Post-MVP, so this test only
-    /// asserts the shape fact it needs. `#[ignore]` keeps it out of
-    /// the default run but documents the contract.
+    /// Forward-compatibility guard: a payload declaring `formatVersion: 0`
+    /// (or any value other than 1) parses into the V1 wire struct but must
+    /// be refused. The importer now exists and enforces this at the
+    /// ANALYSIS level (`domain::import::analyze_rustory_artifact` returns a
+    /// `Blocked` verdict on a `FormatVersion` aspect — see
+    /// `rejects_format_version_zero_at_analysis`); this test guards the
+    /// shape fact that backs that refusal — the envelope parses, so the
+    /// analysis, not the deserializer, is what blocks it.
     #[test]
-    #[ignore = "importer is Post-MVP; guards the wire shape for later"]
     fn rejects_deserialization_of_format_version_zero() {
         let json = r#"{
             "rustoryArtifact": {

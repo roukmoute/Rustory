@@ -43,6 +43,8 @@ import {
   type TransferView,
 } from "../../features/library/components/LuniiDecisionPanel";
 import { useStoryPreparation, useStoryTransfer } from "../../features/transfer";
+import { ImportArtifactSurface } from "../../features/import-export/components/ImportArtifactSurface";
+import { useStoryImport } from "../../features/import-export/hooks/use-story-import";
 import type { StoryPreparationBadge } from "../../features/library/components/StoryCard";
 import { StoryCollection } from "../../features/library/components/StoryCollection";
 import {
@@ -126,6 +128,22 @@ export function LibraryRoute(): React.JSX.Element {
   const handleCreateStoryRequest = (): void => {
     setIsCreateOpen(true);
   };
+
+  // Local-artifact import flow (file → library). USER-TRIGGERED via the
+  // "Importer une histoire" CTA — the hook stays idle until `pickAndAnalyze`.
+  // AC1: analysis never mutates; the overview is re-read only after a
+  // successful commit (the hook already dropped the module cache; the effect
+  // below reloads THIS route so the fresh card appears).
+  const storyImport = useStoryImport();
+  const isImportBusy =
+    storyImport.status.kind === "analyzing" ||
+    storyImport.status.kind === "importing";
+  const importStatusKind = storyImport.status.kind;
+  useEffect(() => {
+    if (importStatusKind === "imported") {
+      invalidate();
+    }
+  }, [importStatusKind, invalidate]);
 
   const handleCreated = (story: StoryCardDto): void => {
     // Drop the module-local SWR snapshot so the next useLibraryOverview
@@ -451,6 +469,13 @@ export function LibraryRoute(): React.JSX.Element {
 
   const center = (
     <>
+      <ImportArtifactSurface
+        status={storyImport.status}
+        onAccept={storyImport.acceptRecognized}
+        onAbandon={storyImport.abandon}
+        onRetry={storyImport.pickAndAnalyze}
+        onDismiss={storyImport.dismiss}
+      />
       {renderCenter(
         state,
         retry,
@@ -464,6 +489,8 @@ export function LibraryRoute(): React.JSX.Element {
         resetFilters,
         handleCreateStoryRequest,
         preparationBadges,
+        storyImport.pickAndAnalyze,
+        isImportBusy,
       )}
       <DeviceStoryCollection
         state={deviceLibrary.state}
@@ -911,6 +938,8 @@ function renderCenter(
   onResetFilters: () => void,
   onCreateStoryRequest: () => void,
   preparationBadges: ReadonlyMap<string, StoryPreparationBadge>,
+  onImportArtifactRequest: () => void,
+  isImportBusy: boolean,
 ): React.JSX.Element {
   switch (state.kind) {
     case "error": {
@@ -941,6 +970,8 @@ function renderCenter(
           onSelectStory={onSelectStory}
           onOpenStory={onOpenStory}
           onCreateStoryRequest={onCreateStoryRequest}
+          onImportArtifactRequest={onImportArtifactRequest}
+          isImportBusy={isImportBusy}
         />
       );
     case "ready":
@@ -958,6 +989,8 @@ function renderCenter(
           onSelectStory={onSelectStory}
           onOpenStory={onOpenStory}
           onCreateStoryRequest={onCreateStoryRequest}
+          onImportArtifactRequest={onImportArtifactRequest}
+          isImportBusy={isImportBusy}
         />
       );
   }

@@ -64,6 +64,19 @@ It exists to keep the same product concepts named the same way across:
 | Abandon a failed / incomplete transfer (action) | `Abandonner` | Returns to a stable library after a failed / incomplete transfer; the local draft stays intact | `annuler`, `cancel`, `supprimer` |
 | Supported local input/output | `artefact local supporté` | Project, archive, or local file explicitly supported by Rustory | `payload`, `package`, `blob` |
 | Availability policy | `profil de support` | Official support statement for devices and local artifacts | `matrix` in user-facing copy |
+| Import a local artifact (action) | `Importer une histoire` | User-visible act of bringing a supported local artifact (`.rustory`) from the computer into the local library; opens a native file picker | `Charger`, `Ouvrir`, `Copier` (reserved for the device flow) |
+| Local artifact recognition — clean | `Propre` | Analysis verdict: every aspect of the artifact is recognized; it imports as a canonical story with no marker | `valide`, `ok`, `parfait` |
+| Local artifact recognition — partially usable | `Partiellement exploitable` | Analysis verdict: the artifact imports, but one or more aspects need attention (a discreet marker + an on-demand report) | `partiel` used loosely, `dégradé`, `warning` |
+| Local artifact recognition — unusable | `Inexploitable` | Analysis verdict: a real blocker prevents a safe import; nothing is added to the library | `corrompu`, `cassé`, `erreur` |
+| Import report finding — recognized aspect | `reconnu` | Per-aspect report category: this aspect of the artifact is understood and accepted. Distinct from the per-story import-state chip below | `ok`, `valide` |
+| Import report finding — ambiguity | `ambiguïté` | Per-aspect report category: the aspect is usable but had to be adjusted or could not be fully trusted (e.g. a normalized title) | `warning`, `bizarre` |
+| Import report finding — missing information | `information manquante` | Per-aspect report category: an expected aspect is absent (declared for structured imports; never emitted by the `.rustory` flow) | `vide`, `null`, `absent` |
+| Import report finding — real blocker | `blocage réel` | Per-aspect report category: the aspect makes the artifact unusable as-is | `erreur`, `fatal` |
+| Import state chip (Story Card) | `reconnu` / `partiel` / `à revoir` | Durable per-story import state surfaced as a discreet card chip, reserved for the local artifact-import flow — see [ui-states.md#Post-MVP Import State Contract](./ui-states.md) and `#Local Artifact Import Contract`. Never reuse the transfer/verification `partiel` / `état partiel` sense | reusing the transfer `partial` / `état partiel` chip |
+| Accept the recognized result of an import (action) | `Importer ce qui est reconnu` | User-visible act of committing the recognized story (with its points of attention) from an analyzed artifact; pairs with `Abandonner` | `valider`, `confirmer`, `OK` |
+| Imported-artifact provenance (Story Card) | `Importée` | Discreet origin marker on a library card whose story came from a local artifact import — distinct from a native story and from a device copy | `import`, `external`, `fichier` |
+| Import report — recognized facts header | `Ce que Rustory a reconnu` | On-demand import report header grouping the global outcome + the recognized aspects | `résumé`, `rapport`, `détails` |
+| Import report — attention header | `Points d'attention` | On-demand import report header grouping the aspects to review | `warnings`, `problèmes`, `erreurs` |
 
 ## Preferred State Labels
 
@@ -138,6 +151,18 @@ The UI should favor these labels when they are user-visible:
 | Fetch / refresh the official catalog (explicit, networked) | `Récupérer / mettre à jour` |
 | Import the official catalog from a local file (offline) | `Importer depuis un fichier` |
 | Official-catalog action failed (chip header; the actionable text is the alert's `message` + `userAction`) | `Catalogue indisponible` |
+| Import a local artifact (action) | `Importer une histoire` |
+| Local artifact analysis in flight | `Analyse de l'artefact…` |
+| Artifact recognized — clean | `Propre` |
+| Artifact partially usable | `Partiellement exploitable` |
+| Artifact unusable | `Inexploitable` |
+| Accept the recognized import (action) | `Importer ce qui est reconnu` |
+| Abandon an analyzed import (no mutation) | `Abandonner` |
+| Import commit in flight | `Import en cours…` |
+| Import just succeeded | `Histoire importée dans ta bibliothèque` |
+| Import failed (transport) and user can retry | `Import impossible` |
+| Imported story origin marker (Story Card) | `Importée` |
+| Open the durable on-demand import report (Story Card) | `Voir le rapport d'import` |
 
 Do not alternate freely between synonyms such as `sync`, `envoi`, `upload`, or `job`.
 When a different wording is necessary in context, it must still map back to one of the preferred labels above.

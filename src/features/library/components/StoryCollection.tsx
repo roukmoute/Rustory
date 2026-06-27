@@ -33,6 +33,12 @@ export interface StoryCollectionProps {
    *  When omitted, the CTA in the empty state falls back to its disabled
    *  form with the canonical "indisponible" reason. */
   onCreateStoryRequest?: () => void;
+  /** Fires when the user requests to import a local `.rustory` artifact.
+   *  When omitted, the "Importer une histoire" CTA is hidden. */
+  onImportArtifactRequest?: () => void;
+  /** Disables the import CTA while an analysis / import is in flight, so a
+   *  second pick cannot start a concurrent flow. */
+  isImportBusy?: boolean;
 }
 
 type CollectionState =
@@ -61,6 +67,8 @@ export function StoryCollection({
   onSelectStory,
   onOpenStory,
   onCreateStoryRequest,
+  onImportArtifactRequest,
+  isImportBusy = false,
 }: StoryCollectionProps): React.JSX.Element {
   const titleId = useId();
   const searchId = useId();
@@ -152,6 +160,18 @@ export function StoryCollection({
             <div className="story-collection__control">
               <Button variant="primary" onClick={onCreateStoryRequest}>
                 Créer une histoire
+              </Button>
+            </div>
+          ) : null}
+          {onImportArtifactRequest ? (
+            <div className="story-collection__control">
+              <Button
+                variant="secondary"
+                onClick={onImportArtifactRequest}
+                disabled={isImportBusy}
+                aria-busy={isImportBusy}
+              >
+                Importer une histoire
               </Button>
             </div>
           ) : null}

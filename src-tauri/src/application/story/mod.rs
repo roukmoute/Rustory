@@ -87,10 +87,7 @@ pub fn create_story(db: &mut DbHandle, input: CreateStoryInput) -> Result<StoryC
         )
         .map_err(map_insert_error)?;
 
-    Ok(StoryCardDto {
-        id,
-        title: normalized,
-    })
+    Ok(StoryCardDto::native(id, normalized))
 }
 
 /// Update a persisted story's title.

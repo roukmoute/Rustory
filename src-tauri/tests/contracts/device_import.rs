@@ -42,10 +42,10 @@ fn input_rejects_snake_case_fields() {
 #[test]
 fn outcome_round_trips_the_documented_wire_shape() {
     let dto = ImportDeviceStoryOutcomeDto {
-        story: StoryCardDto {
-            id: "0197a5d0-0000-7000-8000-000000000000".into(),
-            title: "Histoire de ma Lunii (FAC5562D)".into(),
-        },
+        story: StoryCardDto::native(
+            "0197a5d0-0000-7000-8000-000000000000".into(),
+            "Histoire de ma Lunii (FAC5562D)".into(),
+        ),
         pack_short_id: "FAC5562D".into(),
         imported_at: "2026-06-10T12:00:00.000Z".into(),
     };

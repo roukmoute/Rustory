@@ -14,8 +14,14 @@ pub fn canonical_structure_json(structure: &CanonicalStructure) -> String {
 /// hex, 64 characters exactly — the stored value is the ground truth the
 /// UI would eventually use to detect silent on-disk corruption.
 pub fn content_checksum(json: &str) -> String {
-    let digest = Sha256::digest(json.as_bytes());
-    hex_lower(&digest)
+    content_checksum_bytes(json.as_bytes())
+}
+
+/// SHA-256 hex digest over RAW bytes — used to fingerprint a whole file
+/// artifact (its on-disk bytes, possibly not valid UTF-8) as opposed to a
+/// canonical JSON string. Same 64-char lower-case hex shape.
+pub fn content_checksum_bytes(bytes: &[u8]) -> String {
+    hex_lower(&Sha256::digest(bytes))
 }
 
 fn hex_lower(bytes: &[u8]) -> String {

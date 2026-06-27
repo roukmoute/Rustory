@@ -1,0 +1,115 @@
+/* In-context surface for the local-artifact import flow. Mirrors the
+ * DeviceImportStatusSurface layout: a permanent visually-hidden polite
+ * region + a stacked content area; a problem is never a toast. */
+.import-artifact {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-3);
+  background: var(--color-surface-raised, var(--color-surface));
+  border: 1px solid var(--color-border, #e5e7eb);
+  border-radius: var(--radius-md, 0.5rem);
+}
+
+.import-artifact__live {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.import-artifact__pending {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.import-artifact__review {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.import-artifact__group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.import-artifact__group-heading {
+  margin: 0;
+  font-weight: var(--font-weight-semibold);
+  color: var(--color-text-primary);
+}
+
+.import-artifact__findings {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.import-artifact__finding {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+}
+
+.import-artifact__finding-chip {
+  flex: 0 0 auto;
+}
+
+.import-artifact__finding-message {
+  color: var(--color-text-secondary);
+  overflow-wrap: anywhere;
+}
+
+.import-artifact__success {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-2);
+}
+
+.import-artifact__success-title {
+  margin: 0;
+  font-size: var(--font-size-meta);
+  color: var(--color-text-secondary);
+  overflow-wrap: anywhere;
+}
+
+.import-artifact__alert {
+  padding: var(--space-3);
+  background: var(--surface-warning-subtle, #fef3c7);
+  border: 1px solid var(--surface-error-border, #f87171);
+  border-radius: 0.5rem;
+}
+
+.import-artifact__alert-title {
+  margin: 0;
+  font-weight: var(--font-weight-semibold);
+  color: var(--color-text-primary);
+}
+
+.import-artifact__alert-message,
+.import-artifact__alert-action {
+  margin: var(--space-1) 0 0;
+  color: var(--color-text-primary);
+}
+
+.import-artifact__alert-action {
+  color: var(--color-text-secondary);
+}
+
+.import-artifact__actions {
+  display: flex;
+  gap: var(--space-2);
+  margin-top: var(--space-2);
+}

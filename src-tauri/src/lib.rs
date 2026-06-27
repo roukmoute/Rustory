@@ -263,6 +263,8 @@ pub fn run() {
         // grouped by module first which made the relative position
         // of two same-prefix commands non-obvious.
         .invoke_handler(tauri::generate_handler![
+            commands::import_export::accept_artifact_import,
+            commands::import_export::analyze_artifact_for_import,
             commands::story::apply_recovery,
             commands::story::create_story,
             commands::story::discard_draft,

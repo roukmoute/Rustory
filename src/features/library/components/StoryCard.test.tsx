@@ -257,4 +257,103 @@ describe("StoryCard", () => {
     const title = screen.getByRole("heading", { level: 3 });
     expect(title).toHaveClass("story-card__title");
   });
+
+  it("shows no import marker on a native story", () => {
+    render(
+      <StoryCard
+        story={STORY}
+        isSelected={false}
+        onSelect={vi.fn()}
+        onOpen={vi.fn()}
+      />,
+    );
+    expect(screen.queryByText("Importée")).not.toBeInTheDocument();
+    expect(screen.queryByText("à revoir")).not.toBeInTheDocument();
+  });
+
+  it("shows the provenance marker but NO issue chip on a clean import (AC3)", () => {
+    render(
+      <StoryCard
+        story={{ ...STORY, importState: "recognized" }}
+        isSelected={false}
+        onSelect={vi.fn()}
+        onOpen={vi.fn()}
+      />,
+    );
+    expect(screen.getByText("Importée")).toBeInTheDocument();
+    // A clean import carries no attention chip.
+    expect(screen.queryByText("partiel")).not.toBeInTheDocument();
+    expect(screen.queryByText("à revoir")).not.toBeInTheDocument();
+  });
+
+  it("shows a dedicated 'à revoir' marker distinct from the transfer badge (AC2)", () => {
+    render(
+      <StoryCard
+        story={{
+          ...STORY,
+          importState: "needsReview",
+          importReport: [
+            {
+              aspect: "envelope",
+              category: "recognized",
+              message: "L'enveloppe de l'artefact est valide.",
+            },
+            {
+              aspect: "title",
+              category: "ambiguous",
+              message: "Le titre a été normalisé à l'import.",
+            },
+          ],
+        }}
+        // The transfer/verification badge coexists and stays distinct.
+        preparationBadge="partial"
+        isSelected={false}
+        onSelect={vi.fn()}
+        onOpen={vi.fn()}
+      />,
+    );
+    expect(screen.getByText("Importée")).toBeInTheDocument();
+    // The import marker uses its dedicated label, never the transfer
+    // `état partiel` wording.
+    expect(screen.getByText("à revoir")).toBeInTheDocument();
+    expect(screen.getByText("état partiel")).toBeInTheDocument();
+    expect(screen.queryByText("partiel", { exact: true })).not.toBeInTheDocument();
+  });
+
+  it("discloses the full on-demand import report (both groups) on request", async () => {
+    const user = userEvent.setup();
+    render(
+      <StoryCard
+        story={{
+          ...STORY,
+          importState: "needsReview",
+          importReport: [
+            {
+              aspect: "envelope",
+              category: "recognized",
+              message: "L'enveloppe de l'artefact est valide.",
+            },
+            {
+              aspect: "title",
+              category: "ambiguous",
+              message: "Le titre a été normalisé à l'import.",
+            },
+          ],
+        }}
+        isSelected={false}
+        onSelect={vi.fn()}
+        onOpen={vi.fn()}
+      />,
+    );
+    // Collapsed by default — the detail is behind a disclosure.
+    const summary = screen.getByText("Voir le rapport d'import");
+    await user.click(summary);
+    // Both groups are restored from the durable report (§5).
+    expect(screen.getByText("Ce que Rustory a reconnu")).toBeInTheDocument();
+    expect(screen.getByText("L'enveloppe de l'artefact est valide.")).toBeInTheDocument();
+    expect(screen.getByText("Points d'attention")).toBeInTheDocument();
+    expect(
+      screen.getByText("Le titre a été normalisé à l'import."),
+    ).toBeInTheDocument();
+  });
 });

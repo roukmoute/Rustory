@@ -24,6 +24,10 @@ pub const MIGRATIONS: &[(u32, &str)] = &[
         5,
         include_str!("../../../migrations/0005_transfer_jobs.sql"),
     ),
+    (
+        6,
+        include_str!("../../../migrations/0006_story_local_imports.sql"),
+    ),
 ];
 
 /// Thin wrapper over a [`rusqlite::Connection`]. Exposes only the operations

@@ -407,3 +407,62 @@ Adding a new cohort:
 
 A line in the matrix that has no test is a bug — the test enforces
 that the gate behavior matches the published policy.
+
+## Local Artifact Import Contract
+
+The support profile covers **local artifacts** as well as devices. A local
+artifact is imported through the file flow (`Importer une histoire`, see
+[ui-states.md#Local Artifact Import Contract](./ui-states.md)) — the inverse of
+the `.rustory` export — never through the device flow. Each supported artifact
+type is documented here with its format contract: what is recognized, what is
+ambiguous, and what blocks the import. Anything not explicitly listed is refused
+(no implicit format).
+
+### Supported local artifact types
+
+| Type | Extension | Format version | Status |
+| --- | --- | --- | --- |
+| Rustory story artifact | `.rustory` | `formatVersion == 1` | ✅ supported (import + export) |
+| Structured archive / multi-element folder | — | — | ❌ deferred (no node/media model nor archive reader yet) |
+
+### `.rustory` v1 format contract
+
+A `.rustory` v1 artifact is a single UTF-8 JSON file with a fixed envelope:
+
+```
+{ "rustoryArtifact": { "formatVersion": 1, "exportedAt", "exportedBy" },
+  "story": { "schemaVersion", "title", "structureJson", "contentChecksum", "createdAt", "updatedAt" } }
+```
+
+`deny_unknown_fields` applies to every object — an unknown field fails the parse.
+The importer analyzes the following aspects and classifies each as recognized,
+ambiguous, or blocking:
+
+| Aspect | Recognized | Blocking |
+| --- | --- | --- |
+| Envelope | JSON parses, all required fields present, no unknown field | malformed JSON, missing field, unknown field |
+| Format version | `formatVersion == 1` | `formatVersion != 1` (a newer/older artifact this build does not understand) |
+| Schema version | `schemaVersion` is the supported canonical version | a `structureJson` that fails canonical validation (`validate_canonical`) — unsupported / incoherent schema |
+| Structure | `structureJson` is canonically valid (`{ "schemaVersion": 1, "nodes": [] }` in v1) | non-canonical / corrupt structure |
+| Integrity | `SHA-256(structureJson)` equals the declared `contentChecksum` | checksum divergent (silent corruption) — never recomputed/overwritten, only verified |
+| Title | normalizable to a non-empty valid title | empty after normalization / invalid characters |
+| Timestamps | `createdAt` / `updatedAt` are ISO-8601 UTC ms | — (a malformed timestamp is **ambiguous**, preserved and flagged, never blocking) |
+
+Ambiguous (importable with a durable marker): a title that had to be **normalized**
+(the stored value differs from `normalize_title(value)`), or a carried timestamp
+not in the expected ISO-8601 UTC ms shape. Because Rustory's own export always
+writes a normalized title and canonical timestamps, an ambiguous verdict is only
+reachable from a hand-edited artifact.
+
+Provenance: a successful import records a `story_local_imports` row (source
+format `rustory`, format version, source file basename only — never an absolute
+path, artifact SHA-256, import state, optional findings summary, import
+timestamp) linked to the new `stories` row by `ON DELETE CASCADE`. It is distinct
+from `story_imports` (the device-pack provenance): a file artifact has neither a
+pack UUID nor a source device. The canonical row **preserves** the artifact's
+`createdAt` / `updatedAt` (a re-openable story keeps its history);
+`imported_at = now`.
+
+Bounds & safety: the chosen file is read bounded (`MAX_ARTIFACT_BYTES`); the
+import is offline, adds zero dependency, never writes a device, and is atomic
+(one SQLite transaction — a failure leaves the previous library state intact).

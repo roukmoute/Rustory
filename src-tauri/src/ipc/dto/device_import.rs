@@ -94,10 +94,10 @@ mod tests {
     #[test]
     fn outcome_serializes_in_camel_case() {
         let dto = ImportDeviceStoryOutcomeDto::from_outcome(ImportedDeviceStory {
-            story: StoryCardDto {
-                id: "0197a5d0-0000-7000-8000-000000000000".into(),
-                title: "Histoire de ma Lunii (FAC5562D)".into(),
-            },
+            story: StoryCardDto::native(
+                "0197a5d0-0000-7000-8000-000000000000".into(),
+                "Histoire de ma Lunii (FAC5562D)".into(),
+            ),
             pack_short_id: "FAC5562D".into(),
             imported_at: "2026-06-10T00:00:00.000Z".into(),
             pack_file_count: 5,

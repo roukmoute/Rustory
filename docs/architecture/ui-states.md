@@ -53,7 +53,8 @@ The transfer contract is part of the MVP and should map internal state to UI lab
 
 ## Post-MVP Import State Contract
 
-These states are for post-MVP local structured import flows and must not be mistaken for MVP transfer states:
+These states are for post-MVP local structured import flows and must not be mistaken for MVP transfer states. The first flow that realizes them is the
+`Local Artifact Import Contract` below (`.rustory` file import); see it for the full two-phase machine, recognition model and error taxonomy.
 
 | Internal Contract State | UI Label | Scope |
 | --- | --- | --- |
@@ -61,7 +62,7 @@ These states are for post-MVP local structured import flows and must not be mist
 | `partial` | `partiel` | Some content is usable, some is not |
 | `needs_review` | `à revoir` | The user must inspect before accepting |
 | `blocked` | `bloqué` | Import cannot continue safely |
-| `resolved` | `résolu` | The import issue has been handled |
+| `resolved` | `résolu` | The import issue has been handled (declared; not emitted in the first iteration) |
 
 ## State Transition Rules
 
@@ -1098,6 +1099,115 @@ time; batch export from the library is Post-MVP.
 | Default filename rule | `sanitizeFilename(persistedTitle) + ".rustory"`. Sanitization applies NFC, trims whitespace, replaces filesystem-unsafe characters (`\x00-\x1f`, `\x7f`, `/ \\ : * ? " < > |`) with `_`, collapses runs of whitespace/underscore, truncates at 80 code points, and falls back to `histoire` when the result is empty. |
 | H1 rule | The visible `<h1>` continues to mirror `detail.title` — export does NOT change the title, so the heading is unaffected regardless of export outcome. |
 | Accessibility | The success region is `aria-live="polite"` with `aria-atomic="true"`. The failure region is `role="alert"`. The "Choisir un autre emplacement" button is reachable via keyboard and appears before `Fermer` in tab order so a keyboard user can retry with one keystroke after reading the alert. |
+
+## Local Artifact Import Contract
+
+Importing a supported local artifact (`Importer une histoire`) is the **inverse
+of the export flow**: it brings a `.rustory` file from the computer into the
+local library as a canonical, re-openable story. It is **distinct from the
+`Device Story Import Contract`** (`Copier dans ma bibliothèque`, device → library)
+— that flow either fully succeeds or explicitly fails, while this one produces a
+typed recognition verdict that may be `Partiellement exploitable`. The supported
+artifact set for this iteration is **the `.rustory` v1 artifact only** (see
+[device-support-profile.md#Local Artifact Import Contract](./device-support-profile.md));
+structured archives / multi-element folders are out of scope until the
+node/media model exists.
+
+The flow is **two-phase, with no mutation before acceptance (AC1)**:
+
+| Phase | Command | Effect |
+| --- | --- | --- |
+| Analyze | `analyze_artifact_for_import` | Opens a native file picker (`.rustory`), reads the chosen file bounded, parses + validates every aspect, returns a typed recognition verdict DTO. NO row written, no file promoted. A cancelled dialog returns `{ kind: "cancelled" }` (never an error). A read/transport failure rejects with `IMPORT_FAILED`. |
+| Accept | `accept_artifact_import` | On the explicit `Importer ce qui est reconnu` action: re-validates the canonical content from zero (never trusts the frontend), then commits one `stories` row + one `story_local_imports` row in a single `BEGIN IMMEDIATE` transaction. Returns the created `StoryCardDto`. |
+| Abandon | — (pure frontend) | `Abandonner` drops the verdict. Nothing was mutated, so no command is needed. |
+
+Recognition model (a typed verdict, NEVER an `AppError` — a partially usable or
+functionally blocked artifact is a result state, not a transport error):
+
+- **Recognition quality** (global): `Clean` → `Propre`, `Partial` →
+  `Partiellement exploitable`, `Unusable` → `Inexploitable`.
+- **Recognition aspect** (per finding): `Envelope`, `FormatVersion`,
+  `SchemaVersion`, `Structure`, `Integrity`, `Title`, `Timestamps`.
+- **Recognition category** (per finding): `Recognized` → `reconnu`, `Ambiguous`
+  → `ambiguïté`, `Missing` → `information manquante`, `Blocking` → `blocage
+  réel`. `Missing` (and the UX `dupliqué`) belong to the deferred multi-element
+  import and are **declared but never emitted** by the `.rustory` flow — a
+  negative test locks this (mirrors `Axis::Media` / `Axis::Filesystem` in the
+  preflight contract).
+- **Import state** (per story, durable, surfaced as a Story Card chip):
+  `recognized` / `partial` / `needs_review` / `blocked` / `resolved`. `resolved`
+  is **declared but never emitted** in this iteration (guided repair is later).
+
+Recognition truth table for a `.rustory` artifact:
+
+| Case | Quality | Import state | Result |
+| --- | --- | --- | --- |
+| Envelope valid, `formatVersion == 1`, canonical structure valid, recomputed checksum == declared, title normalizable and non-empty, canonical timestamps | `Propre` | `recognized` | Importable → canonical story, **no marker** (AC3) |
+| Same, but the title had to be normalized (`original != normalize_title(original)`) OR a carried timestamp is not the expected ISO-8601 UTC ms shape | `Partiellement exploitable` | `needs_review` | Importable **with** a durable `Import Issue Marker` + on-demand report (AC2) |
+| Malformed JSON / unknown field / `formatVersion != 1` / non-canonical structure / **checksum divergent** / title empty after normalization | `Inexploitable` | `blocked` | **Not importable** → clear error + abandon, **no mutation** (AC1) |
+
+The only real `partial` trigger for a Rustory-exported `.rustory` is a
+**hand-edited** title (Rustory always exports a normalized title and canonical
+timestamps, and the title never enters the `content_checksum` digest — adjusting
+it never diverges the checksum). Timestamps are **preserved** on the imported
+row (fidelity of the AC3 "re-openable" story) — never silently rewritten to
+`now`; a malformed carried timestamp is preserved AND flagged `needs_review`.
+`story_local_imports.imported_at = now`.
+
+UI state machine (owned by `useStoryImport`, surfaced in the library):
+
+| State | Rendering | Announcement |
+| --- | --- | --- |
+| `idle` | no status content (the polite region stays mounted, empty) | none |
+| `analyzing` | indeterminate `ProgressIndicator` labelled `Analyse de l'artefact…` (calm, neutral) | deliberately NOT announced |
+| `review` | the recognition report in-context: the quality chip (`Propre` / `Partiellement exploitable` / `Inexploitable`), the per-aspect findings, and — when importable — `Importer ce qui est reconnu` THEN `Abandonner` in tab order. A `blocked` verdict is `role="alert"` (no accept button, only `Abandonner`); an importable verdict is `aria-live="polite"` | `role="alert"` if blocked, else `aria-live="polite"` |
+| `importing` | indeterminate `ProgressIndicator` labelled `Import en cours…` | deliberately NOT announced |
+| `imported` | `Histoire importée dans ta bibliothèque` (success chip) + the created local title + explicit `Fermer` dismiss; no auto-hide | `aria-live="polite"`, mounted, `aria-atomic` |
+| `failed` | `Import impossible` block with the canonical `message` + `userAction`, buttons `Réessayer` THEN `Fermer` in tab order | `role="alert"` |
+
+`Import Issue Marker` (durable, AC2): a story imported as `partial` /
+`needs_review` carries a discreet chip on its library card (`partiel` / `à
+revoir`), derived from `story_local_imports.import_state` exposed by
+`read_stories` / `StoryCardDto` — so it **survives an app restart**. It is
+distinct from (and must coexist with) the transfer/preparation `StoryPreparationBadge`,
+whose `partial` means a verification verdict: this marker uses its own dedicated
+labels/tone/glyph and never reuses the transfer `partial` value or sense.
+
+`Import Review Flow` (on-demand, AC2): clicking the marker opens a simple
+in-context report — the global outcome (`Ce que Rustory a reconnu`) + the
+recognized aspects + the `Points d'attention`. The single source of truth is
+`story_local_imports.findings_summary`. Never a toast / modal to carry a problem
+alone; a guided repair level is deferred.
+
+Invariants (locked by tests):
+
+- **No mutation before acceptance (AC1)**: until `accept_artifact_import` runs,
+  no `stories` / `story_local_imports` row exists. `Abandonner` and the
+  `Unusable` / `blocked` case return to an unchanged library.
+- **Canonical data never mutated by another import (FR18)**: an import creates a
+  NEW story (fresh UUIDv7); it never touches an existing row.
+- **No false success / honesty**: `recognized` is shown only when every aspect
+  passes; a `partial` is named as such, never disguised as success.
+- **Atomicity**: the commit is one transaction; any failure rolls back fully
+  (never a half-imported story).
+- Offline, zero dependency, zero network; color is never the sole carrier of
+  meaning; a problem is never carried in a toast alone.
+
+Error taxonomy — analyze/accept reject only on TRANSPORT failure, as `AppError {
+code: "IMPORT_FAILED" }` with a stable `details.source` from this closed set
+(the functional verdict is the typed DTO, never an error):
+
+- `file_read` — reading the chosen file failed (unreadable, oversize beyond `MAX_ARTIFACT_BYTES`, a non-regular file, a non-filesystem path). `details.stage` ∈ `metadata`, `open`, `not_regular_file`, `oversize`, `read`, `non_filesystem_path`.
+- `db_commit` — the final SQLite transaction failed; nothing is committed (atomic rollback). `details.stage` ∈ `begin_transaction`, `insert_story`, `insert_provenance`, `commit`; `details.kind` ∈ `busy`, `locked`, `constraint_violation`, `other`.
+- `spawn_blocking_join` — the worker task could not be joined.
+- `app_data_unavailable` — the managed local store has no resolvable home.
+- `dialog_failed` — the native file dialog backend could not open.
+- `other` — fallback for unmapped causes; `details.cause` names the specific reason (`revalidation`, `invalid_provenance` with `details.field`, `system_clock_invalid`).
+
+Every refusal constructor carries a non-empty `message` (cause + impact) AND a
+non-empty `userAction` (next gesture); the frontend renders both verbatim and
+branches on `code` + `details.source` only to choose the surface, never to
+compose the text.
 
 ## Story Recovery Contract
 
