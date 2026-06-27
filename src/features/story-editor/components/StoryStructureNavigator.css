@@ -1,0 +1,60 @@
+.story-structure-navigator {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-3);
+  border: 1px solid var(--color-border-subtle, rgba(0, 0, 0, 0.12));
+  border-radius: var(--radius-md);
+  background: var(--color-surface-base);
+  min-height: 160px;
+}
+
+.story-structure-navigator__heading {
+  margin: 0;
+  font-size: var(--font-size-h4, var(--font-size-body));
+  font-weight: var(--font-weight-semibold);
+  color: var(--color-text-primary);
+  line-height: var(--line-height-tight);
+}
+
+.story-structure-navigator__tree {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.story-structure-navigator__root {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-1);
+  padding: var(--space-1) var(--space-2);
+  border-radius: var(--radius-sm);
+  color: var(--color-text-primary);
+  font-weight: var(--font-weight-medium, var(--font-weight-semibold));
+  overflow-wrap: anywhere;
+}
+
+.story-structure-navigator__glyph {
+  flex: none;
+  color: var(--color-text-secondary);
+}
+
+.story-structure-navigator__empty,
+.story-structure-navigator__degraded {
+  margin: 0;
+  /* Empty / degraded states are NAMED and indented under the root so the
+   * honesty of the v1 reality reads as part of the structure, not a stray
+   * note. */
+  padding-left: var(--space-3);
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-body);
+  line-height: var(--line-height-normal);
+}
+
+.story-structure-navigator__degraded {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-1);
+  padding-left: 0;
+  color: var(--color-text-primary);
+}

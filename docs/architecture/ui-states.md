@@ -1048,7 +1048,7 @@ A new `brouillon local` is created through a single modal dialog in the `library
 | Aspect | Value |
 | --- | --- |
 | Entry points | Header CTA `Créer une histoire` inside `Story Collection`, plus the same CTA inside the `loaded-empty` region. Both are active in parallel whenever the route wires a handler; they dispatch the exact same flow. |
-| Input | A single `Titre` field. No `description`, `genre` or `cover image` at this stage — the editor surface is deferred. |
+| Input | A single `Titre` field. No `description`, `genre` or `cover image` at this stage — richer story inputs are deferred. After a successful creation the router lands on the `Story Editor Shell` (see `Story Editor Shell Contract`). |
 | UI validation | Mirrors the Rust domain rules so `aria-disabled` flips at typing speed: the normalized title (NFC + trim) must be non-empty, at most `120` Unicode code points, and contain no C0 / C1 control characters nor any code point from the Unicode denylist below. |
 | Unicode denylist | Beyond C0 (`U+0000..U+001F`) and C1 (`U+007F..U+009F`) controls, the following `Cf` and line-separator code points are rejected because they would make a title hidden, bidirectionally ambiguous, or carry embedded line breaks: `U+FEFF` (BOM / ZWNBSP), `U+202A..U+202E` (LRE / RLE / PDF / LRO / RLO bidi overrides), `U+2066..U+2069` (LRI / RLI / FSI / PDI bidi isolates), `U+200E` (LRM), `U+200F` (RLM), `U+061C` (ALM), `U+2028` (LINE SEPARATOR), `U+2029` (PARAGRAPH SEPARATOR). ZWJ (`U+200D`) and ZWNJ (`U+200C`) are deliberately allowed — they are load-bearing for many scripts and emoji sequences. |
 | Authoritative validation | Rust re-validates on every `create_story` call; a title that slipped past the UI is refused via `AppError { code: "INVALID_STORY_TITLE" }` and no row is inserted. |
@@ -1059,11 +1059,44 @@ A new `brouillon local` is created through a single modal dialog in the `library
 | Post-success flow | The module-local SWR cache for `useLibraryOverview` is invalidated, a fresh fetch is triggered, and the router navigates to `/story/:storyId/edit` with `replace: true` so the history stack stays flat. |
 | Failure recovery | On rejection, the dialog stays open, the typed title survives, the focus returns to the field, and the Rust-supplied `message` + `userAction` are rendered inside a `role="alert"` region below the field. |
 
+## Story Editor Shell Contract
+
+The `/story/:storyId/edit` route renders the `Story Editor Shell` — the
+dedicated screen, separate from the library, where a parent resumes a story
+without losing the global context. It is the same route the library opens on
+double-click / `Éditer` (see `Story Card Interaction Contract`) and leaves
+through `Retour à la bibliothèque` (see `Library Routing Contract`, which
+already preserves selection and filters across the round trip). The shell
+opens identically for a native story and for an imported one — both are
+canonical `stories` rows read by `get_story_detail`.
+
+This contract owns the SHELL: the three-zone frame, its entry/exit, and its
+keyboard model. The behaviors hosted inside it keep their own contracts — the
+title field (`Story Autosave Contract`), export (`Story Export Contract`), and
+draft recovery (`Story Recovery Contract`). Editing the content of a node, and
+reorganizing the structure / option links, are NOT part of this shell yet: it
+ships the frame plus a read-only projection of the structure.
+
+| Aspect | Value |
+| --- | --- |
+| Three coexisting zones | The shell shows, at once: the global structure (`Story Structure Navigator`), the current node (host zone), and the story state + actions. None is hidden behind a tab or a click — all three are visible together so the global context is never lost while editing. |
+| Honest empty states (v1) | The v1 canonical model is empty (`{"schemaVersion":1,"nodes":[]}` — no season, no node). Each zone renders a NAMED empty state (`Structure de l'histoire` with "no season or node yet", `Nœud courant` with "no node to edit yet"), never blank, never disguised, never a fake current node. |
+| Structure projection (read-only) | The navigator parses `detail.structureJson` for DISPLAY ONLY: it shows the story as the structure root plus the named empty state. It NEVER re-serializes or reformats those bytes (they are covered byte-for-byte by `content_checksum`); any future mutation goes through Rust commands. A parse failure — near-impossible since Rust is authoritative and checksum-guarded — falls back to a NAMED degraded state (`Structure illisible`), never a crash. The frontend models no node tree; when a real node model lands it will be projected FROM Rust (a future structure DTO), never recomposed in React. |
+| Current-node zone | A host reserved for the future node editor. v1 renders a NAMED empty state only; no node is selectable because none exists. |
+| Story state + actions | The persisted title (`<h1>`, mirrors `detail.title`), the editable title field + autosave chip (`Story Autosave Contract`), the draft recovery banner when present (`Story Recovery Contract`, which keeps priority over the field), and the global actions `Retour à la bibliothèque` (+ `Exporter l'histoire`). |
+| Global actions scope | `Retour` and `Exporter` only. Sending a story to a device stays ANCHORED IN THE LIBRARY — it is never an editor action. No node-level or preflight validation lives in the shell (preflight is a transfer flow). |
+| Keyboard & focus | Stable focus order: structure → current node → global actions. Focus is visible on every zone (the global `:focus-visible` ring). Meaning is never carried by color alone (glyph + text). A problem is never carried in a toast alone. |
+| Context separation | Editing is a SEPARATE dominant context (its own route): the shell never renders the library collection / filters. Returning restores the library with its useful card traces intact (preparation / transfer badges, import provenance) — and never silently erases the selection or filters when they stay coherent. |
+| Read rule & performance | The shell consumes the single authoritative `get_story_detail` read already owned by `useStoryEditor` (title + `structureJson` + timestamps) — no extra read, no device call, fully offline. Re-open stays well within NFR2 (one small read + a tiny JSON parse). |
+| No regression | Title autosave, draft recovery, and export keep their exact behavior; `flushAutoSave` still fires on `Retour` and on unmount so a keystroke typed mid-debounce is never lost. |
+
 ## Story Autosave Contract
 
-A persisted story is editable from the `/story/:storyId/edit` route. MVP
-Phase 1 exposes exactly one editable field — the title. The full Story
-Node Editor (nodes, media, option links) remains Post-MVP.
+A persisted story is editable from the `/story/:storyId/edit` route, inside
+the `Story Editor Shell` (see `Story Editor Shell Contract`). The title is the
+one editable field at this stage; the shell also frames the global structure
+(a read-only projection) and the current-node zone. Editing the content of a
+node, its media, and option links remains deferred.
 
 | Aspect | Value |
 | --- | --- |

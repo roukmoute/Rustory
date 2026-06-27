@@ -77,6 +77,10 @@ It exists to keep the same product concepts named the same way across:
 | Imported-artifact provenance (Story Card) | `Importée` | Discreet origin marker on a library card whose story came from a local artifact import — distinct from a native story and from a device copy | `import`, `external`, `fichier` |
 | Import report — recognized facts header | `Ce que Rustory a reconnu` | On-demand import report header grouping the global outcome + the recognized aspects | `résumé`, `rapport`, `détails` |
 | Import report — attention header | `Points d'attention` | On-demand import report header grouping the aspects to review | `warnings`, `problèmes`, `erreurs` |
+| Story editing screen | `Éditeur d'histoire` | Dedicated screen, separate from the library, where the user resumes and edits a local story | `workspace`, `projet`, `canvas`, `editor` |
+| Editor zone — global structure | `Structure de l'histoire` | Editor zone showing the story's overall layout (seasons, nodes, branches), read-only at this stage | `arbre`, `outline`, `tree`, `plan` |
+| Editor zone — current node | `Nœud courant` | Editor zone reserved for editing the node currently in focus | `current node`, `panneau`, `étape courante` |
+| Story node | `nœud` | A single step of an interactive story (a narrative moment and its choices) | `node`, `step`, `écran` |
 
 ## Preferred State Labels
 
@@ -163,6 +167,12 @@ The UI should favor these labels when they are user-visible:
 | Import failed (transport) and user can retry | `Import impossible` |
 | Imported story origin marker (Story Card) | `Importée` |
 | Open the durable on-demand import report (Story Card) | `Voir le rapport d'import` |
+| Story editing screen (separate from the library) | `Éditeur d'histoire` |
+| Editor zone showing the global structure | `Structure de l'histoire` |
+| Editor zone hosting the current node | `Nœud courant` |
+| Structure has no season or node yet (v1 empty state) | `Aucune saison ni nœud pour l'instant.` |
+| Structure could not be read (degraded; near-impossible) | `Structure illisible.` |
+| No node to edit yet (v1 current-node empty state) | `Aucun nœud à éditer pour l'instant.` |
 
 Do not alternate freely between synonyms such as `sync`, `envoi`, `upload`, or `job`.
 When a different wording is necessary in context, it must still map back to one of the preferred labels above.

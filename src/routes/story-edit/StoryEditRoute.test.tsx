@@ -160,7 +160,7 @@ describe("<StoryEditRoute />", () => {
     );
 
     const main = screen.getByRole("main", {
-      name: /reprise d'un brouillon local/i,
+      name: /éditeur d'histoire/i,
     });
     expect(main).toHaveTextContent(/brouillon local/i);
     expect(
@@ -314,10 +314,10 @@ describe("<StoryEditRoute />", () => {
     );
     // Use scoped query to avoid matching the `<p>` prose ("brouillon local").
     const main = screen.getByRole("main", {
-      name: /reprise d'un brouillon local/i,
+      name: /éditeur d'histoire/i,
     });
     expect(
-      main.querySelector(".story-edit-route__save-status"),
+      main.querySelector(".story-editor-shell__save-status"),
     ).toHaveTextContent("Brouillon local");
   });
 
@@ -353,10 +353,10 @@ describe("<StoryEditRoute />", () => {
       });
 
       const main = screen.getByRole("main", {
-        name: /reprise d'un brouillon local/i,
+        name: /éditeur d'histoire/i,
       });
       expect(
-        main.querySelector(".story-edit-route__save-status"),
+        main.querySelector(".story-editor-shell__save-status"),
       ).toHaveTextContent(/enregistré/i);
       expect(invalidateLibraryOverviewCacheMock).toHaveBeenCalledTimes(1);
     } finally {

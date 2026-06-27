@@ -96,7 +96,7 @@ describe("router", () => {
     // story heading is a side-effect we also verify.
     await waitFor(() =>
       expect(
-        screen.getByRole("main", { name: /reprise d'un brouillon local/i }),
+        screen.getByRole("main", { name: /éditeur d'histoire/i }),
       ).toBeInTheDocument(),
     );
     expect(
@@ -110,7 +110,7 @@ describe("router", () => {
 
     await waitFor(() =>
       expect(
-        screen.getByRole("main", { name: /reprise d'un brouillon local/i }),
+        screen.getByRole("main", { name: /éditeur d'histoire/i }),
       ).toBeInTheDocument(),
     );
     expect(
