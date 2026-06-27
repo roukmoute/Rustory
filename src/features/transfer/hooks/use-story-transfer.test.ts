@@ -252,6 +252,65 @@ describe("useStoryTransfer", () => {
     await waitFor(() => expect(result.current.state.kind).toBe("verified"));
   });
 
+  it("recovers a MISSED job:failed from the durable memory when a fast pre-mutation rejection leaves the device re-read idle (no stuck spinner)", async () => {
+    vi.mocked(startTransferStory).mockResolvedValue({ jobId: "j1", storyId: STORY });
+    // A write REJECTED before mutating the device: the catch-up device re-read can
+    // never prove a terminal (stays idle), and the `job:failed` event fired before the
+    // async subscription registered, so it is NEVER delivered here. The recoverable
+    // failure must still surface — from the durable memory (persisted before the
+    // event, F5) — instead of leaving the panel stuck on "transferring".
+    vi.mocked(readTransferState).mockResolvedValue({ kind: "idle" });
+    vi.mocked(readTransferOutcome).mockResolvedValue({
+      storyId: STORY,
+      terminalKind: "retryable",
+      cause: "writeRejected",
+      message: "Envoi interrompu : la Lunii a refusé l'enregistrement de l'histoire.",
+      userAction: "Vérifie l'espace disponible sur la Lunii puis relance l'envoi.",
+      // Recorded for THIS attempt (after it started).
+      recordedAt: new Date(Date.now() + 60_000).toISOString(),
+    });
+
+    const { result } = renderHook(() => useStoryTransfer());
+    act(() => result.current.send(STORY, DEVICE));
+
+    // No live event is ever fired; the panel must still settle the recoverable failure.
+    await waitFor(() => expect(result.current.state.kind).toBe("retryable"));
+    if (result.current.state.kind === "retryable") {
+      expect(result.current.state.storyId).toBe(STORY);
+      expect(result.current.state.cause).toBe("writeRejected");
+      expect(result.current.state.message).toMatch(/a refusé l'enregistrement/i);
+    }
+    // The live subscription is torn down once the terminal is recovered.
+    await waitFor(() => expect(lastUnsubscribe()).toHaveBeenCalled());
+  });
+
+  it("the catch-up never settles from a STALE prior outcome while a fresh (slow) transfer is in flight", async () => {
+    vi.mocked(startTransferStory).mockResolvedValue({ jobId: "j1", storyId: STORY });
+    vi.mocked(readTransferState).mockResolvedValue({ kind: "idle" });
+    // A lingering outcome from a PREVIOUS attempt (recorded long before this one
+    // started): the catch-up must ignore it so a genuinely in-flight retry keeps its
+    // live phases instead of snapping back to the old failure.
+    vi.mocked(readTransferOutcome).mockResolvedValue({
+      storyId: STORY,
+      terminalKind: "retryable",
+      cause: "deviceChanged",
+      message: "Envoi interrompu : l'appareil connecté a changé.",
+      userAction: "Rebranche la Lunii souhaitée puis relance l'envoi.",
+      recordedAt: "2020-01-01T00:00:00.000Z",
+    });
+
+    const { result } = renderHook(() => useStoryTransfer());
+    act(() => result.current.send(STORY, DEVICE));
+    await waitFor(() => expect(readTransferOutcome).toHaveBeenCalled());
+    // Flush the resolved-outcome handler — the stale guard bails without settling.
+    await act(async () => {});
+    expect(result.current.state.kind).toBe("transferring");
+
+    // The real live terminal still settles it.
+    act(() => lastSubscription().onFailed(failed(1)));
+    await waitFor(() => expect(result.current.state.kind).toBe("retryable"));
+  });
+
   it("a late progress event never regresses a settled terminal", async () => {
     vi.mocked(startTransferStory).mockResolvedValue({ jobId: "j1", storyId: STORY });
     vi.mocked(readTransferState).mockResolvedValue(verifiedState);

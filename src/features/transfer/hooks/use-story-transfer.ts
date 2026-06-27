@@ -255,9 +255,82 @@ export function useStoryTransfer(): UseStoryTransfer {
     [clearJob, teardown],
   );
 
+  // Recover a terminal the live `job:*` subscription MISSED. `subscribeJobEvents`
+  // registers its listeners asynchronously (`listen()` resolves a promise), so a
+  // transfer that reaches its terminal before that registration completes never
+  // delivers its `job:failed` / `job:completed` here. The catch-up device re-read
+  // above rescues a fast SUCCESS and a fast device-MUTATING failure, but a write
+  // REJECTED *before any mutation* leaves `read_transfer_state` folded to idle
+  // forever — so without this the panel stays stuck on the optimistic `transferring`
+  // (no terminal, no Relancer / Abandonner). The terminal IS persisted to the durable
+  // memory BEFORE the event is emitted (F5), and we only reach here AFTER the device
+  // re-read round-trip, so the row is reliably present.
+  //
+  // Stale-guard: a prior attempt's outcome lingers until its own terminal overwrites
+  // it, so ONLY a row recorded at/after THIS attempt started (`recordedAt >=
+  // startedAt`, same machine clock as the Rust `record_transfer_outcome`) may settle
+  // this job — a genuinely in-flight (slow) retry keeps its live phases and is settled
+  // by its real event. A remembered `verified` is NEVER surfaced here: a success is
+  // proven solely by the device re-read, which folded to idle, so this is a non-success.
+  const recoverMissedTerminal = useCallback(
+    (callId: number, jobId: string, storyId: string, startedAt: number) => {
+      readTransferOutcome({ storyId })
+        .then((outcome) => {
+          if (
+            !mountedRef.current ||
+            callId !== activeJobRef.current ||
+            settledRef.current === callId ||
+            !outcome ||
+            outcome.terminalKind === "verified"
+          ) {
+            return;
+          }
+          // Only a terminal recorded for THIS attempt may settle a live transfer.
+          const recordedAtMs = Date.parse(outcome.recordedAt);
+          if (Number.isNaN(recordedAtMs) || recordedAtMs < startedAt) return;
+          teardown();
+          settledRef.current = callId;
+          clearJob(jobId);
+          setState(
+            outcome.terminalKind === "partial"
+              ? {
+                  kind: "partial",
+                  storyId,
+                  message: outcome.message,
+                  userAction: outcome.userAction,
+                }
+              : outcome.terminalKind === "incomplete"
+                ? {
+                    kind: "incomplete",
+                    storyId,
+                    cause: outcome.cause,
+                    message: outcome.message,
+                    userAction: outcome.userAction,
+                  }
+                : {
+                    kind: "retryable",
+                    storyId,
+                    cause: outcome.cause,
+                    message: outcome.message,
+                    userAction: outcome.userAction,
+                  },
+          );
+        })
+        .catch(() => {
+          // Best-effort: a memory-read failure leaves the live events to settle the
+          // job; a later re-visit / restart recovers it via `hydrate`.
+        });
+    },
+    [clearJob, teardown],
+  );
+
   const start = useCallback(
     (storyId: string, deviceIdentifier: string) => {
       const callId = ++activeJobRef.current;
+      // Wall-clock at attempt start (same machine clock as the Rust
+      // `record_transfer_outcome`), so the catch-up can tell a terminal recorded for
+      // THIS attempt from a stale prior one.
+      const startedAt = Date.now();
       lastRequestRef.current = { storyId, deviceIdentifier };
       teardown();
       // Optimistic: the write starts in flight. Live events refine the progress.
@@ -374,9 +447,14 @@ export function useStoryTransfer(): UseStoryTransfer {
           unsubscribeRef.current = unsubscribe;
           // Catch-up: a write that finished before this subscription registered
           // would otherwise leave the panel on the optimistic phase. An
-          // authoritative re-read reconciles to the terminal regardless; if it
-          // can't yet derive one (idle), the live events still drive the phase.
-          reread(callId, acceptance.jobId, storyId, deviceIdentifier, () => {});
+          // authoritative re-read reconciles a device-provable terminal; if it can't
+          // derive one (idle), recover a MISSED terminal from the durable memory — a
+          // write rejected before mutating the device is provable only there. A
+          // genuinely in-flight transfer has no fresh row yet, so the live events
+          // still drive its phases.
+          reread(callId, acceptance.jobId, storyId, deviceIdentifier, () =>
+            recoverMissedTerminal(callId, acceptance.jobId, storyId, startedAt),
+          );
         })
         .catch((err) => {
           if (!mountedRef.current || callId !== activeJobRef.current) return;
@@ -390,7 +468,7 @@ export function useStoryTransfer(): UseStoryTransfer {
           });
         });
     },
-    [teardown, reread, trackJobProgress],
+    [teardown, reread, recoverMissedTerminal, trackJobProgress],
   );
 
   const send = useCallback(
