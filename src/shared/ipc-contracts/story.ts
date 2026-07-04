@@ -57,12 +57,50 @@ export interface NodeContentDto {
 }
 
 /**
+ * One option of a projected graph node. Mirror of `OptionLinkDto`. `state`
+ * is DERIVED BY RUST — never re-derive it from `target` on the frontend.
+ * Truth table (enforced by `isOptionLink`):
+ * `unlinked` ⟺ `target = null`; `linked` / `broken` ⟺ `target` is a node id
+ * (`linked` = present in the graph, `broken` = absent — rendered as
+ * `destination à corriger`).
+ */
+export interface OptionLink {
+  label: string;
+  target: string | null;
+  state: "unlinked" | "linked" | "broken";
+}
+
+/**
+ * One node of the projected graph. Mirror of `NodeGraphDto`. `hasIssue` is
+ * Rust-derived (at least one broken option link) — localized on the node,
+ * never hiding the rest of the list.
+ */
+export interface NodeGraph {
+  id: string;
+  label: string;
+  isStart: boolean;
+  hasIssue: boolean;
+  options: OptionLink[];
+}
+
+/**
+ * The story's node graph, projected LIGHT for the structure navigator.
+ * Mirror of `StoryStructureDto`. Node order = display / navigation order.
+ */
+export interface StoryStructure {
+  startNodeId: string;
+  nodes: NodeGraph[];
+}
+
+/**
  * Full wire projection of a single story for the edit surface. Mirror of
  * `src-tauri/src/ipc/dto/story.rs::StoryDetailDto`. `structureJson` is the
  * exact byte sequence covered by `contentChecksum` — never reserialize or
  * reformat it on the frontend. `editable` is `false` for an imported story
- * (its node is read-only); `node` is the Rust-projected current node, or
- * `null` when the structure could not be projected (degraded).
+ * (read-only); `structure` is the Rust-projected node graph and `node` the
+ * SELECTED node's content (the start node by default). Both are `null` when
+ * a BLOCKING canonical issue prevents projecting (degraded state); a FIXABLE
+ * issue (a broken option link) keeps them projected.
  */
 export interface StoryDetailDto {
   id: string;
@@ -73,7 +111,67 @@ export interface StoryDetailDto {
   createdAt: string;
   updatedAt: string;
   editable: boolean;
+  structure: StoryStructure | null;
   node: NodeContentDto | null;
+}
+
+/** Mirror of `StructureWriteOutputDto` — the outcome of every structural
+ *  write; the UI reconciles from its re-projected `structure`, and the
+ *  local detail keeps `structureJson` in step with `contentChecksum` (the
+ *  contract says those exact bytes are what the checksum covers). */
+export interface StructureWriteOutput {
+  id: string;
+  updatedAt: string;
+  contentChecksum: string;
+  structureJson: string;
+  structure: StoryStructure;
+}
+
+/** Mirror of `OptionRefDto` (the `linkFrom` of `add_story_node`). */
+export interface OptionRef {
+  nodeId: string;
+  optionIndex: number;
+}
+
+/** Mirror of `AddStoryNodeInputDto`. */
+export interface AddStoryNodeInput {
+  storyId: string;
+  linkFrom?: OptionRef;
+}
+
+/** Mirror of `DeleteStoryNodeInputDto`. */
+export interface DeleteStoryNodeInput {
+  storyId: string;
+  nodeId: string;
+}
+
+/** Mirror of `MoveStoryNodeInputDto`. */
+export interface MoveStoryNodeInput {
+  storyId: string;
+  nodeId: string;
+  direction: "up" | "down";
+}
+
+/** Mirror of `AddNodeOptionInputDto`. */
+export interface AddNodeOptionInput {
+  storyId: string;
+  nodeId: string;
+  label: string;
+}
+
+/** Mirror of `SetNodeOptionLinkInputDto` — `target: null` unlinks. */
+export interface SetNodeOptionLinkInput {
+  storyId: string;
+  nodeId: string;
+  optionIndex: number;
+  target: string | null;
+}
+
+/** Mirror of `RemoveNodeOptionInputDto`. */
+export interface RemoveNodeOptionInput {
+  storyId: string;
+  nodeId: string;
+  optionIndex: number;
 }
 
 /** Mirror of `NodeWriteOutputDto` — the outcome of every node write. */
@@ -189,8 +287,118 @@ export function isStoryDetailDto(value: unknown): value is StoryDetailDto {
     return false;
   }
   if (typeof candidate.editable !== "boolean") return false;
+  if (
+    candidate.structure !== null &&
+    !isStoryStructureDto(candidate.structure)
+  ) {
+    return false;
+  }
   if (candidate.node !== null && !isNodeContentDto(candidate.node)) return false;
+  // Rust degrades BOTH projections together on a blocking issue and projects
+  // BOTH on a sound graph (the selected node falls back to the start node) —
+  // a payload where one is null and the other is not is an impossible DTO.
+  if ((candidate.structure === null) !== (candidate.node === null)) return false;
   return true;
+}
+
+/**
+ * Runtime guard for an `OptionLink`. STRICT on the `state`↔`target`
+ * coupling so a Rust/TS drift (or a frontend re-derivation bug) fails
+ * loudly instead of rendering a broken link as linked: `unlinked` MUST
+ * carry `target: null`; `linked` and `broken` MUST carry a non-empty
+ * target id.
+ */
+export function isOptionLink(value: unknown): value is OptionLink {
+  if (typeof value !== "object" || value === null) return false;
+  const c = value as Record<string, unknown>;
+  if (typeof c.label !== "string") return false;
+  if (c.state === "unlinked") return c.target === null;
+  if (c.state === "linked" || c.state === "broken") {
+    return typeof c.target === "string" && c.target.length > 0;
+  }
+  return false;
+}
+
+/**
+ * Runtime guard for a `NodeGraph`. Also STRICT on the `hasIssue`↔options
+ * coupling: the flag is Rust-derived from the broken links, so a payload
+ * where the two disagree is drift, not something to accommodate.
+ */
+export function isNodeGraph(value: unknown): value is NodeGraph {
+  if (typeof value !== "object" || value === null) return false;
+  const c = value as Record<string, unknown>;
+  if (typeof c.id !== "string" || c.id.length === 0) return false;
+  if (typeof c.label !== "string") return false;
+  if (typeof c.isStart !== "boolean") return false;
+  if (typeof c.hasIssue !== "boolean") return false;
+  if (!Array.isArray(c.options) || !c.options.every(isOptionLink)) return false;
+  const hasBroken = (c.options as OptionLink[]).some(
+    (o) => o.state === "broken",
+  );
+  return c.hasIssue === hasBroken;
+}
+
+/**
+ * Runtime guard for a `StoryStructure`. Checks the graph-level coherence the
+ * navigator relies on: a non-empty start id that references a listed node,
+ * and per-node `isStart` flags that agree with it.
+ */
+export function isStoryStructureDto(value: unknown): value is StoryStructure {
+  if (typeof value !== "object" || value === null) return false;
+  const c = value as Record<string, unknown>;
+  if (typeof c.startNodeId !== "string" || c.startNodeId.length === 0)
+    return false;
+  if (!Array.isArray(c.nodes) || !c.nodes.every(isNodeGraph)) return false;
+  const nodes = c.nodes as NodeGraph[];
+  if (nodes.length === 0) return false;
+  // Rust never projects a graph with duplicate node ids (Blocking) — a
+  // payload that carries them is drift, and every id-based lookup below
+  // would silently resolve to the wrong node.
+  const ids = new Set(nodes.map((node) => node.id));
+  if (ids.size !== nodes.length) return false;
+  // Rust never projects a graph whose start node is missing (Blocking) —
+  // a payload that does is drift.
+  if (!ids.has(c.startNodeId)) return false;
+  if (!nodes.every((node) => node.isStart === (node.id === c.startNodeId))) {
+    return false;
+  }
+  // The per-option `state` is Rust-derived FROM this very graph: `linked`
+  // must reference a listed node, `broken` must NOT. With the whole graph in
+  // hand the guard re-checks the coupling — a mismatch would repaint a
+  // broken link as live (or vice versa).
+  return nodes.every((node) =>
+    node.options.every((option) => {
+      if (option.state === "linked") {
+        return option.target !== null && ids.has(option.target);
+      }
+      if (option.state === "broken") {
+        return option.target !== null && !ids.has(option.target);
+      }
+      return true;
+    }),
+  );
+}
+
+/** Runtime guard for a `StructureWriteOutput`. */
+export function isStructureWriteOutput(
+  value: unknown,
+): value is StructureWriteOutput {
+  if (typeof value !== "object" || value === null) return false;
+  const c = value as Record<string, unknown>;
+  if (typeof c.id !== "string" || c.id.length === 0) return false;
+  if (typeof c.updatedAt !== "string" || !ISO8601_UTC_PATTERN.test(c.updatedAt)) {
+    return false;
+  }
+  if (
+    typeof c.contentChecksum !== "string" ||
+    !SHA256_HEX_PATTERN.test(c.contentChecksum)
+  ) {
+    return false;
+  }
+  if (typeof c.structureJson !== "string" || c.structureJson.length === 0) {
+    return false;
+  }
+  return isStoryStructureDto(c.structure);
 }
 
 /**

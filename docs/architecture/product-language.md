@@ -78,7 +78,7 @@ It exists to keep the same product concepts named the same way across:
 | Import report — recognized facts header | `Ce que Rustory a reconnu` | On-demand import report header grouping the global outcome + the recognized aspects | `résumé`, `rapport`, `détails` |
 | Import report — attention header | `Points d'attention` | On-demand import report header grouping the aspects to review | `warnings`, `problèmes`, `erreurs` |
 | Story editing screen | `Éditeur d'histoire` | Dedicated screen, separate from the library, where the user resumes and edits a local story | `workspace`, `projet`, `canvas`, `editor` |
-| Editor zone — global structure | `Structure de l'histoire` | Editor zone showing the story's overall layout and the current node, clearly identified; read-only projection from the core (reorganizing the structure is a later step) | `arbre`, `outline`, `tree`, `plan` |
+| Editor zone — global structure | `Structure de l'histoire` | Editor zone showing the story's overall layout (ordered node list, start node, option links) and the current node, clearly identified; projected from the core, with explicit per-node actions on a native story | `arbre`, `outline`, `tree`, `plan`, `canvas` |
 | Editor zone — current node | `Nœud courant` | Editor zone hosting the editor for the node currently in focus (its text, metadata and media) | `current node`, `panneau`, `étape courante` |
 | Story node | `nœud` | A single step of an interactive story (a narrative moment and its choices) | `node`, `step`, `écran` |
 | Node narrative text (field) | `Texte du nœud` | The narrative text of the current node | `contenu`, `body`, `script` |
@@ -93,6 +93,22 @@ It exists to keep the same product concepts named the same way across:
 | Node media needs attention (repairable) | `Média à corriger` | The media is associated but its source is no longer accessible; the rest of the node stays editable | `warning`, `cassé`, `erreur média` |
 | Node media is blocked (real block) | `Média bloqué` | The chosen file is an unsupported format, unreadable, or too large; it is not saved until corrected | `erreur`, `fatal`, `rejeté` |
 | Supported node media formats | `Formats acceptés : images PNG, JPEG ; sons MP3, WAV, OGG` | The closed set of source media formats the editor accepts | listing extensions as the gate, `codecs`, `mime` |
+| Node option (choice) | `option` | A choice a node offers to the listener; each option may point at a destination node | `choice`, `branch`, `transition`, `lien` used alone |
+| Option destination | `destination` | The node an option points at | `target`, `cible technique`, `pointeur` |
+| Start node | `Nœud de départ` | The node where the story begins; marked `Départ` in the structure zone | `racine`, `entry point`, `node 1` |
+| Start node mark (structure entry) | `Départ` | Textual mark on the start node in the structure list | color-only or icon-only start marks |
+| Add a node (action) | `Ajouter un nœud` | Append a new empty node to the story's structure | `Créer un nœud`, `Nouveau`, `+` alone |
+| Move a node up / down (actions) | `Monter` / `Descendre` | Swap a node with its neighbor in the displayed order | `Déplacer` used loosely, drag-and-drop wording |
+| Delete a node (action, first gesture) | `Supprimer le nœud` | Start removing a node; always followed by an explicit confirmation | `Effacer`, `Retirer` (reserved for options/media) |
+| Confirm a node deletion (second gesture) | `Confirmer la suppression` | Explicit second gesture that actually removes the node | `OK`, `Oui`, single-gesture deletes |
+| Add an option (action) | `Ajouter une option` | Add a new choice to the current node, with its label typed at creation | `Nouvelle option`, `+` alone |
+| Link an option (action) | `Lier` | Point an option at an existing node, chosen in a flat selector | `connecter`, `pointer`, `attacher` |
+| Create and link a new node (action) | `Créer et lier un nouveau nœud` | Create an empty node and link the option to it, in one atomic action | `lier vers nouveau`, two-step wordings |
+| Unlink an option (action) | `Délier` | Remove an option's destination; the option becomes `non liée` | `déconnecter`, `détacher` |
+| Remove an option (action) | `Retirer l'option` | Drop the option from its node | `Supprimer` (reserved for nodes), `Effacer` |
+| Option has no destination yet (state) | `non liée` | Normal authoring state: the option exists but points nowhere yet | `vide`, `incomplète`, `en attente` |
+| Option destination is present (state) | `liée` | The option points at an existing node, named next to the state | `ok`, `valide`, `connectée` |
+| Option destination must be repaired (state) | `destination à corriger` | The option points at a node that no longer exists; repairable in place | `lien cassé`, `broken`, `invalide`, `erreur` |
 
 ## Preferred State Labels
 
@@ -194,6 +210,19 @@ The UI should favor these labels when they are user-visible:
 | A node media needs attention (repairable; rest of the node still saves) | `Média à corriger` |
 | A node media is blocked (unsupported / unreadable / oversize; not saved) | `Média bloqué` |
 | An imported story's node is read-only at this stage | `Histoire importée (lecture seule)` |
+| Start node mark in the structure list | `Départ` |
+| Append a new empty node to the structure (action) | `Ajouter un nœud` |
+| Swap a node with its neighbor (actions) | `Monter` / `Descendre` |
+| Start removing a node (action, first gesture) | `Supprimer le nœud` |
+| Actually remove the node (action, second gesture) | `Confirmer la suppression` |
+| Add a choice to the current node (action) | `Ajouter une option` |
+| Point an option at an existing node (action) | `Lier` |
+| Create an empty node and link the option to it (action, atomic) | `Créer et lier un nouveau nœud` |
+| Remove an option's destination (action) | `Délier` |
+| Drop an option from its node (action) | `Retirer l'option` |
+| Option without a destination (normal authoring state) | `non liée` |
+| Option pointing at an existing node | `liée` |
+| Option pointing at a node that no longer exists (repairable) | `destination à corriger` |
 
 Do not alternate freely between synonyms such as `sync`, `envoi`, `upload`, or `job`.
 When a different wording is necessary in context, it must still map back to one of the preferred labels above.

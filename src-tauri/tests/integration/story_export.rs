@@ -21,7 +21,7 @@ fn exports_persisted_story_and_produces_readable_artifact() {
         },
     )
     .expect("create story");
-    let detail = get_story_detail(&handle, &std::env::temp_dir(), &created.id)
+    let detail = get_story_detail(&handle, &std::env::temp_dir(), &created.id, None)
         .expect("read detail")
         .expect("detail present");
 
@@ -37,10 +37,10 @@ fn exports_persisted_story_and_produces_readable_artifact() {
         serde_json::from_slice(&bytes).expect("artifact must parse as Rustory v1");
 
     assert_eq!(parsed.story.title, "Le Soleil Couchant");
-    assert_eq!(parsed.story.schema_version, 2);
+    assert_eq!(parsed.story.schema_version, 3);
     assert_eq!(
         parsed.story.structure_json,
-        "{\"schemaVersion\":2,\"nodes\":[{\"id\":\"n1\",\"text\":\"\",\"label\":\"\",\"imageAssetId\":null,\"audioAssetId\":null}]}"
+        "{\"schemaVersion\":3,\"startNodeId\":\"n1\",\"nodes\":[{\"id\":\"n1\",\"text\":\"\",\"label\":\"\",\"imageAssetId\":null,\"audioAssetId\":null,\"options\":[]}]}"
     );
     assert_eq!(output.bytes_written as usize, bytes.len());
     // The canonicalized destination is the same file the test wrote to
@@ -65,7 +65,7 @@ fn export_does_not_touch_stories_row() {
         },
     )
     .expect("create");
-    let detail = get_story_detail(&handle, &std::env::temp_dir(), &created.id)
+    let detail = get_story_detail(&handle, &std::env::temp_dir(), &created.id, None)
         .expect("read detail")
         .expect("detail present");
 
@@ -114,7 +114,7 @@ fn export_twice_to_same_destination_overwrites_without_corruption() {
         },
     )
     .expect("create");
-    let detail = get_story_detail(&handle, &std::env::temp_dir(), &created.id)
+    let detail = get_story_detail(&handle, &std::env::temp_dir(), &created.id, None)
         .expect("read detail")
         .expect("detail present");
 

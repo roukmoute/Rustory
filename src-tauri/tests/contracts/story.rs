@@ -1,9 +1,10 @@
 use rustory_lib::domain::shared::AppError;
 use rustory_lib::ipc::dto::{
-    ApplyRecoveryInputDto, AttachNodeMediaOutcomeDto, CreateStoryInputDto, NodeContentDto,
-    NodeMediaSlotDto, NodeMediaSlotInputDto, NodeWriteOutputDto, RecordDraftInputDto,
-    RecoverableDraftDto, StoryDetailDto, UpdateNodeContentInputDto, UpdateStoryInputDto,
-    UpdateStoryOutputDto,
+    AddStoryNodeInputDto, ApplyRecoveryInputDto, AttachNodeMediaOutcomeDto, CreateStoryInputDto,
+    MoveDirectionDto, MoveStoryNodeInputDto, NodeContentDto, NodeGraphDto, NodeMediaSlotDto,
+    NodeMediaSlotInputDto, NodeWriteOutputDto, OptionLinkDto, RecordDraftInputDto,
+    RecoverableDraftDto, SetNodeOptionLinkInputDto, StoryDetailDto, StoryStructureDto,
+    StructureWriteOutputDto, UpdateNodeContentInputDto, UpdateStoryInputDto, UpdateStoryOutputDto,
 };
 
 #[test]
@@ -111,12 +112,26 @@ fn story_detail_wire_shape_is_camel_case_with_all_fields() {
     let dto = StoryDetailDto {
         id: "sid".into(),
         title: "Titre".into(),
-        schema_version: 2,
-        structure_json: "{\"schemaVersion\":2,\"nodes\":[]}".into(),
+        schema_version: 3,
+        structure_json: "{\"schemaVersion\":3,\"startNodeId\":\"n1\",\"nodes\":[]}".into(),
         content_checksum: "0".repeat(64),
         created_at: "2026-04-23T09:00:00.000Z".into(),
         updated_at: "2026-04-23T10:00:00.000Z".into(),
         editable: true,
+        structure: Some(StoryStructureDto {
+            start_node_id: "n1".into(),
+            nodes: vec![NodeGraphDto {
+                id: "n1".into(),
+                label: "Début".into(),
+                is_start: true,
+                has_issue: false,
+                options: vec![OptionLinkDto {
+                    label: "Continuer".into(),
+                    target: None,
+                    state: "unlinked".into(),
+                }],
+            }],
+        }),
         node: Some(NodeContentDto {
             id: "n1".into(),
             text: "Bonjour".into(),
@@ -134,12 +149,24 @@ fn story_detail_wire_shape_is_camel_case_with_all_fields() {
     let v = serde_json::to_value(&dto).expect("serialize");
     assert_eq!(v["id"], "sid");
     assert_eq!(v["title"], "Titre");
-    assert_eq!(v["schemaVersion"], 2);
-    assert_eq!(v["structureJson"], "{\"schemaVersion\":2,\"nodes\":[]}");
+    assert_eq!(v["schemaVersion"], 3);
+    assert_eq!(
+        v["structureJson"],
+        "{\"schemaVersion\":3,\"startNodeId\":\"n1\",\"nodes\":[]}"
+    );
     assert_eq!(v["contentChecksum"].as_str().unwrap().len(), 64);
     assert_eq!(v["createdAt"], "2026-04-23T09:00:00.000Z");
     assert_eq!(v["updatedAt"], "2026-04-23T10:00:00.000Z");
     assert_eq!(v["editable"], true);
+    assert_eq!(v["structure"]["startNodeId"], "n1");
+    assert_eq!(v["structure"]["nodes"][0]["id"], "n1");
+    assert_eq!(v["structure"]["nodes"][0]["isStart"], true);
+    assert_eq!(v["structure"]["nodes"][0]["hasIssue"], false);
+    assert_eq!(
+        v["structure"]["nodes"][0]["options"][0]["state"],
+        "unlinked"
+    );
+    assert!(v["structure"]["nodes"][0]["options"][0]["target"].is_null());
     assert_eq!(v["node"]["id"], "n1");
     assert_eq!(v["node"]["image"]["assetId"], "a1");
     assert_eq!(v["node"]["image"]["state"], "ready");
@@ -150,9 +177,97 @@ fn story_detail_wire_shape_is_camel_case_with_all_fields() {
         "content_checksum",
         "created_at",
         "updated_at",
+        "start_node_id",
     ] {
         assert!(v.get(snake).is_none(), "{snake} must be camelCase");
     }
+}
+
+#[test]
+fn story_detail_structure_key_is_required_even_when_null() {
+    // A blocking canonical issue projects `structure = null` — the KEY must
+    // stay present so the TS mirror can require it.
+    let dto = StoryDetailDto {
+        id: "sid".into(),
+        title: "Titre".into(),
+        schema_version: 3,
+        structure_json: "not json".into(),
+        content_checksum: "0".repeat(64),
+        created_at: "2026-04-23T09:00:00.000Z".into(),
+        updated_at: "2026-04-23T10:00:00.000Z".into(),
+        editable: false,
+        structure: None,
+        node: None,
+    };
+    let v = serde_json::to_value(&dto).expect("serialize");
+    assert!(v.as_object().expect("obj").contains_key("structure"));
+    assert!(v["structure"].is_null());
+    assert!(v.as_object().expect("obj").contains_key("node"));
+    assert!(v["node"].is_null());
+}
+
+#[test]
+fn structure_write_output_wire_shape_is_camel_case() {
+    let dto = StructureWriteOutputDto {
+        id: "sid".into(),
+        updated_at: "2026-07-04T10:00:00.000Z".into(),
+        content_checksum: "0".repeat(64),
+        structure_json: "{\"schemaVersion\":3,\"startNodeId\":\"n1\",\"nodes\":[]}".into(),
+        structure: StoryStructureDto {
+            start_node_id: "n1".into(),
+            nodes: vec![NodeGraphDto {
+                id: "n1".into(),
+                label: String::new(),
+                is_start: true,
+                has_issue: true,
+                options: vec![OptionLinkDto {
+                    label: "Perdu".into(),
+                    target: Some("ghost".into()),
+                    state: "broken".into(),
+                }],
+            }],
+        },
+    };
+    let v = serde_json::to_value(&dto).expect("serialize");
+    assert_eq!(v["id"], "sid");
+    assert_eq!(v["updatedAt"], "2026-07-04T10:00:00.000Z");
+    assert_eq!(v["contentChecksum"].as_str().unwrap().len(), 64);
+    assert_eq!(
+        v["structureJson"],
+        "{\"schemaVersion\":3,\"startNodeId\":\"n1\",\"nodes\":[]}"
+    );
+    assert_eq!(v["structure"]["startNodeId"], "n1");
+    assert_eq!(v["structure"]["nodes"][0]["hasIssue"], true);
+    assert_eq!(v["structure"]["nodes"][0]["options"][0]["state"], "broken");
+    assert_eq!(v["structure"]["nodes"][0]["options"][0]["target"], "ghost");
+    assert!(v.get("updated_at").is_none(), "snake_case must not leak");
+}
+
+#[test]
+fn structural_inputs_accept_canonical_camel_case_and_reject_unknown_fields() {
+    let add: AddStoryNodeInputDto = serde_json::from_value(serde_json::json!({
+        "storyId": "s",
+        "linkFrom": { "nodeId": "n1", "optionIndex": 0 },
+    }))
+    .expect("deser add");
+    assert_eq!(add.link_from.expect("linkFrom").node_id, "n1");
+
+    let mv: MoveStoryNodeInputDto = serde_json::from_value(serde_json::json!({
+        "storyId": "s", "nodeId": "n2", "direction": "down",
+    }))
+    .expect("deser move");
+    assert_eq!(mv.direction, MoveDirectionDto::Down);
+
+    let link: SetNodeOptionLinkInputDto = serde_json::from_value(serde_json::json!({
+        "storyId": "s", "nodeId": "n1", "optionIndex": 0, "target": null,
+    }))
+    .expect("deser link");
+    assert!(link.target.is_none());
+
+    serde_json::from_value::<AddStoryNodeInputDto>(serde_json::json!({
+        "storyId": "s", "position": 3,
+    }))
+    .expect_err("unknown field must be rejected");
 }
 
 #[test]

@@ -11,6 +11,7 @@ import {
 import { toAppError, type AppError } from "../../../shared/errors/app-error";
 import type {
   StoryDetailDto,
+  StructureWriteOutput,
   UpdateStoryOutput,
 } from "../../../shared/ipc-contracts/story";
 import { isStoryDetailDto } from "../../../shared/ipc-contracts/story";
@@ -63,12 +64,25 @@ export interface UseStoryEditor {
   /** Re-fire the autosave from a failed state using the current draft. */
   retrySave: () => void;
   /** Cancel the debounce and commit the pending save immediately. Called
-   *  when the user clicks "Retour à la bibliothèque" or the route unmounts. */
-  flushAutoSave: () => void;
+   *  when the user clicks "Retour à la bibliothèque", before a structural
+   *  mutation / node-selection change, or when the route unmounts. Resolves
+   *  when the flushed (or already in-flight) save has SETTLED — awaitable
+   *  so a structural write never races the content it depends on; never
+   *  rejects. */
+  flushAutoSave: () => Promise<void>;
   /** Patch the in-memory `detail` from a successful `applyRecovery`
    *  output without re-fetching. Aligns `draftTitle` with the new
    *  persisted value and resets the save status to `idle`. */
   reloadDetailFromOutput: (output: UpdateStoryOutput) => void;
+  /** Reconcile the in-memory `detail` from a structural write
+   *  acknowledgement: the re-projected graph plus the freshly committed
+   *  `contentChecksum` / `updatedAt`. Never touches the title autosave
+   *  machinery. */
+  applyStructureOutput: (output: StructureWriteOutput) => void;
+  /** Replace the whole `detail` from an authoritative targeted re-read
+   *  (a current-node selection change). Preserves the live title draft
+   *  and save status — only the projections move. */
+  replaceDetail: (detail: StoryDetailDto) => void;
 }
 
 interface UseStoryEditorOptions {
@@ -136,6 +150,10 @@ export function useStoryEditor(
   // and issue a duplicate `saveStory` before the first has even been
   // queued. This ref is flipped synchronously inside `fireSave`.
   const saveInFlightRef = useRef(false);
+  // The settled-promise of the in-flight save, so `flushAutoSave` callers
+  // can AWAIT a save that is already carrying the latest value instead of
+  // returning before it lands (a structural mutation must never race it).
+  const saveInFlightPromiseRef = useRef<Promise<void> | null>(null);
 
   const clearDebounce = useCallback(() => {
     if (debounceTimerRef.current !== null) {
@@ -219,7 +237,9 @@ export function useStoryEditor(
   // Forward reference — `scheduleDebouncedSave` closes over `fireSave`
   // via the `fireSaveRef` indirection below, so `fireSave` can schedule
   // a debounce when a stale success exposes a newer draft.
-  const fireSaveRef = useRef<((normalizedTitle: string) => void) | null>(null);
+  const fireSaveRef = useRef<((normalizedTitle: string) => Promise<void>) | null>(
+    null,
+  );
 
   const scheduleDebouncedSave = useCallback(() => {
     clearDebounce();
@@ -249,9 +269,9 @@ export function useStoryEditor(
   //   `Enregistré` when `draftTitle` has already moved past the save
   //   we are ACK-ing.
   const fireSave = useCallback(
-    (normalizedTitle: string) => {
+    (normalizedTitle: string): Promise<void> => {
       const current = stateRef.current;
-      if (current.kind !== "ready") return;
+      if (current.kind !== "ready") return Promise.resolve();
       const detailId = current.detail.id;
       const callId = ++activeCallRef.current;
       saveInFlightRef.current = true;
@@ -263,7 +283,7 @@ export function useStoryEditor(
           : prev,
       );
 
-      saveStory({ id: detailId, title: normalizedTitle })
+      const settled = saveStory({ id: detailId, title: normalizedTitle })
         .then((output) => {
           // The write committed in Rust regardless of whether the UI is
           // still mounted. Invalidate the library cache BEFORE the guard
@@ -273,6 +293,7 @@ export function useStoryEditor(
           invalidateLibraryOverviewCache();
           if (callId === activeCallRef.current) {
             saveInFlightRef.current = false;
+            saveInFlightPromiseRef.current = null;
             // The autosave UPDATE deletes any `story_drafts` row for
             // this story in the same SQLite transaction, so the buffer
             // is provably empty after a confirmed success.
@@ -319,6 +340,7 @@ export function useStoryEditor(
         .catch((err: unknown) => {
           if (callId === activeCallRef.current) {
             saveInFlightRef.current = false;
+            saveInFlightPromiseRef.current = null;
           }
           if (!mountedRef.current || callId !== activeCallRef.current) return;
           // Failure leaves the persisted state untouched (NFR9 atomicity:
@@ -341,6 +363,8 @@ export function useStoryEditor(
             };
           });
         });
+      saveInFlightPromiseRef.current = settled;
+      return settled;
     },
     [clearSavedIdle, savedVisibleMs, scheduleDebouncedSave],
   );
@@ -436,18 +460,23 @@ export function useStoryEditor(
     fireSave(current.saveStatus.attemptedTitle);
   }, [clearDebounce, fireSave]);
 
-  const flushAutoSave = useCallback(() => {
+  const flushAutoSave = useCallback((): Promise<void> => {
     const current = stateRef.current;
-    if (current.kind !== "ready") return;
+    if (current.kind !== "ready") return Promise.resolve();
     const normalized = normalizeStoryTitle(current.draftTitle);
-    if (normalized === current.detail.title) return;
+    if (normalized === current.detail.title) {
+      // Nothing NEW to flush — but a save may already be in flight carrying
+      // this exact value: hand its settled-promise to the caller so a
+      // structural mutation still waits for it.
+      return saveInFlightPromiseRef.current ?? Promise.resolve();
+    }
     clearDebounce();
     // `fireSave` bumps `activeCallRef`, so a save already in flight is
     // superseded by this fresher attempt: its own then/catch becomes a
     // no-op and will not clobber the newer draft. Without this call the
     // user's latest typed value would be silently lost when the prior
     // save ACKs against an older input.
-    fireSave(normalized);
+    return fireSave(normalized);
   }, [clearDebounce, fireSave]);
 
   /**
@@ -487,6 +516,44 @@ export function useStoryEditor(
     },
     [clearDebounce, clearRecordDraft, clearSavedIdle],
   );
+
+  /**
+   * Reconcile the detail from a structural write ACK. The graph, the exact
+   * committed `structureJson` bytes and the checksum / timestamp move
+   * TOGETHER — the contract says `structureJson` is the byte sequence
+   * `contentChecksum` covers, so the local pair must never go stale. The
+   * node projection stays valid (a structural mutation never edits another
+   * node's content — deleting the SELECTED node goes through
+   * `replaceDetail` with a full targeted re-read instead).
+   */
+  const applyStructureOutput = useCallback((output: StructureWriteOutput) => {
+    setState((prev) => {
+      if (prev.kind !== "ready" || prev.detail.id !== output.id) return prev;
+      return {
+        ...prev,
+        detail: {
+          ...prev.detail,
+          structure: output.structure,
+          structureJson: output.structureJson,
+          contentChecksum: output.contentChecksum,
+          updatedAt: output.updatedAt,
+        },
+      };
+    });
+  }, []);
+
+  /**
+   * Replace the whole detail from a targeted authoritative re-read (the
+   * current-node selection changed). The title draft and its save status
+   * are PRESERVED — selecting a node must not clobber a mid-debounce title
+   * keystroke (the content flush ran before the re-read).
+   */
+  const replaceDetail = useCallback((detail: StoryDetailDto) => {
+    setState((prev) => {
+      if (prev.kind !== "ready" || prev.detail.id !== detail.id) return prev;
+      return { ...prev, detail };
+    });
+  }, []);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -575,5 +642,7 @@ export function useStoryEditor(
     retrySave,
     flushAutoSave,
     reloadDetailFromOutput,
+    applyStructureOutput,
+    replaceDetail,
   };
 }

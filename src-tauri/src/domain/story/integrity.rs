@@ -43,7 +43,7 @@ mod tests {
         let structure = CanonicalStructure::minimal();
         assert_eq!(
             canonical_structure_json(&structure),
-            "{\"schemaVersion\":2,\"nodes\":[{\"id\":\"n1\",\"text\":\"\",\"label\":\"\",\"imageAssetId\":null,\"audioAssetId\":null}]}",
+            "{\"schemaVersion\":3,\"startNodeId\":\"n1\",\"nodes\":[{\"id\":\"n1\",\"text\":\"\",\"label\":\"\",\"imageAssetId\":null,\"audioAssetId\":null,\"options\":[]}]}",
         );
     }
 

@@ -222,6 +222,9 @@ export interface StoryNodeEditorHostProps {
    *  fields + media actions are locked and its own recovery banner is held
    *  back) so the two recovery surfaces never compete. */
   gated?: boolean;
+  /** Hosted below the node's content (the `Option Link Editor`), keeping the
+   *  tab order stable: fields → media slots → options. */
+  children?: React.ReactNode;
 }
 
 /**
@@ -237,6 +240,7 @@ export function StoryNodeEditorHost({
   storyId,
   editor,
   gated = false,
+  children,
 }: StoryNodeEditorHostProps): React.JSX.Element {
   const headingId = useId();
   const textId = useId();
@@ -298,6 +302,17 @@ export function StoryNodeEditorHost({
               Conserver l'état enregistré
             </Button>
           </div>
+          {editor.recoveryApplyError ? (
+            <div
+              className="story-node-editor-host__recovery-error"
+              role="alert"
+            >
+              <p>{editor.recoveryApplyError.message}</p>
+              {editor.recoveryApplyError.userAction ? (
+                <p>{editor.recoveryApplyError.userAction}</p>
+              ) : null}
+            </div>
+          ) : null}
         </div>
       ) : null}
 
@@ -369,6 +384,8 @@ export function StoryNodeEditorHost({
           onRemove={() => editor.removeMedia("audio")}
         />
       </div>
+
+      {children}
     </section>
   );
 }

@@ -18,7 +18,8 @@ use crate::domain::export::{
 };
 use crate::domain::story::{
     canonical_structure_json, content_checksum, normalize_title, validate_canonical,
-    CanonicalCause, CanonicalStoryFacts, CanonicalStructure, CANONICAL_STORY_SCHEMA_VERSION,
+    CanonicalCause, CanonicalStoryFacts, CanonicalStructure, LegacyStructureV2,
+    CANONICAL_STORY_SCHEMA_VERSION,
 };
 
 use super::recognition::{
@@ -138,12 +139,14 @@ impl ArtifactAnalysis {
 /// before the v2 bump can be upgraded losslessly.
 const LEGACY_V1_STRUCTURE: &str = "{\"schemaVersion\":1,\"nodes\":[]}";
 
-/// Bring a LEGACY v1 canonical body up to the current v2 shape so a `.rustory`
-/// exported before the v2 bump still imports (backward compatibility). The v1
-/// structure was always the empty `nodes` list, so the upgrade injects the same
-/// empty starting node the local v1→v2 migration backfills and recomputes the
-/// checksum — lossless. Anything other than the exact canonical v1 empty body
-/// is left untouched (a genuinely corrupt / non-canonical v1 stays blocked).
+/// Bring a LEGACY v1 canonical body up to the CURRENT canonical shape so a
+/// `.rustory` exported before the schema bumps still imports (backward
+/// compatibility). The v1 structure was always the empty `nodes` list, so the
+/// upgrade targets `CanonicalStructure::minimal()` directly (conceptually the
+/// v1→v2→v3 chain — the v2 intermediate carried the same single empty start
+/// node) and recomputes the checksum — lossless. Anything other than the
+/// exact canonical v1 empty body is left untouched (a genuinely corrupt /
+/// non-canonical v1 stays blocked).
 fn upgrade_legacy_v1(
     schema_version: u32,
     structure_json: &str,
@@ -162,11 +165,41 @@ fn upgrade_legacy_v1(
     }
 }
 
+/// Bring a LEGACY v2 canonical body (one typed node, varied content) up to
+/// the current v3 graph shape. Unlike v1 (a single known byte shape), v2
+/// bodies are VARIED, so the upgrade first PROVES the declared checksum
+/// against the v2 bytes — recomputing it blindly would silently erase a real
+/// corruption — then parses through the dedicated legacy read type and
+/// promotes losslessly (the node's id becomes `startNodeId`, `options: []`).
+/// Anything not a healthy v2 (checksum divergent, unparsable, node count ≠ 1)
+/// is left untouched and stays blocked downstream.
+fn upgrade_legacy_v2(
+    schema_version: u32,
+    structure_json: &str,
+    content_checksum_in: &str,
+) -> (u32, String, String) {
+    if schema_version == 2 && content_checksum(structure_json) == content_checksum_in {
+        if let Some(promoted) = serde_json::from_str::<LegacyStructureV2>(structure_json)
+            .ok()
+            .as_ref()
+            .and_then(LegacyStructureV2::promote_to_v3)
+        {
+            let json = canonical_structure_json(&promoted);
+            let checksum = content_checksum(&json);
+            return (CANONICAL_STORY_SCHEMA_VERSION, json, checksum);
+        }
+    }
+    (
+        schema_version,
+        structure_json.to_string(),
+        content_checksum_in.to_string(),
+    )
+}
+
 /// Analyze a parsed `.rustory` v1 artifact. Pure: no I/O, deterministic on
-/// its input. A legacy v1 canonical body is upgraded to v2 (lossless — the v1
-/// structure was always empty) so older artifacts remain importable, then
-/// delegates to [`analyze_components`] with the envelope's declared format
-/// version.
+/// its input. A legacy v1 or v2 canonical body is upgraded to the current v3
+/// shape (lossless) so older artifacts remain importable, then delegates to
+/// [`analyze_components`] with the envelope's declared format version.
 pub fn analyze_rustory_artifact(artifact: &RustoryArtifactV1) -> ArtifactAnalysis {
     let story = &artifact.story;
     let (schema_version, structure_json, content_checksum) = upgrade_legacy_v1(
@@ -174,6 +207,8 @@ pub fn analyze_rustory_artifact(artifact: &RustoryArtifactV1) -> ArtifactAnalysi
         &story.structure_json,
         &story.content_checksum,
     );
+    let (schema_version, structure_json, content_checksum) =
+        upgrade_legacy_v2(schema_version, &structure_json, &content_checksum);
     analyze_components(
         artifact.rustory_artifact.format_version,
         &CanonicalContent {
@@ -230,10 +265,21 @@ pub fn analyze_components(format_version: u32, content: &CanonicalContent) -> Ar
         RecognitionAspect::SchemaVersion,
         blocked(CanonicalCause::SchemaUnsupported),
     ));
-    findings.push(aspect_finding(
-        RecognitionAspect::Structure,
-        blocked(CanonicalCause::StructureCorrupt),
-    ));
+    // Structure: the graph invariant. An unusable graph (corrupt shape,
+    // duplicate node ids, an invalid start node) is a real block; an option
+    // whose destination is absent from the graph (`BrokenOptionLink`,
+    // Fixable) is an AMBIGUITY — the story imports, repairable in the
+    // editor, surfaced through the durable marker instead of refused.
+    let structure_blocked = blocked(CanonicalCause::StructureCorrupt)
+        || blocked(CanonicalCause::DuplicateNodeId)
+        || blocked(CanonicalCause::StartNodeInvalid);
+    findings.push(if structure_blocked {
+        RecognitionFinding::blocking(RecognitionAspect::Structure)
+    } else if blocked(CanonicalCause::BrokenOptionLink) {
+        RecognitionFinding::ambiguous(RecognitionAspect::Structure)
+    } else {
+        RecognitionFinding::recognized(RecognitionAspect::Structure)
+    });
     findings.push(aspect_finding(
         RecognitionAspect::Integrity,
         blocked(CanonicalCause::ChecksumMismatch),
@@ -340,7 +386,7 @@ mod tests {
     use crate::domain::import::recognition::RecognitionCategory;
     use crate::domain::story::content_checksum;
 
-    const CANONICAL_STRUCTURE: &str = "{\"schemaVersion\":2,\"nodes\":[{\"id\":\"n1\",\"text\":\"\",\"label\":\"\",\"imageAssetId\":null,\"audioAssetId\":null}]}";
+    const CANONICAL_STRUCTURE: &str = "{\"schemaVersion\":3,\"startNodeId\":\"n1\",\"nodes\":[{\"id\":\"n1\",\"text\":\"\",\"label\":\"\",\"imageAssetId\":null,\"audioAssetId\":null,\"options\":[]}]}";
 
     /// A pristine artifact as Rustory's own export would produce it: a
     /// normalized title, canonical timestamps, a checksum over the
@@ -353,7 +399,7 @@ mod tests {
                 exported_by: "rustory/0.1.0".into(),
             },
             story: ExportedStoryV1 {
-                schema_version: 2,
+                schema_version: 3,
                 title: "Le Soleil Couchant".into(),
                 structure_json: CANONICAL_STRUCTURE.into(),
                 content_checksum: content_checksum(CANONICAL_STRUCTURE),
@@ -451,6 +497,139 @@ mod tests {
     }
 
     #[test]
+    fn a_legacy_v2_artifact_with_varied_content_is_upgraded_and_imports_clean() {
+        // An artifact exported by the single-node era carries VARIED content
+        // (text / label / media references, an id not necessarily "n1"). It
+        // is upgraded losslessly: same node content, its id becomes the
+        // start, empty options, checksum recomputed on the v3 bytes.
+        let legacy = "{\"schemaVersion\":2,\"nodes\":[{\"id\":\"noeud-7\",\"text\":\"Il était une fois…\",\"label\":\"Début\",\"imageAssetId\":\"asset-img\",\"audioAssetId\":null}]}";
+        let mut artifact = clean_artifact();
+        artifact.story.schema_version = 2;
+        artifact.story.structure_json = legacy.into();
+        artifact.story.content_checksum = content_checksum(legacy);
+
+        let analysis = analyze_rustory_artifact(&artifact);
+        assert_eq!(
+            analysis.quality,
+            RecognitionQuality::Clean,
+            "a healthy legacy v2 artifact imports clean after the upgrade"
+        );
+        let content = analysis.importable.expect("importable after upgrade");
+        let upgraded: CanonicalStructure =
+            serde_json::from_str(&content.structure_json).expect("v3 parse");
+        assert_eq!(upgraded.schema_version, 3);
+        assert_eq!(upgraded.start_node_id, "noeud-7");
+        assert_eq!(upgraded.nodes.len(), 1);
+        assert_eq!(upgraded.nodes[0].text, "Il était une fois…");
+        assert_eq!(upgraded.nodes[0].label, "Début");
+        assert_eq!(
+            upgraded.nodes[0].image_asset_id.as_deref(),
+            Some("asset-img")
+        );
+        assert!(upgraded.nodes[0].options.is_empty());
+        assert_eq!(
+            content.content_checksum,
+            content_checksum(&content.structure_json)
+        );
+    }
+
+    #[test]
+    fn a_diverging_v2_checksum_is_never_masked_by_the_upgrade() {
+        // The v2 upgrade PROVES the declared checksum against the v2 bytes
+        // BEFORE promoting — blindly recomputing it would erase a real
+        // corruption. A diverging v2 stays blocked.
+        let legacy = "{\"schemaVersion\":2,\"nodes\":[{\"id\":\"n1\",\"text\":\"corrompu ?\",\"label\":\"\",\"imageAssetId\":null,\"audioAssetId\":null}]}";
+        let mut artifact = clean_artifact();
+        artifact.story.schema_version = 2;
+        artifact.story.structure_json = legacy.into();
+        artifact.story.content_checksum = "0".repeat(64);
+
+        let analysis = analyze_rustory_artifact(&artifact);
+        assert_eq!(analysis.quality, RecognitionQuality::Unusable);
+        assert_eq!(analysis.state, ImportState::Blocked);
+        assert!(analysis.importable.is_none());
+    }
+
+    #[test]
+    fn a_forged_multi_node_v2_artifact_is_not_upgraded() {
+        // The v2 model carried EXACTLY one node; a forged multi-node v2 is
+        // not silently repaired into a v3 graph — it stays blocked.
+        let forged = "{\"schemaVersion\":2,\"nodes\":[{\"id\":\"n1\",\"text\":\"\",\"label\":\"\",\"imageAssetId\":null,\"audioAssetId\":null},{\"id\":\"n2\",\"text\":\"\",\"label\":\"\",\"imageAssetId\":null,\"audioAssetId\":null}]}";
+        let mut artifact = clean_artifact();
+        artifact.story.schema_version = 2;
+        artifact.story.structure_json = forged.into();
+        artifact.story.content_checksum = content_checksum(forged);
+
+        let analysis = analyze_rustory_artifact(&artifact);
+        assert_eq!(analysis.quality, RecognitionQuality::Unusable);
+        assert_eq!(
+            category_of(&analysis, RecognitionAspect::Structure),
+            RecognitionCategory::Blocking
+        );
+    }
+
+    #[test]
+    fn a_v3_multi_node_graph_with_links_imports_clean() {
+        let graph = "{\"schemaVersion\":3,\"startNodeId\":\"n1\",\"nodes\":[{\"id\":\"n1\",\"text\":\"\",\"label\":\"\",\"imageAssetId\":null,\"audioAssetId\":null,\"options\":[{\"label\":\"Continuer\",\"target\":\"n2\"}]},{\"id\":\"n2\",\"text\":\"\",\"label\":\"\",\"imageAssetId\":null,\"audioAssetId\":null,\"options\":[]}]}";
+        let mut artifact = clean_artifact();
+        artifact.story.structure_json = graph.into();
+        artifact.story.content_checksum = content_checksum(graph);
+        let analysis = analyze_rustory_artifact(&artifact);
+        assert_eq!(analysis.quality, RecognitionQuality::Clean);
+        assert_eq!(analysis.state, ImportState::Recognized);
+    }
+
+    #[test]
+    fn a_broken_option_link_is_partial_needs_review_but_importable() {
+        // A Fixable graph issue (an option pointing at a vanished node) is an
+        // AMBIGUITY: the story imports with the durable marker, repairable in
+        // the editor — never refused, never silently unlinked.
+        let graph = "{\"schemaVersion\":3,\"startNodeId\":\"n1\",\"nodes\":[{\"id\":\"n1\",\"text\":\"\",\"label\":\"\",\"imageAssetId\":null,\"audioAssetId\":null,\"options\":[{\"label\":\"Perdu\",\"target\":\"ghost\"}]}]}";
+        let mut artifact = clean_artifact();
+        artifact.story.structure_json = graph.into();
+        artifact.story.content_checksum = content_checksum(graph);
+
+        let analysis = analyze_rustory_artifact(&artifact);
+        assert_eq!(analysis.quality, RecognitionQuality::Partial);
+        assert_eq!(analysis.state, ImportState::NeedsReview);
+        assert_eq!(
+            category_of(&analysis, RecognitionAspect::Structure),
+            RecognitionCategory::Ambiguous
+        );
+        let content = analysis.importable.expect("still importable");
+        // The broken link is PRESERVED byte-for-byte (the trace survives).
+        assert!(content.structure_json.contains("\"target\":\"ghost\""));
+    }
+
+    #[test]
+    fn a_duplicate_node_id_graph_is_unusable_blocked() {
+        let graph = "{\"schemaVersion\":3,\"startNodeId\":\"n1\",\"nodes\":[{\"id\":\"n1\",\"text\":\"\",\"label\":\"\",\"imageAssetId\":null,\"audioAssetId\":null,\"options\":[]},{\"id\":\"n1\",\"text\":\"\",\"label\":\"\",\"imageAssetId\":null,\"audioAssetId\":null,\"options\":[]}]}";
+        let mut artifact = clean_artifact();
+        artifact.story.structure_json = graph.into();
+        artifact.story.content_checksum = content_checksum(graph);
+        let analysis = analyze_rustory_artifact(&artifact);
+        assert_eq!(analysis.quality, RecognitionQuality::Unusable);
+        assert_eq!(
+            category_of(&analysis, RecognitionAspect::Structure),
+            RecognitionCategory::Blocking
+        );
+    }
+
+    #[test]
+    fn an_invalid_start_node_graph_is_unusable_blocked() {
+        let graph = "{\"schemaVersion\":3,\"startNodeId\":\"ghost\",\"nodes\":[{\"id\":\"n1\",\"text\":\"\",\"label\":\"\",\"imageAssetId\":null,\"audioAssetId\":null,\"options\":[]}]}";
+        let mut artifact = clean_artifact();
+        artifact.story.structure_json = graph.into();
+        artifact.story.content_checksum = content_checksum(graph);
+        let analysis = analyze_rustory_artifact(&artifact);
+        assert_eq!(analysis.quality, RecognitionQuality::Unusable);
+        assert_eq!(
+            category_of(&analysis, RecognitionAspect::Structure),
+            RecognitionCategory::Blocking
+        );
+    }
+
+    #[test]
     fn a_non_normalized_title_is_partial_needs_review_but_importable() {
         let mut artifact = clean_artifact();
         artifact.story.title = "  Le Soleil Couchant  ".into(); // leading/trailing spaces
@@ -517,8 +696,8 @@ mod tests {
     #[test]
     fn a_schema_above_supported_is_unusable_blocked_on_schema_version() {
         let mut artifact = clean_artifact();
-        let future = "{\"schemaVersion\":3,\"nodes\":[]}";
-        artifact.story.schema_version = 3;
+        let future = "{\"schemaVersion\":4,\"startNodeId\":\"n1\",\"nodes\":[]}";
+        artifact.story.schema_version = 4;
         artifact.story.structure_json = future.into();
         artifact.story.content_checksum = content_checksum(future);
         let analysis = analyze_rustory_artifact(&artifact);

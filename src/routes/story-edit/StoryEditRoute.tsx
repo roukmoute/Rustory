@@ -1,5 +1,5 @@
 import type React from "react";
-import { useMemo } from "react";
+import { useMemo, useRef } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 
 import { StoryEditorShell } from "../../features/story-editor/components/StoryEditorShell";
@@ -8,6 +8,7 @@ import { LibraryErrorBanner } from "../../features/library/components/LibraryErr
 import { useNodeEditor } from "../../features/story-editor/hooks/use-node-editor";
 import { useStoryEditor } from "../../features/story-editor/hooks/use-story-editor";
 import { useStoryRecovery } from "../../features/story-editor/hooks/use-story-recovery";
+import { useStructureEditor } from "../../features/story-editor/hooks/use-structure-editor";
 import { Button, ProgressIndicator, SurfacePanel } from "../../shared/ui";
 
 import "./StoryEditRoute.css";
@@ -41,17 +42,43 @@ export function StoryEditRoute(): React.JSX.Element {
   });
   const { state } = editor;
 
-  // The current node + editability are projected by Rust inside the story
-  // detail. The hook is called unconditionally (Rules of Hooks) with the
-  // projection when ready, `null` otherwise — it handles the no-node case.
+  // The current node + graph + editability are projected by Rust inside the
+  // story detail. The hooks are called unconditionally (Rules of Hooks) with
+  // the projections when ready, `null` otherwise — they handle the absence.
   const projectedNode = state.kind === "ready" ? state.detail.node : null;
+  const projectedStructure =
+    state.kind === "ready" ? state.detail.structure : null;
   const editable = state.kind === "ready" ? state.detail.editable : true;
-  const nodeEditor = useNodeEditor(storyId, projectedNode, editable);
+  // Forward ref: the node editor needs the structure editor's targeted
+  // re-read (cross-node recovery), while the structure editor needs the
+  // node editor's flush — the ref breaks the declaration cycle.
+  const refreshDetailRef = useRef<() => void>(() => undefined);
+  const nodeEditor = useNodeEditor(storyId, projectedNode, editable, {
+    onCrossNodeRecoveryApplied: () => refreshDetailRef.current(),
+  });
 
-  const flushAll = (): void => {
-    editor.flushAutoSave();
-    nodeEditor.flushNodeAutoSave();
+  const flushAll = (): Promise<void> => {
+    // Both flushes resolve when their save settles (never reject), so a
+    // structural mutation / selection change can truly WAIT for the pending
+    // content instead of racing it.
+    return Promise.all([
+      editor.flushAutoSave(),
+      nodeEditor.flushNodeAutoSave(),
+    ]).then(() => undefined);
   };
+
+  // Structural mutations + current-node selection. The selection is LOCAL
+  // route state (never the Zustand shell store); every mutation flushes the
+  // pending content first and reconciles from the Rust-re-projected graph.
+  const structureEditor = useStructureEditor({
+    storyId,
+    structure: projectedStructure,
+    editable,
+    flushContent: flushAll,
+    onStructureCommitted: editor.applyStructureOutput,
+    onDetailReloaded: editor.replaceDetail,
+  });
+  refreshDetailRef.current = structureEditor.refreshDetail;
 
   const goBack = (): void => {
     // Block the navigation while a recovery apply / discard is in flight:
@@ -62,8 +89,10 @@ export function StoryEditRoute(): React.JSX.Element {
     // programmatic call (keyboard shortcut, browser back) must also no-op here.
     if (recovery.state.kind === "applying") return;
     // Commit BOTH pending autosaves before the route unmounts: clicking Retour
-    // at millisecond 499 of the debounce must not lose the change.
-    flushAll();
+    // at millisecond 499 of the debounce must not lose the change. Fire and
+    // commit in Rust, forget in UI (the route is leaving) — the awaitable
+    // form matters for structural mutations, not for the exit path.
+    void flushAll();
     // `replace` keeps the browser history a single in/out transition for the
     // library ↔ edit context — back button behavior stays predictable.
     navigate("/library", { replace: true });
@@ -139,6 +168,7 @@ export function StoryEditRoute(): React.JSX.Element {
       recovery={recovery}
       exporter={exporter}
       nodeEditor={nodeEditor}
+      structureEditor={structureEditor}
       onSetDraftTitle={editor.setDraftTitle}
       onRetrySave={editor.retrySave}
       onFlushAutoSave={flushAll}

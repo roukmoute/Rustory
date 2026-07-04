@@ -6,6 +6,7 @@ import type { StoryDetailDto } from "../../../shared/ipc-contracts/story";
 import type { UseStoryExport } from "../../import-export/hooks/use-story-export";
 import type { UseNodeEditor } from "../hooks/use-node-editor";
 import type { UseStoryRecovery } from "../hooks/use-story-recovery";
+import type { UseStructureEditor } from "../hooks/use-structure-editor";
 
 import { StoryEditorShell } from "./StoryEditorShell";
 
@@ -17,12 +18,18 @@ function buildDetail(overrides: Partial<StoryDetailDto> = {}): StoryDetailDto {
   return {
     id: "abc",
     title: "Le soleil couchant",
-    schemaVersion: 2,
-    structureJson: '{"schemaVersion":2,"nodes":[]}',
+    schemaVersion: 3,
+    structureJson: '{"schemaVersion":3,"startNodeId":"n1","nodes":[]}',
     contentChecksum: "a".repeat(64),
     createdAt: "2026-04-23T09:00:00.000Z",
     updatedAt: "2026-04-23T09:00:00.000Z",
     editable: true,
+    structure: {
+      startNodeId: "n1",
+      nodes: [
+        { id: "n1", label: "", isStart: true, hasIssue: false, options: [] },
+      ],
+    },
     node: { id: "n1", text: "", label: "", image: null, audio: null },
     ...overrides,
   };
@@ -42,6 +49,7 @@ function stubNodeEditor(overrides: Partial<UseNodeEditor> = {}): UseNodeEditor {
     imageBusy: false,
     audioBusy: false,
     recovery: { kind: "none" },
+    recoveryApplyError: null,
     setText: vi.fn(),
     setLabel: vi.fn(),
     flushNodeAutoSave: vi.fn(),
@@ -72,10 +80,31 @@ function stubExporter(): UseStoryExport {
   };
 }
 
+function stubStructureEditor(
+  overrides: Partial<UseStructureEditor> = {},
+): UseStructureEditor {
+  return {
+    selectedNodeId: null,
+    busy: false,
+    lastError: null,
+    clearError: vi.fn(),
+    selectNode: vi.fn(),
+    refreshDetail: vi.fn(),
+    addNode: vi.fn(),
+    addNodeAndLink: vi.fn(),
+    deleteNode: vi.fn(),
+    moveNode: vi.fn(),
+    addOption: vi.fn(),
+    setOptionLink: vi.fn(),
+    removeOption: vi.fn(),
+    ...overrides,
+  };
+}
+
 function renderShell(props: Partial<Parameters<typeof StoryEditorShell>[0]> = {}) {
   const onBack = vi.fn();
   const onFlushAutoSave = vi.fn();
-  render(
+  const { container } = render(
     <StoryEditorShell
       detail={props.detail ?? buildDetail()}
       draftTitle={props.draftTitle ?? "Le soleil couchant"}
@@ -83,13 +112,14 @@ function renderShell(props: Partial<Parameters<typeof StoryEditorShell>[0]> = {}
       recovery={props.recovery ?? stubRecovery()}
       exporter={props.exporter ?? stubExporter()}
       nodeEditor={props.nodeEditor ?? stubNodeEditor()}
+      structureEditor={props.structureEditor ?? stubStructureEditor()}
       onSetDraftTitle={props.onSetDraftTitle ?? vi.fn()}
       onRetrySave={props.onRetrySave ?? vi.fn()}
       onFlushAutoSave={props.onFlushAutoSave ?? onFlushAutoSave}
       onBack={props.onBack ?? onBack}
     />,
   );
-  return { onBack, onFlushAutoSave };
+  return { onBack, onFlushAutoSave, container };
 }
 
 describe("<StoryEditorShell />", () => {
@@ -156,16 +186,58 @@ describe("<StoryEditorShell />", () => {
     expect(node.compareDocumentPosition(back) & following).toBe(following);
   });
 
-  it("makes the structure root a keyboard focus stop and exposes editable node fields (AC3)", () => {
-    renderShell();
-    const structureRoot = screen.getByText("Le soleil couchant", {
-      selector: ".story-structure-navigator__root-label",
-    }).parentElement;
-    expect(structureRoot).toHaveAttribute("tabindex", "0");
+  it("keeps a keyboard focus stop in the structure zone and editable node fields (AC3)", () => {
+    const { container } = renderShell();
+    // The roving tabindex lives on the node ENTRIES now: exactly one entry
+    // of the structure list is tabbable.
+    const tabbableEntries = container.querySelectorAll(
+      '.story-structure-navigator__node[tabindex="0"]',
+    );
+    expect(tabbableEntries).toHaveLength(1);
     // The node fields are inherently focusable form controls.
     expect(
       screen.getByRole("textbox", { name: "Texte du nœud" }),
     ).toBeEnabled();
+  });
+
+  it("gates ALL structural actions while a recovery decision is pending", () => {
+    // A pending title-recovery decision locks the content fields — the
+    // structural mutations must be gated too: mutating the graph under an
+    // undecided recovery would race the buffered content.
+    renderShell({
+      recovery: {
+        state: {
+          kind: "recoverable",
+          draft: {
+            storyId: "abc",
+            draftTitle: "Tapé avant le crash",
+            draftAt: "2026-07-04T12:00:00.000Z",
+            persistedTitle: "Le soleil couchant",
+          },
+        },
+        apply: vi.fn(),
+        discard: vi.fn(),
+        retry: vi.fn(),
+        dismissReadError: vi.fn(),
+      } as unknown as UseStoryRecovery,
+    });
+    // Navigator: zero structural action rendered.
+    expect(
+      screen.queryByRole("button", { name: "Ajouter un nœud" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /Supprimer le nœud/ }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /Monter|Descendre/ }),
+    ).not.toBeInTheDocument();
+    // Option link editor: zero link gesture rendered.
+    expect(
+      screen.queryByRole("button", { name: /^Lier — / }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Ajouter une option" }),
+    ).not.toBeInTheDocument();
   });
 
   it("never mixes the library context into the editor (AC3)", () => {

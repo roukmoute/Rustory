@@ -42,11 +42,15 @@ export type NodeSaveStatus =
   | { kind: "saved" }
   | { kind: "failed"; error: AppError };
 
-/** A pending node-content recovery offer (NFR8). */
+/** A pending node-content recovery offer (NFR8). `nodeId` is the node the
+ *  BUFFER belongs to — not necessarily the node currently displayed; the
+ *  apply path targets it explicitly so a draft never lands on the wrong
+ *  node. */
 export type NodeRecovery =
   | { kind: "none" }
   | {
       kind: "recoverable";
+      nodeId: string;
       draftText: string;
       draftLabel: string;
       draftAt: string;
@@ -73,10 +77,15 @@ export interface UseNodeEditor {
   audioBusy: boolean;
   /** Node-content recovery offer. */
   recovery: NodeRecovery;
+  /** A failed EXPLICIT recovery apply (surfaced inline in the banner —
+   *  the offer is re-proposed so the gesture can be retried). */
+  recoveryApplyError: AppError | null;
   setText: (next: string) => void;
   setLabel: (next: string) => void;
-  /** Commit a pending node autosave immediately (Retour / unmount). */
-  flushNodeAutoSave: () => void;
+  /** Commit a pending node autosave immediately (Retour, a structural
+   *  mutation, a node-selection change, unmount). Resolves when the flushed
+   *  (or already in-flight) save has SETTLED; never rejects. */
+  flushNodeAutoSave: () => Promise<void>;
   attachMedia: (slot: NodeMediaSlotKind) => void;
   removeMedia: (slot: NodeMediaSlotKind) => void;
   applyRecovery: () => void;
@@ -87,6 +96,11 @@ interface UseNodeEditorOptions {
   debounceMs?: number;
   savedVisibleMs?: number;
   recordDraftDebounceMs?: number;
+  /** Called after a CROSS-NODE recovery apply committed (the recovered
+   *  content landed on a node other than the displayed one): the owner
+   *  triggers an authoritative targeted re-read so the local detail
+   *  (structureJson/checksum pair, navigator labels) does not go stale. */
+  onCrossNodeRecoveryApplied?: () => void;
 }
 
 /**
@@ -133,6 +147,13 @@ export function useNodeEditor(
   const [imageBusy, setImageBusy] = useState(false);
   const [audioBusy, setAudioBusy] = useState(false);
   const [recovery, setRecovery] = useState<NodeRecovery>({ kind: "none" });
+  const [recoveryApplyError, setRecoveryApplyError] = useState<AppError | null>(
+    null,
+  );
+  const onCrossNodeRecoveryAppliedRef = useRef(
+    options.onCrossNodeRecoveryApplied,
+  );
+  onCrossNodeRecoveryAppliedRef.current = options.onCrossNodeRecoveryApplied;
 
   const persistedRef = useRef(persisted);
   persistedRef.current = persisted;
@@ -152,6 +173,10 @@ export function useNodeEditor(
   const mountedRef = useRef(true);
   const activeCallRef = useRef(0);
   const saveInFlightRef = useRef(false);
+  // The settled-promise of the in-flight content save, so a flush caller
+  // (structural mutation / selection change) can AWAIT it instead of racing
+  // the write it depends on.
+  const saveInFlightPromiseRef = useRef<Promise<void> | null>(null);
   const debounceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const savedIdleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const recordTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -210,7 +235,7 @@ export function useNodeEditor(
 
   // Forward reference so `scheduleSave`'s timer can reach `fireSave` without a
   // declaration cycle (same indirection as `useStoryEditor`).
-  const fireSaveRef = useRef<(() => void) | null>(null);
+  const fireSaveRef = useRef<(() => Promise<void>) | null>(null);
 
   const scheduleSave = useCallback(() => {
     clearTimer(debounceTimerRef);
@@ -228,16 +253,27 @@ export function useNodeEditor(
     }, debounceMs);
   }, [debounceMs]);
 
-  const fireSave = useCallback(() => {
-    if (!storyId || !nodeId) return;
+  const fireSave = useCallback((): Promise<void> => {
+    if (!storyId || !nodeId) return Promise.resolve();
     // Single-flight: never start a SECOND content write while one is in flight.
     // Two in-flight writes can land on the SQLite mutex out of order, letting an
     // older value overwrite a newer one (lost update — `callId` only guards the
-    // RESPONSE, not the write). Re-plan instead; the in-flight save re-fires on
-    // completion if the draft has moved on.
+    // RESPONSE, not the write). Re-plan instead — and CHAIN the returned
+    // promise: it settles only once the in-flight save has landed AND, if the
+    // draft moved past it meanwhile, a follow-up save has carried the LATEST
+    // keystroke. Returning the stale in-flight promise alone would let an
+    // awaiting structural mutation / selection change proceed with the newest
+    // input neither committed nor buffered (NFR8).
     if (saveInFlightRef.current) {
       scheduleSave();
-      return;
+      const inflight = saveInFlightPromiseRef.current ?? Promise.resolve();
+      return inflight.then(() => {
+        const dirty =
+          textRef.current !== persistedRef.current.text ||
+          labelRef.current !== persistedRef.current.label;
+        if (!dirty) return undefined;
+        return fireSaveRef.current?.() ?? undefined;
+      });
     }
     const callId = ++activeCallRef.current;
     saveInFlightRef.current = true;
@@ -246,7 +282,7 @@ export function useNodeEditor(
     const attemptedLabel = labelRef.current;
     setSaveStatus({ kind: "saving" });
 
-    void updateNodeContent({
+    const settled = updateNodeContent({
       storyId,
       nodeId,
       text: attemptedText,
@@ -254,7 +290,10 @@ export function useNodeEditor(
     })
       .then((output) => {
         const current = callId === activeCallRef.current;
-        if (current) saveInFlightRef.current = false;
+        if (current) {
+          saveInFlightRef.current = false;
+          saveInFlightPromiseRef.current = null;
+        }
         // Reconcile ONLY when this is still the current call: a superseded
         // response (a newer save / a storyId switch) must not re-apply its
         // stale snapshot over fresher state.
@@ -279,10 +318,15 @@ export function useNodeEditor(
       })
       .catch((err: unknown) => {
         const current = callId === activeCallRef.current;
-        if (current) saveInFlightRef.current = false;
+        if (current) {
+          saveInFlightRef.current = false;
+          saveInFlightPromiseRef.current = null;
+        }
         if (!mountedRef.current || !current) return;
         setSaveStatus({ kind: "failed", error: toAppError(err) });
       });
+    saveInFlightPromiseRef.current = settled;
+    return settled;
   }, [storyId, nodeId, reconcileContentFromOutput, savedVisibleMs, scheduleSave]);
 
   fireSaveRef.current = fireSave;
@@ -336,16 +380,18 @@ export function useNodeEditor(
     [editable, planEdit],
   );
 
-  const flushNodeAutoSave = useCallback(() => {
-    if (!editable || !storyId || !nodeId) return;
+  const flushNodeAutoSave = useCallback((): Promise<void> => {
+    if (!editable || !storyId || !nodeId) return Promise.resolve();
     if (
       textRef.current === persistedRef.current.text &&
       labelRef.current === persistedRef.current.label
     ) {
-      return;
+      // Nothing NEW to flush — but a save may still be in flight carrying
+      // this exact value: hand its settled-promise to the caller.
+      return saveInFlightPromiseRef.current ?? Promise.resolve();
     }
     clearTimer(debounceTimerRef);
-    fireSave();
+    return fireSave();
   }, [editable, storyId, nodeId, fireSave]);
 
   const attachMedia = useCallback(
@@ -401,19 +447,58 @@ export function useNodeEditor(
 
   const applyRecovery = useCallback(() => {
     if (recovery.kind !== "recoverable" || !storyId || !nodeId) return;
-    const { draftText, draftLabel } = recovery;
+    const { nodeId: draftNodeId, draftText, draftLabel } = recovery;
+    const proposed = recovery;
     setRecovery({ kind: "none" });
+    setRecoveryApplyError(null);
+    if (draftNodeId !== nodeId) {
+      // The buffer belongs to ANOTHER node than the one displayed (the
+      // editor opened on the start node while the crash interrupted a
+      // different one). Persist the recovered content EXPLICITLY to its own
+      // node — never through the displayed node's save path, which would
+      // apply the text to the wrong node. The local fields stay untouched.
+      void updateNodeContent({
+        storyId,
+        nodeId: draftNodeId,
+        text: draftText,
+        label: draftLabel,
+      })
+        .then(() => {
+          invalidateLibraryOverviewCache();
+          // The commit changed structure_json / content_checksum /
+          // updated_at in the base: the owner re-reads authoritatively so
+          // the local detail pair and the navigator labels stay coherent.
+          if (mountedRef.current) onCrossNodeRecoveryAppliedRef.current?.();
+        })
+        .catch((err: unknown) => {
+          // An EXPLICIT gesture failed: surface it inline AND re-propose
+          // the offer (the probe is deduplicated per story, a silent drop
+          // would strand the draft for the whole session). Re-buffer
+          // best-effort too, for the next session.
+          void recordNodeDraft({
+            storyId,
+            nodeId: draftNodeId,
+            draftText,
+            draftLabel,
+          }).catch(() => undefined);
+          if (!mountedRef.current) return;
+          setRecovery(proposed);
+          setRecoveryApplyError(toAppError(err));
+        });
+      return;
+    }
     setTextState(draftText);
     textRef.current = draftText;
     setLabelState(draftLabel);
     labelRef.current = draftLabel;
-    fireSave();
+    void fireSave();
   }, [recovery, storyId, nodeId, fireSave]);
 
   const discardRecovery = useCallback(() => {
     if (recovery.kind !== "recoverable" || !storyId) return;
     const draftAt = recovery.draftAt;
     setRecovery({ kind: "none" });
+    setRecoveryApplyError(null);
     void discardNodeDraft({ storyId, expectedDraftAt: draftAt }).catch(
       () => undefined,
     );
@@ -434,6 +519,7 @@ export function useNodeEditor(
         if (result.kind === "recoverable") {
           setRecovery({
             kind: "recoverable",
+            nodeId: result.nodeId,
             draftText: result.draftText,
             draftLabel: result.draftLabel,
             draftAt: result.draftAt,
@@ -518,6 +604,7 @@ export function useNodeEditor(
     imageBusy,
     audioBusy,
     recovery,
+    recoveryApplyError,
     setText,
     setLabel,
     flushNodeAutoSave,

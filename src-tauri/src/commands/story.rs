@@ -7,6 +7,7 @@ use crate::application::story::node::{
 use crate::application::story::recovery::{
     self, ApplyRecoveryInput as RecoveryApplyInput, RecordDraftInput,
 };
+use crate::application::story::structure::{self, MoveDirection};
 use crate::application::story::{self, CreateStoryInput, UpdateStoryInput};
 use crate::commands::shared::{base64_encode, parse_media_slot, validate_story_id};
 use crate::domain::shared::AppError;
@@ -14,10 +15,12 @@ use crate::domain::story::RecoveryDraftDelta;
 use crate::infrastructure::diagnostics::recovery_log;
 use crate::infrastructure::filesystem::{resolve_node_media_dir, MediaKind, MAX_MEDIA_BYTES};
 use crate::ipc::dto::{
-    ApplyRecoveryInputDto, AttachNodeMediaOutcomeDto, CreateStoryInputDto, DiscardDraftInputDto,
-    DiscardNodeDraftInputDto, NodeMediaPreviewDto, NodeMediaSlotInputDto, NodeWriteOutputDto,
-    RecordDraftInputDto, RecordNodeDraftInputDto, RecoverableDraftDto, RecoverableNodeDraftDto,
-    StoryCardDto, StoryDetailDto, UpdateNodeContentInputDto, UpdateStoryInputDto,
+    AddNodeOptionInputDto, AddStoryNodeInputDto, ApplyRecoveryInputDto, AttachNodeMediaOutcomeDto,
+    CreateStoryInputDto, DeleteStoryNodeInputDto, DiscardDraftInputDto, DiscardNodeDraftInputDto,
+    MoveDirectionDto, MoveStoryNodeInputDto, NodeMediaPreviewDto, NodeMediaSlotInputDto,
+    NodeWriteOutputDto, RecordDraftInputDto, RecordNodeDraftInputDto, RecoverableDraftDto,
+    RecoverableNodeDraftDto, RemoveNodeOptionInputDto, SetNodeOptionLinkInputDto, StoryCardDto,
+    StoryDetailDto, StructureWriteOutputDto, UpdateNodeContentInputDto, UpdateStoryInputDto,
     UpdateStoryOutputDto,
 };
 use crate::AppState;
@@ -67,11 +70,16 @@ pub fn update_story(
 /// Read a single story detail by id for the edit surface. Returns `null`
 /// when the row is missing — the UI treats that case as "Histoire
 /// introuvable" without needing to parse an error.
+///
+/// `node_id` is optional and targets the selected node's content projection
+/// (`None` = the start node) — the invoke stays backward-compatible for
+/// callers that omit it.
 #[tauri::command]
 pub fn get_story_detail(
     app: AppHandle,
     state: State<'_, AppState>,
     story_id: String,
+    node_id: Option<String>,
 ) -> Result<Option<StoryDetailDto>, AppError> {
     validate_story_id(&story_id)?;
     let app_data_dir = resolve_app_data_dir(&app)?;
@@ -79,7 +87,7 @@ pub fn get_story_detail(
         .db
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    story::get_story_detail(&db, &app_data_dir, &story_id)
+    story::get_story_detail(&db, &app_data_dir, &story_id, node_id.as_deref())
 }
 
 /// Persist a buffered keystroke value for a story (recovery flow).
@@ -164,7 +172,7 @@ pub fn read_recoverable_draft(
             .db
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let detail = story::get_story_detail(&db, &app_data_dir, &story_id)?;
+        let detail = story::get_story_detail(&db, &app_data_dir, &story_id, None)?;
         let draft = recovery::read_recoverable_draft(&db, &story_id)?;
         Ok(match (draft, detail) {
             (Some(d), Some(detail)) => {
@@ -577,10 +585,13 @@ pub fn read_recoverable_node_draft(
     let Some(draft) = node::read_node_draft(&db, &story_id)? else {
         return Ok(RecoverableNodeDraftDto::None);
     };
-    // Compare against the persisted node (projected from Rust). A missing story
-    // / unprojectable node / id mismatch means there is nothing to recover
-    // against — report `none`.
-    let persisted = story::get_story_detail(&db, &app_data_dir, &story_id)?
+    // Compare against the persisted node (projected from Rust), TARGETED by
+    // the draft's own node id — the untargeted projection would return the
+    // START node and silently kill recovery for any other node of the graph.
+    // A missing story / unprojectable structure / vanished node (the graceful
+    // fallback projects the start node, which the id filter then rejects)
+    // means there is nothing to recover against — report `none`.
+    let persisted = story::get_story_detail(&db, &app_data_dir, &story_id, Some(&draft.node_id))?
         .and_then(|d| d.node)
         .filter(|n| n.id == draft.node_id);
     let Some(persisted) = persisted else {
@@ -615,6 +626,113 @@ pub fn discard_node_draft(
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     node::discard_node_draft(&mut db, &input.story_id, input.expected_draft_at.as_deref())
+}
+
+/// Append a new empty node to the story's structure; with `linkFrom`, link
+/// the referenced option to the new node in the same transaction.
+#[tauri::command]
+pub fn add_story_node(
+    _app: AppHandle,
+    state: State<'_, AppState>,
+    input: AddStoryNodeInputDto,
+) -> Result<StructureWriteOutputDto, AppError> {
+    validate_story_id(&input.story_id)?;
+    let mut db = state
+        .db
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let link_from = input
+        .link_from
+        .as_ref()
+        .map(|l| (l.node_id.as_str(), l.option_index));
+    structure::add_node(&mut db, &input.story_id, link_from)
+}
+
+/// Delete a node from the story's structure (the start node is refused).
+#[tauri::command]
+pub fn delete_story_node(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    input: DeleteStoryNodeInputDto,
+) -> Result<StructureWriteOutputDto, AppError> {
+    validate_story_id(&input.story_id)?;
+    let app_data_dir = resolve_app_data_dir(&app)?;
+    let mut db = state
+        .db
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    structure::delete_node(&mut db, &app_data_dir, &input.story_id, &input.node_id)
+}
+
+/// Swap a node with its neighbor in the display order.
+#[tauri::command]
+pub fn move_story_node(
+    _app: AppHandle,
+    state: State<'_, AppState>,
+    input: MoveStoryNodeInputDto,
+) -> Result<StructureWriteOutputDto, AppError> {
+    validate_story_id(&input.story_id)?;
+    let mut db = state
+        .db
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let direction = match input.direction {
+        MoveDirectionDto::Up => MoveDirection::Up,
+        MoveDirectionDto::Down => MoveDirection::Down,
+    };
+    structure::move_node(&mut db, &input.story_id, &input.node_id, direction)
+}
+
+/// Add an option (its label typed at creation) to a node.
+#[tauri::command]
+pub fn add_node_option(
+    _app: AppHandle,
+    state: State<'_, AppState>,
+    input: AddNodeOptionInputDto,
+) -> Result<StructureWriteOutputDto, AppError> {
+    validate_story_id(&input.story_id)?;
+    let mut db = state
+        .db
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    structure::add_option(&mut db, &input.story_id, &input.node_id, &input.label)
+}
+
+/// Set an option's destination (`target` = an existing node id) or unlink it
+/// (`target` = null). A missing destination is refused, never written.
+#[tauri::command]
+pub fn set_node_option_link(
+    _app: AppHandle,
+    state: State<'_, AppState>,
+    input: SetNodeOptionLinkInputDto,
+) -> Result<StructureWriteOutputDto, AppError> {
+    validate_story_id(&input.story_id)?;
+    let mut db = state
+        .db
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    structure::set_option_link(
+        &mut db,
+        &input.story_id,
+        &input.node_id,
+        input.option_index,
+        input.target.as_deref(),
+    )
+}
+
+/// Remove an option from a node.
+#[tauri::command]
+pub fn remove_node_option(
+    _app: AppHandle,
+    state: State<'_, AppState>,
+    input: RemoveNodeOptionInputDto,
+) -> Result<StructureWriteOutputDto, AppError> {
+    validate_story_id(&input.story_id)?;
+    let mut db = state
+        .db
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    structure::remove_option(&mut db, &input.story_id, &input.node_id, input.option_index)
 }
 
 /// Resolve the Tauri `app_data_dir`, mapping a failure to a PII-free

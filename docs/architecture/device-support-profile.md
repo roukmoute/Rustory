@@ -429,6 +429,14 @@ own local files; the editor stores them as-is and **never transcodes** them.
   media transformer stays declared but not implemented (no story type requires
   transcoding yet). Associating a source media to a node is editing, not a device
   capability: it introduces no `SupportedOperation`.
+- **The native canonical model is a node graph** — one or more ordered nodes, a
+  designated start node, and per-node option links toward other nodes. Editing
+  that graph (adding, moving, deleting nodes; linking options) is pure local
+  editing and introduces no device capability either. Converting the canonical
+  node graph to a device pack layout (stage/action nodes, transitions) remains
+  EXPLICITLY out of scope: the story transcoder stays declared but not
+  implemented, and a native story — single-node or multi-node — stays
+  non-transferable at the write-plan gate until it exists.
 
 ## Local Artifact Import Contract
 
@@ -445,7 +453,7 @@ ambiguous, and what blocks the import. Anything not explicitly listed is refused
 | Type | Extension | Format version | Status |
 | --- | --- | --- | --- |
 | Rustory story artifact | `.rustory` | `formatVersion == 1` | ✅ supported (import + export) |
-| Structured archive / multi-element folder | — | — | ❌ deferred (no node/media model nor archive reader yet) |
+| Structured archive / multi-element folder | — | — | ❌ deferred (no archive reader yet; the single-file `.rustory` artifact stays the only supported type) |
 
 ### `.rustory` v1 format contract
 
@@ -465,7 +473,7 @@ ambiguous, or blocking:
 | Envelope | JSON parses, all required fields present, no unknown field | malformed JSON, missing field, unknown field |
 | Format version | `formatVersion == 1` | `formatVersion != 1` (a newer/older artifact this build does not understand) |
 | Schema version | `schemaVersion` is the supported canonical version | a `structureJson` that fails canonical validation (`validate_canonical`) — unsupported / incoherent schema |
-| Structure | `structureJson` is canonically valid per `validate_canonical` (the current canonical schema, one current node) | non-canonical / corrupt structure |
+| Structure | `structureJson` is canonically valid per `validate_canonical` (the current canonical schema — an ordered node graph with a start node and option links) | non-canonical / corrupt structure |
 | Integrity | `SHA-256(structureJson)` equals the declared `contentChecksum` | checksum divergent (silent corruption) — never recomputed/overwritten, only verified |
 | Title | normalizable to a non-empty valid title | empty after normalization / invalid characters |
 | Timestamps | `createdAt` / `updatedAt` are ISO-8601 UTC ms | — (a malformed timestamp is **ambiguous**, preserved and flagged, never blocking) |

@@ -37,12 +37,16 @@ pub struct UpdateStoryOutputDto {
 /// are what the `contentChecksum` covers, so the UI must never reserialize
 /// or reformat it.
 ///
-/// `editable` says whether the current node may be edited (native stories) or
-/// is projected read-only (imported stories — their declared edit scope is a
-/// later iteration). `node` is the current node PROJECTED BY RUST — the UI
-/// consumes it and never recomposes a node from `structureJson`. It is `None`
-/// when the structure could not be projected (corrupt / drifted), which the UI
-/// renders as the named degraded state.
+/// `editable` says whether the story may be edited (native stories) or is
+/// projected read-only (imported stories — their declared edit scope is a
+/// later iteration). `structure` is the LIGHT node graph PROJECTED BY RUST for
+/// the structure navigator; `node` is the SELECTED node's full content (the
+/// start node by default). The UI consumes both projections and never
+/// recomposes anything from `structureJson`. Both are `None` when a BLOCKING
+/// canonical issue prevents projecting (corrupt / drifted), which the UI
+/// renders as the named degraded state; a FIXABLE issue (a broken option
+/// link) keeps them projected so the flagged spot stays visible and
+/// repairable.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StoryDetailDto {
@@ -54,7 +58,64 @@ pub struct StoryDetailDto {
     pub created_at: String,
     pub updated_at: String,
     pub editable: bool,
+    pub structure: Option<StoryStructureDto>,
     pub node: Option<NodeContentDto>,
+}
+
+/// The story's node graph, projected LIGHT for the structure navigator: the
+/// start node id plus the ordered node list (order = canonical `nodes[]`
+/// order — the display / navigation order). No text, no media resolution
+/// (that stays on the selected node's `NodeContentDto`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StoryStructureDto {
+    pub start_node_id: String,
+    pub nodes: Vec<NodeGraphDto>,
+}
+
+/// One node of the projected graph. `is_start` marks the entry point;
+/// `has_issue` is true when at least one of the node's options points at a
+/// node absent from the graph (a localized, repairable issue — the navigator
+/// flags the entry without hiding the rest).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NodeGraphDto {
+    pub id: String,
+    pub label: String,
+    pub is_start: bool,
+    pub has_issue: bool,
+    pub options: Vec<OptionLinkDto>,
+}
+
+/// One option of a node, with its link state DERIVED BY RUST — the frontend
+/// never re-derives it from `target`:
+/// `target = None` → `unlinked`; `target` present in the graph → `linked`;
+/// `target` ABSENT from the graph → `broken` (rendered as `destination à
+/// corriger`, never prose containing "broken").
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OptionLinkDto {
+    pub label: String,
+    pub target: Option<String>,
+    pub state: String,
+}
+
+/// Wire outcome of every STRUCTURAL write (`add_story_node`,
+/// `delete_story_node`, `move_story_node`, `add_node_option`,
+/// `set_node_option_link`, `remove_node_option`). Carries the freshly
+/// committed `updatedAt` / `contentChecksum`, the EXACT committed
+/// `structureJson` bytes (the contract says those bytes are what the
+/// checksum covers — the local detail must never hold a stale pair), and
+/// the RE-PROJECTED graph so the UI reconciles from Rust's truth without a
+/// follow-up read.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StructureWriteOutputDto {
+    pub id: String,
+    pub updated_at: String,
+    pub content_checksum: String,
+    pub structure_json: String,
+    pub structure: StoryStructureDto,
 }
 
 /// The current node of a story, projected for the editor. Carries the stable
@@ -219,6 +280,82 @@ pub struct DiscardNodeDraftInputDto {
     pub expected_draft_at: Option<String>,
 }
 
+/// Input for `add_story_node`. `linkFrom` is the OPTIONAL atomic link-back:
+/// when present, the newly created node becomes the destination of the
+/// referenced option IN THE SAME transaction (the "create and link" gesture —
+/// never an intermediate half-state).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AddStoryNodeInputDto {
+    pub story_id: String,
+    pub link_from: Option<OptionRefDto>,
+}
+
+/// A reference to one option of one node (used by `linkFrom`).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct OptionRefDto {
+    pub node_id: String,
+    pub option_index: usize,
+}
+
+/// Input for `delete_story_node`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DeleteStoryNodeInputDto {
+    pub story_id: String,
+    pub node_id: String,
+}
+
+/// Input for `move_story_node` — swap the node with its neighbor in the
+/// DISPLAY order (`nodes[]`); the start node is designated by `startNodeId`,
+/// not by position, so moving it is legitimate.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct MoveStoryNodeInputDto {
+    pub story_id: String,
+    pub node_id: String,
+    pub direction: MoveDirectionDto,
+}
+
+/// Direction of a node move.
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum MoveDirectionDto {
+    Up,
+    Down,
+}
+
+/// Input for `add_node_option` — the option's label is typed at creation.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AddNodeOptionInputDto {
+    pub story_id: String,
+    pub node_id: String,
+    pub label: String,
+}
+
+/// Input for `set_node_option_link`. `target = Some(id)` links the option to
+/// an EXISTING node (a missing destination is refused, never written);
+/// `target = None` unlinks it.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SetNodeOptionLinkInputDto {
+    pub story_id: String,
+    pub node_id: String,
+    pub option_index: usize,
+    pub target: Option<String>,
+}
+
+/// Input for `remove_node_option`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RemoveNodeOptionInputDto {
+    pub story_id: String,
+    pub node_id: String,
+    pub option_index: usize,
+}
+
 /// Wire outcome of `read_recoverable_node_draft`. Tagged union over `none`
 /// and `recoverable`, mirroring `RecoverableDraftDto` for the title.
 #[derive(Debug, Clone, Serialize)]
@@ -348,12 +485,22 @@ mod tests {
         let dto = StoryDetailDto {
             id: "sid".into(),
             title: "Titre".into(),
-            schema_version: 2,
-            structure_json: "{\"schemaVersion\":2,\"nodes\":[]}".into(),
+            schema_version: 3,
+            structure_json: "{\"schemaVersion\":3,\"startNodeId\":\"n1\",\"nodes\":[]}".into(),
             content_checksum: "0".repeat(64),
             created_at: "2026-04-23T09:00:00.000Z".into(),
             updated_at: "2026-04-23T10:00:00.000Z".into(),
             editable: true,
+            structure: Some(StoryStructureDto {
+                start_node_id: "n1".into(),
+                nodes: vec![NodeGraphDto {
+                    id: "n1".into(),
+                    label: "Début".into(),
+                    is_start: true,
+                    has_issue: false,
+                    options: vec![],
+                }],
+            }),
             node: Some(NodeContentDto {
                 id: "n1".into(),
                 text: "Bonjour".into(),
@@ -371,12 +518,18 @@ mod tests {
         let v = serde_json::to_value(&dto).expect("serialize");
         assert_eq!(v["id"], "sid");
         assert_eq!(v["title"], "Titre");
-        assert_eq!(v["schemaVersion"], 2);
-        assert_eq!(v["structureJson"], "{\"schemaVersion\":2,\"nodes\":[]}");
+        assert_eq!(v["schemaVersion"], 3);
+        assert_eq!(
+            v["structureJson"],
+            "{\"schemaVersion\":3,\"startNodeId\":\"n1\",\"nodes\":[]}"
+        );
         assert_eq!(v["contentChecksum"].as_str().unwrap().len(), 64);
         assert_eq!(v["createdAt"], "2026-04-23T09:00:00.000Z");
         assert_eq!(v["updatedAt"], "2026-04-23T10:00:00.000Z");
         assert_eq!(v["editable"], true);
+        assert_eq!(v["structure"]["startNodeId"], "n1");
+        assert_eq!(v["structure"]["nodes"][0]["id"], "n1");
+        assert_eq!(v["structure"]["nodes"][0]["isStart"], true);
         assert_eq!(v["node"]["id"], "n1");
         assert_eq!(v["node"]["text"], "Bonjour");
         assert_eq!(v["node"]["label"], "Début");
@@ -458,6 +611,172 @@ mod tests {
     fn attach_node_media_outcome_cancelled_serializes_with_kind() {
         let v = serde_json::to_value(&AttachNodeMediaOutcomeDto::Cancelled).expect("serialize");
         assert_eq!(v, serde_json::json!({ "kind": "cancelled" }));
+    }
+
+    // ------ StoryStructureDto / NodeGraphDto / OptionLinkDto ------
+
+    #[test]
+    fn story_structure_serializes_in_camel_case_with_derived_states() {
+        let dto = StoryStructureDto {
+            start_node_id: "n1".into(),
+            nodes: vec![NodeGraphDto {
+                id: "n1".into(),
+                label: "Début".into(),
+                is_start: true,
+                has_issue: true,
+                options: vec![
+                    OptionLinkDto {
+                        label: "Continuer".into(),
+                        target: Some("n2".into()),
+                        state: "linked".into(),
+                    },
+                    OptionLinkDto {
+                        label: "Plus tard".into(),
+                        target: None,
+                        state: "unlinked".into(),
+                    },
+                    OptionLinkDto {
+                        label: "Perdu".into(),
+                        target: Some("ghost".into()),
+                        state: "broken".into(),
+                    },
+                ],
+            }],
+        };
+        let v = serde_json::to_value(&dto).expect("serialize");
+        assert_eq!(v["startNodeId"], "n1");
+        assert_eq!(v["nodes"][0]["id"], "n1");
+        assert_eq!(v["nodes"][0]["isStart"], true);
+        assert_eq!(v["nodes"][0]["hasIssue"], true);
+        assert_eq!(v["nodes"][0]["options"][0]["state"], "linked");
+        assert_eq!(v["nodes"][0]["options"][0]["target"], "n2");
+        assert_eq!(v["nodes"][0]["options"][1]["state"], "unlinked");
+        // An unlinked option's target is an EXPLICIT null, never an absent key
+        // (the TS guard checks the state↔target coherence).
+        assert!(v["nodes"][0]["options"][1]
+            .as_object()
+            .expect("option obj")
+            .contains_key("target"));
+        assert!(v["nodes"][0]["options"][1]["target"].is_null());
+        assert_eq!(v["nodes"][0]["options"][2]["state"], "broken");
+        for snake in ["start_node_id", "is_start", "has_issue"] {
+            assert!(v.get(snake).is_none(), "{snake} must be camelCase");
+        }
+    }
+
+    #[test]
+    fn story_detail_structure_is_a_required_key_even_when_null() {
+        // The `structure` field must serialize as an explicit null (not an
+        // absent key) so the TS mirror can require the key.
+        let dto = StoryDetailDto {
+            id: "sid".into(),
+            title: "Titre".into(),
+            schema_version: 3,
+            structure_json: "{}".into(),
+            content_checksum: "0".repeat(64),
+            created_at: "2026-07-04T09:00:00.000Z".into(),
+            updated_at: "2026-07-04T10:00:00.000Z".into(),
+            editable: false,
+            structure: None,
+            node: None,
+        };
+        let v = serde_json::to_value(&dto).expect("serialize");
+        assert!(v.as_object().expect("obj").contains_key("structure"));
+        assert!(v["structure"].is_null());
+    }
+
+    #[test]
+    fn structure_write_output_serializes_in_camel_case() {
+        let dto = StructureWriteOutputDto {
+            id: "sid".into(),
+            updated_at: "2026-07-04T10:00:00.000Z".into(),
+            content_checksum: "0".repeat(64),
+            structure_json: "{\"schemaVersion\":3,\"startNodeId\":\"n1\",\"nodes\":[]}".into(),
+            structure: StoryStructureDto {
+                start_node_id: "n1".into(),
+                nodes: vec![],
+            },
+        };
+        let v = serde_json::to_value(&dto).expect("serialize");
+        assert_eq!(v["id"], "sid");
+        assert_eq!(v["updatedAt"], "2026-07-04T10:00:00.000Z");
+        assert_eq!(v["contentChecksum"].as_str().expect("str").len(), 64);
+        assert_eq!(
+            v["structureJson"],
+            "{\"schemaVersion\":3,\"startNodeId\":\"n1\",\"nodes\":[]}"
+        );
+        assert_eq!(v["structure"]["startNodeId"], "n1");
+        assert!(v.get("updated_at").is_none());
+        assert!(v.get("content_checksum").is_none());
+        assert!(v.get("structure_json").is_none());
+    }
+
+    // ------ Structural mutation inputs ------
+
+    #[test]
+    fn add_story_node_input_accepts_optional_link_from() {
+        let bare: AddStoryNodeInputDto =
+            serde_json::from_value(serde_json::json!({ "storyId": "s" })).expect("deser");
+        assert!(bare.link_from.is_none());
+
+        let linked: AddStoryNodeInputDto = serde_json::from_value(serde_json::json!({
+            "storyId": "s",
+            "linkFrom": { "nodeId": "n1", "optionIndex": 2 },
+        }))
+        .expect("deser");
+        let link = linked.link_from.expect("linkFrom");
+        assert_eq!(link.node_id, "n1");
+        assert_eq!(link.option_index, 2);
+    }
+
+    #[test]
+    fn add_story_node_input_rejects_unknown_field() {
+        serde_json::from_value::<AddStoryNodeInputDto>(serde_json::json!({
+            "storyId": "s", "position": 0,
+        }))
+        .expect_err("must reject unknown field");
+    }
+
+    #[test]
+    fn move_story_node_input_parses_camel_case_directions() {
+        for (wire, expected) in [
+            ("up", MoveDirectionDto::Up),
+            ("down", MoveDirectionDto::Down),
+        ] {
+            let dto: MoveStoryNodeInputDto = serde_json::from_value(serde_json::json!({
+                "storyId": "s", "nodeId": "n1", "direction": wire,
+            }))
+            .expect("deser");
+            assert_eq!(dto.direction, expected);
+        }
+        serde_json::from_value::<MoveStoryNodeInputDto>(serde_json::json!({
+            "storyId": "s", "nodeId": "n1", "direction": "left",
+        }))
+        .expect_err("unknown direction must be rejected");
+    }
+
+    #[test]
+    fn set_node_option_link_input_accepts_null_and_string_target() {
+        let unlink: SetNodeOptionLinkInputDto = serde_json::from_value(serde_json::json!({
+            "storyId": "s", "nodeId": "n1", "optionIndex": 0, "target": null,
+        }))
+        .expect("deser");
+        assert!(unlink.target.is_none());
+
+        let link: SetNodeOptionLinkInputDto = serde_json::from_value(serde_json::json!({
+            "storyId": "s", "nodeId": "n1", "optionIndex": 1, "target": "n2",
+        }))
+        .expect("deser");
+        assert_eq!(link.target.as_deref(), Some("n2"));
+        assert_eq!(link.option_index, 1);
+    }
+
+    #[test]
+    fn remove_node_option_input_rejects_snake_case() {
+        serde_json::from_value::<RemoveNodeOptionInputDto>(serde_json::json!({
+            "storyId": "s", "nodeId": "n1", "option_index": 0,
+        }))
+        .expect_err("must reject snake_case field");
     }
 
     #[test]

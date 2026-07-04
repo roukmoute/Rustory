@@ -9,6 +9,7 @@ import type { StateChipProps } from "../../../shared/ui";
 import type { AppError } from "../../../shared/errors/app-error";
 import type { StoryDetailDto } from "../../../shared/ipc-contracts/story";
 
+import { OptionLinkEditor } from "./OptionLinkEditor";
 import { RecoveryBanner } from "./RecoveryBanner";
 import { RecoveryReadErrorBanner } from "./RecoveryReadErrorBanner";
 import { StoryNodeEditorHost } from "./StoryNodeEditorHost";
@@ -16,6 +17,7 @@ import { StoryStructureNavigator } from "./StoryStructureNavigator";
 import type { SaveStatus } from "../hooks/use-story-editor";
 import type { UseNodeEditor } from "../hooks/use-node-editor";
 import type { UseStoryRecovery } from "../hooks/use-story-recovery";
+import type { UseStructureEditor } from "../hooks/use-structure-editor";
 
 import "./StoryEditorShell.css";
 
@@ -67,6 +69,8 @@ export interface StoryEditorShellProps {
   exporter: UseStoryExport;
   /** Current-node editor (text/metadata autosave + media actions). */
   nodeEditor: UseNodeEditor;
+  /** Structure editor (node selection + acknowledged structural mutations). */
+  structureEditor: UseStructureEditor;
   onSetDraftTitle: (next: string) => void;
   onRetrySave: () => void;
   /** Flush BOTH the title and node autosaves before the export boundary opens. */
@@ -95,6 +99,7 @@ export function StoryEditorShell({
   recovery,
   exporter,
   nodeEditor,
+  structureEditor,
   onSetDraftTitle,
   onRetrySave,
   onFlushAutoSave,
@@ -253,19 +258,97 @@ export function StoryEditorShell({
       </section>
 
       {/* The two content zones coexist with the state bandeau (AC1). The
-          navigator and the node editor both consume the node PROJECTED by Rust
-          (`detail.node`), never re-parsing `structureJson`. */}
+          navigator, the node editor and the option-link editor all consume
+          the projections FROM RUST (`detail.structure` / `detail.node`),
+          never re-parsing `structureJson`. Structural actions are gated
+          while a recovery decision is pending — mutating the graph under an
+          undecided recovery would race the buffered content. */}
       <div className="story-editor-shell__zones">
         <StoryStructureNavigator
           title={detail.title}
-          node={detail.node}
+          structure={detail.structure}
           currentNodeId={nodeEditor.nodeId}
+          editable={detail.editable && !recoveryActive}
+          busy={structureEditor.busy}
+          nodeError={
+            structureEditor.lastError !== null &&
+            structureEditor.lastError.context.kind === "node"
+              ? {
+                  nodeId: structureEditor.lastError.context.nodeId,
+                  error: structureEditor.lastError.error,
+                }
+              : null
+          }
+          globalError={
+            structureEditor.lastError !== null &&
+            structureEditor.lastError.context.kind === "global"
+              ? structureEditor.lastError.error
+              : null
+          }
+          onSelectNode={structureEditor.selectNode}
+          onAddNode={structureEditor.addNode}
+          onMoveNode={structureEditor.moveNode}
+          onDeleteNode={structureEditor.deleteNode}
         />
         <StoryNodeEditorHost
           storyId={detail.id}
           editor={nodeEditor}
           gated={recoveryActive}
-        />
+        >
+          <OptionLinkEditor
+            node={
+              detail.structure?.nodes.find(
+                (node) => node.id === nodeEditor.nodeId,
+              ) ?? null
+            }
+            nodes={detail.structure?.nodes ?? []}
+            editable={detail.editable && !recoveryActive}
+            busy={structureEditor.busy}
+            optionError={
+              structureEditor.lastError !== null &&
+              structureEditor.lastError.context.kind === "option"
+                ? {
+                    nodeId: structureEditor.lastError.context.nodeId,
+                    optionIndex: structureEditor.lastError.context.optionIndex,
+                    error: structureEditor.lastError.error,
+                  }
+                : null
+            }
+            onAddOption={(label) => {
+              if (nodeEditor.nodeId !== null) {
+                structureEditor.addOption(nodeEditor.nodeId, label);
+              }
+            }}
+            onLink={(optionIndex, target) => {
+              if (nodeEditor.nodeId !== null) {
+                structureEditor.setOptionLink(
+                  nodeEditor.nodeId,
+                  optionIndex,
+                  target,
+                );
+              }
+            }}
+            onCreateAndLink={(optionIndex) => {
+              if (nodeEditor.nodeId !== null) {
+                structureEditor.addNodeAndLink(nodeEditor.nodeId, optionIndex);
+              }
+            }}
+            onUnlink={(optionIndex) => {
+              if (nodeEditor.nodeId !== null) {
+                structureEditor.setOptionLink(
+                  nodeEditor.nodeId,
+                  optionIndex,
+                  null,
+                );
+              }
+            }}
+            onRemoveOption={(optionIndex) => {
+              if (nodeEditor.nodeId !== null) {
+                structureEditor.removeOption(nodeEditor.nodeId, optionIndex);
+              }
+            }}
+          />
+        </StoryNodeEditorHost>
       </div>
 
       <section className="story-editor-shell__actions-region">

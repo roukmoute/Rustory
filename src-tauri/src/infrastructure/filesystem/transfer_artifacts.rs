@@ -425,7 +425,7 @@ mod tests {
     use super::*;
     use crate::domain::transfer::verify_aggregate;
 
-    const HEALTHY_JSON: &str = "{\"schemaVersion\":2,\"nodes\":[{\"id\":\"n1\",\"text\":\"\",\"label\":\"\",\"imageAssetId\":null,\"audioAssetId\":null}]}";
+    const HEALTHY_JSON: &str = "{\"schemaVersion\":3,\"startNodeId\":\"n1\",\"nodes\":[{\"id\":\"n1\",\"text\":\"\",\"label\":\"\",\"imageAssetId\":null,\"audioAssetId\":null,\"options\":[]}]}";
 
     fn budget() -> Duration {
         Duration::from_secs(30)

@@ -11,7 +11,7 @@ pub use preflight::{
     Severity,
 };
 pub use schema::{
-    CanonicalNode, CanonicalStructure, CANONICAL_STORY_SCHEMA_VERSION, MAX_TITLE_CHARS,
-    START_NODE_ID,
+    CanonicalNode, CanonicalOption, CanonicalStructure, LegacyNodeV2, LegacyStructureV2,
+    CANONICAL_STORY_SCHEMA_VERSION, MAX_TITLE_CHARS, START_NODE_ID,
 };
 pub use validation::{map_error, normalize_title, validate_title, StoryTitleError};

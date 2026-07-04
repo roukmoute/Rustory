@@ -17,6 +17,7 @@ use std::time::Duration;
 use rustory_lib::application::device::transfer::{read_transfer_preview, TransferPreviewOutcome};
 use rustory_lib::domain::device::{format_pack_uuid, pack_short_id, DeviceLibrary};
 use rustory_lib::domain::shared::AppError;
+use rustory_lib::domain::story::content_checksum;
 use rustory_lib::infrastructure::db::{self, DbHandle};
 use rustory_lib::infrastructure::device::{
     compute_device_identifier, DeviceLibraryReader, SystemDeviceLibraryReader, SystemDeviceScanner,
@@ -60,16 +61,18 @@ fn open_db(tmp: &TempDir) -> DbHandle {
     handle
 }
 
+/// A COHERENT healthy v3 story: column version, structure bytes and checksum
+/// agree — the preview outcomes under test must never ride on an accidental
+/// integrity failure that would mask a real regression.
 fn insert_story(db: &Mutex<DbHandle>, id: &str, title: &str) {
+    let structure_json = "{\"schemaVersion\":3,\"startNodeId\":\"n1\",\"nodes\":[{\"id\":\"n1\",\"text\":\"\",\"label\":\"\",\"imageAssetId\":null,\"audioAssetId\":null,\"options\":[]}]}";
     db.lock()
         .unwrap()
         .conn()
         .execute(
             "INSERT INTO stories (id, title, schema_version, structure_json, content_checksum, created_at, updated_at) \
-             VALUES (?1, ?2, 2, '{\"schemaVersion\":2,\"nodes\":[{\"id\":\"n1\",\"text\":\"\",\"label\":\"\",\"imageAssetId\":null,\"audioAssetId\":null}]}', \
-             '0000000000000000000000000000000000000000000000000000000000000000', \
-             '2026-06-16T00:00:00.000Z', '2026-06-16T00:00:00.000Z')",
-            rusqlite::params![id, title],
+             VALUES (?1, ?2, 3, ?3, ?4, '2026-06-16T00:00:00.000Z', '2026-06-16T00:00:00.000Z')",
+            rusqlite::params![id, title, structure_json, content_checksum(structure_json)],
         )
         .expect("insert story");
 }

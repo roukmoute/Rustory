@@ -3,15 +3,22 @@ import { describe, expect, it } from "vitest";
 import {
   isAttachNodeMediaOutcome,
   isNodeContentDto,
+  isNodeGraph,
   isNodeMediaPreview,
   isNodeMediaSlot,
   isNodeWriteOutput,
+  isOptionLink,
   isRecoverableDraft,
   isRecoverableNodeDraft,
   isStoryDetailDto,
+  isStoryStructureDto,
+  isStructureWriteOutput,
   isUpdateStoryOutput,
   type NodeContentDto,
+  type NodeGraph,
   type StoryDetailDto,
+  type StoryStructure,
+  type StructureWriteOutput,
 } from "./story";
 
 const VALID_DETAIL: StoryDetailDto = {
@@ -23,6 +30,12 @@ const VALID_DETAIL: StoryDetailDto = {
   createdAt: "2026-04-23T09:00:00.000Z",
   updatedAt: "2026-04-23T10:00:00.000Z",
   editable: true,
+  structure: {
+    startNodeId: "n1",
+    nodes: [
+      { id: "n1", label: "", isStart: true, hasIssue: false, options: [] },
+    ],
+  },
   node: { id: "n1", text: "", label: "", image: null, audio: null },
 };
 
@@ -118,6 +131,205 @@ describe("isStoryDetailDto", () => {
         updatedAt: "2026-04-23T10:00:00.000+00:00",
       }),
     ).toBe(false);
+  });
+
+  it("accepts the blocking degraded state (structure AND node both null)", () => {
+    expect(
+      isStoryDetailDto({ ...VALID_DETAIL, structure: null, node: null }),
+    ).toBe(true);
+  });
+
+  it("rejects an impossible DTO where structure/node nullity diverges", () => {
+    // Rust degrades BOTH projections together (Blocking) and projects BOTH
+    // on a sound graph — one null without the other is drift.
+    expect(isStoryDetailDto({ ...VALID_DETAIL, structure: null })).toBe(false);
+    expect(isStoryDetailDto({ ...VALID_DETAIL, node: null })).toBe(false);
+  });
+
+  it("rejects a payload whose structure key is absent", () => {
+    // The key is REQUIRED on the wire (Rust serializes an explicit null) —
+    // an absent key is drift, never a tolerated legacy shape.
+    const { structure: _omit, ...rest } = VALID_DETAIL;
+    expect(isStoryDetailDto(rest)).toBe(false);
+  });
+
+  it("rejects a malformed structure object", () => {
+    expect(
+      isStoryDetailDto({ ...VALID_DETAIL, structure: { startNodeId: "" } }),
+    ).toBe(false);
+  });
+});
+
+describe("structure guards", () => {
+  const LINKED = { label: "Continuer", target: "n2", state: "linked" };
+  const UNLINKED = { label: "Plus tard", target: null, state: "unlinked" };
+  const BROKEN = { label: "Perdu", target: "ghost", state: "broken" };
+
+  const VALID_NODE: NodeGraph = {
+    id: "n1",
+    label: "Début",
+    isStart: true,
+    hasIssue: true,
+    options: [
+      LINKED as NodeGraph["options"][number],
+      UNLINKED as NodeGraph["options"][number],
+      BROKEN as NodeGraph["options"][number],
+    ],
+  };
+
+  const VALID_STRUCTURE: StoryStructure = {
+    startNodeId: "n1",
+    nodes: [
+      VALID_NODE,
+      { id: "n2", label: "", isStart: false, hasIssue: false, options: [] },
+    ],
+  };
+
+  it("isOptionLink accepts the three canonical states", () => {
+    expect(isOptionLink(LINKED)).toBe(true);
+    expect(isOptionLink(UNLINKED)).toBe(true);
+    expect(isOptionLink(BROKEN)).toBe(true);
+  });
+
+  it("isOptionLink rejects an incoherent state↔target pair", () => {
+    // unlinked with a target, linked/broken without one: drift, never
+    // accommodated (a broken link must never pass as linked).
+    expect(
+      isOptionLink({ label: "x", target: "n2", state: "unlinked" }),
+    ).toBe(false);
+    expect(isOptionLink({ label: "x", target: null, state: "linked" })).toBe(
+      false,
+    );
+    expect(isOptionLink({ label: "x", target: null, state: "broken" })).toBe(
+      false,
+    );
+    expect(isOptionLink({ label: "x", target: "", state: "linked" })).toBe(
+      false,
+    );
+    expect(isOptionLink({ label: "x", target: "n2", state: "ok" })).toBe(
+      false,
+    );
+  });
+
+  it("isNodeGraph accepts a coherent node", () => {
+    expect(isNodeGraph(VALID_NODE)).toBe(true);
+  });
+
+  it("isNodeGraph rejects a hasIssue flag that disagrees with the links", () => {
+    expect(isNodeGraph({ ...VALID_NODE, hasIssue: false })).toBe(false);
+    expect(
+      isNodeGraph({
+        id: "n3",
+        label: "",
+        isStart: false,
+        hasIssue: true,
+        options: [],
+      }),
+    ).toBe(false);
+  });
+
+  it("isNodeGraph rejects an empty id", () => {
+    expect(isNodeGraph({ ...VALID_NODE, id: "" })).toBe(false);
+  });
+
+  it("isStoryStructureDto accepts a coherent graph", () => {
+    expect(isStoryStructureDto(VALID_STRUCTURE)).toBe(true);
+  });
+
+  it("isStoryStructureDto rejects an empty node list", () => {
+    expect(
+      isStoryStructureDto({ startNodeId: "n1", nodes: [] }),
+    ).toBe(false);
+  });
+
+  it("isStoryStructureDto rejects a start id absent from the nodes", () => {
+    expect(
+      isStoryStructureDto({
+        startNodeId: "ghost",
+        nodes: VALID_STRUCTURE.nodes.map((n) => ({ ...n, isStart: false })),
+      }),
+    ).toBe(false);
+  });
+
+  it("isStoryStructureDto rejects isStart flags that disagree with startNodeId", () => {
+    expect(
+      isStoryStructureDto({
+        ...VALID_STRUCTURE,
+        nodes: VALID_STRUCTURE.nodes.map((n) => ({ ...n, isStart: false })),
+      }),
+    ).toBe(false);
+  });
+
+  it("isStoryStructureDto rejects duplicate node ids (Rust never projects them)", () => {
+    expect(
+      isStoryStructureDto({
+        startNodeId: "n1",
+        nodes: [
+          { id: "n1", label: "", isStart: true, hasIssue: false, options: [] },
+          { id: "n1", label: "", isStart: true, hasIssue: false, options: [] },
+        ],
+      }),
+    ).toBe(false);
+  });
+
+  it("isStoryStructureDto re-checks linked/broken against the graph's own ids", () => {
+    // `linked` toward an id ABSENT from the graph: Rust would have derived
+    // `broken` — repainting it as live is exactly the drift to refuse.
+    expect(
+      isStoryStructureDto({
+        startNodeId: "n1",
+        nodes: [
+          {
+            id: "n1",
+            label: "",
+            isStart: true,
+            hasIssue: false,
+            options: [{ label: "x", target: "ghost", state: "linked" }],
+          },
+        ],
+      }),
+    ).toBe(false);
+    // `broken` toward an id PRESENT in the graph: the inverse drift.
+    expect(
+      isStoryStructureDto({
+        startNodeId: "n1",
+        nodes: [
+          {
+            id: "n1",
+            label: "",
+            isStart: true,
+            hasIssue: true,
+            options: [{ label: "x", target: "n2", state: "broken" }],
+          },
+          { id: "n2", label: "", isStart: false, hasIssue: false, options: [] },
+        ],
+      }),
+    ).toBe(false);
+  });
+
+  it("isStructureWriteOutput validates the full acknowledgement", () => {
+    const output: StructureWriteOutput = {
+      id: "sid",
+      updatedAt: "2026-07-04T10:00:00.000Z",
+      contentChecksum: "a".repeat(64),
+      structureJson: '{"schemaVersion":3,"startNodeId":"n1","nodes":[]}',
+      structure: VALID_STRUCTURE,
+    };
+    expect(isStructureWriteOutput(output)).toBe(true);
+    expect(isStructureWriteOutput({ ...output, structure: null })).toBe(false);
+    expect(
+      isStructureWriteOutput({ ...output, contentChecksum: "A".repeat(64) }),
+    ).toBe(false);
+    expect(
+      isStructureWriteOutput({ ...output, updatedAt: "hier" }),
+    ).toBe(false);
+    // The committed bytes are part of the ACK contract — absent or empty is
+    // drift (the local structureJson/checksum pair would go stale).
+    const { structureJson: _omit, ...withoutBytes } = output;
+    expect(isStructureWriteOutput(withoutBytes)).toBe(false);
+    expect(isStructureWriteOutput({ ...output, structureJson: "" })).toBe(
+      false,
+    );
   });
 });
 
@@ -267,13 +479,15 @@ const VALID_NODE: NodeContentDto = {
 };
 
 describe("node guards", () => {
-  it("isStoryDetailDto requires editable + a valid (or null) node", () => {
+  it("isStoryDetailDto requires editable + a valid (or coupled-null) node", () => {
     expect(isStoryDetailDto(VALID_DETAIL)).toBe(true);
     // editable missing.
     const { editable: _e, ...noEditable } = VALID_DETAIL;
     expect(isStoryDetailDto(noEditable)).toBe(false);
-    // node may be null.
-    expect(isStoryDetailDto({ ...VALID_DETAIL, node: null })).toBe(true);
+    // node may be null — only together with a null structure (degraded).
+    expect(
+      isStoryDetailDto({ ...VALID_DETAIL, structure: null, node: null }),
+    ).toBe(true);
     // a drifted node object is rejected.
     expect(isStoryDetailDto({ ...VALID_DETAIL, node: { id: "" } })).toBe(false);
   });

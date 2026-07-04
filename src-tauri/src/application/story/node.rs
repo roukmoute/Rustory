@@ -257,10 +257,13 @@ where
     // media mutation re-serializes the structure from the still-old text, so
     // dropping the draft here would lose an un-flushed keystroke on a crash
     // (NFR8). Media mutations leave the draft for the next content save.
+    // The DELETE is CONDITIONED on the mutated node: the single per-story
+    // draft row may buffer ANOTHER node's unsaved keystrokes, and a save of
+    // this node must never silently destroy that other buffer (NFR8).
     if consume_draft {
         tx.execute(
-            "DELETE FROM node_drafts WHERE story_id = ?1",
-            rusqlite::params![story_id],
+            "DELETE FROM node_drafts WHERE story_id = ?1 AND node_id = ?2",
+            rusqlite::params![story_id, node_id],
         )
         .map_err(|e| transport_error(&e, "delete_draft", story_id))?;
     }
@@ -531,7 +534,16 @@ pub fn sweep_orphan_node_media(db: &DbHandle, app_data_dir: &Path) {
 
 /// Best-effort delete of a promoted media file IF no remaining `assets` row
 /// references the same content (content-addressed sharing). Used by the
-/// replacement GC, the removal GC, and the attach-failure compensation.
+/// replacement GC, the removal GC, the attach-failure compensation, and the
+/// structural node deletion (`structure::delete_node`).
+pub(crate) fn gc_unreferenced_media_file(
+    db: &DbHandle,
+    media_dir: &Path,
+    info: Option<(String, String)>,
+) {
+    gc_unreferenced_file(db, media_dir, info)
+}
+
 fn gc_unreferenced_file(db: &DbHandle, media_dir: &Path, info: Option<(String, String)>) {
     if let Some((content_hash, file_name)) = info {
         let still_used: bool = db
@@ -874,7 +886,9 @@ mod tests {
         assert_eq!(out.node.label, "Début");
         assert_ne!(out.content_checksum, before, "checksum must change");
 
-        let detail = get_story_detail(&db, tmp.path(), &id).unwrap().unwrap();
+        let detail = get_story_detail(&db, tmp.path(), &id, None)
+            .unwrap()
+            .unwrap();
         let node = detail.node.expect("node projected");
         assert_eq!(node.text, "Il était une fois");
         assert_eq!(node.label, "Début");
@@ -1133,6 +1147,58 @@ mod tests {
         );
     }
 
+    #[test]
+    fn saving_one_node_never_consumes_another_nodes_draft() {
+        // The single per-story draft row may buffer ANOTHER node's unsaved
+        // keystrokes: a successful save of n1 must not silently destroy the
+        // recoverable buffer of n2 (NFR8).
+        let mut db = fresh_db();
+        let tmp = TempDir::new().unwrap();
+        let id = new_story(&mut db);
+        crate::application::story::structure::add_node(&mut db, &id, None).expect("n2");
+        record_node_draft(
+            &mut db,
+            RecordNodeDraftInput {
+                story_id: id.clone(),
+                node_id: "n2".into(),
+                draft_text: "non sauvé sur n2".into(),
+                draft_label: String::new(),
+            },
+        )
+        .expect("record");
+
+        save_node_content(
+            &mut db,
+            tmp.path(),
+            SaveNodeContentInput {
+                story_id: id.clone(),
+                node_id: START_NODE_ID.into(),
+                text: "saved on n1".into(),
+                label: String::new(),
+            },
+        )
+        .expect("save n1");
+        let draft = read_node_draft(&db, &id)
+            .expect("read")
+            .expect("n2's buffer must survive a save of n1");
+        assert_eq!(draft.node_id, "n2");
+        assert_eq!(draft.draft_text, "non sauvé sur n2");
+
+        // Saving THE buffered node does consume it.
+        save_node_content(
+            &mut db,
+            tmp.path(),
+            SaveNodeContentInput {
+                story_id: id.clone(),
+                node_id: "n2".into(),
+                text: "saved on n2".into(),
+                label: String::new(),
+            },
+        )
+        .expect("save n2");
+        assert!(read_node_draft(&db, &id).expect("read").is_none());
+    }
+
     // F2: a media mutation must NOT consume the buffered text draft (a kill
     // before the next debounce would otherwise lose un-flushed text — NFR8).
     #[test]
@@ -1212,7 +1278,9 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let id = new_story(&mut db);
         mark_local_import(&db, &id);
-        let detail = get_story_detail(&db, tmp.path(), &id).unwrap().unwrap();
+        let detail = get_story_detail(&db, tmp.path(), &id, None)
+            .unwrap()
+            .unwrap();
         assert!(!detail.editable, "imported story node is read-only");
     }
 
@@ -1244,7 +1312,9 @@ mod tests {
             )
             .expect("corrupt checksum");
 
-        let detail = get_story_detail(&db, tmp.path(), &id).unwrap().unwrap();
+        let detail = get_story_detail(&db, tmp.path(), &id, None)
+            .unwrap()
+            .unwrap();
         assert!(
             detail.node.is_none(),
             "a checksum-mismatched story projects no node"
@@ -1293,7 +1363,9 @@ mod tests {
         // The source file vanishes from the store (external deletion).
         std::fs::remove_file(resolve_node_media_dir(tmp.path()).join(&file_name)).unwrap();
 
-        let detail = get_story_detail(&db, tmp.path(), &id).unwrap().unwrap();
+        let detail = get_story_detail(&db, tmp.path(), &id, None)
+            .unwrap()
+            .unwrap();
         let slot = detail.node.unwrap().image.expect("slot present");
         assert_eq!(slot.state, "attention");
         assert!(slot.format.is_none());

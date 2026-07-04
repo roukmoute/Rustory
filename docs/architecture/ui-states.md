@@ -553,8 +553,8 @@ headers (canonical vs Lunii) and the AC1 distinction stays visible.
 | `blocked` | `bloquée` | error | A hard canonical block was found (corrupt structure, checksum mismatch, unsupported schema). |
 
 The verdict is derived in Rust: `bloquée` if any `Blocking` cause exists, else
-`à corriger` if any `Fixable` cause exists, else `présumée transférable`. An
-empty-`nodes` story is canonically valid (the v1 canonical form) and is never a
+`à corriger` if any `Fixable` cause exists, else `présumée transférable`. A
+minimal story (a single empty start node) is canonically valid and is never a
 block.
 
 **Closed taxonomy `axis × cause` (AC2).** Every blocker is a closed
@@ -574,6 +574,9 @@ both strings, React renders them verbatim.
 | `structure` | `schemaUnsupported` | blocking | Cette histoire utilise un format plus récent que celui pris en charge par cette version de Rustory. | Mets à jour Rustory pour transférer cette histoire. |
 | `structure` | `structureCorrupt` | blocking | La structure interne de l'histoire est illisible ou incohérente. | Restaure une version saine de l'histoire puis relance la vérification. |
 | `structure` | `checksumMismatch` | blocking | Les données locales de l'histoire ont changé de façon inattendue (corruption détectée). | Restaure une sauvegarde saine de l'histoire avant de la transférer. |
+| `structure` | `duplicateNodeId` | blocking | Deux nœuds de l'histoire portent le même identifiant interne. | Restaure une version saine de l'histoire puis relance la vérification. |
+| `structure` | `startNodeInvalid` | blocking | Le nœud de départ de l'histoire est introuvable. | Restaure une version saine de l'histoire puis relance la vérification. |
+| `structure` | `brokenOptionLink` | fixable | Une option pointe vers un nœud qui n'existe plus. | Relie l'option vers un nœud existant ou retire-la ; les autres éléments de l'histoire restent valides. |
 | `media` | `mediaUnsupported` | blocking | Ce média utilise un format non pris en charge. | Choisis une image PNG ou JPEG, ou un son MP3, WAV ou OGG. |
 | `media` | `mediaUnreadable` | blocking | Ce média est illisible ou dépasse la taille autorisée. | Choisis un fichier plus léger et lisible puis réessaie. |
 | `media` | `mediaSourceMissing` | fixable | Le fichier d'un média associé n'est plus accessible. | Ré-associe le média ou retire-le ; le reste du nœud reste modifiable. |
@@ -589,7 +592,7 @@ both strings, React renders them verbatim.
 node's source media. That is where the `(axis = media, cause)` blockers above
 are produced and surfaced inline, with the `needs attention` vs `blocked`
 distinction. The TRANSFER preflight panel itself does not re-emit media blockers
-for a native single-node story: such a story is structurally coherent for the
+for a native story: such a story is structurally coherent for the
 canonical checks, and converting its source media to a device pack is a
 preparation/transfer concern, not a canonical-validity one. The `media` causes
 are nonetheless part of the closed wire taxonomy so the verdict surface stays
@@ -1078,7 +1081,7 @@ A new `brouillon local` is created through a single modal dialog in the `library
 | UI validation | Mirrors the Rust domain rules so `aria-disabled` flips at typing speed: the normalized title (NFC + trim) must be non-empty, at most `120` Unicode code points, and contain no C0 / C1 control characters nor any code point from the Unicode denylist below. |
 | Unicode denylist | Beyond C0 (`U+0000..U+001F`) and C1 (`U+007F..U+009F`) controls, the following `Cf` and line-separator code points are rejected because they would make a title hidden, bidirectionally ambiguous, or carry embedded line breaks: `U+FEFF` (BOM / ZWNBSP), `U+202A..U+202E` (LRE / RLE / PDF / LRO / RLO bidi overrides), `U+2066..U+2069` (LRI / RLI / FSI / PDI bidi isolates), `U+200E` (LRM), `U+200F` (RLM), `U+061C` (ALM), `U+2028` (LINE SEPARATOR), `U+2029` (PARAGRAPH SEPARATOR). ZWJ (`U+200D`) and ZWNJ (`U+200C`) are deliberately allowed — they are load-bearing for many scripts and emoji sequences. |
 | Authoritative validation | Rust re-validates on every `create_story` call; a title that slipped past the UI is refused via `AppError { code: "INVALID_STORY_TITLE" }` and no row is inserted. |
-| Canonical model | Persisted with `schema_version = 1` and a minimal `CanonicalStructure` `{ "schemaVersion": 1, "nodes": [] }`. Any future extension of the canonical shape MUST bump `schema_version` and ship an SQL migration. |
+| Canonical model | Persisted with the current canonical schema (`schema_version = 3`) and the minimal `CanonicalStructure` — a single empty start node: `{ "schemaVersion": 3, "startNodeId": "n1", "nodes": [{ "id": "n1", "text": "", "label": "", "imageAssetId": null, "audioAssetId": null, "options": [] }] }`. Any future extension of the canonical shape MUST bump `schema_version` and ship a migration. |
 | Integrity | `content_checksum` is the SHA-256 hex digest of the exact `structure_json` bytes written to disk. |
 | Timestamps | `created_at` equals `updated_at` on first insert; both are ISO-8601 UTC at millisecond precision (`YYYY-MM-DDTHH:MM:SS.sssZ`). |
 | Ordering | Library default sort is `ORDER BY created_at ASC, id ASC`. UUIDv7 keeps the ordering stable without an extra secondary key. |
@@ -1104,20 +1107,20 @@ keyboard model. The behaviors hosted inside it keep their own contracts — the
 title field (`Story Autosave Contract`), the current-node editor
 (`Story Node Editor Contract`), export (`Story Export Contract`), and draft
 recovery (`Story Recovery Contract`). Editing the **content** of the current
-node (its text, metadata, image and audio) now lives in the shell through the
-`Story Node Editor Contract`; reorganizing the structure and option links
-across multiple nodes stays out of scope (it ships the single current node,
-not a node tree).
+node (its text, metadata, image and audio) lives in the shell through the
+`Story Node Editor Contract`; reorganizing the **structure** (adding, moving,
+deleting nodes) and the **option links** between nodes lives there too, through
+the `Story Structure Editing Contract` and the `Option Link Editor Contract`.
 
 | Aspect | Value |
 | --- | --- |
 | Three coexisting zones | The shell shows, at once: the global structure (`Story Structure Navigator`), the current node (host zone), and the story state + actions. None is hidden behind a tab or a click — all three are visible together so the global context is never lost while editing. |
-| Content states (v2) | The v2 canonical model carries exactly one current node. Each zone renders honest, NAMED states (`Structure de l'histoire` shows the story root + the current node; `Nœud courant` shows the editor for that node, with named empty states for an empty field or an absent optional media), never blank, never disguised, never a fake node. A new story (or a migrated one) starts with an empty current node — that is a valid starting state, not an error. |
-| Structure projection (read-only, from Rust) | The navigator consumes the current node PROJECTED by Rust (`detail.node`, see `Story Node Editor Contract`): it shows the story as the structure root plus the current node, clearly identified by its stable id. It NEVER re-serializes or reformats `structureJson` (covered byte-for-byte by `content_checksum`); every mutation goes through a Rust command. When Rust cannot project a node (a corrupt / drifted structure — near-impossible since Rust is authoritative and checksum-guarded) the zone falls back to a NAMED degraded state (`Structure illisible`), never a crash, never a fake node. |
+| Content states | The canonical model carries an ordered node graph (one or more nodes, a designated start node, option links). Each zone renders honest, NAMED states (`Structure de l'histoire` shows the story root + the ordered node list; `Nœud courant` shows the editor for the selected node, with named empty states for an empty field or an absent optional media), never blank, never disguised, never a fake node. A new story (or a migrated one) starts with a single empty start node — that is a valid starting state, not an error. |
+| Structure projection (from Rust) | The navigator consumes the node graph PROJECTED by Rust (`detail.structure`, see `Story Structure Editing Contract`): the start node id plus the ordered list of nodes, each with its stable id, label, option links and a localized issue flag. It NEVER re-serializes or reformats `structureJson` (covered byte-for-byte by `content_checksum`); every mutation goes through a Rust command. When Rust cannot project the graph (a corrupt / drifted structure — near-impossible since Rust is authoritative and checksum-guarded) the zone falls back to a NAMED degraded state (`Structure illisible`), never a crash, never a fake node. |
 | Current-node zone | The `Story Node Editor` (see `Story Node Editor Contract`): the labelled text and metadata fields plus the image and audio media slots of the current node. For a native story the fields and media actions are active; for an imported story the same projection renders read-only. |
 | Story state + actions | The persisted title (`<h1>`, mirrors `detail.title`), the editable title field + autosave chip (`Story Autosave Contract`), the draft recovery banner when present (`Story Recovery Contract`, which keeps priority over the field), and the global actions `Retour à la bibliothèque` (+ `Exporter l'histoire`). |
 | Global actions scope | `Retour` and `Exporter` only. Sending a story to a device stays ANCHORED IN THE LIBRARY — it is never an editor action. No node-level or preflight validation lives in the shell (preflight is a transfer flow). |
-| Keyboard & focus | Stable focus order: structure → current node → global actions. Focus is visible on every zone (the global `:focus-visible` ring). Meaning is never carried by color alone (glyph + text). A problem is never carried in a toast alone. |
+| Keyboard & focus | Stable focus order, EXPLICITLY: the story state zone OPENS the tab order (its editable title field is the editing entry point, and the recovery banner keeps priority above it), then structure → current node → terminal global actions (`Exporter`, `Retour`). The CONTENT zones and the terminal actions therefore follow structure → current node → global actions; the state/title block sitting first is deliberate (it has opened the shell since its first iteration and anchors the recovery decision before any content edit). Focus is visible on every zone (the global `:focus-visible` ring). Meaning is never carried by color alone (glyph + text). A problem is never carried in a toast alone. |
 | Context separation | Editing is a SEPARATE dominant context (its own route): the shell never renders the library collection / filters. Returning restores the library with its useful card traces intact (preparation / transfer badges, import provenance) — and never silently erases the selection or filters when they stay coherent. |
 | Read rule & performance | The shell consumes the single authoritative `get_story_detail` read already owned by `useStoryEditor` (title + `structureJson` + timestamps) — no extra read, no device call, fully offline. Re-open stays well within NFR2 (one small read + a tiny JSON parse). |
 | No regression | Title autosave, draft recovery, and export keep their exact behavior; `flushAutoSave` still fires on `Retour` and on unmount so a keystroke typed mid-debounce is never lost. |
@@ -1130,8 +1133,10 @@ autosaved by this contract; the **content of the current node** (text,
 metadata, image and audio) is autosaved by the `Story Node Editor Contract`,
 which reuses this exact engine (the `500 ms` debounce, the `150 ms` recovery
 buffer, `flushAutoSave`, the call-correlation guards, and the overview
-invalidation). Reorganizing the structure and option links across multiple
-nodes remains deferred.
+invalidation). Reorganizing the structure and the option links is NOT an
+autosave concern: structural mutations are explicit, acknowledged actions owned
+by the `Story Structure Editing Contract` and the `Option Link Editor
+Contract`, and the pending content is flushed before any of them runs.
 
 | Aspect | Value |
 | --- | --- |
@@ -1151,15 +1156,19 @@ nodes remains deferred.
 ## Story Node Editor Contract
 
 The `Story Node Editor` fills the current-node zone of the `Story Editor Shell`
-(see `Story Editor Shell Contract`). It edits the **content of the single
-current node**: its narrative **text**, its **metadata** (a human-readable
-label), and two optional **media** — an **image** and an **audio**. It does NOT
-add, move, delete or relink nodes (that is a separate, deferred flow): there is
-exactly one current node, projected by Rust, and this contract edits it in
-place.
+(see `Story Editor Shell Contract`). It edits the **content of the current
+node** — the node selected in the `Story Structure Navigator`: its narrative
+**text**, its **metadata** (a human-readable label), and two optional
+**media** — an **image** and an **audio**. It does NOT add, move, delete or
+relink nodes: structural mutations are owned by the `Story Structure Editing
+Contract`, and the node's option links by the `Option Link Editor Contract`
+(hosted below the content, in this same zone). This contract edits the selected
+node in place.
 
 **Projection from Rust (AC3).** The node is PROJECTED by the Rust core inside
-`get_story_detail` as `detail.node` (a `NodeContentDto`), never recomposed in
+`get_story_detail` as `detail.node` (a `NodeContentDto`) — the SELECTED node,
+the start node by default (see `Story Structure Editing Contract` for the
+selection rule), never recomposed in
 React from `structureJson`. The projection carries the node's stable `id`, its
 `text`, its `label`, and a resolved state for each media slot (see below). The
 frontend consumes the projection; it never parses or rewrites `structureJson`
@@ -1187,7 +1196,77 @@ be saved.
 | State chip mapping | The node editor reuses the autosave chip for text / metadata (`idle → Brouillon local`, `pending`, `saving`, `saved → Enregistré`, `failed`). A media slot carries its own named state: `Aucune image` / `Aucun audio` (empty), a preview/identity when present, `Média à corriger` (attention), `Média bloqué` (blocked). |
 | Recovery (NFR8) | The `150 ms` recovery buffer extends to the node's in-progress text so a hard kill (kill -9) mid-edit does not lose the typed value, mirroring the title recovery. The buffered node text is offered back on the next open through the `Story Recovery Contract` surface. |
 | Atomicity (NFR9) | The editor never paints `Enregistré` over an unsaved change: the same source-of-truth reconciliation as the title autosave applies. A failed node save leaves the previous canonical body untouched (the `BEGIN IMMEDIATE` transaction commits or rolls back whole). The canonical body of ANY OTHER story is never touched. |
-| Keyboard & focus | Stable tab order: structure → node fields / media slots → global actions. A disabled media action carries a standardized reason (see `Disabled Actions and Reasons`). Focus is visible everywhere (the global `:focus-visible` ring). |
+| Keyboard & focus | Stable tab order: structure → node fields / media slots → terminal global actions (the state/title block opens the shell's overall order — see the `Story Editor Shell Contract`). A disabled media action carries a standardized reason (see `Disabled Actions and Reasons`). Focus is visible everywhere (the global `:focus-visible` ring). |
+
+## Story Structure Editing Contract
+
+The `Story Structure Navigator` (the `Structure de l'histoire` zone of the
+`Story Editor Shell`) renders the story's node graph and owns the STRUCTURAL
+mutations: adding, reordering and deleting nodes, and selecting the current
+node. It stays an ordered hierarchical LIST — the story root followed by the
+nodes in their canonical order — never a free-form 2D canvas. Branches remain
+readable through each node's option links (see `Option Link Editor Contract`);
+the graph is never manipulated spatially.
+
+**Projection (from Rust).** The navigator consumes `detail.structure` (a
+`StoryStructureDto`): the start node id plus the ordered node list, each node
+carrying its stable `id`, its `label`, an `isStart` flag, a localized
+`hasIssue` flag, and its option links with a Rust-derived state. The frontend
+NEVER parses, re-serializes or reformats `structureJson` (covered
+byte-for-byte by `content_checksum`) and never re-derives a link state. When a
+BLOCKING canonical issue exists (unsupported schema, corrupt structure,
+checksum mismatch, duplicate node id, invalid start node), Rust projects
+`structure = null` and the zone renders the named degraded state
+(`Structure illisible`) — never a crash, never a fabricated graph. A FIXABLE
+issue (an option whose destination no longer exists) does NOT unmount the
+graph: the structure stays projected and editable so the user can SEE and fix
+the flagged spot.
+
+| Aspect | Value |
+| --- | --- |
+| Rendering | Story root (the persisted title) + the ordered node list (order = canonical `nodes[]` order). Each entry shows the node label — or its stable id when the label is empty (a NAMED state, never a blank row) — the textual `Départ` mark on the start node, a short summary of its options, and a glyph + text `à corriger` mark when `hasIssue` is true. A localized issue NEVER hides or collapses the rest of the list. |
+| Selection | Click / `Entrée` selects a node as the current node. The selection is LOCAL UI state (component/route state, never the Zustand shell store). Selecting re-reads `get_story_detail(storyId, nodeId)` (the authoritative read) so the `Nœud courant` zone re-seeds from Rust. The pending node content is flushed BEFORE the selection changes — a keystroke typed mid-debounce is never lost. `aria-current="true"` marks the selected entry. |
+| Selection fallback | Deleting the currently selected node moves the selection back to the START node (structure and current node stay coherent). A stale selection (a node id no longer in a healthy graph) also falls back to the start node — never a blank editor over a healthy structure. |
+| Keyboard | Roving tabindex over the node list: `↑` / `↓` move focus between nodes, `Entrée` selects the focused node. Inter-zone focus order is UNCHANGED (see the `Story Editor Shell Contract` for the explicit full order — the state/title block opens the tab order, then structure → current node → terminal global actions). Focus is visible everywhere (the global `:focus-visible` ring). |
+| Structural actions | Per-node, discreet (quiet/tertiary) actions, rendered ONLY for an editable (native) story: `Ajouter un nœud` (appends an empty node at the end of the list), `Monter` / `Descendre` (swap the node with its neighbor — display order only; the start node is designated by `startNodeId`, NOT by position, so moving it is allowed), `Supprimer le nœud`. An imported story renders NO structural action (never a control that cannot be saved). |
+| Delete confirmation | `Supprimer le nœud` is destructive (the node's text and media are lost). It requires TWO explicit gestures, INLINE and localized inside the node's entry: the first gesture swaps the action row for a confirmation block naming the impact (the node and its media are removed; options pointing at it will be flagged `destination à corriger`), with `Confirmer la suppression` + `Annuler`. Never a modal, never a single-gesture delete. Deleting the START node is refused by Rust (the entry point must exist); the UI does not offer it. |
+| Mutation rule | Every structural mutation is an EXPLICIT, ACKNOWLEDGED action (never debounced, never optimistic): it calls a dedicated Rust command, which re-validates the persisted facts, applies the mutation to the whole graph, re-serializes the canonical structure and recomputes `content_checksum` in ONE `BEGIN IMMEDIATE` transaction. The UI reconciles from the ACK's re-projected graph — never from a locally recomposed state. The pending node content is flushed BEFORE any structural mutation. |
+| Deletion side effects | Deleting a node removes its media assets (with the reference-counted file GC) and its recovery buffer entry for THAT node only. Options on OTHER nodes that pointed at the deleted node KEEP their destination value and become `destination à corriger` — visible, localized, repairable — never silently unlinked (the trace survives). |
+| States | The degraded `Structure illisible` state (blocking issue) and the honest empty states are preserved. A story with a single start node is a valid minimal graph, not an error. |
+| Errors | A refused mutation (deleting the start node, an unknown node id, a stale index) surfaces INLINE near the acted-on entry in a `role="alert"` region with the canonical `message` + `userAction` — never a lone toast, never color alone. Acknowledgements stay quiet (`aria-live="polite"` at most). |
+| No canvas | The zone never becomes a free-form canvas: no drag-and-drop graph, no spatial layout, no zoom surface. The hierarchy stays visible in place, permanently, whatever the graph size. |
+
+## Option Link Editor Contract
+
+The `Option Link Editor` lives INSIDE the current-node zone (below the node's
+content fields, hosted by the `Story Node Editor` zone) and edits the CHOICES
+of the selected node: the list of its options and the destination each option
+points at. It is the only surface that creates or repairs links between nodes.
+
+**Link states (truth table, Rust-derived).** Each option carries a wire
+`state` DERIVED BY RUST from its persisted `target` — the frontend never
+re-derives it:
+
+| Persisted `target` | Wire `state` | UI label (product language) |
+| --- | --- | --- |
+| absent (`null`) | `unlinked` | `non liée` — a normal authoring state, not an error |
+| a node id present in the graph | `linked` | `liée` + the destination's label |
+| a node id ABSENT from the graph | `broken` | `destination à corriger` — repairable, flagged in place |
+
+Forbidden ambiguities: an option with a missing destination is NEVER rendered
+as linked; a partially valid state is NEVER rendered as a success; the words
+`broken` / `lien cassé` NEVER appear on screen (`destination à corriger` is
+the only user-facing wording); an `unlinked` option is never conflated with a
+`broken` one (not linked yet ≠ points at a ghost).
+
+| Aspect | Value |
+| --- | --- |
+| Prevent vs flag (write vs read) | At WRITE time Rustory PREVENTS creating an invalid link: linking an option to a node id that does not exist in the graph is refused by Rust (typed error, inline alert). At READ time an already-broken link (its destination was deleted later) is FLAGGED `destination à corriger` — persisted, visible, repairable — never silently dropped. Self-reference (an option pointing back at its own node) is a legitimate narrative loop and is allowed. |
+| Actions | Per option: `Lier` (opens a FLAT selector listing the graph's nodes by label/id — never a canvas), `Créer et lier un nouveau nœud` (creates an empty node AND links the option to it in ONE atomic Rust transaction — no intermediate half-state), `Délier` (back to `non liée`), `Retirer l'option` (removes the option). Per node: `Ajouter une option` (with its label typed at creation). Labels are bounded by the same cap as the node metadata label. |
+| Acknowledged mutations | Same mutation rule as the structure contract: explicit acknowledged Rust commands, one transaction each, UI reconciled from the re-projected graph, pending content flushed first. Never debounced, never optimistic. |
+| Read-only rule | For an imported (non-editable) story the editor renders NO link action — the options are shown read-only with their states, under the same named read-only reason as the node content. |
+| Errors | A refused link (unknown destination, stale option index) surfaces INLINE at the option row in a `role="alert"` region naming the cause, the impact and the next gesture. Acknowledgements are `aria-live="polite"`. Never a toast alone, never color alone (glyph + text). |
+| A11y | The option list and the flat node selector are keyboard-reachable in the normal tab order of the current-node zone; every action is a real button with an accessible name naming its option (e.g. `Lier — {option label}`). |
 
 ## Story Export Contract
 
@@ -1219,8 +1298,9 @@ local library as a canonical, re-openable story. It is **distinct from the
 typed recognition verdict that may be `Partiellement exploitable`. The supported
 artifact set for this iteration is **the `.rustory` v1 artifact only** (see
 [device-support-profile.md#Local Artifact Import Contract](./device-support-profile.md));
-structured archives / multi-element folders are out of scope until the
-node/media model exists.
+structured archives / multi-element folders remain out of scope (no archive
+reader yet — the single-file `.rustory` artifact stays the only supported
+type).
 
 The flow is **two-phase, with no mutation before acceptance (AC1)**:
 

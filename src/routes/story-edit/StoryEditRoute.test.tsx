@@ -111,6 +111,12 @@ function buildDetail(overrides: Partial<StoryDetailDto> = {}): StoryDetailDto {
     createdAt: "2026-04-23T09:00:00.000Z",
     updatedAt: "2026-04-23T09:00:00.000Z",
     editable: true,
+    structure: {
+      startNodeId: "n1",
+      nodes: [
+        { id: "n1", label: "", isStart: true, hasIssue: false, options: [] },
+      ],
+    },
     node: { id: "n1", text: "", label: "", image: null, audio: null },
     ...overrides,
   };

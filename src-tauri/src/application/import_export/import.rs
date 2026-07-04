@@ -26,7 +26,7 @@ use crate::domain::import::{
 use crate::domain::shared::AppError;
 use crate::domain::story::{
     content_checksum_bytes, map_error, normalize_title, validate_canonical, validate_title,
-    CanonicalStoryFacts, CANONICAL_STORY_SCHEMA_VERSION,
+    CanonicalStoryFacts, Severity, CANONICAL_STORY_SCHEMA_VERSION,
 };
 use crate::infrastructure::db::DbHandle;
 use crate::ipc::dto::import_export::{
@@ -123,14 +123,20 @@ pub fn accept_import(
     // its embedded `schemaVersion` must agree with the supported canonical
     // version, and `SHA-256(structureJson)` must equal the carried
     // `contentChecksum`. A defense-in-depth refusal of a frontend that
-    // bypassed the verdict.
+    // bypassed the verdict. The gate is BLOCKING causes only — a Fixable
+    // outcome (a broken option link) is exactly what the analysis announced
+    // as importable `NeedsReview`; refusing it at commit would contradict
+    // the verdict the user just accepted.
     let facts = CanonicalStoryFacts {
         title: normalized.clone(),
         schema_version: CANONICAL_STORY_SCHEMA_VERSION,
         structure_json: content.structure_json.clone(),
         content_checksum: content.content_checksum.clone(),
     };
-    if !validate_canonical(&facts).is_empty() {
+    let has_blocking = validate_canonical(&facts)
+        .iter()
+        .any(|b| b.severity == Severity::Blocking);
+    if has_blocking {
         return Err(revalidation_error());
     }
 
@@ -392,7 +398,7 @@ mod tests {
     use crate::infrastructure::db;
     use crate::ipc::dto::import_export::{ImportCategoryDto, ImportableContentDto};
 
-    const CANONICAL_STRUCTURE: &str = "{\"schemaVersion\":2,\"nodes\":[{\"id\":\"n1\",\"text\":\"\",\"label\":\"\",\"imageAssetId\":null,\"audioAssetId\":null}]}";
+    const CANONICAL_STRUCTURE: &str = "{\"schemaVersion\":3,\"startNodeId\":\"n1\",\"nodes\":[{\"id\":\"n1\",\"text\":\"\",\"label\":\"\",\"imageAssetId\":null,\"audioAssetId\":null,\"options\":[]}]}";
 
     fn fresh_db() -> DbHandle {
         let mut db = db::open_in_memory().expect("open in-memory db");
@@ -408,7 +414,7 @@ mod tests {
                 exported_by: "rustory/0.1.0".into(),
             },
             story: ExportedStoryV1 {
-                schema_version: 2,
+                schema_version: 3,
                 title: title.into(),
                 structure_json: CANONICAL_STRUCTURE.into(),
                 content_checksum: content_checksum(CANONICAL_STRUCTURE),
@@ -495,11 +501,11 @@ mod tests {
 
         // The story is re-openable WITHOUT the artifact, with PRESERVED
         // timestamps (fidelity of the AC3 re-openable story).
-        let detail = get_story_detail(&db, &std::env::temp_dir(), &card.id)
+        let detail = get_story_detail(&db, &std::env::temp_dir(), &card.id, None)
             .expect("read detail")
             .expect("row present");
         assert_eq!(detail.title, "Mon Histoire");
-        assert_eq!(detail.schema_version, 2);
+        assert_eq!(detail.schema_version, 3);
         assert_eq!(detail.structure_json, CANONICAL_STRUCTURE);
         assert_eq!(detail.created_at, "2026-06-20T10:00:00.000Z");
         assert_eq!(detail.updated_at, "2026-06-24T14:15:00.000Z");
@@ -513,6 +519,47 @@ mod tests {
         assert_eq!(provenance.source_name, "mon.rustory");
         assert_eq!(provenance.artifact_checksum.len(), 64);
         assert_eq!(provenance.import_state, "recognized");
+    }
+
+    #[test]
+    fn accept_commits_a_needs_review_story_with_a_broken_option_link() {
+        // The analysis announces a broken option link as importable
+        // `NeedsReview` (a Fixable ambiguity) — the acceptance gate must
+        // agree: only BLOCKING causes refuse the commit, so the accepted
+        // story lands with its durable needs_review marker and the flagged
+        // link preserved byte-for-byte.
+        let broken = "{\"schemaVersion\":3,\"startNodeId\":\"n1\",\"nodes\":[{\"id\":\"n1\",\"text\":\"\",\"label\":\"\",\"imageAssetId\":null,\"audioAssetId\":null,\"options\":[{\"label\":\"Perdu\",\"target\":\"ghost\"}]}]}";
+        let artifact = RustoryArtifactV1 {
+            rustory_artifact: ArtifactEnvelopeV1 {
+                format_version: RUSTORY_ARTIFACT_FORMAT_VERSION,
+                exported_at: "2026-06-27T10:00:00.000Z".into(),
+                exported_by: "rustory/0.1.0".into(),
+            },
+            story: ExportedStoryV1 {
+                schema_version: 3,
+                title: "Lien à corriger".into(),
+                structure_json: broken.into(),
+                content_checksum: content_checksum(broken),
+                created_at: "2026-06-20T10:00:00.000Z".into(),
+                updated_at: "2026-06-24T14:15:00.000Z".into(),
+            },
+        };
+        let bytes = artifact.to_canonical_json().expect("serialize");
+        let mut db = fresh_db();
+        let analysis = analyze_artifact(&bytes, "casse.rustory".into());
+        assert_eq!(analysis.analysis.state, ImportState::NeedsReview);
+
+        let card = accept_import(&mut db, &accept_input_from(&analysis))
+            .expect("a NeedsReview verdict must stay committable");
+        let provenance = read_local_import_provenance(&db, &card.id)
+            .expect("read provenance")
+            .expect("provenance present");
+        assert_eq!(provenance.import_state, "needs_review");
+
+        let detail = get_story_detail(&db, &std::env::temp_dir(), &card.id, None)
+            .expect("read detail")
+            .expect("row present");
+        assert_eq!(detail.structure_json, broken, "the flagged link survives");
     }
 
     #[test]
@@ -687,14 +734,14 @@ mod tests {
             },
         )
         .expect("create native");
-        let before = get_story_detail(&db, &std::env::temp_dir(), &native.id)
+        let before = get_story_detail(&db, &std::env::temp_dir(), &native.id, None)
             .expect("read")
             .expect("present");
 
         let analysis = analyze_artifact(&clean_artifact_bytes("Importée"), "i.rustory".into());
         accept_import(&mut db, &accept_input_from(&analysis)).expect("accept");
 
-        let after = get_story_detail(&db, &std::env::temp_dir(), &native.id)
+        let after = get_story_detail(&db, &std::env::temp_dir(), &native.id, None)
             .expect("read")
             .expect("present");
         assert_eq!(before.title, after.title);

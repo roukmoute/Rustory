@@ -39,7 +39,7 @@ fn reopens_persisted_story_after_restart_sim() {
 
     assert_eq!(id, expected_id);
     assert_eq!(title, expected_title);
-    assert_eq!(schema_version, 2);
+    assert_eq!(schema_version, 3);
 }
 
 /// Re-running `run_migrations` on an already-initialized database must be
@@ -169,12 +169,12 @@ fn updates_story_title_and_reopens_exact_state_after_restart() {
     // Simulate another restart and verify the persisted state.
     {
         let db = db::open_at(&path).expect("reopen for read");
-        let detail = get_story_detail(&db, &std::env::temp_dir(), &created_id)
+        let detail = get_story_detail(&db, &std::env::temp_dir(), &created_id, None)
             .expect("ok")
             .expect("some");
         assert_eq!(detail.id, created_id);
         assert_eq!(detail.title, "Après");
-        assert_eq!(detail.schema_version, 2);
+        assert_eq!(detail.schema_version, 3);
         assert_eq!(
             detail.structure_json, initial_structure,
             "structure_json must not be altered by a title update"

@@ -273,7 +273,7 @@ mod tests {
         compute_device_identifier, MockDeviceLibraryReader, MockDeviceScanner,
     };
 
-    const HEALTHY_JSON: &str = "{\"schemaVersion\":2,\"nodes\":[{\"id\":\"n1\",\"text\":\"\",\"label\":\"\",\"imageAssetId\":null,\"audioAssetId\":null}]}";
+    const HEALTHY_JSON: &str = "{\"schemaVersion\":3,\"startNodeId\":\"n1\",\"nodes\":[{\"id\":\"n1\",\"text\":\"\",\"label\":\"\",\"imageAssetId\":null,\"audioAssetId\":null,\"options\":[]}]}";
 
     fn budget() -> Duration {
         Duration::from_secs(5)
@@ -315,7 +315,7 @@ mod tests {
             db,
             id,
             title,
-            2,
+            3,
             HEALTHY_JSON,
             &content_checksum(HEALTHY_JSON),
         );
@@ -360,7 +360,7 @@ mod tests {
     #[test]
     fn blocked_when_checksum_mismatches() {
         let db = fresh_db();
-        insert_story(&db, "s1", "Corrompue", 2, HEALTHY_JSON, &"0".repeat(64));
+        insert_story(&db, "s1", "Corrompue", 3, HEALTHY_JSON, &"0".repeat(64));
         let (scanner, reader) = supported(3);
         let outcome =
             read_story_validation(&db, &scanner, &reader, "s1", &mock_identifier(), budget())
@@ -380,8 +380,8 @@ mod tests {
     #[test]
     fn blocked_when_schema_is_too_recent() {
         let db = fresh_db();
-        let json = "{\"schemaVersion\":3,\"nodes\":[]}";
-        insert_story(&db, "s1", "Trop récente", 3, json, &content_checksum(json));
+        let json = "{\"schemaVersion\":4,\"startNodeId\":\"n1\",\"nodes\":[]}";
+        insert_story(&db, "s1", "Trop récente", 4, json, &content_checksum(json));
         let (scanner, reader) = supported(6);
         let outcome =
             read_story_validation(&db, &scanner, &reader, "s1", &mock_identifier(), budget())
@@ -480,7 +480,7 @@ mod tests {
         // blockers; the Lunii-compatibility axis is clear (supported = compatible
         // by construction), so no `device_profile` blocker is ever emitted.
         let db = fresh_db();
-        insert_story(&db, "s1", "Corrompue", 2, HEALTHY_JSON, &"0".repeat(64));
+        insert_story(&db, "s1", "Corrompue", 3, HEALTHY_JSON, &"0".repeat(64));
         let (scanner, reader) = supported(7);
         let outcome =
             read_story_validation(&db, &scanner, &reader, "s1", &mock_identifier(), budget())

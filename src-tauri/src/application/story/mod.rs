@@ -1,5 +1,6 @@
 pub mod node;
 pub mod recovery;
+pub mod structure;
 
 use rusqlite::OptionalExtension;
 use time::format_description::well_known::iso8601::{
@@ -191,12 +192,18 @@ pub fn update_story(
 /// IO, schema mismatch, etc.) crosses the boundary as a normalized
 /// [`AppError`] so the UI never has to distinguish "row absent" from
 /// "storage broken" from shared plumbing.
+///
+/// `node_id` targets the SELECTED node's full content projection: `None` =
+/// the start node; a stale id over a HEALTHY graph falls back gracefully to
+/// the start node (the graph stays projected — never a blank editor over a
+/// sound structure).
 pub fn get_story_detail(
     db: &DbHandle,
     app_data_dir: &std::path::Path,
     story_id: &str,
+    node_id: Option<&str>,
 ) -> Result<Option<StoryDetailDto>, AppError> {
-    // Read the raw row first; the node projection + editability flag need
+    // Read the raw row first; the projections + editability flag need
     // follow-up reads (asset lookups, provenance) that cannot live inside the
     // single `query_row` closure.
     let row: Option<(String, String, u32, String, String, String, String)> = db
@@ -227,11 +234,15 @@ pub fn get_story_detail(
     };
 
     let editable = node::is_story_editable(db.conn(), &id);
-    // Project the current node FROM Rust. A structure that does not parse to a
-    // current-version single node — OR whose PERSISTED canonical facts are
-    // already invalid (e.g. a checksum mismatch) — degrades to `None`, which the
-    // UI renders as the named "Structure illisible" state. Never project (hence
-    // never expose as editable) a structure we would not vouch for.
+    // Project the graph + the selected node FROM Rust. The gate is "no
+    // BLOCKING blocker" — NOT "no blocker at all": a Fixable issue (a broken
+    // option link, an invalid persisted title) MUST leave the structure and
+    // node projected, because the user repairs it IN the editor; hiding the
+    // graph would make the flagged spot unreachable. A Blocking issue
+    // (unsupported schema, corrupt structure, checksum mismatch, duplicate
+    // ids, invalid start) degrades BOTH to `None`, which the UI renders as
+    // the named "Structure illisible" state. Never project (hence never
+    // expose as editable) a structure we would not vouch for.
     let media_dir = crate::infrastructure::filesystem::resolve_node_media_dir(app_data_dir);
     let persisted_facts = crate::domain::story::CanonicalStoryFacts {
         title: title.clone(),
@@ -239,22 +250,27 @@ pub fn get_story_detail(
         structure_json: structure_json.clone(),
         content_checksum: content_checksum.clone(),
     };
-    let node = if crate::domain::story::validate_canonical(&persisted_facts).is_empty() {
-        match serde_json::from_str::<CanonicalStructure>(&structure_json) {
-            Ok(structure)
-                if structure.schema_version == CANONICAL_STORY_SCHEMA_VERSION
-                    && structure.nodes.len() == 1 =>
-            {
-                Some(node::project_node_content(
-                    db.conn(),
-                    &media_dir,
-                    &structure.nodes[0],
-                ))
-            }
-            _ => None,
-        }
+    let has_blocking = crate::domain::story::validate_canonical(&persisted_facts)
+        .iter()
+        .any(|b| b.severity == crate::domain::story::Severity::Blocking);
+    let (structure_dto, node) = if has_blocking {
+        (None, None)
     } else {
-        None
+        match serde_json::from_str::<CanonicalStructure>(&structure_json) {
+            Ok(parsed) if parsed.schema_version == CANONICAL_STORY_SCHEMA_VERSION => {
+                let projected = structure::project_structure(&parsed);
+                // The selected node: the requested id when it exists, else the
+                // start node (guaranteed present on a non-blocking graph —
+                // `StartNodeInvalid` is Blocking).
+                let selected = node_id
+                    .and_then(|want| parsed.nodes.iter().find(|n| n.id == want))
+                    .or_else(|| parsed.nodes.iter().find(|n| n.id == parsed.start_node_id));
+                let node_dto =
+                    selected.map(|n| node::project_node_content(db.conn(), &media_dir, n));
+                (Some(projected), node_dto)
+            }
+            _ => (None, None),
+        }
     };
 
     Ok(Some(StoryDetailDto {
@@ -266,6 +282,7 @@ pub fn get_story_detail(
         created_at,
         updated_at,
         editable,
+        structure: structure_dto,
         node,
     }))
 }
@@ -408,10 +425,10 @@ mod tests {
 
         assert_eq!(id, dto.id);
         assert_eq!(title, "Le soleil couchant");
-        assert_eq!(schema_version, 2);
+        assert_eq!(schema_version, 3);
         assert_eq!(
             structure_json,
-            "{\"schemaVersion\":2,\"nodes\":[{\"id\":\"n1\",\"text\":\"\",\"label\":\"\",\"imageAssetId\":null,\"audioAssetId\":null}]}"
+            "{\"schemaVersion\":3,\"startNodeId\":\"n1\",\"nodes\":[{\"id\":\"n1\",\"text\":\"\",\"label\":\"\",\"imageAssetId\":null,\"audioAssetId\":null,\"options\":[]}]}"
         );
         assert_eq!(content_checksum.len(), 64);
         assert!(content_checksum.chars().all(|c| c.is_ascii_hexdigit()));
@@ -557,7 +574,7 @@ mod tests {
         );
         assert_eq!(
             stored_structure,
-            "{\"schemaVersion\":2,\"nodes\":[{\"id\":\"n1\",\"text\":\"\",\"label\":\"\",\"imageAssetId\":null,\"audioAssetId\":null}]}",
+            "{\"schemaVersion\":3,\"startNodeId\":\"n1\",\"nodes\":[{\"id\":\"n1\",\"text\":\"\",\"label\":\"\",\"imageAssetId\":null,\"audioAssetId\":null,\"options\":[]}]}",
             "structure_json must remain invariant under a title-only update"
         );
         assert_eq!(
@@ -806,7 +823,7 @@ mod tests {
     #[test]
     fn get_story_detail_returns_none_for_missing_id() {
         let db = fresh_db();
-        let detail = get_story_detail(&db, &std::env::temp_dir(), "missing-id").expect("ok");
+        let detail = get_story_detail(&db, &std::env::temp_dir(), "missing-id", None).expect("ok");
         assert!(detail.is_none());
     }
 
@@ -821,15 +838,15 @@ mod tests {
         )
         .expect("create");
 
-        let detail = get_story_detail(&db, &std::env::temp_dir(), &created.id)
+        let detail = get_story_detail(&db, &std::env::temp_dir(), &created.id, None)
             .expect("ok")
             .expect("some");
         assert_eq!(detail.id, created.id);
         assert_eq!(detail.title, "Brouillon");
-        assert_eq!(detail.schema_version, 2);
+        assert_eq!(detail.schema_version, 3);
         assert_eq!(
             detail.structure_json,
-            "{\"schemaVersion\":2,\"nodes\":[{\"id\":\"n1\",\"text\":\"\",\"label\":\"\",\"imageAssetId\":null,\"audioAssetId\":null}]}"
+            "{\"schemaVersion\":3,\"startNodeId\":\"n1\",\"nodes\":[{\"id\":\"n1\",\"text\":\"\",\"label\":\"\",\"imageAssetId\":null,\"audioAssetId\":null,\"options\":[]}]}"
         );
         assert_eq!(detail.content_checksum.len(), 64);
         assert!(detail
@@ -891,7 +908,7 @@ mod tests {
         )
         .expect("update");
 
-        let detail = get_story_detail(&db, &std::env::temp_dir(), &created.id)
+        let detail = get_story_detail(&db, &std::env::temp_dir(), &created.id, None)
             .expect("ok")
             .expect("some");
         assert_eq!(detail.title, "Après");

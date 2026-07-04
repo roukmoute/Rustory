@@ -232,8 +232,8 @@ mod tests {
             .conn()
             .execute(
                 "INSERT INTO stories (id, title, schema_version, structure_json, content_checksum, created_at, updated_at) \
-                 VALUES (?1, ?2, 1, '{\"schemaVersion\":2,\"nodes\":[{\"id\":\"n1\",\"text\":\"\",\"label\":\"\",\"imageAssetId\":null,\"audioAssetId\":null}]}', \
-                 '0000000000000000000000000000000000000000000000000000000000000000', \
+                 VALUES (?1, ?2, 3, '{\"schemaVersion\":3,\"startNodeId\":\"n1\",\"nodes\":[{\"id\":\"n1\",\"text\":\"\",\"label\":\"\",\"imageAssetId\":null,\"audioAssetId\":null,\"options\":[]}]}', \
+                 '65d663fd2180630fa24693a5ccaee6d663b7a0f78b7d44b0e5ef07adc3f293b2', \
                  '2026-06-16T00:00:00.000Z', '2026-06-16T00:00:00.000Z')",
                 rusqlite::params![id, title],
             )

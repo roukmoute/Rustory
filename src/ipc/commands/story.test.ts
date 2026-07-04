@@ -7,16 +7,24 @@ vi.mock("@tauri-apps/api/core", () => ({
 import { invoke } from "@tauri-apps/api/core";
 
 import {
+  addNodeOption,
+  addStoryNode,
   applyRecovery,
   ApplyRecoveryContractDriftError,
   createStory,
+  deleteStoryNode,
   discardDraft,
   getStoryDetail,
+  moveStoryNode,
+  NodeContractDriftError,
   readRecoverableDraft,
   ReadRecoverableDraftContractDriftError,
   recordDraft,
+  removeNodeOption,
   saveStory,
+  setNodeOptionLink,
 } from "./story";
+import type { StructureWriteOutput } from "../../shared/ipc-contracts/story";
 
 const STORY_ID = "0197a5d0-0000-7000-8000-000000000000";
 
@@ -112,13 +120,30 @@ describe("getStoryDetail", () => {
       contentChecksum: "a".repeat(64),
       createdAt: "2026-04-23T09:00:00.000Z",
       updatedAt: "2026-04-23T09:00:00.000Z",
+      structure: {
+        startNodeId: "n1",
+        nodes: [
+          { id: "n1", label: "", isStart: true, hasIssue: false, options: [] },
+        ],
+      },
+      node: { id: "n1", text: "", label: "", image: null, audio: null },
     };
     vi.mocked(invoke).mockResolvedValueOnce(detail);
     const result = await getStoryDetail({ storyId: STORY_ID });
     expect(invoke).toHaveBeenCalledWith("get_story_detail", {
       storyId: STORY_ID,
+      nodeId: null,
     });
     expect(result).toEqual(detail);
+  });
+
+  it("forwards the targeted nodeId when provided", async () => {
+    vi.mocked(invoke).mockResolvedValueOnce(null);
+    await getStoryDetail({ storyId: STORY_ID, nodeId: "n2" });
+    expect(invoke).toHaveBeenCalledWith("get_story_detail", {
+      storyId: STORY_ID,
+      nodeId: "n2",
+    });
   });
 
   it("returns null when the Rust core has no matching row", async () => {
@@ -307,5 +332,128 @@ describe("discardDraft", () => {
     await expect(discardDraft({ storyId: STORY_ID })).rejects.toEqual(
       rustError,
     );
+  });
+});
+
+
+describe("structural mutation facades", () => {
+  const VALID_ACK: StructureWriteOutput = {
+    id: STORY_ID,
+    updatedAt: "2026-07-04T10:00:00.000Z",
+    contentChecksum: "a".repeat(64),
+    structureJson: '{"schemaVersion":3,"startNodeId":"n1","nodes":[]}',
+    structure: {
+      startNodeId: "n1",
+      nodes: [
+        { id: "n1", label: "", isStart: true, hasIssue: false, options: [] },
+      ],
+    },
+  };
+
+  beforeEach(() => {
+    vi.mocked(invoke).mockReset();
+  });
+
+  it("wraps every mutation in the canonical { input } envelope with its command name", async () => {
+    const cases: Array<[string, () => Promise<StructureWriteOutput>, unknown]> = [
+      [
+        "add_story_node",
+        () => addStoryNode({ storyId: STORY_ID }),
+        { storyId: STORY_ID, linkFrom: null },
+      ],
+      [
+        "add_story_node",
+        () =>
+          addStoryNode({
+            storyId: STORY_ID,
+            linkFrom: { nodeId: "n1", optionIndex: 2 },
+          }),
+        { storyId: STORY_ID, linkFrom: { nodeId: "n1", optionIndex: 2 } },
+      ],
+      [
+        "delete_story_node",
+        () => deleteStoryNode({ storyId: STORY_ID, nodeId: "n2" }),
+        { storyId: STORY_ID, nodeId: "n2" },
+      ],
+      [
+        "move_story_node",
+        () =>
+          moveStoryNode({ storyId: STORY_ID, nodeId: "n2", direction: "up" }),
+        { storyId: STORY_ID, nodeId: "n2", direction: "up" },
+      ],
+      [
+        "add_node_option",
+        () =>
+          addNodeOption({ storyId: STORY_ID, nodeId: "n1", label: "Choix" }),
+        { storyId: STORY_ID, nodeId: "n1", label: "Choix" },
+      ],
+      [
+        "set_node_option_link",
+        () =>
+          setNodeOptionLink({
+            storyId: STORY_ID,
+            nodeId: "n1",
+            optionIndex: 0,
+            target: null,
+          }),
+        { storyId: STORY_ID, nodeId: "n1", optionIndex: 0, target: null },
+      ],
+      [
+        "remove_node_option",
+        () =>
+          removeNodeOption({ storyId: STORY_ID, nodeId: "n1", optionIndex: 1 }),
+        { storyId: STORY_ID, nodeId: "n1", optionIndex: 1 },
+      ],
+    ];
+    for (const [command, call, expectedInput] of cases) {
+      vi.mocked(invoke).mockResolvedValueOnce(VALID_ACK);
+      const result = await call();
+      expect(invoke).toHaveBeenLastCalledWith(command, {
+        input: expectedInput,
+      });
+      expect(result).toEqual(VALID_ACK);
+    }
+  });
+
+  it("throws a NodeContractDriftError on a drifted acknowledgement", async () => {
+    // A payload missing the committed bytes / re-projected graph must fail
+    // LOUDLY on every wrapper — never be handed to the reconciler.
+    const drifted = { id: STORY_ID, updatedAt: "2026-07-04T10:00:00.000Z" };
+    const calls: Array<() => Promise<StructureWriteOutput>> = [
+      () => addStoryNode({ storyId: STORY_ID }),
+      () => deleteStoryNode({ storyId: STORY_ID, nodeId: "n2" }),
+      () => moveStoryNode({ storyId: STORY_ID, nodeId: "n2", direction: "down" }),
+      () => addNodeOption({ storyId: STORY_ID, nodeId: "n1", label: "X" }),
+      () =>
+        setNodeOptionLink({
+          storyId: STORY_ID,
+          nodeId: "n1",
+          optionIndex: 0,
+          target: "n2",
+        }),
+      () => removeNodeOption({ storyId: STORY_ID, nodeId: "n1", optionIndex: 0 }),
+    ];
+    for (const call of calls) {
+      vi.mocked(invoke).mockResolvedValueOnce(drifted);
+      await expect(call()).rejects.toBeInstanceOf(NodeContractDriftError);
+    }
+  });
+
+  it("propagates a typed Rust refusal verbatim", async () => {
+    const rustError = {
+      code: "LIBRARY_INCONSISTENT",
+      message: "La destination choisie n'existe plus dans l'histoire.",
+      userAction: "Recharge l'éditeur puis choisis un nœud existant.",
+      details: { source: "link_target_missing" },
+    };
+    vi.mocked(invoke).mockRejectedValueOnce(rustError);
+    await expect(
+      setNodeOptionLink({
+        storyId: STORY_ID,
+        nodeId: "n1",
+        optionIndex: 0,
+        target: "ghost",
+      }),
+    ).rejects.toEqual(rustError);
   });
 });

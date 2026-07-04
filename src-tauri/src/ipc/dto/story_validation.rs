@@ -59,6 +59,9 @@ pub enum BlockerCauseDto {
     SchemaUnsupported,
     StructureCorrupt,
     ChecksumMismatch,
+    DuplicateNodeId,
+    StartNodeInvalid,
+    BrokenOptionLink,
     MetadataUnsupported,
     MetadataCorrupt,
     FamilyUnknown,
@@ -202,6 +205,21 @@ fn canonical_copy(cause: &CanonicalCause) -> (BlockerCauseDto, &'static str, &'s
             "Les données locales de l'histoire ont changé de façon inattendue (corruption détectée).",
             "Restaure une sauvegarde saine de l'histoire avant de la transférer.",
         ),
+        CanonicalCause::DuplicateNodeId => (
+            BlockerCauseDto::DuplicateNodeId,
+            "Deux nœuds de l'histoire portent le même identifiant interne.",
+            "Restaure une version saine de l'histoire puis relance la vérification.",
+        ),
+        CanonicalCause::StartNodeInvalid => (
+            BlockerCauseDto::StartNodeInvalid,
+            "Le nœud de départ de l'histoire est introuvable.",
+            "Restaure une version saine de l'histoire puis relance la vérification.",
+        ),
+        CanonicalCause::BrokenOptionLink => (
+            BlockerCauseDto::BrokenOptionLink,
+            "Une option pointe vers un nœud qui n'existe plus.",
+            "Relie l'option vers un nœud existant ou retire-la ; les autres éléments de l'histoire restent valides.",
+        ),
     }
 }
 
@@ -337,6 +355,9 @@ mod tests {
             CanonicalCause::SchemaUnsupported,
             CanonicalCause::StructureCorrupt,
             CanonicalCause::ChecksumMismatch,
+            CanonicalCause::DuplicateNodeId,
+            CanonicalCause::StartNodeInvalid,
+            CanonicalCause::BrokenOptionLink,
         ];
         for c in canonical {
             let (_, message, action) = canonical_copy(&c);

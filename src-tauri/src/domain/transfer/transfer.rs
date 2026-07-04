@@ -606,6 +606,26 @@ mod tests {
     }
 
     #[test]
+    fn build_write_plan_refuses_a_native_multi_node_story_too() {
+        // A multi-node native story still carries ONLY its canonical
+        // structure (bigger bytes, same kind — the story transcoder stays
+        // unimplemented), so the write-plan gate keeps refusing it: never a
+        // false "transferable" because the graph grew. Orthogonal to the
+        // local preflight verdict, which may legitimately say `présumée
+        // transférable` on the same story.
+        let d = descriptor(vec![PreparedArtifact {
+            kind: PreparedArtifactKind::CanonicalStructure,
+            relative_ref: "structure.json".into(),
+            byte_len: 4096,
+            checksum: "b".repeat(64),
+        }]);
+        assert_eq!(
+            build_write_plan(&d, "FAC5562D").expect_err("native multi-node must refuse"),
+            TransferFailureCause::NotTransferable
+        );
+    }
+
+    #[test]
     fn cohort_coherence_passes_on_match_and_fails_device_changed_on_mismatch() {
         assert!(ensure_cohort_coherent("origine_v1", "origine_v1").is_ok());
         assert_eq!(

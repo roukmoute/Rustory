@@ -91,9 +91,9 @@ mod tests {
                 exported_by: "rustory/0.1.0".into(),
             },
             story: ExportedStoryV1 {
-                schema_version: 2,
+                schema_version: 3,
                 title: "Le Soleil Couchant".into(),
-                structure_json: "{\"schemaVersion\":2,\"nodes\":[{\"id\":\"n1\",\"text\":\"\",\"label\":\"\",\"imageAssetId\":null,\"audioAssetId\":null}]}".into(),
+                structure_json: "{\"schemaVersion\":3,\"startNodeId\":\"n1\",\"nodes\":[{\"id\":\"n1\",\"text\":\"\",\"label\":\"\",\"imageAssetId\":null,\"audioAssetId\":null,\"options\":[]}]}".into(),
                 content_checksum: "a".repeat(64),
                 created_at: "2026-04-20T10:00:00.000Z".into(),
                 updated_at: "2026-04-24T14:15:00.000Z".into(),
@@ -136,7 +136,7 @@ mod tests {
 
     #[test]
     fn exported_story_preserves_structure_json_byte_for_byte() {
-        let canonical = "{\"schemaVersion\":2,\"nodes\":[{\"id\":\"n1\",\"text\":\"\",\"label\":\"\",\"imageAssetId\":null,\"audioAssetId\":null}]}";
+        let canonical = "{\"schemaVersion\":3,\"startNodeId\":\"n1\",\"nodes\":[{\"id\":\"n1\",\"text\":\"\",\"label\":\"\",\"imageAssetId\":null,\"audioAssetId\":null,\"options\":[]}]}";
         let mut artifact = sample_artifact();
         artifact.story.structure_json = canonical.into();
         let bytes = artifact.to_canonical_json().expect("serialize");

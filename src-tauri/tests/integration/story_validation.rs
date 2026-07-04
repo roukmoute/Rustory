@@ -26,7 +26,7 @@ use rustory_lib::infrastructure::device::{
 };
 use tempfile::TempDir;
 
-const HEALTHY_JSON: &str = "{\"schemaVersion\":2,\"nodes\":[{\"id\":\"n1\",\"text\":\"\",\"label\":\"\",\"imageAssetId\":null,\"audioAssetId\":null}]}";
+const HEALTHY_JSON: &str = "{\"schemaVersion\":3,\"startNodeId\":\"n1\",\"nodes\":[{\"id\":\"n1\",\"text\":\"\",\"label\":\"\",\"imageAssetId\":null,\"audioAssetId\":null,\"options\":[]}]}";
 
 fn uuid(tail: [u8; 4]) -> [u8; 16] {
     let mut b = [0xAB; 16];
@@ -62,7 +62,7 @@ fn insert_story(db: &Mutex<DbHandle>, id: &str, title: &str, structure_json: &st
         .conn()
         .execute(
             "INSERT INTO stories (id, title, schema_version, structure_json, content_checksum, created_at, updated_at) \
-             VALUES (?1, ?2, 2, ?3, ?4, '2026-06-19T00:00:00.000Z', '2026-06-19T00:00:00.000Z')",
+             VALUES (?1, ?2, 3, ?3, ?4, '2026-06-19T00:00:00.000Z', '2026-06-19T00:00:00.000Z')",
             rusqlite::params![id, title, structure_json, checksum],
         )
         .expect("insert story");

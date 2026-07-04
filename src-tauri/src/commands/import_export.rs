@@ -70,7 +70,7 @@ pub async fn export_story_with_save_dialog(
             .db
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        get_story_detail(&db, &app_data_dir, &input.story_id)?.ok_or_else(|| {
+        get_story_detail(&db, &app_data_dir, &input.story_id, None)?.ok_or_else(|| {
             AppError::library_inconsistent(
                 "Export impossible: histoire introuvable.",
                 "Retourne à la bibliothèque et recharge la liste.",

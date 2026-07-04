@@ -26,11 +26,13 @@ pub use import_export::{
 };
 pub use library::{LibraryOverviewDto, StoryCardDto};
 pub use story::{
-    ApplyRecoveryInputDto, AttachNodeMediaOutcomeDto, CreateStoryInputDto, DiscardDraftInputDto,
-    DiscardNodeDraftInputDto, NodeContentDto, NodeMediaPreviewDto, NodeMediaSlotDto,
-    NodeMediaSlotInputDto, NodeWriteOutputDto, RecordDraftInputDto, RecordNodeDraftInputDto,
-    RecoverableDraftDto, RecoverableNodeDraftDto, StoryDetailDto, UpdateNodeContentInputDto,
-    UpdateStoryInputDto, UpdateStoryOutputDto,
+    AddNodeOptionInputDto, AddStoryNodeInputDto, ApplyRecoveryInputDto, AttachNodeMediaOutcomeDto,
+    CreateStoryInputDto, DeleteStoryNodeInputDto, DiscardDraftInputDto, DiscardNodeDraftInputDto,
+    MoveDirectionDto, MoveStoryNodeInputDto, NodeContentDto, NodeGraphDto, NodeMediaPreviewDto,
+    NodeMediaSlotDto, NodeMediaSlotInputDto, NodeWriteOutputDto, OptionLinkDto, OptionRefDto,
+    RecordDraftInputDto, RecordNodeDraftInputDto, RecoverableDraftDto, RecoverableNodeDraftDto,
+    RemoveNodeOptionInputDto, SetNodeOptionLinkInputDto, StoryDetailDto, StoryStructureDto,
+    StructureWriteOutputDto, UpdateNodeContentInputDto, UpdateStoryInputDto, UpdateStoryOutputDto,
 };
 pub use story_preparation::{
     PreparationCauseDto, PreparationStateDto, PreparationStoryDto, ReadPreparationStateInputDto,

@@ -23,6 +23,9 @@ export type BlockerCause =
   | "schemaUnsupported"
   | "structureCorrupt"
   | "checksumMismatch"
+  | "duplicateNodeId"
+  | "startNodeInvalid"
+  | "brokenOptionLink"
   | "metadataUnsupported"
   | "metadataCorrupt"
   | "familyUnknown"
@@ -78,6 +81,9 @@ const CAUSES_BY_AXIS: ReadonlyMap<string, ReadonlySet<string>> = new Map([
       "schemaUnsupported",
       "structureCorrupt",
       "checksumMismatch",
+      "duplicateNodeId",
+      "startNodeInvalid",
+      "brokenOptionLink",
     ]),
   ],
   ["media", new Set<string>()],
@@ -96,11 +102,15 @@ const CAUSES_BY_AXIS: ReadonlyMap<string, ReadonlySet<string>> = new Map([
 ]);
 
 // Severity is a FIXED property of the cause in the Rust closed taxonomy (mirror
-// for drift detection — Rust is authoritative). In MVP Phase 1 `titleInvalid` is
-// the ONLY fixable cause; every other cause is blocking. A cause that is not
-// listed here is treated as blocking by construction (it must already be a known
-// cause to reach this check).
-const FIXABLE_CAUSES: ReadonlySet<string> = new Set(["titleInvalid"]);
+// for drift detection — Rust is authoritative). The fixable causes are
+// `titleInvalid` (rename to repair) and `brokenOptionLink` (re-link or remove
+// the option in the editor); every other cause is blocking. A cause that is
+// not listed here is treated as blocking by construction (it must already be
+// a known cause to reach this check).
+const FIXABLE_CAUSES: ReadonlySet<string> = new Set([
+  "titleInvalid",
+  "brokenOptionLink",
+]);
 
 /** 32 lowercase hex chars — mirrors `compute_device_identifier`. */
 const DEVICE_IDENTIFIER_PATTERN = /^[0-9a-f]{32}$/;

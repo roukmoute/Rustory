@@ -43,8 +43,8 @@
 .story-structure-navigator__degraded {
   margin: 0;
   /* Empty / degraded states are NAMED and indented under the root so the
-   * honesty of the v1 reality reads as part of the structure, not a stray
-   * note. */
+   * honesty of the current reality reads as part of the structure, not a
+   * stray note. */
   padding-left: var(--space-3);
   color: var(--color-text-secondary);
   font-size: var(--font-size-body);
@@ -59,14 +59,35 @@
   color: var(--color-text-primary);
 }
 
+.story-structure-navigator__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.story-structure-navigator__item {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
 .story-structure-navigator__node {
   display: flex;
   align-items: baseline;
+  flex-wrap: wrap;
   gap: var(--space-1);
   margin-left: var(--space-3);
   padding: var(--space-1) var(--space-2);
+  border: none;
   border-radius: var(--radius-sm);
+  background: transparent;
   color: var(--color-text-primary);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
   overflow-wrap: anywhere;
 }
 
@@ -75,8 +96,75 @@
   font-weight: var(--font-weight-medium, var(--font-weight-semibold));
 }
 
+.story-structure-navigator__start-mark {
+  color: var(--color-text-secondary);
+  font-weight: var(--font-weight-regular, normal);
+}
+
+.story-structure-navigator__options-summary {
+  color: var(--color-text-secondary);
+  font-weight: var(--font-weight-regular, normal);
+  font-size: var(--font-size-caption, var(--font-size-body));
+}
+
+.story-structure-navigator__issue {
+  display: inline-flex;
+  align-items: baseline;
+  gap: var(--space-1);
+  margin-left: var(--space-1);
+  color: var(--color-warning-text, var(--color-text-primary));
+  font-weight: var(--font-weight-regular, normal);
+  font-size: var(--font-size-caption, var(--font-size-body));
+}
+
 .story-structure-navigator__node-marker {
   color: var(--color-text-secondary);
   font-weight: var(--font-weight-regular, normal);
   font-size: var(--font-size-caption, var(--font-size-body));
+}
+
+.story-structure-navigator__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+  margin-left: var(--space-4, calc(var(--space-3) + var(--space-1)));
+}
+
+.story-structure-navigator__confirm {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-1);
+  margin-left: var(--space-4, calc(var(--space-3) + var(--space-1)));
+  padding: var(--space-2);
+  border: 1px solid var(--color-border-subtle, rgba(0, 0, 0, 0.12));
+  border-radius: var(--radius-sm);
+  background: var(--color-surface-raised, rgba(0, 0, 0, 0.04));
+}
+
+.story-structure-navigator__confirm-impact {
+  margin: 0;
+  color: var(--color-text-primary);
+  font-size: var(--font-size-caption, var(--font-size-body));
+  line-height: var(--line-height-normal);
+}
+
+.story-structure-navigator__error {
+  margin-left: var(--space-4, calc(var(--space-3) + var(--space-1)));
+  padding: var(--space-2);
+  border: 1px solid var(--color-danger-border, rgba(0, 0, 0, 0.2));
+  border-radius: var(--radius-sm);
+  background: var(--color-danger-surface, rgba(0, 0, 0, 0.04));
+}
+
+.story-structure-navigator__error-message,
+.story-structure-navigator__error-action {
+  margin: 0;
+  font-size: var(--font-size-caption, var(--font-size-body));
+  line-height: var(--line-height-normal);
+  color: var(--color-text-primary);
+}
+
+.story-structure-navigator__add {
+  margin-left: var(--space-3);
 }

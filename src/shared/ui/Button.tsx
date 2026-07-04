@@ -8,6 +8,9 @@ export interface ButtonProps
   extends Omit<React.ButtonHTMLAttributes<HTMLButtonElement>, "type"> {
   variant?: ButtonVariant;
   type?: "button" | "submit" | "reset";
+  /** Ref to the underlying `<button>` — for managed focus flows (mirrors
+   *  `Field.inputRef`). */
+  buttonRef?: React.Ref<HTMLButtonElement>;
 }
 
 /**
@@ -22,6 +25,7 @@ export function Button({
   className,
   children,
   onClick,
+  buttonRef,
   ...rest
 }: ButtonProps): React.JSX.Element {
   const ariaDisabled = rest["aria-disabled"] === true || rest["aria-disabled"] === "true";
@@ -38,6 +42,7 @@ export function Button({
 
   return (
     <button
+      ref={buttonRef}
       type={type}
       className={["ds-button", `ds-button--${variant}`, className]
         .filter(Boolean)

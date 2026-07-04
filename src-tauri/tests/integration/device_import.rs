@@ -199,12 +199,12 @@ fn imports_end_to_end_and_the_story_survives_without_the_device() {
     // Canonical stories row, strictly conforming to the create_story model.
     {
         let db = h.db.lock().expect("lock");
-        let detail = get_story_detail(&db, &std::env::temp_dir(), &outcome.story.id)
+        let detail = get_story_detail(&db, &std::env::temp_dir(), &outcome.story.id, None)
             .expect("detail read")
             .expect("row present");
         assert_eq!(detail.title, format!("Histoire de ma Lunii ({short_id})"));
-        assert_eq!(detail.schema_version, 2);
-        assert_eq!(detail.structure_json, "{\"schemaVersion\":2,\"nodes\":[{\"id\":\"n1\",\"text\":\"\",\"label\":\"\",\"imageAssetId\":null,\"audioAssetId\":null}]}");
+        assert_eq!(detail.schema_version, 3);
+        assert_eq!(detail.structure_json, "{\"schemaVersion\":3,\"startNodeId\":\"n1\",\"nodes\":[{\"id\":\"n1\",\"text\":\"\",\"label\":\"\",\"imageAssetId\":null,\"audioAssetId\":null,\"options\":[]}]}");
         assert_eq!(detail.content_checksum.len(), 64);
         assert_eq!(detail.created_at, detail.updated_at);
 
@@ -238,7 +238,7 @@ fn imports_end_to_end_and_the_story_survives_without_the_device() {
     assert!(!mount.exists(), "fixture mount must be gone");
     {
         let db = h.db.lock().expect("lock");
-        let detail = get_story_detail(&db, &std::env::temp_dir(), &outcome.story.id)
+        let detail = get_story_detail(&db, &std::env::temp_dir(), &outcome.story.id, None)
             .expect("re-read without device")
             .expect("still present");
         assert_eq!(detail.title, outcome.story.title);

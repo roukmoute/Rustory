@@ -101,7 +101,7 @@ fn cancelled_outcome_wire_shape_carries_only_kind() {
 fn importable_content_json() -> serde_json::Value {
     serde_json::json!({
         "title": "Le Soleil",
-        "structureJson": "{\"schemaVersion\":2,\"nodes\":[{\"id\":\"n1\",\"text\":\"\",\"label\":\"\",\"imageAssetId\":null,\"audioAssetId\":null}]}",
+        "structureJson": "{\"schemaVersion\":3,\"startNodeId\":\"n1\",\"nodes\":[{\"id\":\"n1\",\"text\":\"\",\"label\":\"\",\"imageAssetId\":null,\"audioAssetId\":null,\"options\":[]}]}",
         "contentChecksum": "a".repeat(64),
         "createdAt": "2026-06-20T10:00:00.000Z",
         "updatedAt": "2026-06-24T14:15:00.000Z",
@@ -154,7 +154,7 @@ fn importable_content_wire_carries_no_schema_version() {
     // re-proves the canonical version against the embedded `structureJson`.
     let err = serde_json::from_value::<ImportableContentDto>(serde_json::json!({
         "title": "Le Soleil",
-        "structureJson": "{\"schemaVersion\":2,\"nodes\":[{\"id\":\"n1\",\"text\":\"\",\"label\":\"\",\"imageAssetId\":null,\"audioAssetId\":null}]}",
+        "structureJson": "{\"schemaVersion\":3,\"startNodeId\":\"n1\",\"nodes\":[{\"id\":\"n1\",\"text\":\"\",\"label\":\"\",\"imageAssetId\":null,\"audioAssetId\":null,\"options\":[]}]}",
         "contentChecksum": "a".repeat(64),
         "createdAt": "2026-06-20T10:00:00.000Z",
         "updatedAt": "2026-06-24T14:15:00.000Z",
@@ -176,7 +176,7 @@ fn analyzed_verdict_round_trips_the_documented_wire_shape() {
         }],
         importable_content: Some(ImportableContentDto {
             title: "  Le Soleil  ".into(),
-            structure_json: "{\"schemaVersion\":2,\"nodes\":[{\"id\":\"n1\",\"text\":\"\",\"label\":\"\",\"imageAssetId\":null,\"audioAssetId\":null}]}".into(),
+            structure_json: "{\"schemaVersion\":3,\"startNodeId\":\"n1\",\"nodes\":[{\"id\":\"n1\",\"text\":\"\",\"label\":\"\",\"imageAssetId\":null,\"audioAssetId\":null,\"options\":[]}]}".into(),
             content_checksum: "a".repeat(64),
             created_at: "2026-06-20T10:00:00.000Z".into(),
             updated_at: "2026-06-24T14:15:00.000Z".into(),

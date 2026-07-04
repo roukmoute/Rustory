@@ -42,6 +42,12 @@ function buildDetail(overrides: Partial<StoryDetailDto> = {}): StoryDetailDto {
     createdAt: "2026-04-23T09:00:00.000Z",
     updatedAt: "2026-04-23T09:00:00.000Z",
     editable: true,
+    structure: {
+      startNodeId: "n1",
+      nodes: [
+        { id: "n1", label: "", isStart: true, hasIssue: false, options: [] },
+      ],
+    },
     node: { id: "n1", text: "", label: "", image: null, audio: null },
     ...overrides,
   };
@@ -1127,5 +1133,56 @@ describe("useStoryEditor — reloadDetailFromOutput", () => {
 
     if (result.current.state.kind !== "ready") throw new Error("ready");
     expect(result.current.state.detail.title).toBe("Titre initial");
+  });
+});
+
+describe("useStoryEditor — applyStructureOutput", () => {
+  it("moves structure, structureJson, checksum and updatedAt TOGETHER", async () => {
+    vi.mocked(getStoryDetail).mockResolvedValueOnce(buildDetail());
+    const { result } = renderHook(() => useStoryEditor(STORY_ID));
+    await flushPromises();
+
+    const committedJson =
+      '{"schemaVersion":3,"startNodeId":"n1","nodes":[{"id":"n1","text":"","label":"","imageAssetId":null,"audioAssetId":null,"options":[]},{"id":"n2","text":"","label":"","imageAssetId":null,"audioAssetId":null,"options":[]}]}';
+    act(() => {
+      if (result.current.state.kind !== "ready") throw new Error("ready");
+      result.current.applyStructureOutput({
+        id: STORY_ID,
+        updatedAt: "2026-07-04T12:00:00.000Z",
+        contentChecksum: "b".repeat(64),
+        structureJson: committedJson,
+        structure: {
+          startNodeId: "n1",
+          nodes: [
+            {
+              id: "n1",
+              label: "",
+              isStart: true,
+              hasIssue: false,
+              options: [],
+            },
+            {
+              id: "n2",
+              label: "",
+              isStart: false,
+              hasIssue: false,
+              options: [],
+            },
+          ],
+        },
+      });
+    });
+
+    if (result.current.state.kind !== "ready") throw new Error("ready");
+    const detail = result.current.state.detail;
+    expect(detail.structure?.nodes).toHaveLength(2);
+    // The structureJson/contentChecksum PAIR stays coherent — the contract
+    // says those exact bytes are what the checksum covers, so the ACK must
+    // never leave a stale pair in the local detail.
+    expect(detail.structureJson).toBe(committedJson);
+    expect(detail.contentChecksum).toBe("b".repeat(64));
+    expect(detail.updatedAt).toBe("2026-07-04T12:00:00.000Z");
+    // The title autosave machinery is untouched.
+    expect(result.current.state.saveStatus.kind).toBe("idle");
   });
 });

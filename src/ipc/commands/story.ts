@@ -6,10 +6,15 @@ import {
   isNodeWriteOutput,
   isRecoverableDraft,
   isRecoverableNodeDraft,
+  isStructureWriteOutput,
   isUpdateStoryOutput,
+  type AddNodeOptionInput,
+  type AddStoryNodeInput,
   type ApplyRecoveryInput,
   type AttachNodeMediaOutcome,
   type CreateStoryInput,
+  type DeleteStoryNodeInput,
+  type MoveStoryNodeInput,
   type NodeMediaPreview,
   type NodeMediaSlotInput,
   type NodeWriteOutput,
@@ -17,8 +22,11 @@ import {
   type RecordNodeDraftInput,
   type RecoverableDraft,
   type RecoverableNodeDraft,
+  type RemoveNodeOptionInput,
+  type SetNodeOptionLinkInput,
   type StoryCardDto,
   type StoryDetailDto,
+  type StructureWriteOutput,
   type UpdateNodeContentInput,
   type UpdateStoryInput,
   type UpdateStoryOutput,
@@ -56,12 +64,18 @@ export function saveStory(input: UpdateStoryInput): Promise<UpdateStoryOutput> {
  * Read a single story detail for the edit surface. Returns `null` when
  * the row is absent — the route renders that as "Histoire introuvable"
  * without treating it as an error.
+ *
+ * `nodeId` targets the selected node's content projection; omitted, the
+ * Rust core projects the start node. A stale id over a healthy graph
+ * falls back to the start node on the Rust side.
  */
 export function getStoryDetail(input: {
   storyId: string;
+  nodeId?: string;
 }): Promise<StoryDetailDto | null> {
   return invoke<StoryDetailDto | null>("get_story_detail", {
     storyId: input.storyId,
+    nodeId: input.nodeId ?? null,
   });
 }
 
@@ -298,4 +312,80 @@ export function discardNodeDraft(input: {
       expectedDraftAt: input.expectedDraftAt ?? null,
     },
   });
+}
+
+// ---------------------------------------------------------------------------
+// Structural mutations (schema v3 node graph)
+// ---------------------------------------------------------------------------
+
+/** Shared validation of every structural write acknowledgement. */
+async function invokeStructureWrite(
+  command: string,
+  input: unknown,
+): Promise<StructureWriteOutput> {
+  const raw = await invoke<unknown>(command, { input });
+  if (!isStructureWriteOutput(raw)) {
+    throw new NodeContractDriftError(
+      `${command} a renvoyé une forme inattendue.`,
+      { raw },
+    );
+  }
+  return raw;
+}
+
+/**
+ * Append a new empty node at the end of the structure. With `linkFrom`,
+ * the referenced option is linked to the new node in the SAME transaction
+ * (the "Créer et lier un nouveau nœud" gesture — never a half-state).
+ */
+export function addStoryNode(
+  input: AddStoryNodeInput,
+): Promise<StructureWriteOutput> {
+  return invokeStructureWrite("add_story_node", {
+    storyId: input.storyId,
+    linkFrom: input.linkFrom ?? null,
+  });
+}
+
+/**
+ * Delete a node. The Rust core refuses the start node; options pointing at
+ * the deleted node keep their destination and come back flagged `broken`
+ * (`destination à corriger`) in the re-projected graph.
+ */
+export function deleteStoryNode(
+  input: DeleteStoryNodeInput,
+): Promise<StructureWriteOutput> {
+  return invokeStructureWrite("delete_story_node", input);
+}
+
+/** Swap a node with its neighbor in the display order. */
+export function moveStoryNode(
+  input: MoveStoryNodeInput,
+): Promise<StructureWriteOutput> {
+  return invokeStructureWrite("move_story_node", input);
+}
+
+/** Add an option (label typed at creation) to a node. */
+export function addNodeOption(
+  input: AddNodeOptionInput,
+): Promise<StructureWriteOutput> {
+  return invokeStructureWrite("add_node_option", input);
+}
+
+/**
+ * Set an option's destination (`target` = an existing node id) or unlink
+ * it (`target: null`). A missing destination is refused by Rust — the
+ * invalid link is never written.
+ */
+export function setNodeOptionLink(
+  input: SetNodeOptionLinkInput,
+): Promise<StructureWriteOutput> {
+  return invokeStructureWrite("set_node_option_link", input);
+}
+
+/** Remove an option from a node. */
+export function removeNodeOption(
+  input: RemoveNodeOptionInput,
+): Promise<StructureWriteOutput> {
+  return invokeStructureWrite("remove_node_option", input);
 }

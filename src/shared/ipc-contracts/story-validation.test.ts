@@ -226,6 +226,59 @@ describe("isStoryValidationDto", () => {
     ).toBe(true);
   });
 
+  it("accepts toFix with the fixable brokenOptionLink cause", () => {
+    expect(
+      isStoryValidationDto(
+        ready({
+          verdict: "toFix",
+          blockers: [
+            blocker({
+              cause: "brokenOptionLink",
+              message: "Une option pointe vers un nœud qui n'existe plus.",
+              userAction: "Relie l'option vers un nœud existant.",
+            }),
+          ],
+        }),
+      ),
+    ).toBe(true);
+  });
+
+  it("accepts the new blocking graph causes under the structure axis", () => {
+    for (const cause of ["duplicateNodeId", "startNodeInvalid"] as const) {
+      expect(
+        isStoryValidationDto(
+          ready({
+            verdict: "blocked",
+            blockers: [
+              blocker({
+                cause,
+                message: "La structure interne est incohérente.",
+                userAction: "Restaure une version saine de l'histoire.",
+              }),
+            ],
+          }),
+        ),
+      ).toBe(true);
+    }
+    // Blocking graph causes can never justify a mere toFix verdict.
+    expect(
+      isStoryValidationDto(
+        ready({
+          verdict: "toFix",
+          blockers: [blocker({ cause: "duplicateNodeId" })],
+        }),
+      ),
+    ).toBe(false);
+    // And a graph cause under the wrong axis stays an impossible pair.
+    expect(
+      isStoryValidationDto(
+        ready({
+          blockers: [blocker({ axis: "deviceProfile", cause: "brokenOptionLink" })],
+        }),
+      ),
+    ).toBe(false);
+  });
+
   it("rejects a blocker with an empty message or userAction", () => {
     expect(
       isStoryValidationDto(ready({ blockers: [blocker({ message: "" })] })),

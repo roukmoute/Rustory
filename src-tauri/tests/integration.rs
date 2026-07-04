@@ -21,6 +21,9 @@ mod story_local_imports_migration;
 #[path = "integration/node_content_migration.rs"]
 mod node_content_migration;
 
+#[path = "integration/multi_node_structure_migration.rs"]
+mod multi_node_structure_migration;
+
 #[path = "integration/story_drafts_recovery.rs"]
 mod story_drafts_recovery;
 

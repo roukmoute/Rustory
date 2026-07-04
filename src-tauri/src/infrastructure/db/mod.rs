@@ -3,40 +3,172 @@ use std::path::Path;
 use rusqlite::Connection;
 
 use crate::domain::shared::AppError;
+use crate::domain::story::{
+    canonical_structure_json, content_checksum, validate_canonical, CanonicalStoryFacts,
+    LegacyStructureV2, Severity,
+};
+
+/// The Rust step of a migration, executed inside the SAME `BEGIN IMMEDIATE`
+/// transaction as the migration's SQL, before the ledger INSERT. Needed when
+/// a data migration cannot be expressed in SQL — e.g. a per-row checksum
+/// recompute over varied payloads.
+pub type MigrationHook = fn(&rusqlite::Transaction<'_>) -> Result<(), MigrationHookError>;
+
+/// Failure raised by a [`MigrationHook`]. Split so non-SQLite failures (a
+/// canonical payload the hook cannot read or re-stamp) keep a dedicated,
+/// PII-safe stage marker instead of being forced through the rusqlite-only
+/// error mapper.
+#[derive(Debug)]
+pub enum MigrationHookError {
+    /// A SQLite-level failure inside the hook (SELECT / UPDATE).
+    Sqlite {
+        stage: &'static str,
+        err: rusqlite::Error,
+    },
+    /// A non-SQLite failure: a row whose canonical payload cannot be read or
+    /// promoted (corrupt bytes, unmappable shape). Fail-closed — the whole
+    /// transaction rolls back and the base stays intact.
+    Payload { stage: &'static str },
+}
 
 /// Registry of canonical migrations, embedded at compile time so a binary
 /// shipped without the repository can still bring up a fresh database.
 ///
-/// The tuple layout is `(version, sql)`. Versions must be strictly ascending
-/// and unique — `run_migrations` asserts that invariant at runtime.
-pub const MIGRATIONS: &[(u32, &str)] = &[
-    (1, include_str!("../../../migrations/0001_init.sql")),
-    (2, include_str!("../../../migrations/0002_story_drafts.sql")),
+/// The tuple layout is `(version, sql, hook)`. Versions must be strictly
+/// ascending and unique — `run_migrations` asserts that invariant at runtime.
+/// The optional hook runs AFTER the SQL, in the same transaction.
+pub const MIGRATIONS: &[(u32, &str, Option<MigrationHook>)] = &[
+    (1, include_str!("../../../migrations/0001_init.sql"), None),
+    (
+        2,
+        include_str!("../../../migrations/0002_story_drafts.sql"),
+        None,
+    ),
     (
         3,
         include_str!("../../../migrations/0003_story_imports.sql"),
+        None,
     ),
     (
         4,
         include_str!("../../../migrations/0004_pack_metadata.sql"),
+        None,
     ),
     (
         5,
         include_str!("../../../migrations/0005_transfer_jobs.sql"),
+        None,
     ),
     (
         6,
         include_str!("../../../migrations/0006_story_local_imports.sql"),
+        None,
     ),
     (
         7,
         include_str!("../../../migrations/0007_node_content_and_media.sql"),
+        None,
     ),
     (
         8,
         include_str!("../../../migrations/0008_assets_content_hash_index.sql"),
+        None,
+    ),
+    (
+        9,
+        include_str!("../../../migrations/0009_multi_node_structure.sql"),
+        Some(restamp_v2_to_v3),
     ),
 ];
+
+/// Migration 0009 hook: re-stamp every v2 story to the v3 graph shape.
+///
+/// v2 rows carry VARIED content (text / label / media references set by the
+/// node editor), so the `schemaVersion` bump changes each row's bytes
+/// differently and the SHA-256 `content_checksum` must be recomputed PER ROW
+/// — impossible in pure SQL (0007 could hardcode ONE checksum only because
+/// every v1 row was byte-identical).
+///
+/// Promotion is LOSSLESS: the node content is carried as-is, the single
+/// node's id becomes `startNodeId` (NOT necessarily "n1" — an imported
+/// artifact may carry another id) and the node gains empty `options`.
+/// Idempotent by construction (`WHERE schema_version = 2`; the ledger
+/// prevents a re-run anyway), forward-only, fail-closed: a v2 row that does
+/// not parse or cannot be promoted aborts the whole transaction and leaves
+/// the base intact — never guessed, never repaired silently.
+fn restamp_v2_to_v3(tx: &rusqlite::Transaction<'_>) -> Result<(), MigrationHookError> {
+    let sqlite =
+        |stage: &'static str| move |err: rusqlite::Error| MigrationHookError::Sqlite { stage, err };
+
+    let mut stmt = tx
+        .prepare(
+            "SELECT id, title, structure_json, content_checksum FROM stories \
+             WHERE schema_version = 2",
+        )
+        .map_err(sqlite("restamp_select"))?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })
+        .map_err(sqlite("restamp_select"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(sqlite("restamp_select"))?;
+    drop(stmt);
+
+    for (story_id, title, structure_json, stored_checksum) in rows {
+        // Integrity FIRST: a v2 row whose stored checksum already diverges
+        // from its bytes is corrupt. Promoting it and recomputing a fresh
+        // checksum would ERASE that integrity signal — fail closed instead.
+        if content_checksum(&structure_json) != stored_checksum {
+            return Err(MigrationHookError::Payload {
+                stage: "restamp_checksum",
+            });
+        }
+        let legacy: LegacyStructureV2 =
+            serde_json::from_str(&structure_json).map_err(|_| MigrationHookError::Payload {
+                stage: "restamp_parse",
+            })?;
+        let promoted = legacy.promote_to_v3().ok_or(MigrationHookError::Payload {
+            stage: "restamp_promote",
+        })?;
+        let json = canonical_structure_json(&promoted);
+        let checksum = content_checksum(&json);
+        // Re-validate the PROMOTED graph with the canonical invariants before
+        // committing it: a v2 payload that promotes mechanically but lands
+        // blocked (e.g. a blank node id ⇒ StructureCorrupt + StartNodeInvalid)
+        // must abort the migration rather than enter the ledger as "done"
+        // with a row the app will refuse to project. Fixable-only outcomes
+        // (an invalid TITLE is Fixable and none of the migration's business)
+        // pass — the gate is Blocking, mirroring the write path.
+        let promoted_facts = CanonicalStoryFacts {
+            title,
+            schema_version: 3,
+            structure_json: json.clone(),
+            content_checksum: checksum.clone(),
+        };
+        let has_blocking = validate_canonical(&promoted_facts)
+            .iter()
+            .any(|b| b.severity == Severity::Blocking);
+        if has_blocking {
+            return Err(MigrationHookError::Payload {
+                stage: "restamp_invalid",
+            });
+        }
+        tx.execute(
+            "UPDATE stories SET structure_json = ?1, schema_version = 3, content_checksum = ?2 \
+             WHERE id = ?3",
+            rusqlite::params![json, checksum, story_id],
+        )
+        .map_err(sqlite("restamp_update"))?;
+    }
+
+    Ok(())
+}
 
 /// Thin wrapper over a [`rusqlite::Connection`]. Exposes only the operations
 /// application services need, so the rest of the codebase never mixes raw
@@ -138,6 +270,14 @@ fn map_pragma_error(_err: &rusqlite::Error, pragma: &'static str) -> AppError {
 }
 
 fn map_migration_error(_err: &rusqlite::Error, stage: &'static str, version: u32) -> AppError {
+    map_migration_stage_error(stage, version)
+}
+
+/// Shared PII-safe mapper for migration failures. Non-SQLite hook failures
+/// (a serde parse of a corrupt canonical payload, an unpromotable shape) go
+/// through this directly — same `sqlite_migration` family, with the failing
+/// hook step as `stage`.
+fn map_migration_stage_error(stage: &'static str, version: u32) -> AppError {
     AppError::local_storage_unavailable(
         "Rustory n'a pas pu préparer sa base locale.",
         "Relance Rustory ; si le problème persiste, réinstalle l'application.",
@@ -171,7 +311,7 @@ pub fn run_migrations(db: &mut DbHandle) -> Result<(), AppError> {
         .map_err(|err| map_migration_error(&err, "ensure_ledger", 0))?;
 
     let mut prev: Option<u32> = None;
-    for (version, sql) in MIGRATIONS {
+    for (version, sql, hook) in MIGRATIONS {
         if let Some(previous) = prev {
             assert!(
                 *version > previous,
@@ -208,6 +348,14 @@ pub fn run_migrations(db: &mut DbHandle) -> Result<(), AppError> {
 
         tx.execute_batch(sql)
             .map_err(|err| map_migration_error(&err, "apply_sql", *version))?;
+        if let Some(hook) = hook {
+            hook(&tx).map_err(|err| match err {
+                MigrationHookError::Sqlite { stage, err } => {
+                    map_migration_error(&err, stage, *version)
+                }
+                MigrationHookError::Payload { stage } => map_migration_stage_error(stage, *version),
+            })?;
+        }
         tx.execute(
             "INSERT INTO schema_migrations (version, applied_at) VALUES (?1, ?2)",
             rusqlite::params![version, now_iso()],

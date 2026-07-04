@@ -249,7 +249,7 @@ mod tests {
             },
         )
         .expect("create story");
-        get_story_detail(db, &std::env::temp_dir(), &dto.id)
+        get_story_detail(db, &std::env::temp_dir(), &dto.id, None)
             .expect("read detail")
             .expect("detail present")
     }

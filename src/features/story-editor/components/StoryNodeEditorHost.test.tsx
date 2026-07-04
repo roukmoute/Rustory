@@ -26,6 +26,7 @@ function stubEditor(overrides: Partial<UseNodeEditor> = {}): UseNodeEditor {
     imageBusy: false,
     audioBusy: false,
     recovery: { kind: "none" },
+    recoveryApplyError: null,
     setText: vi.fn(),
     setLabel: vi.fn(),
     flushNodeAutoSave: vi.fn(),
@@ -184,6 +185,7 @@ describe("<StoryNodeEditorHost />", () => {
         editor={stubEditor({
           recovery: {
             kind: "recoverable",
+            nodeId: "n1",
             draftText: "en cours",
             draftLabel: "",
             draftAt: "2026-06-27T12:00:00.000Z",
@@ -207,6 +209,7 @@ describe("<StoryNodeEditorHost />", () => {
         editor={stubEditor({
           recovery: {
             kind: "recoverable",
+            nodeId: "n1",
             draftText: "en cours",
             draftLabel: "",
             draftAt: "2026-06-27T12:00:00.000Z",

@@ -1,0 +1,21 @@
+-- Schema v3: the canonical story model becomes an ordered node GRAPH — one or
+-- more nodes, an explicit start node (`startNodeId`) and per-node option
+-- links toward other nodes.
+--
+-- No DDL is needed: the graph lives inside `stories.structure_json` (the
+-- JSON-blob canonical source of truth, covered by `content_checksum`).
+--
+-- The v2→v3 re-stamp CANNOT be pure SQL. v2 rows carry VARIED content (node
+-- text, label, media references), so bumping `schemaVersion` changes each
+-- row's bytes differently and the SHA-256 `content_checksum` must be
+-- recomputed PER ROW. That data step is carried by a Rust migration hook
+-- (`restamp_v2_to_v3`), executed in the SAME transaction as this file,
+-- before the ledger INSERT:
+--   1. SELECT id, structure_json FROM stories WHERE schema_version = 2;
+--   2. per row: parse the exact v2 shape (dedicated legacy read type) →
+--      promote losslessly (schemaVersion 3, startNodeId = the single node's
+--      id — not necessarily 'n1' —, options []) → recompute the checksum on
+--      the re-serialized bytes;
+--   3. UPDATE structure_json / schema_version / content_checksum per row.
+-- Idempotent (`WHERE schema_version = 2`), forward-only, fail-closed: an
+-- unreadable or unpromotable v2 row aborts the transaction, base intact.
