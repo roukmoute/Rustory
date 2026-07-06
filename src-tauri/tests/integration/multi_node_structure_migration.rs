@@ -162,7 +162,7 @@ fn migration_v9_is_idempotent() {
 }
 
 #[test]
-fn migration_ledger_records_versions_one_through_ten() {
+fn migration_ledger_records_every_declared_version() {
     let tmp = TempDir::new().expect("tmp");
     let path = tmp.path().join("rustory.sqlite");
     let mut db = open_at(&path).expect("open");
@@ -177,7 +177,7 @@ fn migration_ledger_records_versions_one_through_ten() {
         .expect("query")
         .collect::<Result<Vec<_>, _>>()
         .expect("collect");
-    assert_eq!(versions, (1..=10).collect::<Vec<u32>>());
+    assert_eq!(versions, (1..=11).collect::<Vec<u32>>());
     assert_eq!(versions.len(), MIGRATIONS.len());
 }
 

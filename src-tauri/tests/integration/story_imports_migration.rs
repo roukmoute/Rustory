@@ -233,7 +233,7 @@ fn existing_v2_database_upgrades_to_v3() {
         .expect("collect");
     assert_eq!(
         versions,
-        vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+        vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
         "v1+v2 preserved, v3 added (and later migrations recorded)"
     );
 

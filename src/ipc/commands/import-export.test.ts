@@ -9,8 +9,11 @@ import { invoke } from "@tauri-apps/api/core";
 import {
   ExportStoryContractDriftError,
   ImportArtifactContractDriftError,
+  StructuredCreationContractDriftError,
   acceptArtifactImport,
+  acceptStructuredCreation,
   analyzeArtifactForImport,
+  analyzeStructuredFolderForCreation,
   exportStoryWithSaveDialog,
 } from "./import-export";
 
@@ -201,6 +204,115 @@ describe("acceptArtifactImport", () => {
         sourceName: "histoire.rustory",
         artifactChecksum: "b".repeat(64),
       }),
+    ).rejects.toEqual(rustError);
+  });
+});
+
+// ===== Structured-folder creation facades =====
+
+const FOLDER_ANALYZED = {
+  kind: "analyzed",
+  quality: "clean",
+  state: "recognized",
+  findings: [
+    { aspect: "envelope", category: "recognized", message: "Manifest lisible." },
+    { aspect: "formatVersion", category: "recognized", message: "Version ok." },
+    { aspect: "title", category: "recognized", message: "Titre valide." },
+    { aspect: "structure", category: "recognized", message: "Structure reconnue." },
+    { aspect: "media", category: "recognized", message: "Médias présents." },
+  ],
+  creatableSummary: {
+    title: "Le voyage de Nour",
+    nodeCount: 2,
+    retainedMedia: ["couverture.png"],
+    discardedMedia: [],
+  },
+  folderName: "mon-dossier",
+  folderPath: "/home/user/mon-dossier",
+};
+
+describe("analyzeStructuredFolderForCreation", () => {
+  beforeEach(() => {
+    vi.mocked(invoke).mockReset();
+  });
+
+  it("calls the analyze_structured_folder_for_creation command with no payload", async () => {
+    vi.mocked(invoke).mockResolvedValueOnce(FOLDER_ANALYZED);
+    const result = await analyzeStructuredFolderForCreation();
+    expect(invoke).toHaveBeenCalledWith("analyze_structured_folder_for_creation");
+    expect(result.kind).toBe("analyzed");
+  });
+
+  it("returns a cancelled outcome as a silent value", async () => {
+    vi.mocked(invoke).mockResolvedValueOnce({ kind: "cancelled" });
+    await expect(analyzeStructuredFolderForCreation()).resolves.toEqual({
+      kind: "cancelled",
+    });
+  });
+
+  it("rejects with a drift error when the verdict lacks folderPath", async () => {
+    const { folderPath: _dropped, ...raw } = FOLDER_ANALYZED;
+    vi.mocked(invoke).mockResolvedValueOnce(raw);
+    const err = (await analyzeStructuredFolderForCreation().then(
+      () => {
+        throw new Error("expected rejection");
+      },
+      (e: unknown) => e,
+    )) as StructuredCreationContractDriftError;
+    expect(err).toBeInstanceOf(StructuredCreationContractDriftError);
+    expect(err.raw).toEqual(raw);
+  });
+
+  it("propagates an IMPORT_FAILED transport error verbatim", async () => {
+    const rustError = {
+      code: "IMPORT_FAILED",
+      message: "Création impossible: la fenêtre de sélection n'a pas pu s'ouvrir.",
+      userAction: "Relance Rustory ; si le problème persiste, consulte les traces locales.",
+      details: { source: "dialog_failed" },
+    };
+    vi.mocked(invoke).mockRejectedValueOnce(rustError);
+    await expect(analyzeStructuredFolderForCreation()).rejects.toEqual(rustError);
+  });
+});
+
+describe("acceptStructuredCreation", () => {
+  beforeEach(() => {
+    vi.mocked(invoke).mockReset();
+  });
+
+  it("calls the accept_structured_creation command with the folder pointer wrapped in input", async () => {
+    vi.mocked(invoke).mockResolvedValueOnce({
+      id: "0197a5d0-0000-7000-8000-000000000001",
+      title: "Le voyage de Nour",
+      importState: "recognized",
+    });
+    const card = await acceptStructuredCreation({
+      folderPath: "/home/user/mon-dossier",
+    });
+    expect(invoke).toHaveBeenCalledWith("accept_structured_creation", {
+      input: { folderPath: "/home/user/mon-dossier" },
+    });
+    expect(card.title).toBe("Le voyage de Nour");
+  });
+
+  it("rejects with a drift error when the returned card is malformed", async () => {
+    vi.mocked(invoke).mockResolvedValueOnce({ id: "", title: "" });
+    await expect(
+      acceptStructuredCreation({ folderPath: "/home/user/mon-dossier" }),
+    ).rejects.toBeInstanceOf(StructuredCreationContractDriftError);
+  });
+
+  it("propagates a Rust refusal verbatim (revalidation)", async () => {
+    const rustError = {
+      code: "IMPORT_FAILED",
+      message: "Création impossible: le dossier n'a pas pu être revalidé.",
+      userAction:
+        "Le contenu du dossier a peut-être changé. Relance l'analyse du dossier puis réessaie.",
+      details: { source: "other", cause: "revalidation" },
+    };
+    vi.mocked(invoke).mockRejectedValueOnce(rustError);
+    await expect(
+      acceptStructuredCreation({ folderPath: "/home/user/mon-dossier" }),
     ).rejects.toEqual(rustError);
   });
 });

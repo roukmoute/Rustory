@@ -43,8 +43,10 @@ import {
   type TransferView,
 } from "../../features/library/components/LuniiDecisionPanel";
 import { useStoryPreparation, useStoryTransfer } from "../../features/transfer";
+import { CreateFromFolderSurface } from "../../features/import-export/components/CreateFromFolderSurface";
 import { ImportArtifactSurface } from "../../features/import-export/components/ImportArtifactSurface";
 import { useStoryImport } from "../../features/import-export/hooks/use-story-import";
+import { useStructuredCreation } from "../../features/import-export/hooks/use-structured-creation";
 import type { StoryPreparationBadge } from "../../features/library/components/StoryCard";
 import { StoryCollection } from "../../features/library/components/StoryCollection";
 import {
@@ -144,6 +146,22 @@ export function LibraryRoute(): React.JSX.Element {
       invalidate();
     }
   }, [importStatusKind, invalidate]);
+
+  // Structured-folder creation flow (folder → new canonical story).
+  // USER-TRIGGERED from the creation dialog's secondary entry ("Choisir un
+  // dossier…"). Analysis never mutates (AC4); the overview reloads only
+  // after a successful creation — the fresh card (with its possible marker)
+  // IS the sober success feedback; the editor is NOT auto-opened.
+  const structuredCreation = useStructuredCreation();
+  const isCreateFromFolderBusy =
+    structuredCreation.status.kind === "analyzing" ||
+    structuredCreation.status.kind === "creating";
+  const structuredCreationStatusKind = structuredCreation.status.kind;
+  useEffect(() => {
+    if (structuredCreationStatusKind === "created") {
+      invalidate();
+    }
+  }, [structuredCreationStatusKind, invalidate]);
 
   const handleCreated = (story: StoryCardDto): void => {
     // Drop the module-local SWR snapshot so the next useLibraryOverview
@@ -476,6 +494,13 @@ export function LibraryRoute(): React.JSX.Element {
         onRetry={storyImport.pickAndAnalyze}
         onDismiss={storyImport.dismiss}
       />
+      <CreateFromFolderSurface
+        status={structuredCreation.status}
+        onAccept={structuredCreation.acceptCreation}
+        onAbandon={structuredCreation.abandon}
+        onRetry={structuredCreation.pickAndAnalyze}
+        onDismiss={structuredCreation.dismiss}
+      />
       {renderCenter(
         state,
         retry,
@@ -490,7 +515,7 @@ export function LibraryRoute(): React.JSX.Element {
         handleCreateStoryRequest,
         preparationBadges,
         storyImport.pickAndAnalyze,
-        isImportBusy,
+        isImportBusy || isCreateFromFolderBusy,
       )}
       <DeviceStoryCollection
         state={deviceLibrary.state}
@@ -557,6 +582,10 @@ export function LibraryRoute(): React.JSX.Element {
         open={isCreateOpen}
         onClose={() => setIsCreateOpen(false)}
         onCreated={handleCreated}
+        onCreateFromFolderRequest={() => {
+          void structuredCreation.pickAndAnalyze();
+        }}
+        isCreateFromFolderUnavailable={isImportBusy || isCreateFromFolderBusy}
       />
     </>
   );

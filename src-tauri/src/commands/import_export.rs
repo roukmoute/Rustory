@@ -3,14 +3,17 @@ use std::path::{Path, PathBuf};
 use tauri::{async_runtime, AppHandle, Manager, State};
 use tauri_plugin_dialog::{DialogExt, FilePath};
 
-use crate::application::import_export::{self, import, ExportStoryInput, ImportAnalysis};
+use crate::application::import_export::{
+    self, import, structured_creation, ExportStoryInput, ImportAnalysis,
+};
 use crate::application::story::get_story_detail;
 use crate::commands::shared::validate_story_id;
 use crate::domain::export::RUSTORY_ARTIFACT_EXTENSION;
 use crate::domain::shared::AppError;
 use crate::ipc::dto::{
-    AcceptArtifactImportInputDto, ExportStoryDialogInputDto, ExportStoryDialogOutcomeDto,
-    ImportArtifactAnalysisDto, StoryCardDto,
+    AcceptArtifactImportInputDto, AcceptStructuredCreationInputDto, ExportStoryDialogInputDto,
+    ExportStoryDialogOutcomeDto, ImportArtifactAnalysisDto, StoryCardDto,
+    StructuredCreationAnalysisDto,
 };
 use crate::AppState;
 
@@ -395,6 +398,101 @@ pub async fn accept_artifact_import(
     })
     .await
     .map_err(|_| import::spawn_blocking_join_error())?
+}
+
+/// Analyze a user-picked structured folder (phase 1, NO mutation).
+///
+/// Opens a native FOLDER picker (same non-blocking callback + channel
+/// discipline as the `.rustory` flow — the GTK dialog must run on the main
+/// thread, a `blocking_*` variant dead-locks). A cancelled dialog resolves
+/// with `{ kind: "cancelled" }`. The bounded analysis (manifest + media
+/// probes) runs on a blocking worker. Only TRANSPORT failures reject; every
+/// folder-state problem (manifest absent, malformed, media missing…) is the
+/// typed verdict DTO. The returned `folderPath` exists ONLY to be passed
+/// back to `accept_structured_creation` — never rendered, persisted or
+/// logged (PII).
+#[tauri::command]
+pub async fn analyze_structured_folder_for_creation(
+    app: AppHandle,
+) -> Result<StructuredCreationAnalysisDto, AppError> {
+    let (tx, mut rx) = async_runtime::channel::<Option<FilePath>>(1);
+    app.dialog().file().pick_folder(move |path| {
+        let _ = tx.try_send(path);
+    });
+
+    let picked = match rx.recv().await {
+        Some(inner) => inner,
+        None => return Err(structured_creation::dialog_failed_error()),
+    };
+    let Some(folder) = picked else {
+        return Ok(StructuredCreationAnalysisDto::Cancelled);
+    };
+    let path = folder
+        .as_path()
+        .map(|p| p.to_path_buf())
+        .ok_or_else(structured_creation::non_filesystem_path_error)?;
+    // The wire is UTF-8 JSON: a non-UTF-8 path cannot round-trip VERBATIM
+    // to the accept phase (a lossy conversion would re-analyze a DIFFERENT
+    // folder). Refused at the boundary rather than silently altered.
+    let folder_path = path
+        .to_str()
+        .map(str::to_string)
+        .ok_or_else(structured_creation::non_filesystem_path_error)?;
+
+    let outcome =
+        async_runtime::spawn_blocking(move || import_export::analyze_structured_folder(&path))
+            .await
+            .map_err(|_| structured_creation::spawn_blocking_join_error())??;
+
+    Ok(StructuredCreationAnalysisDto::analyzed(
+        &outcome.analysis,
+        outcome.folder_name,
+        folder_path,
+    ))
+}
+
+/// Commit an analyzed structured folder (phase 2). Re-analyzes the folder
+/// FROM ZERO on a blocking worker (the wire path is a pointer, never an
+/// authority). TRUE "files first, DB second": the re-analysis and the (up
+/// to 256 MiB) media promotions run WITHOUT the DB mutex — the lock is
+/// taken only for the single atomic transaction (or the brief refcounted
+/// compensation after a prepare refusal), INSIDE the worker so no
+/// `MutexGuard` ever lives across an `await`.
+#[tauri::command]
+pub async fn accept_structured_creation(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    input: AcceptStructuredCreationInputDto,
+) -> Result<StoryCardDto, AppError> {
+    let app_data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|_| structured_creation::app_data_unavailable_error())?;
+    let db = state.db.clone();
+    async_runtime::spawn_blocking(move || -> Result<StoryCardDto, AppError> {
+        let folder = Path::new(&input.folder_path);
+        match import_export::prepare_structured_creation(&app_data_dir, folder) {
+            Ok(prepared) => {
+                let mut guard = db.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                import_export::commit_structured_creation(&mut guard, &app_data_dir, prepared)
+            }
+            Err(failure) => {
+                // A refused prepare may have promoted files before failing:
+                // reclaim them under a brief lock (refcounted GC).
+                if !failure.promoted.is_empty() {
+                    let guard = db.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                    import_export::compensate_structured_creation(
+                        &guard,
+                        &app_data_dir,
+                        &failure.promoted,
+                    );
+                }
+                Err(failure.error)
+            }
+        }
+    })
+    .await
+    .map_err(|_| structured_creation::spawn_blocking_join_error())?
 }
 
 /// Read an artifact file with a HARD upper bound, refusing non-regular files.

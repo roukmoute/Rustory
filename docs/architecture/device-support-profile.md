@@ -457,7 +457,8 @@ ambiguous, and what blocks the import. Anything not explicitly listed is refused
 | Type | Extension | Format version | Status |
 | --- | --- | --- | --- |
 | Rustory story artifact | `.rustory` | `formatVersion == 1` | ✅ supported (import + export) |
-| Structured archive / multi-element folder | — | — | ❌ deferred (no archive reader yet; the single-file `.rustory` artifact stays the only supported type) |
+| Structured folder (`histoire.json` + referenced media) | — (a local folder) | `formatVersion == 1` | ✅ supported (creation) |
+| Structured archive (zip…) | — | — | ❌ deferred (no archive reader; zero-dependency rule) |
 
 ### `.rustory` v1 format contract
 
@@ -500,3 +501,128 @@ pack UUID nor a source device. The canonical row **preserves** the artifact's
 Bounds & safety: the chosen file is read bounded (`MAX_ARTIFACT_BYTES`); the
 import is offline, adds zero dependency, never writes a device, and is atomic
 (one SQLite transaction — a failure leaves the previous library state intact).
+
+### Structured folder v1 format contract
+
+The structured folder is an **author format**, not a machine artifact: it is the
+entry point for content prepared OUTSIDE Rustory (FR30) and it CREATES a brand
+new canonical story — it does not round-trip an exported one. It converges to
+the exact same canonical v3 model as an interactive creation. Only the folder
+shape below is recognized; anything else is a named blocking verdict, never a
+half-support (no implicit format).
+
+A structured folder v1 is a **local folder** containing:
+
+- **`histoire.json`** (required, UTF-8 JSON) — the author manifest. One exact
+  name, no alias.
+- **optional media files** (image/audio), flat in the folder, referenced by the
+  manifest by **simple basename** (never a path, never a subfolder in v1).
+
+Manifest v1 schema:
+
+```json
+{
+  "formatVersion": 1,
+  "title": "Le voyage de Nour",
+  "startNodeId": "debut",
+  "nodes": [
+    {
+      "id": "debut",
+      "text": "Il était une fois…",
+      "label": "Départ",
+      "image": "couverture.png",
+      "audio": "intro.mp3",
+      "options": [
+        { "label": "Aller à la mer", "target": "mer" },
+        { "label": "Aller à la montagne", "target": "montagne" }
+      ]
+    },
+    { "id": "mer", "text": "…", "options": [] },
+    { "id": "montagne", "text": "…", "options": [] }
+  ]
+}
+```
+
+Rules: `formatVersion` required and `== 1` (forward guard: anything else blocks,
+like the `.rustory` envelope); `title` required; `startNodeId` optional
+(default: the first node's `id`); `nodes` required, non-empty; per node: `id`
+required, `text` / `label` optional (default `""`), `image` / `audio` optional
+(sober basenames), `options` optional (default `[]`) with `label` required and
+`target` optional/nullable. **An unknown field does not reject: it produces an
+`Ambiguous` finding** — a DELIBERATE difference with the `.rustory` machine
+artifact (`deny_unknown_fields`): an author format tolerates a typo but FLAGS
+it. The manifest is transcoded to the canonical v3 structure (ids preserved,
+`image` / `audio` resolved to asset ids at acceptance); `validate_canonical`
+stays the final oracle.
+
+The folder flow analyzes its OWN aspect set (documented separately from the
+`.rustory` set — each flow owns its contract). Exactly one finding per aspect;
+one matrix cell = one test:
+
+| Aspect | Recognized | Ambiguous (`ambiguïté`) | Missing (`information manquante`) | Blocking (`blocage réel`) |
+| --- | --- | --- | --- | --- |
+| `Envelope` | `histoire.json` present, readable as a regular file, valid JSON | — | — | manifest absent, unreadable, or malformed JSON |
+| `FormatVersion` | `formatVersion == 1` | — | — | absent or `!= 1` |
+| `Title` | valid as-is | normalizable (`value != normalize_title(value)`) | — | absent, empty after normalization, or invalid |
+| `Structure` | transcodable and canonically valid | unknown manifest field; an option `target` pointing at an unknown node (preserved broken — `BrokenOptionLink` is `Fixable`, repairable in the editor) | — | `nodes` absent/empty, duplicate `id`, `startNodeId` given but unknown, anti-DoS bounds exceeded, untranscodable structure |
+| `Media` (new `RecognitionAspect::Media`) | every referenced media present, regular, sniffed inside the closed set, within bounds | a media present but unusable (magic bytes outside the set, wrong slot, oversize, symlink/irregular, non-sober basename) — the media is discarded | a referenced media ABSENT from the folder — the media is discarded | — |
+
+No `SchemaVersion` / `Integrity` / `Timestamps` aspects: an author manifest has
+no declared canonical schema, no checksum and no timestamps (the story is BORN
+at acceptance — see provenance below). The `Media` aspect is analyzed ONLY when
+the declared `formatVersion` is the listed one: an unlisted format never
+triggers a single media read and its verdict carries no `Media` finding (no
+implicit / partial support). A discarded media (`Ambiguous` or
+`Missing`) never prevents the creation: the node is born with the empty slot,
+repairable in the editor.
+
+State derivation (folder flow — extends the shared derivation without changing
+the `.rustory` one): any `Blocking` → `Unusable` → nothing is created (the
+`blocked` verdict is never persisted); else any `Missing` → quality `Partial` →
+durable state `partial` (the first real emitter of `ImportState::Partial`);
+else any `Ambiguous` → quality `Partial` → `needs_review`; else `Clean` →
+`recognized` (no report, no marker).
+
+Named bounds (anti-DoS, tested): `MAX_MANIFEST_BYTES` = 1 MiB;
+`MAX_FOLDER_MEDIA_FILES` = 64 referenced media; per-media bound = the node-media
+store ceiling (`MAX_MEDIA_BYTES`, 32 MiB); `MAX_FOLDER_TOTAL_MEDIA_BYTES` =
+256 MiB. Only `histoire.json` and the files it references are ever read — the
+folder is NEVER listed (no recursive walk); unreferenced files are ignored by
+construction (never opened). Referenced basenames are validated for sobriety
+BEFORE any path join; a symlink or non-regular file is refused at probe time.
+
+Provenance: acceptance records a `story_local_imports` row with
+`source_format = 'structured-folder'`, `source_format_version = 1`,
+`source_name` = the folder's basename (validated for sobriety, no extension
+requirement — never an absolute path), `artifact_checksum` = SHA-256 of the
+manifest bytes, the derived import state and its findings summary. A folder
+whose NAME cannot be carried as a sober provenance source (no real UTF-8
+basename, a name over the length bound or containing `/` `\` `:` / control
+characters / only blanks) is refused as an honest TRANSPORT error
+(`file_read` / `folder_name`) BEFORE any read — never disguised as a manifest
+problem: the `Envelope × Blocking` cell of the matrix keeps meaning exactly
+"manifest absent, unreadable, or malformed JSON". The
+canonical row is a BIRTH: `created_at = updated_at = now`, exactly like
+`create_story` — a DELIBERATE difference with the `.rustory` import (which
+PRESERVES the timestamps of an exported story). The card renders the existing
+`Importée` provenance marker (the content does come from outside Rustory);
+no new provenance label. The edit scope is `Full` BY CONSTRUCTION (the scope
+derivation only consults `story_imports` — device packs — never
+`story_local_imports`), so the created story opens in the editor with every
+control, exactly like a native one, and inherits the import-review resolution
+cycle (a real write that leaves the canonical fully sound settles a pending
+`partial` / `needs_review` review; media are never part of that oracle).
+
+Acceptance is **files first, DB second** (same discipline as the device
+import): the retained media are validated + promoted into the content-addressed
+node-media store OUTSIDE the DB lock, then ONE `BEGIN IMMEDIATE` transaction
+inserts the `stories` row (fresh UUIDv7, transcoded v3 structure with the asset
+ids wired, recomputed checksum), the provenance row and the `assets` rows. A
+transaction failure compensates the promoted files (refcounted GC; the boot
+sweep stays the net). Acceptance RE-ANALYZES the folder from zero (the disk may
+have changed since the analysis) — the re-analysis is authoritative; a verdict
+that turned blocking refuses and creates nothing.
+
+Bounds & safety: offline, zero dependency, never writes a device, analysis is
+strictly read-only (no row, no promoted file), and the commit is atomic (a
+failure leaves the previous library state intact, media files compensated).

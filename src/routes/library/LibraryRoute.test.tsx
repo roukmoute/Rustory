@@ -23,6 +23,8 @@ const mockStartTransfer = vi.fn();
 const mockReadTransfer = vi.fn();
 const mockReadTransferOutcome = vi.fn();
 const mockDiscardTransferOutcome = vi.fn();
+const mockAnalyzeFolder = vi.fn();
+const mockAnalyzeArtifact = vi.fn();
 
 vi.mock("../../ipc/commands/library", () => ({
   getLibraryOverview: () => ({
@@ -131,6 +133,17 @@ vi.mock("../../ipc/events/job-events", () => ({
   subscribeJobEvents: () => () => {},
 }));
 
+vi.mock("../../ipc/commands/import-export", async () => {
+  const actual = await vi.importActual<
+    typeof import("../../ipc/commands/import-export")
+  >("../../ipc/commands/import-export");
+  return {
+    ...actual,
+    analyzeStructuredFolderForCreation: () => mockAnalyzeFolder(),
+    analyzeArtifactForImport: () => mockAnalyzeArtifact(),
+  };
+});
+
 import { invalidateConnectedLuniiCache } from "../../features/device/hooks/use-connected-lunii";
 import { invalidateDeviceLibraryCache } from "../../features/device/hooks/use-device-library";
 import { invalidateLibraryOverviewCache } from "../../features/library/hooks/use-library-overview";
@@ -216,6 +229,13 @@ describe("<LibraryRoute />", () => {
     mockReadTransferOutcome.mockResolvedValue(null);
     mockDiscardTransferOutcome.mockReset();
     mockDiscardTransferOutcome.mockResolvedValue(undefined);
+    // Default: the folder analysis is user-triggered; a cancelled dialog is
+    // the safe default. Tests exercising the folder flow override this.
+    mockAnalyzeFolder.mockReset();
+    mockAnalyzeFolder.mockResolvedValue({ kind: "cancelled" });
+    // Default: the artifact import analysis is user-triggered too.
+    mockAnalyzeArtifact.mockReset();
+    mockAnalyzeArtifact.mockResolvedValue({ kind: "cancelled" });
     // The hooks keep module-local stale-while-revalidate caches; reset
     // them between tests so no stray snapshot bleeds across cases.
     invalidateLibraryOverviewCache();
@@ -708,6 +728,116 @@ describe("<LibraryRoute />", () => {
       name: /créer une histoire/i,
     });
     expect(within(dialog).getByLabelText(/^titre$/i)).toBeInTheDocument();
+  });
+
+  it("keeps the folder entry inert while a .rustory analysis is in flight (cross-flow exclusivity)", async () => {
+    const user = userEvent.setup();
+    mockGet.mockResolvedValueOnce({
+      stories: [{ id: "s1", title: "Le soleil" }],
+    });
+    // A `.rustory` analysis that never settles: the import flow stays busy.
+    mockAnalyzeArtifact.mockImplementationOnce(() => new Promise(() => {}));
+    renderLibrary();
+
+    await screen.findByRole("button", { name: /le soleil/i });
+    await user.click(
+      screen.getByRole("button", { name: /importer une histoire/i }),
+    );
+
+    await user.click(
+      screen.getByRole("button", { name: /créer une histoire/i }),
+    );
+    const dialog = await screen.findByRole("dialog", {
+      name: /créer une histoire/i,
+    });
+    const folderButton = within(dialog).getByRole("button", {
+      name: "Choisir un dossier…",
+    });
+    expect(folderButton).toHaveAttribute("aria-disabled", "true");
+    await user.click(folderButton);
+    // No second native dialog may open: the folder analysis is never
+    // started and the creation dialog stays where the user left it.
+    expect(mockAnalyzeFolder).not.toHaveBeenCalled();
+    expect(
+      screen.getByRole("dialog", { name: /créer une histoire/i }),
+    ).toBeInTheDocument();
+  });
+
+  it("Choisir un dossier… in the Créer dialog closes it and surfaces the folder report in-context", async () => {
+    const user = userEvent.setup();
+    mockGet.mockResolvedValueOnce({
+      stories: [{ id: "s1", title: "Le soleil" }],
+    });
+    // The REAL wire shape of a creatable verdict (five folder aspects) —
+    // the mocked facade must speak the wire the guard would let through.
+    mockAnalyzeFolder.mockResolvedValueOnce({
+      kind: "analyzed",
+      quality: "clean",
+      state: "recognized",
+      findings: [
+        {
+          aspect: "envelope",
+          category: "recognized",
+          message: "Le manifest histoire.json est présent et lisible.",
+        },
+        {
+          aspect: "formatVersion",
+          category: "recognized",
+          message: "La version de format du manifest est prise en charge.",
+        },
+        {
+          aspect: "title",
+          category: "recognized",
+          message: "Le titre de l'histoire est valide.",
+        },
+        {
+          aspect: "structure",
+          category: "recognized",
+          message: "La structure de l'histoire est reconnue.",
+        },
+        {
+          aspect: "media",
+          category: "recognized",
+          message:
+            "Tous les fichiers audio et image référencés par le dossier sont présents et reconnus.",
+        },
+      ],
+      creatableSummary: {
+        title: "Le voyage de Nour",
+        nodeCount: 2,
+        retainedMedia: [],
+        discardedMedia: [],
+      },
+      folderName: "mon-dossier",
+      folderPath: "/home/user/mon-dossier",
+    });
+    renderLibrary();
+
+    await screen.findByRole("button", { name: /le soleil/i });
+    await user.click(
+      screen.getByRole("button", { name: /créer une histoire/i }),
+    );
+    const dialog = await screen.findByRole("dialog", {
+      name: /créer une histoire/i,
+    });
+    await user.click(
+      within(dialog).getByRole("button", { name: "Choisir un dossier…" }),
+    );
+
+    // The dialog closes and the in-context report surfaces (no navigation,
+    // no toast) with the unique accept CTA.
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("dialog", { name: /créer une histoire/i }),
+      ).not.toBeInTheDocument(),
+    );
+    const surface = await screen.findByRole("region", {
+      name: "Création depuis un dossier",
+    });
+    expect(within(surface).getByText("mon-dossier")).toBeInTheDocument();
+    expect(
+      within(surface).getByRole("button", { name: "Créer l'histoire" }),
+    ).toBeInTheDocument();
   });
 
   it("after a successful create_story, invalidates the cache and navigates to /story/:id/edit", async () => {

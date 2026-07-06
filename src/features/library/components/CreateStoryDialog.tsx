@@ -19,11 +19,24 @@ export interface CreateStoryDialogProps {
   open: boolean;
   onClose: () => void;
   onCreated: (story: StoryCardDto) => void;
+  /** Start the structured-folder creation path (`Choisir un dossier…`):
+   *  closes this dialog and hands over to the folder flow. Optional — when
+   *  absent, the secondary entry is not rendered (the interactive path
+   *  stays the whole dialog). */
+  onCreateFromFolderRequest?: () => void;
+  /** Cross-flow exclusivity: while ANOTHER import/creation flow is busy
+   *  (a `.rustory` analysis in flight, a folder analysis/creation), the
+   *  folder entry is disabled — two native dialogs / review surfaces must
+   *  never stack. Mirrors the library bar's import CTA gating. */
+  isCreateFromFolderUnavailable?: boolean;
 }
 
 /**
  * Modal used to collect the minimal input required to create a new local
- * story draft. Title validation runs in two redundant places: this component
+ * story draft — the CREATION CHOICE of the library: the interactive path
+ * (title → `Créer`) stays primary, and a secondary entry hands over to the
+ * structured-folder flow (`Ou démarre depuis un dossier préparé hors de
+ * Rustory`). Title validation runs in two redundant places: this component
  * computes a `StoryTitleIssue` for responsive feedback, and the Rust core
  * re-validates authoritatively before any SQL is executed.
  */
@@ -31,6 +44,8 @@ export function CreateStoryDialog({
   open,
   onClose,
   onCreated,
+  onCreateFromFolderRequest,
+  isCreateFromFolderUnavailable = false,
 }: CreateStoryDialogProps): React.JSX.Element {
   const descriptionId = useId();
   const titleFieldId = useId();
@@ -130,6 +145,16 @@ export function CreateStoryDialog({
     onClose();
   };
 
+  const handleCreateFromFolder = (): void => {
+    // The folder handover is refused while the title submission OR any
+    // sibling import/creation flow is busy (cross-flow exclusivity).
+    if (isSubmitting || isCreateFromFolderUnavailable) return;
+    // Hand over to the structured-folder flow: close this dialog first so
+    // the native folder picker is never stacked under a modal.
+    onClose();
+    onCreateFromFolderRequest?.();
+  };
+
   return (
     <Dialog
       open={open}
@@ -217,6 +242,22 @@ export function CreateStoryDialog({
           </Button>
         )}
       </div>
+      {onCreateFromFolderRequest ? (
+        <div className="create-story-dialog__folder-entry">
+          <p className="create-story-dialog__folder-hint">
+            Ou démarre depuis un dossier préparé hors de Rustory
+          </p>
+          <Button
+            variant="quiet"
+            onClick={handleCreateFromFolder}
+            aria-disabled={
+              isSubmitting || isCreateFromFolderUnavailable || undefined
+            }
+          >
+            Choisir un dossier…
+          </Button>
+        </div>
+      ) : null}
     </Dialog>
   );
 }

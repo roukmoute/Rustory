@@ -1,11 +1,13 @@
 import type React from "react";
 
 import { Button, ProgressIndicator, StateChip } from "../../../shared/ui";
-import type { StateChipTone } from "../../../shared/ui/StateChip";
-import type {
-  ImportFinding,
-  ImportQuality,
-} from "../../../shared/ipc-contracts/import-export";
+import type { ImportFinding } from "../../../shared/ipc-contracts/import-export";
+import {
+  categoryLabel,
+  categoryTone,
+  qualityLabel,
+  qualityTone,
+} from "../lib/recognition-labels";
 import type {
   AnalyzedVerdict,
   StoryImportStatus,
@@ -207,56 +209,4 @@ function FindingItem({
 
 function findingKey(finding: ImportFinding): string {
   return `${finding.aspect}-${finding.category}`;
-}
-
-/** Quality label, kept in sync with `product-language.md`. */
-function qualityLabel(quality: ImportQuality): string {
-  switch (quality) {
-    case "clean":
-      return "Propre";
-    case "partial":
-      return "Partiellement exploitable";
-    case "unusable":
-      return "Inexploitable";
-  }
-}
-
-function qualityTone(quality: ImportQuality): StateChipTone {
-  switch (quality) {
-    case "clean":
-      return "success";
-    case "partial":
-      return "warning";
-    case "unusable":
-      return "error";
-  }
-}
-
-/** Per-finding category label (`reconnu` / `ambiguïté` / `information
- *  manquante` / `blocage réel`) — never color-only (the StateChip ships a
- *  glyph). */
-function categoryLabel(category: ImportFinding["category"]): string {
-  switch (category) {
-    case "recognized":
-      return "reconnu";
-    case "ambiguous":
-      return "ambiguïté";
-    case "missing":
-      return "information manquante";
-    case "blocking":
-      return "blocage réel";
-  }
-}
-
-function categoryTone(category: ImportFinding["category"]): StateChipTone {
-  switch (category) {
-    case "recognized":
-      return "success";
-    case "ambiguous":
-      return "warning";
-    case "missing":
-      return "info";
-    case "blocking":
-      return "error";
-  }
 }

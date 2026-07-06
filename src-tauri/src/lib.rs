@@ -276,9 +276,11 @@ pub fn run() {
         // of two same-prefix commands non-obvious.
         .invoke_handler(tauri::generate_handler![
             commands::import_export::accept_artifact_import,
+            commands::import_export::accept_structured_creation,
             commands::story::add_node_option,
             commands::story::add_story_node,
             commands::import_export::analyze_artifact_for_import,
+            commands::import_export::analyze_structured_folder_for_creation,
             commands::story::apply_recovery,
             commands::story::attach_node_media,
             commands::story::create_story,

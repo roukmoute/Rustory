@@ -70,13 +70,23 @@ It exists to keep the same product concepts named the same way across:
 | Local artifact recognition — unusable | `Inexploitable` | Analysis verdict: a real blocker prevents a safe import; nothing is added to the library | `corrompu`, `cassé`, `erreur` |
 | Import report finding — recognized aspect | `reconnu` | Per-aspect report category: this aspect of the artifact is understood and accepted. Distinct from the per-story import-state chip below | `ok`, `valide` |
 | Import report finding — ambiguity | `ambiguïté` | Per-aspect report category: the aspect is usable but had to be adjusted or could not be fully trusted (e.g. a normalized title) | `warning`, `bizarre` |
-| Import report finding — missing information | `information manquante` | Per-aspect report category: an expected aspect is absent (declared for structured imports; never emitted by the `.rustory` flow) | `vide`, `null`, `absent` |
+| Import report finding — missing information | `information manquante` | Per-aspect report category: an expected aspect is absent. Emitted by the structured-folder creation flow (a referenced media absent from the folder); never emitted by the `.rustory` flow | `vide`, `null`, `absent` |
 | Import report finding — real blocker | `blocage réel` | Per-aspect report category: the aspect makes the artifact unusable as-is | `erreur`, `fatal` |
-| Import state chip (Story Card) | `reconnu` / `partiel` / `à revoir` | Durable per-story import state surfaced as a discreet card chip, reserved for the local artifact-import flow — see [ui-states.md#Post-MVP Import State Contract](./ui-states.md) and `#Local Artifact Import Contract`. Never reuse the transfer/verification `partiel` / `état partiel` sense | reusing the transfer `partial` / `état partiel` chip |
+| Import state chip (Story Card) | `reconnu` / `partiel` / `à revoir` | Durable per-story import state surfaced as a discreet card chip, reserved for the file-provenance flows (`.rustory` import, structured-folder creation) — see [ui-states.md#Post-MVP Import State Contract](./ui-states.md), `#Local Artifact Import Contract` and `#Structured Folder Creation Contract`. Never reuse the transfer/verification `partiel` / `état partiel` sense | reusing the transfer `partial` / `état partiel` chip |
 | Accept the recognized result of an import (action) | `Importer ce qui est reconnu` | User-visible act of committing the recognized story (with its points of attention) from an analyzed artifact; pairs with `Abandonner` | `valider`, `confirmer`, `OK` |
 | Imported-artifact provenance (Story Card) | `Importée` | Discreet origin marker on a library card whose story came from a local artifact import — distinct from a native story and from a device copy | `import`, `external`, `fichier` |
 | Import report — recognized facts header | `Ce que Rustory a reconnu` | On-demand import report header grouping the global outcome + the recognized aspects | `résumé`, `rapport`, `détails` |
 | Import report — attention header | `Points d'attention` | On-demand import report header grouping the aspects to review | `warnings`, `problèmes`, `erreurs` |
+| Structured input folder | `dossier structuré` | A local folder (`histoire.json` + referenced media) explicitly supported as a story-creation entry point; its format contract lives in [device-support-profile.md#Structured folder v1 format contract](./device-support-profile.md) | `dossier projet`, `archive`, `template` |
+| Create from a structured folder (dialog secondary entry) | `Ou démarre depuis un dossier préparé hors de Rustory` | Secondary entry of the creation dialog introducing the structured-folder path; the interactive path (title → `Créer`) stays primary | a third bar CTA, `Importer un dossier` |
+| Pick the structured folder (action) | `Choisir un dossier…` | Opens the native folder picker for the structured-folder creation | `Parcourir`, `Browse`, `Ouvrir` |
+| Structured-folder creation surface (title) | `Création depuis un dossier` | In-context surface presenting the recognition report of an analyzed structured folder | `import`, `wizard`, `assistant` |
+| Structured-folder report — what-will-be-created header | `Ce qui sera créé` | Report group naming exactly what an accepted folder will create: the (normalized) title, the node count, the retained media and the discarded ones by basename | `résumé`, `aperçu`, `preview` |
+| Structured-folder report — created title line | `Titre : {titre}` | The normalized title the created story will carry | showing the raw pre-normalization value |
+| Structured-folder report — node count line | `{n} nœud` / `{n} nœuds` | The number of nodes the created story will carry | `steps`, `écrans` |
+| Structured-folder report — retained media line | `Médias retenus : {basenames}` | The referenced media files that WILL be wired into the story (comma-separated basenames; the line is absent when none) | `assets`, absolute paths |
+| Structured-folder report — discarded media line | `Médias écartés : {basenames}` | The referenced media files that will NOT be wired (absent or unusable — the empty slots stay repairable in the editor); absent when none | `rejetés`, `erreurs`, absolute paths |
+| Accept the structured-folder creation (action) | `Créer l'histoire` | Unique CTA committing the analyzed folder into a canonical story — the report already says what will be discarded (no second CTA); pairs with `Abandonner` | `Importer` (reserved for `.rustory`), `Valider`, dual-CTA variants |
 | Story editing screen | `Éditeur d'histoire` | Dedicated screen, separate from the library, where the user resumes and edits a local story | `workspace`, `projet`, `canvas`, `editor` |
 | Editor zone — global structure | `Structure de l'histoire` | Editor zone showing the story's overall layout (ordered node list, start node, option links) and the current node, clearly identified; projected from the core, with explicit per-node actions on a full-scope story (native or `.rustory` import) | `arbre`, `outline`, `tree`, `plan`, `canvas` |
 | Editor zone — current node | `Nœud courant` | Editor zone hosting the editor for the node currently in focus (its text, metadata and media) | `current node`, `panneau`, `étape courante` |
@@ -199,6 +209,17 @@ The UI should favor these labels when they are user-visible:
 | Import failed (transport) and user can retry | `Import impossible` |
 | Imported story origin marker (Story Card) | `Importée` |
 | Open the durable on-demand import report (Story Card) | `Voir le rapport d'import` |
+| Start a story from a structured folder (dialog secondary entry) | `Ou démarre depuis un dossier préparé hors de Rustory` |
+| Pick the structured folder (action) | `Choisir un dossier…` |
+| Structured-folder creation surface (title) | `Création depuis un dossier` |
+| Structured-folder analysis in flight | `Analyse du dossier…` |
+| Accept the structured-folder creation (action) | `Créer l'histoire` |
+| Abandon an analyzed structured folder (no mutation) | `Abandonner` |
+| Structured-folder creation commit in flight | `Création en cours…` |
+| Structured-folder creation just succeeded | `Histoire créée dans ta bibliothèque` |
+| Structured-folder creation failed (transport; the actionable text is the alert's `message` + `userAction`) | `Création impossible` |
+| Structured-folder refused — the folder's NAME cannot be carried as provenance (cause) | `Création impossible: le nom du dossier choisi ne peut pas être utilisé par Rustory.` |
+| Structured-folder refused — the folder's NAME cannot be carried as provenance (next gesture) | `Renomme le dossier (nom plus court, sans caractère spécial) puis relance l'analyse.` |
 | Story editing screen (separate from the library) | `Éditeur d'histoire` |
 | Editor zone showing the global structure | `Structure de l'histoire` |
 | Editor zone hosting the current node | `Nœud courant` |
@@ -236,6 +257,41 @@ The UI should favor these labels when they are user-visible:
 
 Do not alternate freely between synonyms such as `sync`, `envoi`, `upload`, or `job`.
 When a different wording is necessary in context, it must still map back to one of the preferred labels above.
+
+### Structured-folder recognition copy (per-pair, frozen)
+
+One canonical FR message per `(aspect, catégorie)` pair of the structured-folder
+matrix (see [device-support-profile.md#Structured folder v1 format contract](./device-support-profile.md)).
+The UI branches on the discriminants, never on this text; the folder flow owns
+the wording of EVERY `Envelope`, `FormatVersion`, `Title` and `Structure` pair
+of its matrix (they speak of a manifest and a creation — the `.rustory` copy
+keeps speaking of an artifact and an import), except the shared
+`Title × reconnu` line whose copy is identical; the `Media` pairs exist only in
+this flow. Every `blocage réel` copy names the corrective gesture (fix the
+folder/manifest, re-run the analysis). Quality labels are reused verbatim
+(`Propre` / `Partiellement exploitable` / `Inexploitable`), as are the report
+headers and the per-category chips (`reconnu` / `ambiguïté` /
+`information manquante` / `blocage réel`).
+
+| Aspect | Catégorie | Message figé |
+| --- | --- | --- |
+| Envelope | reconnu | `Le manifest histoire.json est présent et lisible.` |
+| Envelope | blocage réel | `Le dossier ne contient pas de manifest histoire.json lisible. Corrige le dossier puis relance l'analyse.` |
+| FormatVersion | reconnu | `La version de format du manifest est prise en charge.` |
+| FormatVersion | blocage réel | `La version de format de ce manifest n'est pas prise en charge par cette version de Rustory. Corrige le manifest puis relance l'analyse.` |
+| Title | reconnu | `Le titre de l'histoire est valide.` |
+| Title | ambiguïté | `Le titre a été normalisé à la création (espaces ou caractères ajustés).` |
+| Title | blocage réel | `Le titre du manifest est manquant ou n'est pas valide. Corrige le manifest puis relance l'analyse.` |
+| Structure | reconnu | `La structure de l'histoire est reconnue.` |
+| Structure | ambiguïté | `La structure contient un champ inattendu ou un lien d'option vers un nœud inconnu ; l'histoire sera créée telle quelle et tu pourras corriger dans l'éditeur.` |
+| Structure | blocage réel | `La structure du manifest est incomplète ou incohérente. Corrige le manifest puis relance l'analyse.` |
+| Media | reconnu | `Tous les fichiers audio et image référencés par le dossier sont présents et reconnus.` |
+| Media | ambiguïté | `Certains fichiers audio ou image référencés ne sont pas utilisables (format non reconnu, fichier trop volumineux ou nom invalide). L'histoire sera créée sans eux ; tu pourras les ajouter dans l'éditeur.` |
+| Media | information manquante | `Certains fichiers audio ou image référencés par le dossier sont introuvables. L'histoire sera créée sans eux ; tu pourras les ajouter dans l'éditeur.` |
+
+No new card provenance label (the existing `Importée` marker is honest — the
+content comes from outside Rustory) and no label for a settled review
+(`resolved` renders nothing — the marker's disappearance IS the feedback).
 
 ## Copy Rules
 

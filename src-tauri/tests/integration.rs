@@ -27,6 +27,12 @@ mod multi_node_structure_migration;
 #[path = "integration/import_review_resolution_migration.rs"]
 mod import_review_resolution_migration;
 
+#[path = "integration/structured_folder_provenance_migration.rs"]
+mod structured_folder_provenance_migration;
+
+#[path = "integration/structured_folder_creation.rs"]
+mod structured_folder_creation;
+
 #[path = "integration/story_edit_scope.rs"]
 mod story_edit_scope;
 

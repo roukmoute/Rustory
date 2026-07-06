@@ -6,9 +6,14 @@ use crate::domain::shared::AppError;
 use crate::infrastructure::db::DbHandle;
 use crate::infrastructure::filesystem::ensure_app_data_dir;
 use crate::ipc::dto::import_export::{
-    import_findings_from_summary, import_state_dto_from_tag, ImportStateDto,
+    folder_import_findings_from_summary, import_findings_from_summary, import_state_dto_from_tag,
+    ImportStateDto,
 };
 use crate::ipc::dto::{LibraryOverviewDto, StoryCardDto};
+
+/// The `story_local_imports.source_format` tag of a structured-folder
+/// creation — selects the FOLDER per-pair copy for the durable card report.
+const STRUCTURED_FOLDER_FORMAT: &str = "structured-folder";
 
 /// Application service for the `library` flow.
 ///
@@ -43,7 +48,7 @@ fn read_stories(db: &DbHandle) -> Result<Vec<StoryCardDto>, AppError> {
         .conn()
         .prepare(
             "SELECT s.id, s.title, li.import_state, li.findings_summary, \
-                    pi.story_id IS NOT NULL \
+                    li.source_format, pi.story_id IS NOT NULL \
              FROM stories s \
              LEFT JOIN story_local_imports li ON li.story_id = s.id \
              LEFT JOIN story_imports pi ON pi.story_id = s.id \
@@ -56,12 +61,14 @@ fn read_stories(db: &DbHandle) -> Result<Vec<StoryCardDto>, AppError> {
             let title: String = row.get(1)?;
             let import_state: Option<String> = row.get(2)?;
             let findings_summary: Option<String> = row.get(3)?;
-            let device_pack: bool = row.get(4)?;
+            let source_format: Option<String> = row.get(4)?;
+            let device_pack: bool = row.get(5)?;
             Ok(project_story_card(
                 id,
                 title,
                 import_state,
                 findings_summary,
+                source_format,
                 device_pack,
             ))
         })
@@ -88,6 +95,7 @@ fn project_story_card(
     title: String,
     import_state: Option<String>,
     findings_summary: Option<String>,
+    source_format: Option<String>,
     device_pack: bool,
 ) -> StoryCardDto {
     if device_pack {
@@ -101,12 +109,19 @@ fn project_story_card(
     // its global outcome + recognized elements + points of attention (§5) —
     // projected ONLY while the review is PENDING. A `resolved` review keeps
     // its findings in base as the trace but never renders them again: its
-    // card goes quiet, exactly like a recognized import.
+    // card goes quiet, exactly like a recognized import. The per-pair copy
+    // follows the provenance's format: a structured-folder story speaks of
+    // its manifest, a `.rustory` one of its artifact.
     let review_pending = matches!(state, ImportStateDto::Partial | ImportStateDto::NeedsReview);
     let import_report = if review_pending {
+        let render = if source_format.as_deref() == Some(STRUCTURED_FOLDER_FORMAT) {
+            folder_import_findings_from_summary
+        } else {
+            import_findings_from_summary
+        };
         findings_summary
             .as_deref()
-            .map(import_findings_from_summary)
+            .map(render)
             .filter(|report| !report.is_empty())
     } else {
         None
@@ -342,9 +357,61 @@ mod tests {
             "Douteuse".into(),
             Some("not_a_known_state".into()),
             None,
+            Some("rustory".into()),
             false,
         );
         assert!(card.import_state.is_none());
+    }
+
+    #[test]
+    fn read_stories_projects_a_structured_folder_creation_with_the_folder_copy() {
+        // The card projection covers the new format with NO hidden filter:
+        // the durable state + report surface exactly like a `.rustory`
+        // import, and the report's copy is the FOLDER one (manifest
+        // wording), selected by the provenance's source_format.
+        let mut db = fresh_db();
+        let created = create_story(
+            &mut db,
+            CreateStoryInput {
+                title: "Depuis un dossier".into(),
+            },
+        )
+        .expect("create");
+        db.conn()
+            .execute(
+                "INSERT INTO story_local_imports (story_id, source_format, source_format_version, source_name, artifact_checksum, import_state, findings_summary, imported_at) \
+                 VALUES (?1, 'structured-folder', 1, 'mon-dossier', ?2, 'partial', ?3, '2026-07-06T00:00:00.000Z')",
+                rusqlite::params![
+                    created.id,
+                    "a".repeat(64),
+                    "[{\"aspect\":\"envelope\",\"category\":\"recognized\"},{\"aspect\":\"media\",\"category\":\"missing\"}]",
+                ],
+            )
+            .expect("insert folder provenance");
+
+        let stories = read_stories(&db).expect("read");
+        let card = stories
+            .iter()
+            .find(|s| s.id == created.id)
+            .expect("folder card");
+        assert_eq!(
+            card.import_state,
+            Some(crate::ipc::dto::import_export::ImportStateDto::Partial),
+            "the partial marker projects for the new format"
+        );
+        let report = card.import_report.as_ref().expect("durable report");
+        let envelope = report
+            .iter()
+            .find(|f| f.aspect == crate::ipc::dto::ImportAspectDto::Envelope)
+            .expect("envelope finding");
+        assert!(
+            envelope.message.contains("manifest"),
+            "the folder copy speaks of the manifest, not of an artifact: {}",
+            envelope.message
+        );
+        assert!(report
+            .iter()
+            .any(|f| f.category == ImportCategoryDto::Missing));
     }
 
     #[test]

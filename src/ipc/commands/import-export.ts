@@ -3,13 +3,16 @@ import { invoke } from "@tauri-apps/api/core";
 import { toAppError } from "../../shared/errors/app-error";
 import type {
   AcceptArtifactImportInput,
+  AcceptStructuredCreationInput,
   ExportStoryDialogInput,
   ExportStoryDialogOutcome,
   ImportArtifactAnalysis,
+  StructuredCreationAnalysis,
 } from "../../shared/ipc-contracts/import-export";
 import {
   isExportStoryDialogOutcome,
   isImportArtifactAnalysis,
+  isStructuredCreationAnalysis,
 } from "../../shared/ipc-contracts/import-export";
 import type { StoryCardDto } from "../../shared/ipc-contracts/library";
 import { isStoryCardDto } from "../../shared/ipc-contracts/library";
@@ -120,6 +123,77 @@ export async function acceptArtifactImport(
   }
   if (!isStoryCardDto(raw)) {
     throw new ImportArtifactContractDriftError("accept_artifact_import", raw);
+  }
+  return raw;
+}
+
+/**
+ * Error thrown when a structured-folder creation command returns a payload
+ * that does not match the wire contract. A payload outside the contract
+ * NEVER renders a screen — the raw response is attached for debugging.
+ */
+export class StructuredCreationContractDriftError extends Error {
+  readonly raw: unknown;
+  constructor(command: string, raw: unknown) {
+    super(`${command} returned a payload that does not match the contract`);
+    this.name = "StructuredCreationContractDriftError";
+    this.raw = raw;
+  }
+}
+
+/**
+ * Open the native FOLDER picker and analyze the chosen structured folder
+ * (phase 1, NO mutation). Rust owns the dialog, the bounded reads and the
+ * recognition verdict; the returned `folderPath` exists only to be passed
+ * back to [`acceptStructuredCreation`] — never rendered, never persisted,
+ * never logged.
+ *
+ * A cancelled dialog resolves with `{ kind: "cancelled" }` (silent no-op).
+ * A TRANSPORT failure rejects with a normalized `AppError`; the functional
+ * verdict (manifest absent, media missing…) is the resolved value, never a
+ * rejection. A drifted payload rejects with
+ * [`StructuredCreationContractDriftError`].
+ *
+ * Components MUST NOT call `invoke` directly — go through this facade so
+ * the wire contract stays owned by `src/ipc/`.
+ */
+export async function analyzeStructuredFolderForCreation(): Promise<StructuredCreationAnalysis> {
+  let raw: unknown;
+  try {
+    raw = await invoke<unknown>("analyze_structured_folder_for_creation");
+  } catch (err) {
+    throw toAppError(err);
+  }
+  if (!isStructuredCreationAnalysis(raw)) {
+    throw new StructuredCreationContractDriftError(
+      "analyze_structured_folder_for_creation",
+      raw,
+    );
+  }
+  return raw;
+}
+
+/**
+ * Commit an analyzed structured folder (phase 2). Sends the folder pointer
+ * back; Rust RE-ANALYZES the disk from zero (the wire is never an
+ * authority) and returns the created local Story Card. A failure rejects
+ * with a normalized `AppError`; a drifted payload rejects with
+ * [`StructuredCreationContractDriftError`].
+ */
+export async function acceptStructuredCreation(
+  input: AcceptStructuredCreationInput,
+): Promise<StoryCardDto> {
+  let raw: unknown;
+  try {
+    raw = await invoke<unknown>("accept_structured_creation", { input });
+  } catch (err) {
+    throw toAppError(err);
+  }
+  if (!isStoryCardDto(raw)) {
+    throw new StructuredCreationContractDriftError(
+      "accept_structured_creation",
+      raw,
+    );
   }
   return raw;
 }

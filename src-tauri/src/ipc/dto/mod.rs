@@ -20,9 +20,10 @@ pub use device_import::{ImportDeviceStoryInputDto, ImportDeviceStoryOutcomeDto};
 pub use device_library::{DeviceLibraryDto, DeviceStoryDto, PackTitleSourceDto};
 pub use device_title::{DeviceStoryTitleDto, SetDeviceStoryTitleInputDto};
 pub use import_export::{
-    AcceptArtifactImportInputDto, ExportStoryDialogInputDto, ExportStoryDialogOutcomeDto,
-    ImportArtifactAnalysisDto, ImportAspectDto, ImportCategoryDto, ImportFindingDto,
-    ImportQualityDto, ImportStateDto, ImportableContentDto,
+    AcceptArtifactImportInputDto, AcceptStructuredCreationInputDto, CreatableSummaryDto,
+    ExportStoryDialogInputDto, ExportStoryDialogOutcomeDto, ImportArtifactAnalysisDto,
+    ImportAspectDto, ImportCategoryDto, ImportFindingDto, ImportQualityDto, ImportStateDto,
+    ImportableContentDto, StructuredCreationAnalysisDto,
 };
 pub use library::{LibraryOverviewDto, StoryCardDto};
 pub use story::{

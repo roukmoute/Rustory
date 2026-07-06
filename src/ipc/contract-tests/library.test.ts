@@ -164,4 +164,35 @@ describe("isLibraryOverviewDto guard", () => {
       }),
     ).toBe(false);
   });
+
+  it("accepts a structured-folder card: partial state + a media/missing report finding", () => {
+    // Symmetric twin of the Rust producer test
+    // (`read_stories_projects_a_structured_folder_creation_with_the_folder_copy`):
+    // the first folder creation to reach the library must not drift-error —
+    // its `partial` marker and its `media`-aspect report pass the card guard.
+    expect(
+      isLibraryOverviewDto({
+        stories: [
+          {
+            id: "a",
+            title: "Depuis un dossier",
+            importState: "partial",
+            importReport: [
+              {
+                aspect: "envelope",
+                category: "recognized",
+                message: "Le manifest histoire.json est présent et lisible.",
+              },
+              {
+                aspect: "media",
+                category: "missing",
+                message:
+                  "Certains fichiers audio ou image référencés par le dossier sont introuvables.",
+              },
+            ],
+          },
+        ],
+      }),
+    ).toBe(true);
+  });
 });

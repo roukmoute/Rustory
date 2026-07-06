@@ -252,4 +252,63 @@ describe("<CreateStoryDialog />", () => {
     });
     expect(dialog.textContent).not.toMatch(/\b(BMAD|épic|story\s*1)\b/i);
   });
+
+  it("hides the folder entry when no folder handler is wired", () => {
+    renderDialog();
+    expect(
+      screen.queryByRole("button", { name: /choisir un dossier/i }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByText(/dossier préparé hors de Rustory/i),
+    ).not.toBeInTheDocument();
+  });
+
+  it("renders the secondary folder entry and keeps the interactive path primary", () => {
+    renderDialog({ onCreateFromFolderRequest: vi.fn() });
+    // The interactive path is INTACT: field + both CTAs still there.
+    expect(screen.getByLabelText(/^titre$/i)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /^créer$/i })).toBeInTheDocument();
+    // The secondary entry, with its frozen copy.
+    expect(
+      screen.getByText("Ou démarre depuis un dossier préparé hors de Rustory"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Choisir un dossier…" }),
+    ).toBeInTheDocument();
+  });
+
+  it("Choisir un dossier… closes the dialog THEN hands over to the folder flow, without any interactive IPC", async () => {
+    const user = userEvent.setup();
+    const onCreateFromFolderRequest = vi.fn();
+    const { onClose } = renderDialog({ onCreateFromFolderRequest });
+    await user.click(
+      screen.getByRole("button", { name: "Choisir un dossier…" }),
+    );
+    expect(onClose).toHaveBeenCalledTimes(1);
+    expect(onCreateFromFolderRequest).toHaveBeenCalledTimes(1);
+    // The dialog closes BEFORE the handover (the native picker must never
+    // stack under a modal).
+    expect(onClose.mock.invocationCallOrder[0]).toBeLessThan(
+      onCreateFromFolderRequest.mock.invocationCallOrder[0],
+    );
+    expect(createStory).not.toHaveBeenCalled();
+  });
+
+  it("disables the folder entry while a sibling import/creation flow is busy (cross-flow exclusivity)", async () => {
+    const user = userEvent.setup();
+    const onCreateFromFolderRequest = vi.fn();
+    const { onClose } = renderDialog({
+      onCreateFromFolderRequest,
+      isCreateFromFolderUnavailable: true,
+    });
+    const folderButton = screen.getByRole("button", {
+      name: "Choisir un dossier…",
+    });
+    expect(folderButton).toHaveAttribute("aria-disabled", "true");
+    await user.click(folderButton);
+    // Two native dialogs / review surfaces must never stack: the handover
+    // is a no-op and the dialog stays open.
+    expect(onCreateFromFolderRequest).not.toHaveBeenCalled();
+    expect(onClose).not.toHaveBeenCalled();
+  });
 });

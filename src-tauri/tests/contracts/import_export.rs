@@ -1,8 +1,9 @@
 use rustory_lib::domain::shared::AppError;
 use rustory_lib::ipc::dto::{
-    AcceptArtifactImportInputDto, ExportStoryDialogInputDto, ExportStoryDialogOutcomeDto,
-    ImportArtifactAnalysisDto, ImportAspectDto, ImportCategoryDto, ImportFindingDto,
-    ImportQualityDto, ImportStateDto, ImportableContentDto,
+    AcceptArtifactImportInputDto, AcceptStructuredCreationInputDto, ExportStoryDialogInputDto,
+    ExportStoryDialogOutcomeDto, ImportArtifactAnalysisDto, ImportAspectDto, ImportCategoryDto,
+    ImportFindingDto, ImportQualityDto, ImportStateDto, ImportableContentDto,
+    StructuredCreationAnalysisDto,
 };
 
 #[test]
@@ -245,4 +246,142 @@ fn app_error_wire_shape_for_export_destination_unavailable() {
         v.get("user_action").is_none(),
         "snake_case must never leak across the boundary"
     );
+}
+
+// ===== Structured-folder creation (folder → new canonical story) =====
+
+/// Analyze a manifest through the REAL domain pipeline so the contract test
+/// exercises the exact wire the command emits.
+fn folder_analysis(manifest: &str) -> rustory_lib::domain::import::StructuredFolderAnalysis {
+    rustory_lib::domain::import::analyze_structured_folder_components(
+        manifest.as_bytes(),
+        &std::collections::BTreeMap::new(),
+    )
+}
+
+#[test]
+fn structured_creation_analyzed_wire_shape_is_tagged_camel_case() {
+    let analysis = folder_analysis(
+        r#"{ "formatVersion": 1, "title": "Le voyage", "nodes": [ { "id": "n1" } ] }"#,
+    );
+    let dto = StructuredCreationAnalysisDto::analyzed(
+        &analysis,
+        "mon-dossier".into(),
+        "/home/user/mon-dossier".into(),
+    );
+    let v = serde_json::to_value(&dto).expect("serialize");
+    assert_eq!(v["kind"], "analyzed");
+    assert_eq!(v["quality"], "clean");
+    assert_eq!(v["state"], "recognized");
+    assert_eq!(v["folderName"], "mon-dossier");
+    // The folderPath is REQUIRED on an analyzed verdict (the accept phase
+    // needs it back) — and it is the ONLY place the absolute path exists.
+    assert_eq!(v["folderPath"], "/home/user/mon-dossier");
+    assert_eq!(v["creatableSummary"]["title"], "Le voyage");
+    assert_eq!(v["creatableSummary"]["nodeCount"], 1);
+    assert!(v["creatableSummary"]["retainedMedia"]
+        .as_array()
+        .expect("array")
+        .is_empty());
+    assert_eq!(
+        v["findings"].as_array().expect("findings").len(),
+        5,
+        "exactly one finding per folder aspect"
+    );
+    for snake in [
+        "folder_name",
+        "folder_path",
+        "creatable_summary",
+        "node_count",
+        "retained_media",
+        "discarded_media",
+    ] {
+        assert!(
+            v.get(snake).is_none() && v["creatableSummary"].get(snake).is_none(),
+            "{snake} must be camelCase"
+        );
+    }
+}
+
+#[test]
+fn structured_creation_blocked_verdict_omits_the_creatable_summary() {
+    let analysis =
+        folder_analysis(r#"{ "formatVersion": 2, "title": "Futur", "nodes": [ { "id": "n1" } ] }"#);
+    let dto = StructuredCreationAnalysisDto::analyzed(
+        &analysis,
+        "dossier-futur".into(),
+        "/tmp/dossier-futur".into(),
+    );
+    let v = serde_json::to_value(&dto).expect("serialize");
+    assert_eq!(v["quality"], "unusable");
+    assert_eq!(v["state"], "blocked");
+    assert!(
+        v.get("creatableSummary").is_none(),
+        "a blocked verdict carries nothing to create"
+    );
+}
+
+#[test]
+fn structured_creation_media_findings_use_the_folder_copy() {
+    // A media pair on the wire: the message is the FOLDER copy (manifest /
+    // creation wording), and the `media` aspect serializes camelCase.
+    let manifest = r#"{ "formatVersion": 1, "title": "Média", "nodes": [ { "id": "n1", "image": "absente.png" } ] }"#;
+    let analysis = rustory_lib::domain::import::analyze_structured_folder_components(
+        manifest.as_bytes(),
+        &[(
+            "absente.png".to_string(),
+            rustory_lib::domain::import::MediaProbe::Absent,
+        )]
+        .into_iter()
+        .collect(),
+    );
+    let dto = StructuredCreationAnalysisDto::analyzed(&analysis, "d".into(), "/tmp/d".into());
+    let v = serde_json::to_value(&dto).expect("serialize");
+    assert_eq!(v["state"], "partial");
+    let findings = v["findings"].as_array().expect("findings");
+    let media = findings
+        .iter()
+        .find(|f| f["aspect"] == "media")
+        .expect("a media finding");
+    assert_eq!(media["category"], "missing");
+    assert!(media["message"]
+        .as_str()
+        .expect("message")
+        .contains("introuvables"));
+    assert_eq!(
+        v["creatableSummary"]["discardedMedia"],
+        serde_json::json!(["absente.png"])
+    );
+}
+
+#[test]
+fn structured_creation_cancelled_wire_shape_carries_only_kind() {
+    let v = serde_json::to_value(StructuredCreationAnalysisDto::Cancelled).expect("ser");
+    assert_eq!(v, serde_json::json!({ "kind": "cancelled" }));
+}
+
+#[test]
+fn accept_structured_creation_input_accepts_canonical_camel_case_payload() {
+    let dto: AcceptStructuredCreationInputDto = serde_json::from_value(serde_json::json!({
+        "folderPath": "/home/user/mon-dossier",
+    }))
+    .expect("deser");
+    assert_eq!(dto.folder_path, "/home/user/mon-dossier");
+}
+
+#[test]
+fn accept_structured_creation_input_rejects_snake_case_and_unknown_field() {
+    let snake = serde_json::from_value::<AcceptStructuredCreationInputDto>(serde_json::json!({
+        "folder_path": "/tmp/d",
+    }));
+    assert!(snake.is_err(), "snake_case folder_path must be refused");
+
+    let unknown = serde_json::from_value::<AcceptStructuredCreationInputDto>(serde_json::json!({
+        "folderPath": "/tmp/d",
+        "extra": true,
+    }));
+    assert!(unknown.is_err(), "unknown field must be refused");
+
+    let missing = serde_json::from_value::<AcceptStructuredCreationInputDto>(serde_json::json!({}));
+    assert!(missing.is_err(), "missing folderPath must be refused");
 }

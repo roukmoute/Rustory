@@ -53,13 +53,13 @@ The transfer contract is part of the MVP and should map internal state to UI lab
 
 ## Post-MVP Import State Contract
 
-These states are for post-MVP local structured import flows and must not be mistaken for MVP transfer states. The first flow that realizes them is the
-`Local Artifact Import Contract` below (`.rustory` file import); see it for the full two-phase machine, recognition model and error taxonomy.
+These states are for post-MVP local structured import flows and must not be mistaken for MVP transfer states. Two flows realize them: the
+`Local Artifact Import Contract` below (`.rustory` file import) and the `Structured Folder Creation Contract` (folder → new story); see them for the full two-phase machines, recognition models and error taxonomy.
 
 | Internal Contract State | UI Label | Scope |
 | --- | --- | --- |
 | `recognized` | `reconnu` | Import analysis found usable material |
-| `partial` | `partiel` | Some content is usable, some is not |
+| `partial` | `partiel` | Some content is usable, some is not — emitted by the structured-folder flow (a referenced media is missing); never by the `.rustory` flow |
 | `needs_review` | `à revoir` | The user must inspect before accepting |
 | `blocked` | `bloqué` | Import cannot continue safely |
 | `resolved` | `résolu` | The import review was settled by a real write that left the canonical story fully sound (see `Import Review Resolution Contract`); renders with NO marker — the marker's disappearance IS the feedback |
@@ -1300,11 +1300,12 @@ local library as a canonical, re-openable story. It is **distinct from the
 `Device Story Import Contract`** (`Copier dans ma bibliothèque`, device → library)
 — that flow either fully succeeds or explicitly fails, while this one produces a
 typed recognition verdict that may be `Partiellement exploitable`. The supported
-artifact set for this iteration is **the `.rustory` v1 artifact only** (see
-[device-support-profile.md#Local Artifact Import Contract](./device-support-profile.md));
-structured archives / multi-element folders remain out of scope (no archive
-reader yet — the single-file `.rustory` artifact stays the only supported
-type).
+artifact set for THIS flow is **the `.rustory` v1 artifact only** (see
+[device-support-profile.md#Local Artifact Import Contract](./device-support-profile.md)).
+The **structured folder** is supported by its own CREATION flow (see
+`Structured Folder Creation Contract` below — a different door into the same
+canonical model, never an implicit extension of this one); structured archives
+(zip…) remain out of scope (no archive reader — zero-dependency rule).
 
 The flow is **two-phase, with no mutation before acceptance (AC1)**:
 
@@ -1323,10 +1324,12 @@ functionally blocked artifact is a result state, not a transport error):
   `SchemaVersion`, `Structure`, `Integrity`, `Title`, `Timestamps`.
 - **Recognition category** (per finding): `Recognized` → `reconnu`, `Ambiguous`
   → `ambiguïté`, `Missing` → `information manquante`, `Blocking` → `blocage
-  réel`. `Missing` (and the UX `dupliqué`) belong to the deferred multi-element
-  import and are **declared but never emitted** by the `.rustory` flow — a
-  negative test locks this (mirrors `Axis::Media` / `Axis::Filesystem` in the
-  preflight contract).
+  réel`. `Missing` is **never emitted by the `.rustory` flow** — a negative
+  test locks this (mirrors `Axis::Media` / `Axis::Filesystem` in the preflight
+  contract); its first real emitter is the structured-folder creation flow
+  (see `Structured Folder Creation Contract` — a referenced media absent from
+  the folder). The UX `dupliqué` stays a `Blocking` finding of the `Structure`
+  aspect (a duplicate node id), never a category of its own.
 - **Import state** (per story, durable, surfaced as a Story Card chip):
   `recognized` / `partial` / `needs_review` / `blocked` / `resolved`. `resolved`
   is emitted by the write-path review resolution ONLY (see `Import Review
@@ -1408,6 +1411,132 @@ non-empty `userAction` (next gesture); the frontend renders both verbatim and
 branches on `code` + `details.source` only to choose the surface, never to
 compose the text.
 
+## Structured Folder Creation Contract
+
+Creating a story from a **structured folder** (`Créer une histoire` → `Choisir
+un dossier…`) is a CREATION flow, not an import bis: the folder carries an
+**author manifest** (`histoire.json` + referenced media, see
+[device-support-profile.md#Structured folder v1 format contract](./device-support-profile.md))
+and the accepted story is BORN like an interactive creation (fresh UUIDv7,
+`created_at = updated_at = now`). It reuses the import machinery — two phases,
+typed verdict, durable marker — but owns its aspect set, its state derivation
+and its copy.
+
+The flow is **two-phase, with no mutation before acceptance (AC4)**:
+
+| Phase | Command | Effect |
+| --- | --- | --- |
+| Analyze | `analyze_structured_folder_for_creation` | Opens a native FOLDER picker, reads `histoire.json` bounded, probes each referenced media (`symlink_metadata`, bounded read, magic-byte sniff — never the extension), returns a typed verdict DTO. NO row written, NO file promoted, the folder is never listed. A cancelled dialog returns `{ kind: "cancelled" }`. A read/transport failure rejects with `IMPORT_FAILED`. |
+| Accept | `accept_structured_creation` | On the explicit `Créer l'histoire` action: RE-ANALYZES the folder from zero (the disk may have changed — the re-analysis is authoritative; a verdict turned blocking refuses), promotes the retained media into the node-media store OUTSIDE the DB lock, then commits `stories` + `story_local_imports` (`source_format = 'structured-folder'`) + `assets` rows in ONE `BEGIN IMMEDIATE` transaction. A transaction failure compensates the promoted files (GC). Returns the created `StoryCardDto`. |
+| Abandon | — (pure frontend) | `Abandonner` drops the verdict. Nothing was mutated, so no command is needed. |
+
+The analysis DTO carries the absolute `folderPath` returned by the system
+dialog, ONLY so the accept phase can re-read the same folder. It is NEVER
+rendered, NEVER persisted (provenance stores the validated basename only),
+NEVER logged and never part of an error payload (PII). The accept phase grants
+it no authority: everything is re-derived from the disk; a forged path is
+equivalent to "the user picked this folder" and opens no new capability.
+
+Recognition model (typed verdict, NEVER an `AppError`): the folder flow
+analyzes `Envelope`, `FormatVersion`, `Title`, `Structure` and `Media` — its
+OWN aspect set (no `SchemaVersion` / `Integrity` / `Timestamps`: an author
+manifest has no declared schema, no checksum, no timestamps). The `Media`
+aspect is analyzed ONLY when the declared `formatVersion` is the listed one:
+an unlisted format never triggers a single media read (AC2 — no implicit /
+partial support) and its verdict carries no `Media` finding. The full
+aspect × category matrix, the named bounds and the manifest schema live in the
+support profile contract. State derivation (folder flow):
+
+| Findings | Quality | Durable state |
+| --- | --- | --- |
+| any `Blocking` | `Inexploitable` | `blocked` — nothing created, never persisted |
+| else any `Missing` (a referenced media absent) | `Partiellement exploitable` | `partial` — the FIRST real emitter of this state |
+| else any `Ambiguous` | `Partiellement exploitable` | `needs_review` |
+| none of the above | `Propre` | `recognized` (no report, no marker) |
+
+A discarded media (`Missing` / `Ambiguous`) never blocks the creation: the node
+is born with the empty slot, visible in the editor (node-media controls) — that IS the
+"à corriger" of AC1. The persisted findings stay aggregated `(aspect, category)`
+pairs (per-file detail is deferred); the report names the groups, the editor
+shows the empty slots.
+
+Per-pair FR copy: the folder flow owns the FR message of every pair of its
+matrix (fixed in `product-language.md#Change Control`). Every `Envelope`,
+`FormatVersion`, `Title` and `Structure` pair carries a FOLDER wording (the
+folder speaks of a manifest and a creation, not of an artifact and an import)
+— except the shared `Title × reconnu` line, whose copy is identical to the
+`.rustory` one. The folder wording renders everywhere the folder flow appears,
+INCLUDING the durable card report (the projection branches on the provenance's
+`source_format`); the `Media` pairs exist only in this flow. Every BLOCKING
+copy of the matrix names the corrective gesture (fix the folder/manifest, then
+re-run the analysis) — the blocked surface itself only offers `Abandonner`.
+
+UI state machine (owned by `use-structured-creation`, mounted in the library):
+
+| State | Rendering | Announcement |
+| --- | --- | --- |
+| `idle` | no status content | none |
+| `analyzing` | indeterminate `ProgressIndicator` labelled `Analyse du dossier…` | deliberately NOT announced |
+| `review` | the recognition report in-context (surface `Création depuis un dossier`): the quality chip, the folder basename, the per-aspect findings grouped `Ce que Rustory a reconnu` / `Points d'attention`, the `Ce qui sera créé` group (the normalized title, the node count, the retained media and the discarded ones BY BASENAME — the per-file detail lives here, never in the persisted findings), and — when creatable — the UNIQUE CTA `Créer l'histoire` THEN `Abandonner` in tab order (the report already says what will be discarded — no second CTA). A `blocked` verdict is `role="alert"` (only `Abandonner`, no summary — nothing will be created); a creatable one is `aria-live="polite"` | `role="alert"` if blocked, else `aria-live="polite"` |
+| `creating` | indeterminate `ProgressIndicator` labelled `Création en cours…` | deliberately NOT announced |
+| `created` | `Histoire créée dans ta bibliothèque` (success chip) + the created title + explicit `Fermer`; the library reloads (authoritative re-read); the editor is NOT auto-opened — the fresh card (with its possible marker) IS the sober success feedback | `aria-live="polite"`, mounted, `aria-atomic` |
+| `failed` | `Création impossible` block with the canonical `message` + `userAction`, buttons `Réessayer` THEN `Fermer` | `role="alert"` |
+
+Entry point: the library bar keeps ONE primary CTA (`Créer une histoire`,
+UX-DR26). The `CreateStoryDialog` is the creation CHOICE: the interactive path
+(title → `Créer`) stays primary; a secondary entry `Ou démarre depuis un
+dossier préparé hors de Rustory` + `Choisir un dossier…` closes the dialog and
+starts this flow. No third button in the bar.
+
+Inherited behavior (documented honestly): the created story carries the FULL
+edit scope by construction and joins the `Import Review Resolution Contract`
+unchanged — a real write that leaves the canonical story fully sound settles a
+pending `partial` / `needs_review` review (media slots are NEVER part of that
+oracle: the `partiel` marker is settled by a sound canonical write even while
+media slots stay empty — the empty slots remain visible in the editor, which is
+the intended durable state). A `structured-folder` story with no device pack
+stays `NotTransferable` at the write plan, exactly like a native story.
+
+Invariants (locked by tests):
+
+- **No mutation before acceptance (AC4)**: analysis alone leaves zero row and
+  zero store file; a `blocked` verdict creates NOTHING; `Abandonner` is a pure
+  frontend reset.
+- **Bounded I/O**: manifest read `is_file`-gated then capped
+  (`MAX_MANIFEST_BYTES`); every referenced media `symlink_metadata`-gated,
+  capped per file and in count/total (`MAX_FOLDER_MEDIA_FILES`,
+  `MAX_FOLDER_TOTAL_MEDIA_BYTES`); basenames validated BEFORE any path join;
+  the folder is never walked.
+- **Atomicity**: ONE transaction for `stories` + provenance + `assets`; a
+  failure rolls back fully and compensates the promoted media files (locked by
+  fault injection on both insert stages).
+- **Authority**: the accept phase re-analyzes from zero; the frontend verdict
+  is never trusted; provenance fields are re-validated before INSERT.
+- **Orthogonality**: the `.rustory` import flow is untouched (its negative
+  tests still hold: it never emits `Missing` nor `partial`); `scope.rs` /
+  `review.rs` / the editor spines are inherited WITHOUT modification.
+- Offline, zero dependency, zero network; color is never the sole carrier;
+  a problem is never carried in a toast alone.
+
+Error taxonomy: transport failures reuse the `IMPORT_FAILED` closed set of the
+Local Artifact Import Contract (`file_read`, `db_commit`, `spawn_blocking_join`,
+`app_data_unavailable`, `dialog_failed`, `other`) — the functional verdict is
+the typed DTO, never an error. A folder whose CONTENT exceeds a bound is a
+`Blocking` FINDING (typed verdict), never a transport error. The folder flow
+ADDS these documented sub-values to the reused set:
+
+- `file_read.stage` gains `folder_name` (the chosen folder's name cannot be
+  carried as a provenance source — no real UTF-8 basename, or outside the
+  sobriety rules; an honest refusal, never disguised as a manifest problem),
+  `invalid_path` (a forged accept pointer: empty / relative — the system
+  dialog never produces one) and `oversize_total` (the bytes actually read at
+  promotion exceed `MAX_FOLDER_TOTAL_MEDIA_BYTES` — probe sizes may be stale).
+- `db_commit.stage` gains `insert_assets` (the third insert stage of the
+  atomic commit).
+- `other.cause` gains `media_promotion` (a retained media could not be
+  promoted into the managed store, or its bytes changed kind since the
+  re-analysis).
+
 ## Imported Story Edit Scope Contract
 
 An imported story is editable within the EDIT SCOPE DECLARED for its import
@@ -1418,7 +1547,7 @@ frontend never recomposes it:
 | Provenance | Scope | Meaning |
 | --- | --- | --- |
 | no import row (native story) | `full` | the complete editor — content, media, structure, option links |
-| `story_local_imports` row (`.rustory` import) | `full` | the imported canonical structure is the SAME v3 model as a native story; it edits exactly like one (the node/media/structure/option-link edit paths, unchanged) |
+| `story_local_imports` row (`.rustory` import or structured-folder creation) | `full` | the imported/created canonical structure is the SAME v3 model as a native story; it edits exactly like one (the node/media/structure/option-link edit paths, unchanged) |
 | `story_imports` row (device pack) | `titleOnly` | the content is carried by the binary pack copied from the device (the local canonical row is a placeholder); only the TITLE — a local Rustory metadata, packs store none — is editable |
 | provenance query error | `titleOnly` | fail-closed: a read hiccup must never let a write slip through |
 | forged rows in BOTH tables | `titleOnly` | the pack takes precedence (its placeholder content must never be edited) |
@@ -1451,9 +1580,10 @@ Invariants:
 
 ## Import Review Resolution Contract
 
-The import review of a `.rustory` story (`needs_review` / `partial`) is
-SETTLED BY EDITING — no button, no ceremony, no guided flow (AC3). The durable
-marker resolves when a REAL write leaves the canonical story fully sound:
+The import review of a file-provenance story (`needs_review` / `partial` — a
+`.rustory` import or a structured-folder creation) is SETTLED BY EDITING — no
+button, no ceremony, no guided flow (AC3). The durable marker resolves when a
+REAL write leaves the canonical story fully sound:
 
 | Aspect | Value |
 | --- | --- |

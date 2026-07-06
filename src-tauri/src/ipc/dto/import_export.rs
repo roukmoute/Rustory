@@ -2,8 +2,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::domain::import::{
     ArtifactAnalysis, ImportState, ImportableContent, RecognitionAspect, RecognitionCategory,
-    RecognitionFinding, RecognitionQuality,
+    RecognitionFinding, RecognitionQuality, StructuredFolderAnalysis,
 };
+use crate::domain::story::normalize_title;
 
 /// Input accepted by the `export_story_with_save_dialog` Tauri command.
 /// `deny_unknown_fields` fails the deserialization if the UI ever adds a
@@ -83,8 +84,9 @@ impl ImportStateDto {
     }
 }
 
-/// The aspect of the artifact a finding refers to. Mirror of the domain
-/// [`RecognitionAspect`].
+/// The aspect of the analyzed input a finding refers to. Mirror of the
+/// domain [`RecognitionAspect`] (`media` belongs to the structured-folder
+/// flow only).
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum ImportAspectDto {
@@ -95,6 +97,7 @@ pub enum ImportAspectDto {
     Integrity,
     Title,
     Timestamps,
+    Media,
 }
 
 /// The recognition category of a finding. Mirror of the domain
@@ -171,6 +174,98 @@ pub struct AcceptArtifactImportInputDto {
     pub artifact_checksum: String,
 }
 
+// ===== Structured-folder creation (folder → new canonical story) =====
+
+/// The creatable-content summary carried by an `analyzed` folder verdict:
+/// what WILL be created if accepted — the (normalized) title, the node
+/// count, the retained media and the discarded ones (by basename). The
+/// per-file detail lives HERE only; the persisted findings stay aggregated
+/// `(aspect, category)` pairs.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CreatableSummaryDto {
+    pub title: String,
+    pub node_count: u32,
+    pub retained_media: Vec<String>,
+    pub discarded_media: Vec<String>,
+}
+
+/// Tagged outcome of `analyze_structured_folder_for_creation`: either the
+/// typed recognition verdict (`analyzed`) or a cancelled dialog
+/// (`cancelled`). A TRANSPORT failure rejects with `AppError` instead —
+/// the functional verdict is NEVER an error.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum StructuredCreationAnalysisDto {
+    #[serde(rename_all = "camelCase")]
+    Analyzed {
+        quality: ImportQualityDto,
+        state: ImportStateDto,
+        findings: Vec<ImportFindingDto>,
+        /// Present iff creatable (`quality != unusable`). `None` ⇒ blocked
+        /// (only `Abandonner`).
+        #[serde(skip_serializing_if = "Option::is_none")]
+        creatable_summary: Option<CreatableSummaryDto>,
+        /// The folder's basename — the only name the surface renders.
+        folder_name: String,
+        /// The absolute path returned by the SYSTEM dialog, carried ONLY to
+        /// be passed back to `accept_structured_creation`. NEVER rendered,
+        /// NEVER persisted, NEVER logged (PII) — the accept phase grants it
+        /// no authority (it re-analyzes the disk from zero).
+        folder_path: String,
+    },
+    Cancelled,
+}
+
+impl StructuredCreationAnalysisDto {
+    /// Map a domain folder analysis + the dialog facts to the `analyzed`
+    /// wire verdict, with the FOLDER per-pair FR copy.
+    pub fn analyzed(
+        analysis: &StructuredFolderAnalysis,
+        folder_name: String,
+        folder_path: String,
+    ) -> Self {
+        Self::Analyzed {
+            quality: quality_dto(analysis.quality),
+            state: state_dto(analysis.state),
+            findings: analysis
+                .findings
+                .iter()
+                .map(ImportFindingDto::from_folder_domain)
+                .collect(),
+            creatable_summary: analysis.creatable.as_ref().map(|creatable| {
+                let mut seen = std::collections::BTreeSet::new();
+                let retained_media: Vec<String> = creatable
+                    .retained_media
+                    .iter()
+                    .filter(|media| seen.insert(media.basename.clone()))
+                    .map(|media| media.basename.clone())
+                    .collect();
+                CreatableSummaryDto {
+                    // The summary shows what WILL be stored — the
+                    // normalized title, exactly like the created row.
+                    title: normalize_title(&creatable.title),
+                    node_count: creatable.structure.nodes.len() as u32,
+                    retained_media,
+                    discarded_media: analysis.discarded_media.clone(),
+                }
+            }),
+            folder_name,
+            folder_path,
+        }
+    }
+}
+
+/// Input accepted by the `accept_structured_creation` Tauri command: the
+/// folder path from a prior analysis, round-tripped verbatim. The accept
+/// phase re-analyzes the disk from zero — the wire carries a POINTER, never
+/// an authority. `deny_unknown_fields` keeps the boundary authoritative.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AcceptStructuredCreationInputDto {
+    pub folder_path: String,
+}
+
 /// The persisted shape of one attention finding inside
 /// `story_local_imports.findings_summary` — `(aspect, category)` codes
 /// only, NEVER the localized message (re-derived at read time, so the
@@ -238,6 +333,7 @@ pub fn aspect_dto(aspect: RecognitionAspect) -> ImportAspectDto {
         RecognitionAspect::Integrity => ImportAspectDto::Integrity,
         RecognitionAspect::Title => ImportAspectDto::Title,
         RecognitionAspect::Timestamps => ImportAspectDto::Timestamps,
+        RecognitionAspect::Media => ImportAspectDto::Media,
     }
 }
 
@@ -262,11 +358,26 @@ impl ImportFindingDto {
             message: finding_message(aspect, category).to_string(),
         }
     }
+
+    /// The structured-folder variant: same discriminants, the FOLDER
+    /// per-pair FR copy ([`structured_folder_finding_message`]).
+    pub fn from_folder_domain(finding: &RecognitionFinding) -> Self {
+        let aspect = aspect_dto(finding.aspect);
+        let category = category_dto(finding.category);
+        Self {
+            aspect,
+            category,
+            message: structured_folder_finding_message(aspect, category).to_string(),
+        }
+    }
 }
 
 /// Single canonical FR copy per `(aspect, category)` — never two wordings
-/// for one pair. Mirrors `docs/architecture/ui-states.md#Local Artifact
-/// Import Contract`.
+/// for one pair WITHIN a flow. Mirrors `docs/architecture/ui-states.md#Local
+/// Artifact Import Contract`; the `media` pairs (folder flow only) mirror
+/// `product-language.md#Structured-folder recognition copy`. The folder
+/// flow overrides the shared-aspect pairs whose wording differs through
+/// [`structured_folder_finding_message`].
 pub fn finding_message(aspect: ImportAspectDto, category: ImportCategoryDto) -> &'static str {
     use ImportAspectDto as A;
     use ImportCategoryDto as C;
@@ -296,6 +407,62 @@ pub fn finding_message(aspect: ImportAspectDto, category: ImportCategoryDto) -> 
         (A::Timestamps, _) => {
             "Une date de l'histoire n'a pas le format attendu ; elle a été conservée telle quelle."
         }
+        // `media` pairs — emitted by the structured-folder flow only; the
+        // copy lives here too so a persisted `(media, …)` pair re-rendered
+        // through the shared path never panics nor falls back empty.
+        (A::Media, C::Recognized) => {
+            "Tous les fichiers audio et image référencés par le dossier sont présents et reconnus."
+        }
+        (A::Media, C::Missing) => {
+            "Certains fichiers audio ou image référencés par le dossier sont introuvables. L'histoire sera créée sans eux ; tu pourras les ajouter dans l'éditeur."
+        }
+        // No flow emits `(media, blocking)` — the defensive copy stays
+        // COHERENT with its chip (a real block promises no creation) in
+        // case a persisted/forged summary carries the pair.
+        (A::Media, C::Blocking) => "Un média référencé par le dossier bloque la création.",
+        (A::Media, C::Ambiguous) => {
+            "Certains fichiers audio ou image référencés ne sont pas utilisables (format non reconnu, fichier trop volumineux ou nom invalide). L'histoire sera créée sans eux ; tu pourras les ajouter dans l'éditeur."
+        }
+    }
+}
+
+/// The STRUCTURED-FOLDER per-pair FR copy (frozen in
+/// `product-language.md#Structured-folder recognition copy`). The folder
+/// flow owns the wording of the shared-aspect pairs that speak of a
+/// manifest and a creation (`Envelope`, `FormatVersion`, `Title`,
+/// `Structure`) — the `.rustory` copy keeps speaking of an artifact and an
+/// import; every other pair (including `media`) delegates to the shared
+/// table. Used by the folder analysis DTO AND by the durable card report
+/// when the provenance's `source_format` is `structured-folder`.
+pub fn structured_folder_finding_message(
+    aspect: ImportAspectDto,
+    category: ImportCategoryDto,
+) -> &'static str {
+    use ImportAspectDto as A;
+    use ImportCategoryDto as C;
+    match (aspect, category) {
+        (A::Envelope, C::Recognized) => "Le manifest histoire.json est présent et lisible.",
+        (A::Envelope, C::Ambiguous | C::Missing | C::Blocking) => {
+            "Le dossier ne contient pas de manifest histoire.json lisible. Corrige le dossier puis relance l'analyse."
+        }
+        (A::FormatVersion, C::Recognized) => "La version de format du manifest est prise en charge.",
+        (A::FormatVersion, C::Ambiguous | C::Missing | C::Blocking) => {
+            "La version de format de ce manifest n'est pas prise en charge par cette version de Rustory. Corrige le manifest puis relance l'analyse."
+        }
+        (A::Title, C::Ambiguous) => {
+            "Le titre a été normalisé à la création (espaces ou caractères ajustés)."
+        }
+        (A::Title, C::Missing | C::Blocking) => {
+            "Le titre du manifest est manquant ou n'est pas valide. Corrige le manifest puis relance l'analyse."
+        }
+        (A::Structure, C::Recognized) => "La structure de l'histoire est reconnue.",
+        (A::Structure, C::Ambiguous) => {
+            "La structure contient un champ inattendu ou un lien d'option vers un nœud inconnu ; l'histoire sera créée telle quelle et tu pourras corriger dans l'éditeur."
+        }
+        (A::Structure, C::Missing | C::Blocking) => {
+            "La structure du manifest est incomplète ou incohérente. Corrige le manifest puis relance l'analyse."
+        }
+        _ => finding_message(aspect, category),
     }
 }
 
@@ -330,13 +497,28 @@ pub fn serialize_findings_summary(findings: &[RecognitionFinding]) -> Option<Str
 /// (the marker still shows from the state column; the report is just empty)
 /// — never a hard failure of the overview read.
 pub fn import_findings_from_summary(summary: &str) -> Vec<ImportFindingDto> {
+    findings_from_summary_with(summary, finding_message)
+}
+
+/// The structured-folder variant of [`import_findings_from_summary`]: the
+/// same stored pairs, re-rendered with the FOLDER per-pair copy. The
+/// projection picks it by the provenance's `source_format` so a folder
+/// story's durable card report speaks of a manifest, never of an artifact.
+pub fn folder_import_findings_from_summary(summary: &str) -> Vec<ImportFindingDto> {
+    findings_from_summary_with(summary, structured_folder_finding_message)
+}
+
+fn findings_from_summary_with(
+    summary: &str,
+    message: fn(ImportAspectDto, ImportCategoryDto) -> &'static str,
+) -> Vec<ImportFindingDto> {
     serde_json::from_str::<Vec<StoredImportFinding>>(summary)
         .unwrap_or_default()
         .into_iter()
         .map(|stored| ImportFindingDto {
             aspect: stored.aspect,
             category: stored.category,
-            message: finding_message(stored.aspect, stored.category).to_string(),
+            message: message(stored.aspect, stored.category).to_string(),
         })
         .collect()
 }
@@ -353,6 +535,21 @@ pub fn import_report_dto(findings: &[RecognitionFinding]) -> Vec<ImportFindingDt
         return Vec::new();
     }
     findings.iter().map(ImportFindingDto::from_domain).collect()
+}
+
+/// The structured-folder variant of [`import_report_dto`] — same rules,
+/// the FOLDER per-pair copy.
+pub fn folder_import_report_dto(findings: &[RecognitionFinding]) -> Vec<ImportFindingDto> {
+    if findings
+        .iter()
+        .all(|f| f.category == RecognitionCategory::Recognized)
+    {
+        return Vec::new();
+    }
+    findings
+        .iter()
+        .map(ImportFindingDto::from_folder_domain)
+        .collect()
 }
 
 impl ImportableContentDto {
@@ -611,6 +808,7 @@ mod tests {
             Integrity,
             Title,
             Timestamps,
+            Media,
         ];
         let categories = [Recognized, Ambiguous, Missing, Blocking];
         for aspect in aspects {
@@ -619,7 +817,74 @@ mod tests {
                     !finding_message(aspect, category).is_empty(),
                     "{aspect:?}/{category:?} message empty"
                 );
+                // The folder copy covers every pair too (its own wording or
+                // the shared delegation) — no panic, no empty fallback.
+                assert!(
+                    !structured_folder_finding_message(aspect, category).is_empty(),
+                    "folder {aspect:?}/{category:?} message empty"
+                );
             }
+        }
+    }
+
+    #[test]
+    fn folder_copy_speaks_of_the_manifest_and_shares_the_media_copy() {
+        // The folder flow owns the wording of its shared-aspect pairs…
+        assert_eq!(
+            structured_folder_finding_message(
+                ImportAspectDto::Envelope,
+                ImportCategoryDto::Blocking
+            ),
+            "Le dossier ne contient pas de manifest histoire.json lisible. Corrige le dossier puis relance l'analyse."
+        );
+        assert_ne!(
+            structured_folder_finding_message(
+                ImportAspectDto::Envelope,
+                ImportCategoryDto::Blocking
+            ),
+            finding_message(ImportAspectDto::Envelope, ImportCategoryDto::Blocking),
+            "the .rustory copy keeps speaking of an artifact"
+        );
+        // …and the `media` pairs are ONE copy, shared by construction.
+        for category in [
+            ImportCategoryDto::Recognized,
+            ImportCategoryDto::Ambiguous,
+            ImportCategoryDto::Missing,
+            ImportCategoryDto::Blocking,
+        ] {
+            assert_eq!(
+                structured_folder_finding_message(ImportAspectDto::Media, category),
+                finding_message(ImportAspectDto::Media, category)
+            );
+        }
+    }
+
+    #[test]
+    fn the_dead_media_blocking_pair_never_promises_a_creation() {
+        // No flow emits `(media, blocking)`, but a persisted/forged summary
+        // can re-render it: the defensive copy must stay coherent with the
+        // `blocage réel` chip — never "the story will be created anyway".
+        let copy = finding_message(ImportAspectDto::Media, ImportCategoryDto::Blocking);
+        assert!(!copy.contains("sera créée"), "no creation promise: {copy}");
+        assert!(!copy.is_empty());
+    }
+
+    #[test]
+    fn every_folder_blocking_copy_names_the_corrective_gesture() {
+        // Cause + impact + GESTURE: a blocked report tells the user what to
+        // do next (fix the folder, re-run the analysis) — the blocked
+        // surface only offers `Abandonner`.
+        for aspect in [
+            ImportAspectDto::Envelope,
+            ImportAspectDto::FormatVersion,
+            ImportAspectDto::Title,
+            ImportAspectDto::Structure,
+        ] {
+            let copy = structured_folder_finding_message(aspect, ImportCategoryDto::Blocking);
+            assert!(
+                copy.contains("relance l'analyse"),
+                "{aspect:?} blocking copy must name the gesture: {copy}"
+            );
         }
     }
 

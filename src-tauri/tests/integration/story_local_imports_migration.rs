@@ -246,7 +246,9 @@ fn check_guards_source_format_and_version() {
     let db = fresh_disk_db(&tmp);
     insert_story(&db, "story-format");
 
-    // Only the explicitly-listed `.rustory` format / version 1 is imported.
+    // Only the explicitly-listed formats pass the CHECK — `zip` stays outside
+    // the widened set (`rustory`, `structured-folder`), so this historical
+    // refusal keeps guarding (redirected target rule: never weakened).
     let err = db
         .conn()
         .execute(
@@ -338,7 +340,7 @@ fn existing_v5_database_upgrades_to_v6() {
         .expect("collect");
     assert_eq!(
         versions,
-        vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+        vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
         "v1..v5 preserved, v6+ added"
     );
 

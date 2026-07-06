@@ -4,8 +4,10 @@ import {
   isExportStoryDialogOutcome,
   isImportArtifactAnalysis,
   isImportFinding,
+  isStructuredCreationAnalysis,
   type ExportStoryDialogOutcome,
   type ImportArtifactAnalysis,
+  type StructuredCreationAnalysis,
 } from "./import-export";
 
 const VALID_EXPORTED: ExportStoryDialogOutcome = {
@@ -297,5 +299,206 @@ describe("isImportArtifactAnalysis", () => {
         artifactChecksum: "b".repeat(64),
       }),
     ).toBe(true);
+  });
+});
+
+// ===== Structured-folder creation =====
+
+const FOLDER_FINDINGS_CLEAN = [
+  { aspect: "envelope", category: "recognized", message: "Manifest lisible." },
+  { aspect: "formatVersion", category: "recognized", message: "Version prise en charge." },
+  { aspect: "title", category: "recognized", message: "Titre valide." },
+  { aspect: "structure", category: "recognized", message: "Structure reconnue." },
+  { aspect: "media", category: "recognized", message: "Médias présents." },
+] as const;
+
+type AnalyzedFolderVerdict = Extract<
+  StructuredCreationAnalysis,
+  { kind: "analyzed" }
+>;
+
+const FOLDER_ANALYZED_CLEAN: AnalyzedFolderVerdict = {
+  kind: "analyzed",
+  quality: "clean",
+  state: "recognized",
+  findings: [...FOLDER_FINDINGS_CLEAN],
+  creatableSummary: {
+    title: "Le voyage de Nour",
+    nodeCount: 2,
+    retainedMedia: ["couverture.png"],
+    discardedMedia: [],
+  },
+  folderName: "mon-dossier",
+  folderPath: "/home/user/mon-dossier",
+};
+
+const FOLDER_ANALYZED_PARTIAL: AnalyzedFolderVerdict = {
+  kind: "analyzed",
+  quality: "partial",
+  state: "partial",
+  findings: [
+    FOLDER_FINDINGS_CLEAN[0],
+    FOLDER_FINDINGS_CLEAN[1],
+    FOLDER_FINDINGS_CLEAN[2],
+    FOLDER_FINDINGS_CLEAN[3],
+    { aspect: "media", category: "missing", message: "Des fichiers sont introuvables." },
+  ],
+  creatableSummary: {
+    title: "Sans image",
+    nodeCount: 1,
+    retainedMedia: [],
+    discardedMedia: ["absente.png"],
+  },
+  folderName: "manque",
+  folderPath: "/home/user/manque",
+};
+
+const FOLDER_ANALYZED_BLOCKED: AnalyzedFolderVerdict = {
+  kind: "analyzed",
+  quality: "unusable",
+  state: "blocked",
+  findings: [
+    { aspect: "envelope", category: "blocking", message: "Manifest illisible." },
+  ],
+  folderName: "casse",
+  folderPath: "/home/user/casse",
+};
+
+describe("isStructuredCreationAnalysis", () => {
+  it("accepts a clean creatable verdict", () => {
+    expect(isStructuredCreationAnalysis(FOLDER_ANALYZED_CLEAN)).toBe(true);
+  });
+
+  it("accepts a partial verdict whose state names the missing content", () => {
+    expect(isStructuredCreationAnalysis(FOLDER_ANALYZED_PARTIAL)).toBe(true);
+  });
+
+  it("accepts a blocked verdict with no creatable summary", () => {
+    expect(isStructuredCreationAnalysis(FOLDER_ANALYZED_BLOCKED)).toBe(true);
+  });
+
+  it("accepts a cancelled payload with only the kind discriminant", () => {
+    expect(isStructuredCreationAnalysis({ kind: "cancelled" })).toBe(true);
+    expect(
+      isStructuredCreationAnalysis({ kind: "cancelled", extra: 1 }),
+    ).toBe(false);
+  });
+
+  it("rejects an analyzed verdict without folderPath", () => {
+    const { folderPath: _dropped, ...rest } = FOLDER_ANALYZED_CLEAN;
+    expect(isStructuredCreationAnalysis(rest)).toBe(false);
+    expect(
+      isStructuredCreationAnalysis({ ...FOLDER_ANALYZED_CLEAN, folderPath: "" }),
+    ).toBe(false);
+  });
+
+  it("rejects an empty folderName", () => {
+    expect(
+      isStructuredCreationAnalysis({ ...FOLDER_ANALYZED_CLEAN, folderName: "" }),
+    ).toBe(false);
+  });
+
+  it("rejects a partial state without a missing finding", () => {
+    // The folder derivation is deterministic: `partial` REQUIRES missing
+    // content; ambiguity alone must have derived `needsReview`.
+    expect(
+      isStructuredCreationAnalysis({
+        ...FOLDER_ANALYZED_PARTIAL,
+        findings: [
+          FOLDER_FINDINGS_CLEAN[0],
+          FOLDER_FINDINGS_CLEAN[1],
+          FOLDER_FINDINGS_CLEAN[2],
+          { aspect: "structure", category: "ambiguous", message: "Champ inattendu." },
+          FOLDER_FINDINGS_CLEAN[4],
+        ],
+      }),
+    ).toBe(false);
+  });
+
+  it("rejects a needsReview state that hides a missing finding", () => {
+    expect(
+      isStructuredCreationAnalysis({
+        ...FOLDER_ANALYZED_PARTIAL,
+        state: "needsReview",
+      }),
+    ).toBe(false);
+  });
+
+  it("rejects an aspect outside the folder set", () => {
+    // `timestamps` belongs to the `.rustory` flow — a folder verdict must
+    // never carry it.
+    expect(
+      isStructuredCreationAnalysis({
+        ...FOLDER_ANALYZED_CLEAN,
+        findings: [
+          ...FOLDER_FINDINGS_CLEAN.slice(0, 4),
+          { aspect: "timestamps", category: "recognized", message: "Dates ok." },
+        ],
+      }),
+    ).toBe(false);
+  });
+
+  it("rejects a duplicated aspect", () => {
+    expect(
+      isStructuredCreationAnalysis({
+        ...FOLDER_ANALYZED_CLEAN,
+        findings: [...FOLDER_FINDINGS_CLEAN.slice(0, 4), FOLDER_FINDINGS_CLEAN[3]],
+      }),
+    ).toBe(false);
+  });
+
+  it("rejects a creatable verdict missing one of the five folder aspects", () => {
+    expect(
+      isStructuredCreationAnalysis({
+        ...FOLDER_ANALYZED_CLEAN,
+        quality: "clean",
+        state: "recognized",
+        findings: FOLDER_FINDINGS_CLEAN.slice(0, 4),
+      }),
+    ).toBe(false);
+  });
+
+  it("rejects a creatable verdict without its summary", () => {
+    const { creatableSummary: _dropped, ...rest } = FOLDER_ANALYZED_CLEAN;
+    expect(isStructuredCreationAnalysis(rest)).toBe(false);
+  });
+
+  it("rejects a blocked verdict that carries a summary", () => {
+    expect(
+      isStructuredCreationAnalysis({
+        ...FOLDER_ANALYZED_BLOCKED,
+        creatableSummary: {
+          title: "X",
+          nodeCount: 1,
+          retainedMedia: [],
+          discardedMedia: [],
+        },
+      }),
+    ).toBe(false);
+  });
+
+  it("rejects a malformed summary (zero nodes, empty title)", () => {
+    expect(
+      isStructuredCreationAnalysis({
+        ...FOLDER_ANALYZED_CLEAN,
+        creatableSummary: { ...FOLDER_ANALYZED_CLEAN.creatableSummary!, nodeCount: 0 },
+      }),
+    ).toBe(false);
+    expect(
+      isStructuredCreationAnalysis({
+        ...FOLDER_ANALYZED_CLEAN,
+        creatableSummary: { ...FOLDER_ANALYZED_CLEAN.creatableSummary!, title: "" },
+      }),
+    ).toBe(false);
+  });
+
+  it("rejects a quality not derived from the findings", () => {
+    expect(
+      isStructuredCreationAnalysis({
+        ...FOLDER_ANALYZED_CLEAN,
+        quality: "partial",
+        state: "needsReview",
+      }),
+    ).toBe(false);
   });
 });

@@ -6,13 +6,15 @@
 //! STATE here, never an `AppError`: only transport failures (unreadable
 //! file, failed DB write) are errors, surfaced by the application layer.
 //!
-//! Scope reminder: the only supported artifact in this iteration is the
-//! `.rustory` v1 file (a single story, `nodes: []`). The [`Missing`]
-//! finding category and the [`Partial`] / [`Resolved`] import states are
-//! DECLARED for the deferred structured multi-element import but have NO
-//! emitter in the `.rustory` flow — a negative test locks that, mirroring
-//! the `Axis::Media` / `Axis::Filesystem` declared-but-unemitted axes in
-//! `preflight.rs`.
+//! Two flows share this taxonomy, each with its OWN aspect set and state
+//! derivation (each contract is documented separately in the support
+//! profile): the `.rustory` v1 file import (`artifact.rs`) and the
+//! structured-folder creation (`structured_folder.rs`). The [`Missing`]
+//! finding category and the [`Partial`] import state are emitted by the
+//! FOLDER flow only — the `.rustory` flow still never emits them, and a
+//! negative test locks that, mirroring the `Axis::Filesystem`
+//! declared-but-unemitted axis in `preflight.rs`. [`Resolved`] is emitted
+//! by the write-path review resolution only, never at analysis time.
 //!
 //! [`Missing`]: RecognitionCategory::Missing
 //! [`Partial`]: ImportState::Partial
@@ -31,7 +33,12 @@ pub enum RecognitionQuality {
     Unusable,
 }
 
-/// The aspect of the artifact a single finding refers to.
+/// The aspect of the analyzed input a single finding refers to. The
+/// `.rustory` flow analyzes `Envelope` / `FormatVersion` / `SchemaVersion`
+/// / `Structure` / `Integrity` / `Title` / `Timestamps`; the
+/// structured-folder flow analyzes `Envelope` / `FormatVersion` / `Title`
+/// / `Structure` / `Media` (an author manifest has no declared schema, no
+/// checksum, no timestamps).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RecognitionAspect {
     Envelope,
@@ -41,6 +48,9 @@ pub enum RecognitionAspect {
     Integrity,
     Title,
     Timestamps,
+    /// The referenced media files of a structured folder. Emitted by the
+    /// folder flow ONLY — a `.rustory` artifact carries no media.
+    Media,
 }
 
 /// The recognition category of a single finding (UI: `reconnu` /
@@ -51,8 +61,9 @@ pub enum RecognitionCategory {
     Recognized,
     /// Usable but adjusted / not fully trusted (e.g. a normalized title).
     Ambiguous,
-    /// An expected aspect is absent. DECLARED for structured imports; the
-    /// `.rustory` flow never emits it.
+    /// An expected aspect is absent. Emitted by the structured-folder flow
+    /// (a referenced media absent from the folder); the `.rustory` flow
+    /// never emits it.
     Missing,
     /// Makes the artifact unusable as-is.
     Blocking,
@@ -63,15 +74,17 @@ pub enum RecognitionCategory {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ImportState {
     Recognized,
-    /// DECLARED for the deferred structured multi-element import; never
-    /// emitted by the `.rustory` flow (which uses [`NeedsReview`] for its
-    /// single-story ambiguities).
+    /// "Some content is usable, some is not": emitted by the
+    /// structured-folder flow when a referenced media is absent
+    /// ([`folder_import_state`]); never emitted by the `.rustory` flow
+    /// (which uses [`NeedsReview`] for its single-story ambiguities).
     ///
     /// [`NeedsReview`]: ImportState::NeedsReview
     Partial,
     NeedsReview,
     Blocked,
-    /// DECLARED for guided repair; not emitted in this iteration.
+    /// Emitted by the write-path review resolution ONLY
+    /// (`application::story::review`) — never at analysis time.
     Resolved,
 }
 
@@ -131,7 +144,7 @@ pub fn recognition_quality(findings: &[RecognitionFinding]) -> RecognitionQualit
 /// Map the global quality to the durable per-story import state. For a
 /// `.rustory` artifact the `Partial` quality always means "review the
 /// adjusted aspects" → [`NeedsReview`]; [`Partial`] (some elements usable,
-/// some not) is reserved for the deferred multi-element import.
+/// some not) is the folder flow's mapping ([`folder_import_state`]).
 ///
 /// [`NeedsReview`]: ImportState::NeedsReview
 /// [`Partial`]: ImportState::Partial
@@ -140,6 +153,32 @@ pub fn import_state(quality: RecognitionQuality) -> ImportState {
         RecognitionQuality::Clean => ImportState::Recognized,
         RecognitionQuality::Partial => ImportState::NeedsReview,
         RecognitionQuality::Unusable => ImportState::Blocked,
+    }
+}
+
+/// The STRUCTURED-FOLDER state derivation (the `.rustory` one above is
+/// untouched): any `Blocking` → `Blocked` (nothing is created); else any
+/// `Missing` (a referenced media absent — some content is usable, some is
+/// not) → [`Partial`], its first real emitter; else any `Ambiguous` →
+/// [`NeedsReview`]; else [`Recognized`].
+///
+/// [`Partial`]: ImportState::Partial
+/// [`NeedsReview`]: ImportState::NeedsReview
+/// [`Recognized`]: ImportState::Recognized
+pub fn folder_import_state(findings: &[RecognitionFinding]) -> ImportState {
+    match recognition_quality(findings) {
+        RecognitionQuality::Clean => ImportState::Recognized,
+        RecognitionQuality::Unusable => ImportState::Blocked,
+        RecognitionQuality::Partial => {
+            if findings
+                .iter()
+                .any(|f| f.category == RecognitionCategory::Missing)
+            {
+                ImportState::Partial
+            } else {
+                ImportState::NeedsReview
+            }
+        }
     }
 }
 
@@ -190,5 +229,63 @@ mod tests {
     fn empty_findings_is_clean() {
         // Defensive: no findings at all is a (vacuous) clean verdict.
         assert_eq!(recognition_quality(&[]), RecognitionQuality::Clean);
+    }
+
+    fn missing(aspect: RecognitionAspect) -> RecognitionFinding {
+        RecognitionFinding {
+            aspect,
+            category: RecognitionCategory::Missing,
+        }
+    }
+
+    #[test]
+    fn folder_state_maps_a_missing_media_to_partial() {
+        // The folder flow is the FIRST real emitter of the `Partial` state:
+        // a referenced media absent from the folder → some content is
+        // usable, some is not.
+        let findings = [
+            RecognitionFinding::recognized(RecognitionAspect::Envelope),
+            missing(RecognitionAspect::Media),
+        ];
+        assert_eq!(recognition_quality(&findings), RecognitionQuality::Partial);
+        assert_eq!(folder_import_state(&findings), ImportState::Partial);
+    }
+
+    #[test]
+    fn folder_state_maps_an_ambiguity_alone_to_needs_review() {
+        let findings = [
+            RecognitionFinding::recognized(RecognitionAspect::Envelope),
+            RecognitionFinding::ambiguous(RecognitionAspect::Structure),
+        ];
+        assert_eq!(folder_import_state(&findings), ImportState::NeedsReview);
+    }
+
+    #[test]
+    fn folder_state_missing_dominates_an_ambiguity() {
+        // Missing + Ambiguous → the durable state names the missing content
+        // (`partial`), not just "review".
+        let findings = [
+            RecognitionFinding::ambiguous(RecognitionAspect::Title),
+            missing(RecognitionAspect::Media),
+        ];
+        assert_eq!(folder_import_state(&findings), ImportState::Partial);
+    }
+
+    #[test]
+    fn folder_state_a_blocker_dominates_everything() {
+        let findings = [
+            missing(RecognitionAspect::Media),
+            RecognitionFinding::blocking(RecognitionAspect::Structure),
+        ];
+        assert_eq!(folder_import_state(&findings), ImportState::Blocked);
+    }
+
+    #[test]
+    fn folder_state_clean_is_recognized() {
+        let findings = [
+            RecognitionFinding::recognized(RecognitionAspect::Envelope),
+            RecognitionFinding::recognized(RecognitionAspect::Media),
+        ];
+        assert_eq!(folder_import_state(&findings), ImportState::Recognized);
     }
 }
