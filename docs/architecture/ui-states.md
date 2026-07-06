@@ -62,7 +62,7 @@ These states are for post-MVP local structured import flows and must not be mist
 | `partial` | `partiel` | Some content is usable, some is not |
 | `needs_review` | `à revoir` | The user must inspect before accepting |
 | `blocked` | `bloqué` | Import cannot continue safely |
-| `resolved` | `résolu` | The import issue has been handled (declared; not emitted in the first iteration) |
+| `resolved` | `résolu` | The import review was settled by a real write that left the canonical story fully sound (see `Import Review Resolution Contract`); renders with NO marker — the marker's disappearance IS the feedback |
 
 ## State Transition Rules
 
@@ -84,7 +84,7 @@ The UI must never:
 - hide a critical issue only in a `toast`
 - carry a node media block only in a `toast` — it lives inline at its slot
 - paint a node `Enregistré` while one of its fields or media is still blocked
-- show an editable node field or media action that cannot be saved (an imported story's node is read-only)
+- show an editable node field or media action that cannot be saved (a device-pack story's content is carried by the copied pack — only its title is locally editable; see `Imported Story Edit Scope Contract`)
 
 ## Disabled Actions and Reasons
 
@@ -141,10 +141,11 @@ Preferred patterns:
 - `Préparation indisponible: profil non supporté`
 - `Préparation indisponible: corrige les blocages d'abord`
 
-For an imported story the node editor HIDES its write affordances (it renders
-the projection read-only with a named `Histoire importée (lecture seule)` note)
-rather than showing a disabled control with a reason; `Aperçu` / `Retirer` only
-render when a media is present, so they are never shown-but-disabled either.
+For a device-pack story (`titleOnly` edit scope) the content zones render the
+named pack states INSTEAD of the controls (see `Imported Story Edit Scope
+Contract`) — the controls are ABSENT, never shown-but-disabled; `Aperçu` /
+`Retirer` only render when a media is present, so they are never
+shown-but-disabled either.
 
 Node-media error payloads carry a stable `details.source` so support can triage
 without parsing the user-facing message:
@@ -1097,10 +1098,12 @@ double-click / `Éditer` (see `Story Card Interaction Contract`) and leaves
 through `Retour à la bibliothèque` (see `Library Routing Contract`, which
 already preserves selection and filters across the round trip). The shell
 opens for a native story and for an imported one — both are canonical
-`stories` rows read by `get_story_detail`. A native story's current node is
-editable; an imported story's node is projected **read-only** (its declared
-edit scope is a later iteration), so the shell never shows an editable control
-that cannot be saved.
+`stories` rows read by `get_story_detail`. What may be edited follows the
+story's DECLARED EDIT SCOPE, derived from its import provenance (see
+`Imported Story Edit Scope Contract`): a native story and a `.rustory` import
+carry the `full` scope (complete editor); a device-pack story carries
+`titleOnly` (named pack states replace the content zones), so the shell never
+shows an editable control that cannot be saved.
 
 This contract owns the SHELL: the three-zone frame, its entry/exit, and its
 keyboard model. The behaviors hosted inside it keep their own contracts — the
@@ -1117,7 +1120,7 @@ the `Story Structure Editing Contract` and the `Option Link Editor Contract`.
 | Three coexisting zones | The shell shows, at once: the global structure (`Story Structure Navigator`), the current node (host zone), and the story state + actions. None is hidden behind a tab or a click — all three are visible together so the global context is never lost while editing. |
 | Content states | The canonical model carries an ordered node graph (one or more nodes, a designated start node, option links). Each zone renders honest, NAMED states (`Structure de l'histoire` shows the story root + the ordered node list; `Nœud courant` shows the editor for the selected node, with named empty states for an empty field or an absent optional media), never blank, never disguised, never a fake node. A new story (or a migrated one) starts with a single empty start node — that is a valid starting state, not an error. |
 | Structure projection (from Rust) | The navigator consumes the node graph PROJECTED by Rust (`detail.structure`, see `Story Structure Editing Contract`): the start node id plus the ordered list of nodes, each with its stable id, label, option links and a localized issue flag. It NEVER re-serializes or reformats `structureJson` (covered byte-for-byte by `content_checksum`); every mutation goes through a Rust command. When Rust cannot project the graph (a corrupt / drifted structure — near-impossible since Rust is authoritative and checksum-guarded) the zone falls back to a NAMED degraded state (`Structure illisible`), never a crash, never a fake node. |
-| Current-node zone | The `Story Node Editor` (see `Story Node Editor Contract`): the labelled text and metadata fields plus the image and audio media slots of the current node. For a native story the fields and media actions are active; for an imported story the same projection renders read-only. |
+| Current-node zone | The `Story Node Editor` (see `Story Node Editor Contract`): the labelled text and metadata fields plus the image and audio media slots of the current node. For a `full`-scope story (native or `.rustory` import) the fields and media actions are active; for a device-pack story (`titleOnly`) the zone renders the named pack state INSTEAD of the controls (see `Imported Story Edit Scope Contract`). |
 | Story state + actions | The persisted title (`<h1>`, mirrors `detail.title`), the editable title field + autosave chip (`Story Autosave Contract`), the draft recovery banner when present (`Story Recovery Contract`, which keeps priority over the field), and the global actions `Retour à la bibliothèque` (+ `Exporter l'histoire`). |
 | Global actions scope | `Retour` and `Exporter` only. Sending a story to a device stays ANCHORED IN THE LIBRARY — it is never an editor action. No node-level or preflight validation lives in the shell (preflight is a transfer flow). |
 | Keyboard & focus | Stable focus order, EXPLICITLY: the story state zone OPENS the tab order (its editable title field is the editing entry point, and the recovery banner keeps priority above it), then structure → current node → terminal global actions (`Exporter`, `Retour`). The CONTENT zones and the terminal actions therefore follow structure → current node → global actions; the state/title block sitting first is deliberate (it has opened the shell since its first iteration and anchors the recovery decision before any content edit). Focus is visible on every zone (the global `:focus-visible` ring). Meaning is never carried by color alone (glyph + text). A problem is never carried in a toast alone. |
@@ -1178,10 +1181,11 @@ session — no identity drift after N edits. When Rust cannot project a node
 (corrupt / drifted structure) `detail.node` is `null` and the zone renders the
 named degraded state (`Structure illisible`), never a fabricated node.
 
-**Editability.** A native story's node is editable. An imported story's node is
-projected **read-only** with a named reason (its declared edit scope is a later
-iteration) — the editor NEVER shows a text field or a media action that cannot
-be saved.
+**Editability.** The node editor follows the story's declared edit scope (see
+`Imported Story Edit Scope Contract`): a `full`-scope story (native or
+`.rustory` import) edits its node the exact same way; a device-pack story
+(`titleOnly`) renders the named pack state INSTEAD of the fields — the editor
+NEVER shows a text field or a media action that cannot be saved.
 
 | Aspect | Value |
 | --- | --- |
@@ -1228,7 +1232,7 @@ the flagged spot.
 | Selection | Click / `Entrée` selects a node as the current node. The selection is LOCAL UI state (component/route state, never the Zustand shell store). Selecting re-reads `get_story_detail(storyId, nodeId)` (the authoritative read) so the `Nœud courant` zone re-seeds from Rust. The pending node content is flushed BEFORE the selection changes — a keystroke typed mid-debounce is never lost. `aria-current="true"` marks the selected entry. |
 | Selection fallback | Deleting the currently selected node moves the selection back to the START node (structure and current node stay coherent). A stale selection (a node id no longer in a healthy graph) also falls back to the start node — never a blank editor over a healthy structure. |
 | Keyboard | Roving tabindex over the node list: `↑` / `↓` move focus between nodes, `Entrée` selects the focused node. Inter-zone focus order is UNCHANGED (see the `Story Editor Shell Contract` for the explicit full order — the state/title block opens the tab order, then structure → current node → terminal global actions). Focus is visible everywhere (the global `:focus-visible` ring). |
-| Structural actions | Per-node, discreet (quiet/tertiary) actions, rendered ONLY for an editable (native) story: `Ajouter un nœud` (appends an empty node at the end of the list), `Monter` / `Descendre` (swap the node with its neighbor — display order only; the start node is designated by `startNodeId`, NOT by position, so moving it is allowed), `Supprimer le nœud`. An imported story renders NO structural action (never a control that cannot be saved). |
+| Structural actions | Per-node, discreet (quiet/tertiary) actions, rendered ONLY for a `full`-scope story (native or `.rustory` import — see `Imported Story Edit Scope Contract`): `Ajouter un nœud` (appends an empty node at the end of the list), `Monter` / `Descendre` (swap the node with its neighbor — display order only; the start node is designated by `startNodeId`, NOT by position, so moving it is allowed), `Supprimer le nœud`. A device-pack story (`titleOnly`) mounts NO navigator at all — the named pack state replaces the zone (never a control that cannot be saved, and never the misleading placeholder graph). |
 | Delete confirmation | `Supprimer le nœud` is destructive (the node's text and media are lost). It requires TWO explicit gestures, INLINE and localized inside the node's entry: the first gesture swaps the action row for a confirmation block naming the impact (the node and its media are removed; options pointing at it will be flagged `destination à corriger`), with `Confirmer la suppression` + `Annuler`. Never a modal, never a single-gesture delete. Deleting the START node is refused by Rust (the entry point must exist); the UI does not offer it. |
 | Mutation rule | Every structural mutation is an EXPLICIT, ACKNOWLEDGED action (never debounced, never optimistic): it calls a dedicated Rust command, which re-validates the persisted facts, applies the mutation to the whole graph, re-serializes the canonical structure and recomputes `content_checksum` in ONE `BEGIN IMMEDIATE` transaction. The UI reconciles from the ACK's re-projected graph — never from a locally recomposed state. The pending node content is flushed BEFORE any structural mutation. |
 | Deletion side effects | Deleting a node removes its media assets (with the reference-counted file GC) and its recovery buffer entry for THAT node only. Options on OTHER nodes that pointed at the deleted node KEEP their destination value and become `destination à corriger` — visible, localized, repairable — never silently unlinked (the trace survives). |
@@ -1264,7 +1268,7 @@ the only user-facing wording); an `unlinked` option is never conflated with a
 | Prevent vs flag (write vs read) | At WRITE time Rustory PREVENTS creating an invalid link: linking an option to a node id that does not exist in the graph is refused by Rust (typed error, inline alert). At READ time an already-broken link (its destination was deleted later) is FLAGGED `destination à corriger` — persisted, visible, repairable — never silently dropped. Self-reference (an option pointing back at its own node) is a legitimate narrative loop and is allowed. |
 | Actions | Per option: `Lier` (opens a FLAT selector listing the graph's nodes by label/id — never a canvas), `Créer et lier un nouveau nœud` (creates an empty node AND links the option to it in ONE atomic Rust transaction — no intermediate half-state), `Délier` (back to `non liée`), `Retirer l'option` (removes the option). Per node: `Ajouter une option` (with its label typed at creation). Labels are bounded by the same cap as the node metadata label. |
 | Acknowledged mutations | Same mutation rule as the structure contract: explicit acknowledged Rust commands, one transaction each, UI reconciled from the re-projected graph, pending content flushed first. Never debounced, never optimistic. |
-| Read-only rule | For an imported (non-editable) story the editor renders NO link action — the options are shown read-only with their states, under the same named read-only reason as the node content. |
+| Out-of-scope rule | For a device-pack story (`titleOnly` scope) the Option Link Editor is NOT MOUNTED at all — the named pack state replaces the content zones (see `Imported Story Edit Scope Contract`); its defensive non-editable projection is kept as defense in depth only, never as a reachable screen. A `.rustory` import carries the `full` scope and edits its links exactly like a native story. |
 | Errors | A refused link (unknown destination, stale option index) surfaces INLINE at the option row in a `role="alert"` region naming the cause, the impact and the next gesture. Acknowledgements are `aria-live="polite"`. Never a toast alone, never color alone (glyph + text). |
 | A11y | The option list and the flat node selector are keyboard-reachable in the normal tab order of the current-node zone; every action is a real button with an accessible name naming its option (e.g. `Lier — {option label}`). |
 
@@ -1325,7 +1329,8 @@ functionally blocked artifact is a result state, not a transport error):
   preflight contract).
 - **Import state** (per story, durable, surfaced as a Story Card chip):
   `recognized` / `partial` / `needs_review` / `blocked` / `resolved`. `resolved`
-  is **declared but never emitted** in this iteration (guided repair is later).
+  is emitted by the write-path review resolution ONLY (see `Import Review
+  Resolution Contract`) and renders NO chip; `blocked` is never persisted.
 
 Recognition truth table for a `.rustory` artifact:
 
@@ -1360,13 +1365,18 @@ revoir`), derived from `story_local_imports.import_state` exposed by
 `read_stories` / `StoryCardDto` — so it **survives an app restart**. It is
 distinct from (and must coexist with) the transfer/preparation `StoryPreparationBadge`,
 whose `partial` means a verification verdict: this marker uses its own dedicated
-labels/tone/glyph and never reuses the transfer `partial` value or sense.
+labels/tone/glyph and never reuses the transfer `partial` value or sense. A
+`resolved` story carries NO chip and NO report on its card — provenance
+`Importée` only (see `Import Review Resolution Contract`).
 
 `Import Review Flow` (on-demand, AC2): clicking the marker opens a simple
 in-context report — the global outcome (`Ce que Rustory a reconnu`) + the
 recognized aspects + the `Points d'attention`. The single source of truth is
 `story_local_imports.findings_summary`. Never a toast / modal to carry a problem
-alone; a guided repair level is deferred.
+alone. The review is SETTLED by editing — a real write that leaves the
+canonical story fully sound flips the durable state to `resolved` (see
+`Import Review Resolution Contract`); a GUIDED repair flow remains deferred
+and is never imposed.
 
 Invariants (locked by tests):
 
@@ -1397,6 +1407,65 @@ Every refusal constructor carries a non-empty `message` (cause + impact) AND a
 non-empty `userAction` (next gesture); the frontend renders both verbatim and
 branches on `code` + `details.source` only to choose the surface, never to
 compose the text.
+
+## Imported Story Edit Scope Contract
+
+An imported story is editable within the EDIT SCOPE DECLARED for its import
+format (FR21) — never "imported = read-only" as a block. The scope is derived
+in Rust ONLY (`story_edit_scope`), from the story's import provenance, and the
+frontend never recomposes it:
+
+| Provenance | Scope | Meaning |
+| --- | --- | --- |
+| no import row (native story) | `full` | the complete editor — content, media, structure, option links |
+| `story_local_imports` row (`.rustory` import) | `full` | the imported canonical structure is the SAME v3 model as a native story; it edits exactly like one (the node/media/structure/option-link edit paths, unchanged) |
+| `story_imports` row (device pack) | `titleOnly` | the content is carried by the binary pack copied from the device (the local canonical row is a placeholder); only the TITLE — a local Rustory metadata, packs store none — is editable |
+| provenance query error | `titleOnly` | fail-closed: a read hiccup must never let a write slip through |
+| forged rows in BOTH tables | `titleOnly` | the pack takes precedence (its placeholder content must never be edited) |
+
+Scope × surface (the authoritative truth table):
+
+| Surface | `full` (native or `.rustory` import) | `titleOnly` (device pack) |
+| --- | --- | --- |
+| `get_story_detail` projection | `editScope: "full"`, `editable: true`, `importState` present (4 states or `null`) | `editScope: "titleOnly"`, `editable: false`, `importState: null` (never projected outside `full`) |
+| Node + structure write spines | accepted (the node/structure write paths, unchanged) | refused authoritatively — `LIBRARY_INCONSISTENT`, `details.source` `node_not_editable` / `structure_not_editable`, the revised pack messages (no promise of a future version) |
+| Title (`update_story`) | accepted — a local metadata | accepted — the SAME local metadata (renaming a pack locally is the established local rename behavior, contractualized) |
+| Editor zones | full editor | both content zones render a NAMED pack state; the controls are ABSENT, not disabled; the navigator is NOT mounted (a pack's placeholder graph is a lying projection) |
+
+Frozen refusal copy (same error code and `details.source` as before — only the
+text changed; no version promise):
+
+- message: `Le contenu de cette histoire est porté par le pack copié depuis l'appareil et ne peut pas être modifié ici.`
+- userAction: `Tu peux modifier le titre depuis l'éditeur ; le contenu du pack reste celui de l'appareil.`
+
+Invariants:
+
+- `editable` stays on the wire as a DERIVED compatibility flag — always equal
+  to `editScope === "full"`; the TS guard refuses any divergence (drift error).
+- `importState` is projected ONLY for a `full`-scope story, on the detail AND
+  on every write acknowledgement — one shared Rust derivation, so the two can
+  never diverge, even on forged data.
+- The edit scope changes NOTHING for the transfer write-plan gate: a `.rustory`
+  import stays `NotTransferable` (no pack files), a device pack stays
+  transferable — verdict and gate remain orthogonal.
+
+## Import Review Resolution Contract
+
+The import review of a `.rustory` story (`needs_review` / `partial`) is
+SETTLED BY EDITING — no button, no ceremony, no guided flow (AC3). The durable
+marker resolves when a REAL write leaves the canonical story fully sound:
+
+| Aspect | Value |
+| --- | --- |
+| One-way transition | `UPDATE story_local_imports SET import_state = 'resolved' WHERE story_id = ? AND import_state IN ('needs_review','partial')` — conditional by construction, so a `resolved` story NEVER regresses to `needs_review` (the living validation owns the present). |
+| Oracle | The COMPLETE `validate_canonical` blocker list over the post-mutation facts must be EMPTY — any blocker of ANY severity (a still-broken option link is Fixable) prevents resolution. The spines already compute that list; no extra I/O. Node MEDIA are NEVER part of the oracle (a media `attention` slot is not a `.rustory` import finding; its per-slot marker lives its own life). |
+| Write sites | Inside the SAME write transaction of: `apply_node_mutation`, `apply_structure_mutation`, `update_story` (title — after a cheap early-out so a native autosave never pays a structure parse), `apply_recovery` (a title recovery is a real write; a node recovery goes through the node spine and is covered there). |
+| What does NOT resolve | Reading (never write-on-read); an acknowledged structural no-op (no real write happened — the ACK still carries the current state); any write on a non-`full` story (the forged two-table case re-checks the scope). |
+| Findings trace | `findings_summary` is KEPT in base forever (the review's trace) — never rendered for a `resolved` story. |
+| Timestamps | The state transition alone NEVER bumps `stories.updated_at` (a card must not resurface in a recency sort because a chip went out). |
+| Acknowledgements | The three write outputs (`UpdateStoryOutputDto`, `NodeWriteOutputDto`, `StructureWriteOutputDto`) carry `importState` (required key, explicit `null`), read POST-UPDATE in the same transaction through the same None-unless-`full` derivation as the detail. The frontend reconciles with LOCAL MONOTONICITY: a local `resolved` is never overwritten by a stale in-flight `needsReview`/`partial` acknowledgement. |
+| Editor surface | A static review chip in the editor shell banner for `needsReview` / `partial` (the card labels `à revoir` / `partiel`, warning tone, NEVER `role="alert"` — a durable state, not an action error). NOTHING is rendered for `recognized` / `resolved` / `null`: the chip's disappearance IS the feedback, no success announcement. |
+| Library surface | A `resolved` card renders EXACTLY like a `recognized` one: provenance `Importée` only, no chip, no report (`read_stories` projects `importState: "resolved"` WITHOUT `importReport`). |
 
 ## Story Recovery Contract
 

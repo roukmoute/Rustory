@@ -24,6 +24,8 @@ function buildDetail(overrides: Partial<StoryDetailDto> = {}): StoryDetailDto {
     createdAt: "2026-04-23T09:00:00.000Z",
     updatedAt: "2026-04-23T09:00:00.000Z",
     editable: true,
+    editScope: "full",
+    importState: null,
     structure: {
       startNodeId: "n1",
       nodes: [
@@ -290,5 +292,83 @@ describe("<StoryEditorShell />", () => {
     expect(description).toHaveTextContent(
       "Vérification d'un brouillon récupérable…",
     );
+  });
+
+  it("shows the STATIC review chip for a pending import review (never role=alert)", () => {
+    renderShell({ detail: buildDetail({ importState: "needsReview" }) });
+    const chip = screen.getByText("à revoir");
+    expect(chip).toBeInTheDocument();
+    // A durable state, not an action error: rendered statically.
+    expect(chip.closest("[role='alert']")).toBeNull();
+  });
+
+  it("uses the card label « partiel » for a partial review", () => {
+    renderShell({ detail: buildDetail({ importState: "partial" }) });
+    expect(screen.getByText("partiel")).toBeInTheDocument();
+  });
+
+  it.each([
+    ["recognized", "recognized" as const],
+    ["resolved", "resolved" as const],
+    ["null", null],
+  ])(
+    "renders NO review chip for %s — the disappearance IS the feedback",
+    (_label, importState) => {
+      renderShell({ detail: buildDetail({ importState }) });
+      expect(screen.queryByText("à revoir")).not.toBeInTheDocument();
+      expect(screen.queryByText("partiel")).not.toBeInTheDocument();
+    },
+  );
+
+  it("renders the named pack states in BOTH zones for a titleOnly story (AC2)", () => {
+    renderShell({
+      detail: buildDetail({
+        editable: false,
+        editScope: "titleOnly",
+        importState: null,
+      }),
+      nodeEditor: stubNodeEditor({ editable: false }),
+    });
+    // Structure zone: the navigator is NOT mounted — a short named state
+    // replaces it (the pack's placeholder graph would be a lying projection).
+    expect(
+      screen.getByText("Structure portée par le pack de l'appareil"),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /ajouter un nœud/i }),
+    ).not.toBeInTheDocument();
+    // Node zone: the named pack state, controls ABSENT (not disabled).
+    expect(
+      screen.getByText("Contenu porté par le pack de l'appareil"),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("textbox", { name: "Texte du nœud" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Ajouter" }),
+    ).not.toBeInTheDocument();
+    // The option-link editor is not mounted either.
+    expect(
+      screen.queryByRole("button", { name: /ajouter une option/i }),
+    ).not.toBeInTheDocument();
+    // The title stays editable — a local metadata of BOTH scopes.
+    expect(
+      screen.getByRole("textbox", { name: /titre de l'histoire/i }),
+    ).toBeEnabled();
+  });
+
+  it("renders the COMPLETE editor for a full-scope story (a .rustory import included)", () => {
+    renderShell({
+      detail: buildDetail({ editScope: "full", importState: "resolved" }),
+    });
+    expect(
+      screen.getByRole("region", { name: "Structure de l'histoire" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("textbox", { name: "Texte du nœud" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText("Contenu porté par le pack de l'appareil"),
+    ).not.toBeInTheDocument();
   });
 });

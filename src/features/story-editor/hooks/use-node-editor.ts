@@ -61,7 +61,9 @@ export type NodeRecovery =
 export interface UseNodeEditor {
   /** Stable id of the current node, or `null` when none is projected. */
   nodeId: string | null;
-  /** Whether the node may be edited (false for an imported story). */
+  /** Whether the node may be edited — a defensive non-editable projection:
+   *  a device pack never mounts these controls at all, and a `.rustory`
+   *  import is fully editable (full edit scope). */
   editable: boolean;
   /** Live draft values for the two fields. */
   text: string;
@@ -101,6 +103,11 @@ interface UseNodeEditorOptions {
    *  triggers an authoritative targeted re-read so the local detail
    *  (structureJson/checksum pair, navigator labels) does not go stale. */
   onCrossNodeRecoveryApplied?: () => void;
+  /** Called with every acknowledged node write (content save, media attach
+   *  / remove) so the owner can reconcile story-level metadata the ACK
+   *  carries (`importState`) into its own detail — the review chip must
+   *  never lie after a node write settles a pending review. */
+  onWriteAcknowledged?: (output: NodeWriteOutput) => void;
 }
 
 /**
@@ -154,6 +161,8 @@ export function useNodeEditor(
     options.onCrossNodeRecoveryApplied,
   );
   onCrossNodeRecoveryAppliedRef.current = options.onCrossNodeRecoveryApplied;
+  const onWriteAcknowledgedRef = useRef(options.onWriteAcknowledged);
+  onWriteAcknowledgedRef.current = options.onWriteAcknowledged;
 
   const persistedRef = useRef(persisted);
   persistedRef.current = persisted;
@@ -219,6 +228,7 @@ export function useNodeEditor(
   const reconcileContentFromOutput = useCallback((output: NodeWriteOutput) => {
     setPersisted({ text: output.node.text, label: output.node.label });
     invalidateLibraryOverviewCache();
+    onWriteAcknowledgedRef.current?.(output);
   }, []);
 
   // A media action owns ONLY its targeted slot — never text/label nor the OTHER
@@ -229,6 +239,7 @@ export function useNodeEditor(
       if (slot === "image") setImage(output.node.image);
       else setAudio(output.node.audio);
       invalidateLibraryOverviewCache();
+      onWriteAcknowledgedRef.current?.(output);
     },
     [],
   );

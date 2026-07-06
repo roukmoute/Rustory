@@ -31,13 +31,31 @@
   text-align: center;
 }
 
-.story-node-editor-host__readonly {
-  margin: 0;
-  padding: var(--space-1) var(--space-2);
+.story-node-editor-host__pack-state {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: var(--space-1);
+  justify-content: center;
+  padding: var(--space-3);
+  border: 1px dashed var(--color-border-subtle, rgba(0, 0, 0, 0.18));
   border-radius: var(--radius-sm);
-  background: var(--color-surface-raised, rgba(0, 0, 0, 0.04));
+  text-align: center;
+}
+
+.story-node-editor-host__pack-title {
+  margin: 0;
+  color: var(--color-text-primary);
+  font-size: var(--font-size-body);
+  font-weight: var(--font-weight-semibold);
+  line-height: var(--line-height-normal);
+}
+
+.story-node-editor-host__pack-explanation {
+  margin: 0;
   color: var(--color-text-secondary);
   font-size: var(--font-size-caption, var(--font-size-body));
+  line-height: var(--line-height-normal);
 }
 
 .story-node-editor-host__field {

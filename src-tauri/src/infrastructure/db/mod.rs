@@ -79,6 +79,11 @@ pub const MIGRATIONS: &[(u32, &str, Option<MigrationHook>)] = &[
         include_str!("../../../migrations/0009_multi_node_structure.sql"),
         Some(restamp_v2_to_v3),
     ),
+    (
+        10,
+        include_str!("../../../migrations/0010_import_review_resolution.sql"),
+        None,
+    ),
 ];
 
 /// Migration 0009 hook: re-stamp every v2 story to the v3 graph shape.

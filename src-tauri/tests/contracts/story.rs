@@ -99,12 +99,30 @@ fn update_story_output_wire_shape_is_camel_case() {
         id: "sid".into(),
         title: "Titre".into(),
         updated_at: "2026-04-23T10:00:00.000Z".into(),
+        import_state: None,
     };
     let v = serde_json::to_value(&dto).expect("serialize");
     assert_eq!(v["id"], "sid");
     assert_eq!(v["title"], "Titre");
     assert_eq!(v["updatedAt"], "2026-04-23T10:00:00.000Z");
     assert!(v.get("updated_at").is_none(), "snake_case must not leak");
+    // `importState` is a REQUIRED key (explicit null when absent) so the TS
+    // guard can refuse a payload missing the FR21 acknowledgement field.
+    assert!(v.as_object().expect("obj").contains_key("importState"));
+    assert!(v["importState"].is_null());
+}
+
+#[test]
+fn update_story_output_carries_the_import_state_wire_tag() {
+    let dto = UpdateStoryOutputDto {
+        id: "sid".into(),
+        title: "Titre".into(),
+        updated_at: "2026-04-23T10:00:00.000Z".into(),
+        import_state: Some("resolved".into()),
+    };
+    let v = serde_json::to_value(&dto).expect("serialize");
+    assert_eq!(v["importState"], "resolved");
+    assert!(v.get("import_state").is_none(), "camelCase only");
 }
 
 #[test]
@@ -118,6 +136,8 @@ fn story_detail_wire_shape_is_camel_case_with_all_fields() {
         created_at: "2026-04-23T09:00:00.000Z".into(),
         updated_at: "2026-04-23T10:00:00.000Z".into(),
         editable: true,
+        edit_scope: "full".into(),
+        import_state: Some("needsReview".into()),
         structure: Some(StoryStructureDto {
             start_node_id: "n1".into(),
             nodes: vec![NodeGraphDto {
@@ -158,6 +178,8 @@ fn story_detail_wire_shape_is_camel_case_with_all_fields() {
     assert_eq!(v["createdAt"], "2026-04-23T09:00:00.000Z");
     assert_eq!(v["updatedAt"], "2026-04-23T10:00:00.000Z");
     assert_eq!(v["editable"], true);
+    assert_eq!(v["editScope"], "full");
+    assert_eq!(v["importState"], "needsReview");
     assert_eq!(v["structure"]["startNodeId"], "n1");
     assert_eq!(v["structure"]["nodes"][0]["id"], "n1");
     assert_eq!(v["structure"]["nodes"][0]["isStart"], true);
@@ -178,6 +200,8 @@ fn story_detail_wire_shape_is_camel_case_with_all_fields() {
         "created_at",
         "updated_at",
         "start_node_id",
+        "edit_scope",
+        "import_state",
     ] {
         assert!(v.get(snake).is_none(), "{snake} must be camelCase");
     }
@@ -186,7 +210,10 @@ fn story_detail_wire_shape_is_camel_case_with_all_fields() {
 #[test]
 fn story_detail_structure_key_is_required_even_when_null() {
     // A blocking canonical issue projects `structure = null` — the KEY must
-    // stay present so the TS mirror can require it.
+    // stay present so the TS mirror can require it. Same rule for the FR21
+    // fields: `editScope` stays projected under a Blocking degradation
+    // (story metadata, not canonical content) and `importState` stays a
+    // required key with an explicit null.
     let dto = StoryDetailDto {
         id: "sid".into(),
         title: "Titre".into(),
@@ -196,6 +223,8 @@ fn story_detail_structure_key_is_required_even_when_null() {
         created_at: "2026-04-23T09:00:00.000Z".into(),
         updated_at: "2026-04-23T10:00:00.000Z".into(),
         editable: false,
+        edit_scope: "titleOnly".into(),
+        import_state: None,
         structure: None,
         node: None,
     };
@@ -204,6 +233,9 @@ fn story_detail_structure_key_is_required_even_when_null() {
     assert!(v["structure"].is_null());
     assert!(v.as_object().expect("obj").contains_key("node"));
     assert!(v["node"].is_null());
+    assert_eq!(v["editScope"], "titleOnly");
+    assert!(v.as_object().expect("obj").contains_key("importState"));
+    assert!(v["importState"].is_null());
 }
 
 #[test]
@@ -227,6 +259,7 @@ fn structure_write_output_wire_shape_is_camel_case() {
                 }],
             }],
         },
+        import_state: Some("needsReview".into()),
     };
     let v = serde_json::to_value(&dto).expect("serialize");
     assert_eq!(v["id"], "sid");
@@ -240,7 +273,31 @@ fn structure_write_output_wire_shape_is_camel_case() {
     assert_eq!(v["structure"]["nodes"][0]["hasIssue"], true);
     assert_eq!(v["structure"]["nodes"][0]["options"][0]["state"], "broken");
     assert_eq!(v["structure"]["nodes"][0]["options"][0]["target"], "ghost");
+    assert_eq!(v["importState"], "needsReview");
     assert!(v.get("updated_at").is_none(), "snake_case must not leak");
+    assert!(v.get("import_state").is_none(), "snake_case must not leak");
+}
+
+#[test]
+fn structure_write_output_import_state_is_a_required_null_key() {
+    let dto = StructureWriteOutputDto {
+        id: "sid".into(),
+        updated_at: "2026-07-04T10:00:00.000Z".into(),
+        content_checksum: "0".repeat(64),
+        structure_json: "{}".into(),
+        structure: StoryStructureDto {
+            start_node_id: "n1".into(),
+            nodes: vec![],
+        },
+        import_state: None,
+    };
+    let v = serde_json::to_value(&dto).expect("serialize");
+    assert!(
+        v.as_object().expect("obj").contains_key("importState"),
+        "importState must stay a REQUIRED key (explicit null) so the TS guard \
+         can refuse a payload missing the FR21 acknowledgement field"
+    );
+    assert!(v["importState"].is_null());
 }
 
 #[test]
@@ -312,16 +369,39 @@ fn node_write_output_wire_shape_is_camel_case() {
             image: None,
             audio: None,
         },
+        import_state: Some("resolved".into()),
     };
     let v = serde_json::to_value(&dto).expect("serialize");
     assert_eq!(v["updatedAt"], "2026-06-27T10:00:00.000Z");
     assert_eq!(v["contentChecksum"].as_str().unwrap().len(), 64);
     assert_eq!(v["node"]["id"], "n1");
+    assert_eq!(v["importState"], "resolved");
     assert!(v.get("updated_at").is_none(), "snake_case must not leak");
     assert!(
         v.get("content_checksum").is_none(),
         "snake_case must not leak"
     );
+    assert!(v.get("import_state").is_none(), "snake_case must not leak");
+}
+
+#[test]
+fn node_write_output_import_state_is_a_required_null_key() {
+    let dto = NodeWriteOutputDto {
+        id: "sid".into(),
+        updated_at: "2026-06-27T10:00:00.000Z".into(),
+        content_checksum: "0".repeat(64),
+        node: NodeContentDto {
+            id: "n1".into(),
+            text: String::new(),
+            label: String::new(),
+            image: None,
+            audio: None,
+        },
+        import_state: None,
+    };
+    let v = serde_json::to_value(&dto).expect("serialize");
+    assert!(v.as_object().expect("obj").contains_key("importState"));
+    assert!(v["importState"].is_null());
 }
 
 #[test]
@@ -344,6 +424,7 @@ fn attach_node_media_outcome_attached_serializes_with_kind() {
                 }),
                 audio: None,
             },
+            import_state: None,
         }),
     };
     let v = serde_json::to_value(&dto).expect("serialize");

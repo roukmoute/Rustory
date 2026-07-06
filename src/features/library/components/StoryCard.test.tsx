@@ -286,6 +286,26 @@ describe("StoryCard", () => {
     expect(screen.queryByText("à revoir")).not.toBeInTheDocument();
   });
 
+  it("renders a SETTLED review exactly like a recognized import (quiet card, AC3)", () => {
+    render(
+      <StoryCard
+        story={{ ...STORY, importState: "resolved" }}
+        isSelected={false}
+        onSelect={vi.fn()}
+        onOpen={vi.fn()}
+      />,
+    );
+    // The provenance survives; the chip's disappearance IS the feedback —
+    // no chip, no on-demand report, no success announcement.
+    expect(screen.getByText("Importée")).toBeInTheDocument();
+    expect(screen.queryByText("partiel")).not.toBeInTheDocument();
+    expect(screen.queryByText("à revoir")).not.toBeInTheDocument();
+    expect(
+      screen.queryByText("Voir le rapport d'import"),
+    ).not.toBeInTheDocument();
+    expect(document.querySelector("details")).toBeNull();
+  });
+
   it("shows a dedicated 'à revoir' marker distinct from the transfer badge (AC2)", () => {
     render(
       <StoryCard

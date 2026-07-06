@@ -55,6 +55,10 @@ export function StoryEditRoute(): React.JSX.Element {
   const refreshDetailRef = useRef<() => void>(() => undefined);
   const nodeEditor = useNodeEditor(storyId, projectedNode, editable, {
     onCrossNodeRecoveryApplied: () => refreshDetailRef.current(),
+    // Every acknowledged node write carries the durable review state
+    // (`importState`) — route it back into the story detail so the review
+    // chip reconciles from the same truth (correlated by output.id).
+    onWriteAcknowledged: editor.applyNodeWriteOutput,
   });
 
   const flushAll = (): Promise<void> => {

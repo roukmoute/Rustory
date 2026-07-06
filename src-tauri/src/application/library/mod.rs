@@ -5,7 +5,9 @@ use tauri::AppHandle;
 use crate::domain::shared::AppError;
 use crate::infrastructure::db::DbHandle;
 use crate::infrastructure::filesystem::ensure_app_data_dir;
-use crate::ipc::dto::import_export::{import_findings_from_summary, import_state_dto_from_tag};
+use crate::ipc::dto::import_export::{
+    import_findings_from_summary, import_state_dto_from_tag, ImportStateDto,
+};
 use crate::ipc::dto::{LibraryOverviewDto, StoryCardDto};
 
 /// Application service for the `library` flow.
@@ -30,14 +32,21 @@ pub fn load_overview(app: &AppHandle, db: &DbHandle) -> Result<LibraryOverviewDt
 fn read_stories(db: &DbHandle) -> Result<Vec<StoryCardDto>, AppError> {
     // LEFT JOIN the optional file-import provenance: a native story has no
     // `story_local_imports` row (both projected columns are NULL), an
-    // imported one carries its durable state + summary. The ordering is
-    // unchanged (the join is one-to-at-most-one on the PK).
+    // imported one carries its durable state + summary. The device-pack
+    // provenance (`story_imports`) is joined too, because the pack RULES: a
+    // forged double-provenance row must not surface a local import state or
+    // report on its card when the detail and the ACKs already neutralize it
+    // (`titleOnly` scope, `importState: null` — same precedence as
+    // `story_edit_scope`). The ordering is unchanged (both joins are
+    // one-to-at-most-one on the PK).
     let mut stmt = db
         .conn()
         .prepare(
-            "SELECT s.id, s.title, li.import_state, li.findings_summary \
+            "SELECT s.id, s.title, li.import_state, li.findings_summary, \
+                    pi.story_id IS NOT NULL \
              FROM stories s \
              LEFT JOIN story_local_imports li ON li.story_id = s.id \
+             LEFT JOIN story_imports pi ON pi.story_id = s.id \
              ORDER BY s.created_at ASC, s.id ASC",
         )
         .map_err(map_select_error)?;
@@ -47,11 +56,13 @@ fn read_stories(db: &DbHandle) -> Result<Vec<StoryCardDto>, AppError> {
             let title: String = row.get(1)?;
             let import_state: Option<String> = row.get(2)?;
             let findings_summary: Option<String> = row.get(3)?;
+            let device_pack: bool = row.get(4)?;
             Ok(project_story_card(
                 id,
                 title,
                 import_state,
                 findings_summary,
+                device_pack,
             ))
         })
         .map_err(map_select_error)?;
@@ -65,26 +76,41 @@ fn read_stories(db: &DbHandle) -> Result<Vec<StoryCardDto>, AppError> {
 /// Project a `stories` row joined with its optional `story_local_imports`
 /// provenance into a card. A native story (no provenance row) yields the
 /// bare `{ id, title }` card; an imported one additionally carries its
-/// durable import state and — when it has points of attention — the
+/// durable import state and — while the review is PENDING — the
 /// reconstructed on-demand report findings. An unrecognized stored state
 /// tag degrades to a native card rather than failing the whole overview
 /// read (defense in depth; the CHECK constraint already bounds the set).
+/// A device-pack row (`story_imports`) PRIMES over any forged local-import
+/// provenance: its content is carried by the copied pack, so the card never
+/// surfaces a local import state or report the rest of the app neutralizes.
 fn project_story_card(
     id: String,
     title: String,
     import_state: Option<String>,
     findings_summary: Option<String>,
+    device_pack: bool,
 ) -> StoryCardDto {
+    if device_pack {
+        return StoryCardDto::native(id, title);
+    }
     let Some(state) = import_state.as_deref().and_then(import_state_dto_from_tag) else {
         return StoryCardDto::native(id, title);
     };
     // The FULL per-aspect report (recognized + attention) reconstructed from
     // the durable summary, so the on-demand report survives a restart with
-    // its global outcome + recognized elements + points of attention (§5).
-    let import_report = findings_summary
-        .as_deref()
-        .map(import_findings_from_summary)
-        .filter(|report| !report.is_empty());
+    // its global outcome + recognized elements + points of attention (§5) —
+    // projected ONLY while the review is PENDING. A `resolved` review keeps
+    // its findings in base as the trace but never renders them again: its
+    // card goes quiet, exactly like a recognized import.
+    let review_pending = matches!(state, ImportStateDto::Partial | ImportStateDto::NeedsReview);
+    let import_report = if review_pending {
+        findings_summary
+            .as_deref()
+            .map(import_findings_from_summary)
+            .filter(|report| !report.is_empty())
+    } else {
+        None
+    };
     StoryCardDto {
         id,
         title,
@@ -256,6 +282,47 @@ mod tests {
     }
 
     #[test]
+    fn read_stories_projects_a_resolved_review_without_its_report() {
+        // A SETTLED review renders exactly like a recognized import: the
+        // provenance survives (importState: "resolved") but the findings
+        // trace stays in base — never on the wire, never on the card.
+        let mut db = fresh_db();
+        let resolved = create_story(
+            &mut db,
+            CreateStoryInput {
+                title: "Résolue".into(),
+            },
+        )
+        .expect("create");
+        db.conn()
+            .execute(
+                "INSERT INTO story_local_imports (story_id, source_format, source_format_version, source_name, artifact_checksum, import_state, findings_summary, imported_at) \
+                 VALUES (?1, 'rustory', 1, 'h.rustory', ?2, 'resolved', ?3, '2026-07-06T00:00:00.000Z')",
+                rusqlite::params![
+                    resolved.id,
+                    "a".repeat(64),
+                    "[{\"aspect\":\"structure\",\"category\":\"ambiguous\"}]",
+                ],
+            )
+            .expect("insert resolved provenance");
+
+        let stories = read_stories(&db).expect("read");
+        let card = stories
+            .iter()
+            .find(|s| s.id == resolved.id)
+            .expect("resolved card");
+        assert_eq!(
+            card.import_state,
+            Some(crate::ipc::dto::import_export::ImportStateDto::Resolved),
+            "the provenance stays projected"
+        );
+        assert!(
+            card.import_report.is_none(),
+            "the findings trace is NEVER rendered for a settled review"
+        );
+    }
+
+    #[test]
     fn read_stories_degrades_a_corrupt_import_state_to_a_native_card() {
         // A stored state tag outside the known set (defense in depth — the
         // CHECK constraint already bounds it) must not fail the whole read;
@@ -275,7 +342,56 @@ mod tests {
             "Douteuse".into(),
             Some("not_a_known_state".into()),
             None,
+            false,
         );
         assert!(card.import_state.is_none());
+    }
+
+    #[test]
+    fn a_double_provenance_row_renders_as_a_pack_card_never_a_local_import() {
+        // Pack-prime rule, same precedence as `story_edit_scope`: a forged
+        // row present in BOTH provenance tables is a device pack — its card
+        // must not surface the local import state/report the detail and the
+        // ACKs already neutralize (`titleOnly`, `importState: null`).
+        let mut db = fresh_db();
+        let forged = create_story(
+            &mut db,
+            CreateStoryInput {
+                title: "Forgée".into(),
+            },
+        )
+        .expect("create");
+        db.conn()
+            .execute(
+                "INSERT INTO story_local_imports (story_id, source_format, source_format_version, source_name, artifact_checksum, import_state, findings_summary, imported_at) \
+                 VALUES (?1, 'rustory', 1, 'h.rustory', ?2, 'needs_review', ?3, '2026-07-06T00:00:00.000Z')",
+                rusqlite::params![
+                    forged.id,
+                    "a".repeat(64),
+                    "[{\"aspect\":\"structure\",\"category\":\"ambiguous\"}]",
+                ],
+            )
+            .expect("insert local provenance");
+        db.conn()
+            .execute(
+                "INSERT INTO story_imports (story_id, pack_uuid, source_device_identifier, imported_at, pack_file_count, pack_total_bytes, pack_checksum) \
+                 VALUES (?1, '019739b2-0000-7000-8000-000000000000', '0123456789abcdef0123456789abcdef', '2026-07-06T00:00:00.000Z', 5, 18, ?2)",
+                rusqlite::params![forged.id, "ab".repeat(32)],
+            )
+            .expect("insert pack provenance");
+
+        let stories = read_stories(&db).expect("read");
+        let card = stories
+            .iter()
+            .find(|s| s.id == forged.id)
+            .expect("forged card");
+        assert!(
+            card.import_state.is_none(),
+            "the pack primes: no local import state on the card"
+        );
+        assert!(
+            card.import_report.is_none(),
+            "the pack primes: no local import report on the card"
+        );
     }
 }

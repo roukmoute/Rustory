@@ -436,7 +436,11 @@ own local files; the editor stores them as-is and **never transcodes** them.
   node graph to a device pack layout (stage/action nodes, transitions) remains
   EXPLICITLY out of scope: the story transcoder stays declared but not
   implemented, and a native story — single-node or multi-node — stays
-  non-transferable at the write-plan gate until it exists.
+  non-transferable at the write-plan gate until it exists. Editing an imported
+  story within its declared edit scope — and resolving its import review by
+  doing so — changes NOTHING at that gate: a corrected `.rustory` import stays
+  non-transferable (no pack files), a locally renamed device pack stays
+  transferable.
 
 ## Local Artifact Import Contract
 

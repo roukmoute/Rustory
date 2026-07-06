@@ -76,6 +76,8 @@ describe("router", () => {
         createdAt: "2026-04-23T09:00:00.000Z",
         updatedAt: "2026-04-23T09:00:00.000Z",
         editable: true,
+        editScope: "full",
+        importState: null,
         structure: {
           startNodeId: "n1",
           nodes: [

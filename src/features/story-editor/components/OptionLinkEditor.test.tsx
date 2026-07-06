@@ -180,7 +180,7 @@ describe("<OptionLinkEditor />", () => {
     expect(props.onAddOption).toHaveBeenCalledWith("Aller au château");
   });
 
-  it("renders the options read-only with ZERO action for an imported story", () => {
+  it("defensive no-op: renders the options with ZERO action when not editable", () => {
     renderEditor({ editable: false });
     // States stay visible…
     expect(screen.getByText(/liée → La suite/)).toBeInTheDocument();

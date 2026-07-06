@@ -30,6 +30,8 @@ const VALID_DETAIL: StoryDetailDto = {
   createdAt: "2026-04-23T09:00:00.000Z",
   updatedAt: "2026-04-23T10:00:00.000Z",
   editable: true,
+  editScope: "full",
+  importState: null,
   structure: {
     startNodeId: "n1",
     nodes: [
@@ -157,6 +159,69 @@ describe("isStoryDetailDto", () => {
     expect(
       isStoryDetailDto({ ...VALID_DETAIL, structure: { startNodeId: "" } }),
     ).toBe(false);
+  });
+
+  it("accepts the titleOnly scope with a coherent editable flag", () => {
+    expect(
+      isStoryDetailDto({
+        ...VALID_DETAIL,
+        editable: false,
+        editScope: "titleOnly",
+        importState: null,
+      }),
+    ).toBe(true);
+  });
+
+  it("rejects an unknown editScope and a missing editScope key", () => {
+    expect(isStoryDetailDto({ ...VALID_DETAIL, editScope: "partial" })).toBe(
+      false,
+    );
+    const { editScope: _omit, ...rest } = VALID_DETAIL;
+    expect(isStoryDetailDto(rest)).toBe(false);
+  });
+
+  it("rejects an editable flag that disagrees with the scope (drift)", () => {
+    // `editable` is Rust-derived from the scope — a divergence is an
+    // impossible DTO.
+    expect(
+      isStoryDetailDto({ ...VALID_DETAIL, editable: false, editScope: "full" }),
+    ).toBe(false);
+    expect(
+      isStoryDetailDto({
+        ...VALID_DETAIL,
+        editable: true,
+        editScope: "titleOnly",
+      }),
+    ).toBe(false);
+  });
+
+  it("rejects a non-null importState outside the full scope (drift)", () => {
+    // The forged two-table case is neutralized in Rust: a titleOnly story
+    // never projects an import state.
+    expect(
+      isStoryDetailDto({
+        ...VALID_DETAIL,
+        editable: false,
+        editScope: "titleOnly",
+        importState: "needsReview",
+      }),
+    ).toBe(false);
+  });
+
+  it("accepts every persisted import state on a full-scope story", () => {
+    for (const state of ["recognized", "partial", "needsReview", "resolved"]) {
+      expect(isStoryDetailDto({ ...VALID_DETAIL, importState: state })).toBe(
+        true,
+      );
+    }
+  });
+
+  it("rejects an unknown importState and a missing importState key", () => {
+    expect(isStoryDetailDto({ ...VALID_DETAIL, importState: "blocked" })).toBe(
+      false,
+    );
+    const { importState: _omit, ...rest } = VALID_DETAIL;
+    expect(isStoryDetailDto(rest)).toBe(false);
   });
 });
 
@@ -313,6 +378,7 @@ describe("structure guards", () => {
       updatedAt: "2026-07-04T10:00:00.000Z",
       contentChecksum: "a".repeat(64),
       structureJson: '{"schemaVersion":3,"startNodeId":"n1","nodes":[]}',
+      importState: null,
       structure: VALID_STRUCTURE,
     };
     expect(isStructureWriteOutput(output)).toBe(true);
@@ -320,6 +386,15 @@ describe("structure guards", () => {
     expect(
       isStructureWriteOutput({ ...output, contentChecksum: "A".repeat(64) }),
     ).toBe(false);
+    // The importState key is REQUIRED on every structural ACK.
+    expect(isStructureWriteOutput({ ...output, importState: "resolved" })).toBe(
+      true,
+    );
+    expect(isStructureWriteOutput({ ...output, importState: "blocked" })).toBe(
+      false,
+    );
+    const { importState: _omitted, ...withoutKey } = output;
+    expect(isStructureWriteOutput(withoutKey)).toBe(false);
     expect(
       isStructureWriteOutput({ ...output, updatedAt: "hier" }),
     ).toBe(false);
@@ -338,10 +413,28 @@ describe("isUpdateStoryOutput", () => {
     id: "sid",
     title: "Saved",
     updatedAt: "2026-04-25T12:00:00.000Z",
+    importState: null,
   };
 
   it("accepts a canonical payload", () => {
     expect(isUpdateStoryOutput(VALID)).toBe(true);
+  });
+
+  it("accepts every persisted import state and rejects unknown values", () => {
+    for (const state of ["recognized", "partial", "needsReview", "resolved"]) {
+      expect(isUpdateStoryOutput({ ...VALID, importState: state })).toBe(true);
+    }
+    expect(isUpdateStoryOutput({ ...VALID, importState: "blocked" })).toBe(
+      false,
+    );
+    expect(isUpdateStoryOutput({ ...VALID, importState: "garbage" })).toBe(
+      false,
+    );
+  });
+
+  it("rejects a payload missing the importState key (drift)", () => {
+    const { importState: _omitted, ...withoutKey } = VALID;
+    expect(isUpdateStoryOutput(withoutKey)).toBe(false);
   });
 
   it.each([null, undefined, 42, "string", []] as unknown[])(
@@ -536,10 +629,16 @@ describe("node guards", () => {
       updatedAt: "2026-06-27T10:00:00.000Z",
       contentChecksum: "a".repeat(64),
       node: VALID_NODE,
+      importState: null,
     };
     expect(isNodeWriteOutput(valid)).toBe(true);
+    expect(isNodeWriteOutput({ ...valid, importState: "resolved" })).toBe(true);
     expect(isNodeWriteOutput({ ...valid, contentChecksum: "short" })).toBe(false);
     expect(isNodeWriteOutput({ ...valid, node: { id: "" } })).toBe(false);
+    // An ACK missing the importState key is drift, never accommodated.
+    const { importState: _omitted, ...withoutKey } = valid;
+    expect(isNodeWriteOutput(withoutKey)).toBe(false);
+    expect(isNodeWriteOutput({ ...valid, importState: "blocked" })).toBe(false);
   });
 
   it("isAttachNodeMediaOutcome accepts cancelled + attached, rejects drift", () => {
@@ -552,6 +651,7 @@ describe("node guards", () => {
           updatedAt: "2026-06-27T10:00:00.000Z",
           contentChecksum: "a".repeat(64),
           node: VALID_NODE,
+          importState: null,
         },
       }),
     ).toBe(true);

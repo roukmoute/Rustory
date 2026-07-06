@@ -64,8 +64,10 @@ export interface UseStructureEditorArgs {
   storyId: string | undefined;
   /** The Rust-projected graph (`detail.structure`), `null` when degraded. */
   structure: StoryStructure | null;
-  /** `false` for an imported story: every action no-ops (the UI renders no
-   *  control either — this is defense in depth, Rust is the authority). */
+  /** Defensive non-editable flag: every action no-ops when `false`. A
+   *  device pack never mounts the structural controls at all and a
+   *  `.rustory` import is fully editable — this is defense in depth
+   *  (Rust's edit-scope guard is the authority). */
   editable: boolean;
   /** Flush the pending content autosaves (title + node) BEFORE any
    *  structural mutation or selection change — a mid-debounce keystroke

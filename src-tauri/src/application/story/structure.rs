@@ -2,7 +2,7 @@
 //! graph — add / delete / move a node, add / link / remove an option.
 //!
 //! Sibling of the node-content services (`node.rs`) with the SAME
-//! transactional spine: `BEGIN IMMEDIATE`, the fail-closed `is_story_editable`
+//! transactional spine: `BEGIN IMMEDIATE`, the fail-closed `story_edit_scope`
 //! guard, refusal on persisted BLOCKING facts, whole-graph mutation,
 //! re-serialization + per-write checksum recompute, a post-mutation
 //! `has_blocking` defense, one UPDATE, commit (NFR9 / FR18). Differences by
@@ -18,8 +18,9 @@
 
 use rusqlite::{OptionalExtension, Transaction};
 
-use crate::application::story::node::{is_story_editable, MAX_NODE_LABEL_CHARS};
+use crate::application::story::node::MAX_NODE_LABEL_CHARS;
 use crate::application::story::now_iso_ms;
+use crate::application::story::scope::{story_edit_scope, StoryEditScope};
 use crate::domain::shared::AppError;
 use crate::domain::story::{
     canonical_structure_json, content_checksum, validate_canonical, CanonicalNode, CanonicalOption,
@@ -134,10 +135,14 @@ where
         .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
         .map_err(|e| transport_error(&e, "begin_transaction", story_id))?;
 
-    // Authoritative editability guard (fail-closed): an imported story's
-    // structure is read-only at this stage. The UI never offers the controls,
-    // but a direct IPC call or a stale UI state must be refused here.
-    if !is_story_editable(&tx, story_id) {
+    // Authoritative edit-scope guard (FR21, fail-closed): a structural write
+    // requires the FULL scope — a device-pack story's structure is carried by
+    // the copied pack (its local canonical row is a placeholder). The UI never
+    // offers the controls, but a direct IPC call or a stale UI state must be
+    // refused here. The derived scope is reused for the acknowledgement's
+    // `importState` (same None-unless-Full rule as the detail projection).
+    let scope = story_edit_scope(&tx, story_id);
+    if scope != StoryEditScope::Full {
         return Err(structure_not_editable(story_id));
     }
 
@@ -181,9 +186,13 @@ where
     // A mutation that lands on the EXACT same canonical bytes (e.g. a move
     // with no room, a stale double-click) is acknowledged WITHOUT touching
     // the row: rewriting would bump `updated_at` — a persisted, exported,
-    // user-visible metadata — for zero actual change.
+    // user-visible metadata — for zero actual change. No REAL write happened,
+    // so a pending import review is NOT resolved either — but the ACK still
+    // carries the CURRENT state read in this transaction (it never lies).
     if new_json == structure_json {
         let projected = project_structure(&structure);
+        let import_state =
+            crate::application::story::review::read_import_state(&tx, story_id, scope)?;
         tx.commit()
             .map_err(|e| transport_error(&e, "commit", story_id))?;
         return Ok((
@@ -193,6 +202,7 @@ where
                 content_checksum: stored_checksum,
                 structure_json: new_json,
                 structure: projected,
+                import_state: import_state.map(|s| s.wire_tag().to_string()),
             },
             extra,
         ));
@@ -203,14 +213,20 @@ where
     // Defense in depth: the mutated graph must not introduce a BLOCKING
     // incoherence (duplicate id, invalid start, empty graph). A Fixable
     // outcome (a link left pointing at the node just deleted) is a legitimate
-    // authoring state — flagged, never refused.
+    // authoring state — flagged, never refused. The COMPLETE post-mutation
+    // blocker list is kept: `Blocking` refuses the write, and the full list
+    // (any severity) is then the review-resolution oracle — zero extra I/O.
     let facts = CanonicalStoryFacts {
         title,
         schema_version,
         structure_json: new_json.clone(),
         content_checksum: new_checksum.clone(),
     };
-    if has_blocking(&facts) {
+    let post_mutation_blockers = validate_canonical(&facts);
+    if post_mutation_blockers
+        .iter()
+        .any(|b| b.severity == Severity::Blocking)
+    {
         return Err(structure_corrupt(story_id));
     }
 
@@ -219,6 +235,16 @@ where
         rusqlite::params![new_json, new_checksum, now_iso, story_id],
     )
     .map_err(|e| transport_error(&e, "update", story_id))?;
+
+    // A real write that leaves the canonical story ENTIRELY sound settles a
+    // pending import review (AC3) — inside this same transaction. The
+    // acknowledgement then carries the state read POST-UPDATE.
+    crate::application::story::review::resolve_import_review_if_clean(
+        &tx,
+        story_id,
+        &post_mutation_blockers,
+    )?;
+    let import_state = crate::application::story::review::read_import_state(&tx, story_id, scope)?;
 
     let projected = project_structure(&structure);
 
@@ -232,6 +258,7 @@ where
             content_checksum: new_checksum,
             structure_json: new_json,
             structure: projected,
+            import_state: import_state.map(|s| s.wire_tag().to_string()),
         },
         extra,
     ))
@@ -513,13 +540,13 @@ fn node_missing(story_id: &str, node_id: &str) -> AppError {
     )
 }
 
-/// Refusal of a structural write on an IMPORTED story (same cause as the node
-/// content guard — the story is read-only at this stage; dedicated source
-/// marker for support triage).
+/// Refusal of a structural write on a story outside the FULL edit scope
+/// (same cause as the node content guard — a device-pack story's structure
+/// is carried by the pack; dedicated source marker for support triage).
 fn structure_not_editable(story_id: &str) -> AppError {
     AppError::library_inconsistent(
-        "Cette histoire importée ne peut pas être modifiée ici.",
-        "L'édition des histoires importées arrivera dans une prochaine version.",
+        "Le contenu de cette histoire est porté par le pack copié depuis l'appareil et ne peut pas être modifié ici.",
+        "Tu peux modifier le titre depuis l'éditeur ; le contenu du pack reste celui de l'appareil.",
     )
     .with_details(serde_json::json!({ "source": "structure_not_editable", "id": story_id }))
 }
@@ -624,7 +651,7 @@ mod tests {
         (schema_version, structure, checksum)
     }
 
-    fn mark_imported(db: &DbHandle, story_id: &str) {
+    fn mark_local_import(db: &DbHandle, story_id: &str) {
         db.conn()
             .execute(
                 "INSERT INTO story_local_imports (story_id, source_format, source_format_version, source_name, artifact_checksum, import_state, findings_summary, imported_at) \
@@ -632,6 +659,16 @@ mod tests {
                 rusqlite::params![story_id, "a".repeat(64)],
             )
             .expect("mark imported");
+    }
+
+    fn mark_device_pack(db: &DbHandle, story_id: &str) {
+        db.conn()
+            .execute(
+                "INSERT INTO story_imports (story_id, pack_uuid, source_device_identifier, imported_at, pack_file_count, pack_total_bytes, pack_checksum) \
+                 VALUES (?1, '019739b2-0000-7000-8000-000000000000', '0123456789abcdef0123456789abcdef', '2026-07-06T00:00:00.000Z', 5, 18, ?2)",
+                rusqlite::params![story_id, "ab".repeat(32)],
+            )
+            .expect("insert pack provenance");
     }
 
     // ---------------- add_node ----------------
@@ -1036,15 +1073,15 @@ mod tests {
         assert_eq!(details["source"], "option_index_invalid");
     }
 
-    // ---------------- FR18: fail-closed editability on EVERY service --------
+    // ---------------- FR18/FR21: fail-closed edit scope on EVERY service ----
 
     #[test]
-    fn every_structural_service_refuses_an_imported_story() {
+    fn every_structural_service_refuses_a_device_pack_story() {
         let mut db = fresh_db();
         let story_id = seeded_story(&mut db);
-        add_option(&mut db, &story_id, "n1", "Choix").expect("pre-imported option");
-        add_node(&mut db, &story_id, None).expect("pre-imported n2");
-        mark_imported(&db, &story_id);
+        add_option(&mut db, &story_id, "n1", "Choix").expect("pre-pack option");
+        add_node(&mut db, &story_id, None).expect("pre-pack n2");
+        mark_device_pack(&db, &story_id);
 
         let tmp = tempfile::TempDir::new().expect("tmp");
         let failures: Vec<(&str, AppError)> = vec![
@@ -1078,14 +1115,104 @@ mod tests {
             assert_eq!(
                 err.code,
                 AppErrorCode::LibraryInconsistent,
-                "{service} must refuse an imported story"
+                "{service} must refuse a device-pack story"
             );
             let details = err.details.as_ref().expect("details");
             assert_eq!(
                 details["source"], "structure_not_editable",
                 "{service} must use the authoritative guard"
             );
+            assert_eq!(
+                err.message,
+                "Le contenu de cette histoire est porté par le pack copié depuis l'appareil et ne peut pas être modifié ici.",
+                "{service} must carry the revised pack message (no version promise)"
+            );
         }
+    }
+
+    // FR21: a `.rustory` import carries the FULL edit scope — structural
+    // mutations go through exactly like a native story's.
+    #[test]
+    fn a_rustory_import_accepts_structural_mutations() {
+        let mut db = fresh_db();
+        let story_id = seeded_story(&mut db);
+        mark_local_import(&db, &story_id);
+
+        let out = add_node(&mut db, &story_id, None)
+            .expect("a .rustory import reorganizes like a native story");
+        assert_eq!(out.structure.nodes.len(), 2);
+        let (_, structure, _) = stored_structure(&db, &story_id);
+        assert_eq!(structure.nodes.len(), 2, "the mutation is persisted");
+    }
+
+    fn mark_needs_review(db: &DbHandle, story_id: &str) {
+        db.conn()
+            .execute(
+                "INSERT INTO story_local_imports (story_id, source_format, source_format_version, source_name, artifact_checksum, import_state, findings_summary, imported_at) \
+                 VALUES (?1, 'rustory', 1, 'a.rustory', ?2, 'needs_review', '[{\"aspect\":\"structure\",\"category\":\"ambiguous\"}]', '2026-07-06T00:00:00.000Z')",
+                rusqlite::params![story_id, "a".repeat(64)],
+            )
+            .expect("mark needs_review");
+    }
+
+    fn import_state_of(db: &DbHandle, story_id: &str) -> String {
+        db.conn()
+            .query_row(
+                "SELECT import_state FROM story_local_imports WHERE story_id = ?1",
+                rusqlite::params![story_id],
+                |r| r.get(0),
+            )
+            .expect("provenance row")
+    }
+
+    // AC3 signature path: repairing the broken link IS what settles the
+    // review — the structural write that leaves the graph fully sound flips
+    // the durable state and the ACK carries it.
+    #[test]
+    fn repairing_a_broken_link_resolves_a_pending_review() {
+        let mut db = fresh_db();
+        let story_id = seeded_story(&mut db);
+        add_option(&mut db, &story_id, "n1", "Aller").expect("option");
+        add_node(&mut db, &story_id, Some(("n1", 0))).expect("create-and-link n2");
+        delete_node(&mut db, std::env::temp_dir().as_path(), &story_id, "n2")
+            .expect("break the link");
+        mark_needs_review(&db, &story_id);
+
+        // Add a fresh node then repair the option toward it: the graph is
+        // sound again and the review settles.
+        add_node(&mut db, &story_id, None).expect("n3");
+        assert_eq!(
+            import_state_of(&db, &story_id),
+            "needs_review",
+            "adding a node while the link is still broken must NOT resolve"
+        );
+
+        let out = set_option_link(&mut db, &story_id, "n1", 0, Some("n3")).expect("repair");
+        assert_eq!(out.import_state.as_deref(), Some("resolved"));
+        assert_eq!(import_state_of(&db, &story_id), "resolved");
+    }
+
+    // An acknowledged no-op (same canonical bytes) is NOT a real write: the
+    // pending review stays, but the ACK still carries the current state.
+    #[test]
+    fn a_no_op_move_does_not_resolve_but_acks_the_current_state() {
+        let mut db = fresh_db();
+        let story_id = seeded_story(&mut db);
+        add_node(&mut db, &story_id, None).expect("n2");
+        mark_needs_review(&db, &story_id);
+
+        // Moving the first node up has no room: acknowledged without UPDATE.
+        let out = move_node(&mut db, &story_id, "n1", MoveDirection::Up).expect("no-op");
+        assert_eq!(
+            out.import_state.as_deref(),
+            Some("needsReview"),
+            "the no-op ACK carries the CURRENT state"
+        );
+        assert_eq!(
+            import_state_of(&db, &story_id),
+            "needs_review",
+            "no real write happened, the review stays pending"
+        );
     }
 
     #[test]

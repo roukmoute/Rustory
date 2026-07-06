@@ -24,6 +24,12 @@ mod node_content_migration;
 #[path = "integration/multi_node_structure_migration.rs"]
 mod multi_node_structure_migration;
 
+#[path = "integration/import_review_resolution_migration.rs"]
+mod import_review_resolution_migration;
+
+#[path = "integration/story_edit_scope.rs"]
+mod story_edit_scope;
+
 #[path = "integration/story_drafts_recovery.rs"]
 mod story_drafts_recovery;
 

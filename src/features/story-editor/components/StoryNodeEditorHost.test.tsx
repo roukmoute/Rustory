@@ -89,16 +89,44 @@ describe("<StoryNodeEditorHost />", () => {
     expect(empty).toHaveAttribute("tabindex", "0");
   });
 
-  it("renders an imported story's node read-only (no editable media actions)", () => {
+  it("renders the named pack state INSTEAD of the controls for a device pack", () => {
+    render(
+      <StoryNodeEditorHost
+        storyId="s1"
+        editor={stubEditor({ editable: false })}
+        packScoped
+      >
+        <div data-testid="hosted-option-editor" />
+      </StoryNodeEditorHost>,
+    );
+    // The named state + its explanation (AC2): the content lives in the
+    // copied pack; only the title (a local metadata) stays editable.
+    const state = screen.getByText("Contenu porté par le pack de l'appareil");
+    expect(state).toBeInTheDocument();
+    expect(
+      screen.getByText(/tu peux modifier le titre depuis l'éditeur/i),
+    ).toBeInTheDocument();
+    // The controls are ABSENT, not disabled — never a control that cannot
+    // be saved, and the hosted option editor is not mounted either.
+    expect(
+      screen.queryByRole("textbox", { name: "Texte du nœud" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Ajouter" }),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByTestId("hosted-option-editor")).not.toBeInTheDocument();
+  });
+
+  it("keeps the defensive no-op projection when editable is false (defense in depth)", () => {
+    // A device pack never mounts these controls at all (the pack state
+    // replaces the zone) — the disabled projection only covers transient
+    // states such as a pending recovery decision.
     render(
       <StoryNodeEditorHost
         storyId="s1"
         editor={stubEditor({ editable: false })}
       />,
     );
-    expect(
-      screen.getByText("Histoire importée (lecture seule)"),
-    ).toBeInTheDocument();
     expect(
       screen.queryByRole("button", { name: "Ajouter" }),
     ).not.toBeInTheDocument();

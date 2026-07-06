@@ -54,8 +54,9 @@ pub enum ImportQualityDto {
 }
 
 /// Durable per-story import state. Mirror of the domain [`ImportState`].
-/// Only `recognized` / `partial` / `needsReview` are ever persisted on a
-/// Story Card (`blocked` is never imported; `resolved` is not emitted).
+/// `recognized` / `partial` / `needsReview` are persisted at import time;
+/// `resolved` is persisted by the write-path review resolution (a card chip
+/// is never rendered for it); `blocked` is never imported nor persisted.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum ImportStateDto {
@@ -64,6 +65,22 @@ pub enum ImportStateDto {
     NeedsReview,
     Blocked,
     Resolved,
+}
+
+impl ImportStateDto {
+    /// The camelCase wire value as a plain string, for DTOs that carry the
+    /// state as an `Option<String>` (`importState` on the story detail and
+    /// the write acknowledgements). Must stay byte-identical to the serde
+    /// rename above.
+    pub fn wire_tag(self) -> &'static str {
+        match self {
+            ImportStateDto::Recognized => "recognized",
+            ImportStateDto::Partial => "partial",
+            ImportStateDto::NeedsReview => "needsReview",
+            ImportStateDto::Blocked => "blocked",
+            ImportStateDto::Resolved => "resolved",
+        }
+    }
 }
 
 /// The aspect of the artifact a finding refers to. Mirror of the domain
@@ -167,16 +184,17 @@ pub struct StoredImportFinding {
 }
 
 /// The durable DB tag stored in `story_local_imports.import_state` for a
-/// persistable import state. Only `recognized` / `partial` / `needs_review`
-/// are ever written (the CHECK constraint enforces the set); `Blocked` (no
-/// import) and `Resolved` (not emitted) are unreachable here and fall back
-/// to `needs_review` so a future code path passes the CHECK rather than
-/// corrupting the row.
+/// persistable import state. `recognized` / `partial` / `needs_review` are
+/// written at import time; `resolved` is written by the write-path review
+/// resolution ONLY (`application::story::review`). `Blocked` (never
+/// imported) is unreachable here and falls back to `needs_review` so a
+/// future code path passes the CHECK rather than corrupting the row.
 pub fn state_db_tag(state: ImportState) -> &'static str {
     match state {
         ImportState::Recognized => "recognized",
         ImportState::Partial => "partial",
-        ImportState::NeedsReview | ImportState::Blocked | ImportState::Resolved => "needs_review",
+        ImportState::Resolved => "resolved",
+        ImportState::NeedsReview | ImportState::Blocked => "needs_review",
     }
 }
 
@@ -188,6 +206,7 @@ pub fn import_state_dto_from_tag(tag: &str) -> Option<ImportStateDto> {
         "recognized" => Some(ImportStateDto::Recognized),
         "partial" => Some(ImportStateDto::Partial),
         "needs_review" => Some(ImportStateDto::NeedsReview),
+        "resolved" => Some(ImportStateDto::Resolved),
         _ => None,
     }
 }
@@ -684,10 +703,21 @@ mod tests {
                 "needs_review",
                 ImportStateDto::NeedsReview,
             ),
+            (
+                crate::domain::import::ImportState::Resolved,
+                "resolved",
+                ImportStateDto::Resolved,
+            ),
         ] {
             assert_eq!(state_db_tag(state), tag);
             assert_eq!(import_state_dto_from_tag(tag), Some(dto));
         }
         assert_eq!(import_state_dto_from_tag("garbage"), None);
+        // `Blocked` is never persisted: the defensive fallback keeps it
+        // inside the CHECK set rather than corrupting the row.
+        assert_eq!(
+            state_db_tag(crate::domain::import::ImportState::Blocked),
+            "needs_review"
+        );
     }
 }

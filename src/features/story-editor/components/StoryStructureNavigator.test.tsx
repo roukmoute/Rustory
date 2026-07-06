@@ -250,7 +250,7 @@ describe("<StoryStructureNavigator />", () => {
     expect(props.onAddNode).toHaveBeenCalled();
   });
 
-  it("renders ZERO structural action for an imported story", () => {
+  it("defensive no-op: renders ZERO structural action when not editable", () => {
     renderNavigator({ editable: false });
     expect(
       screen.queryByRole("button", { name: "Ajouter un nœud" }),

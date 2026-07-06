@@ -23,6 +23,7 @@ import {
   removeNodeOption,
   saveStory,
   setNodeOptionLink,
+  StoryContractDriftError,
 } from "./story";
 import type { StructureWriteOutput } from "../../shared/ipc-contracts/story";
 
@@ -64,6 +65,7 @@ describe("saveStory", () => {
       id: STORY_ID,
       title: "Nouveau titre",
       updatedAt: "2026-04-23T10:00:00.000Z",
+      importState: null,
     };
     vi.mocked(invoke).mockResolvedValueOnce(output);
     const result = await saveStory({ id: STORY_ID, title: "Nouveau titre" });
@@ -71,6 +73,19 @@ describe("saveStory", () => {
       input: { id: STORY_ID, title: "Nouveau titre" },
     });
     expect(result).toEqual(output);
+  });
+
+  it("throws StoryContractDriftError when the ACK misses the importState key", async () => {
+    // A legacy payload without the FR21 acknowledgement field must fail at
+    // the boundary — never let the editor reconcile against it.
+    vi.mocked(invoke).mockResolvedValueOnce({
+      id: STORY_ID,
+      title: "Nouveau titre",
+      updatedAt: "2026-04-23T10:00:00.000Z",
+    });
+    await expect(
+      saveStory({ id: STORY_ID, title: "Nouveau titre" }),
+    ).rejects.toBeInstanceOf(StoryContractDriftError);
   });
 
   it("propagates a LOCAL_STORAGE_UNAVAILABLE error verbatim", async () => {
@@ -120,6 +135,9 @@ describe("getStoryDetail", () => {
       contentChecksum: "a".repeat(64),
       createdAt: "2026-04-23T09:00:00.000Z",
       updatedAt: "2026-04-23T09:00:00.000Z",
+      editable: true,
+      editScope: "full",
+      importState: null,
       structure: {
         startNodeId: "n1",
         nodes: [
@@ -135,6 +153,37 @@ describe("getStoryDetail", () => {
       nodeId: null,
     });
     expect(result).toEqual(detail);
+  });
+
+  it("throws StoryContractDriftError when the detail misses the FR21 keys", async () => {
+    // A legacy payload without `editScope` / `importState` must fail at the
+    // boundary — the edit surface never renders an out-of-contract screen.
+    vi.mocked(invoke).mockResolvedValueOnce({
+      id: STORY_ID,
+      title: "Un brouillon",
+      schemaVersion: 1,
+      structureJson: '{"schemaVersion":1,"nodes":[]}',
+      contentChecksum: "a".repeat(64),
+      createdAt: "2026-04-23T09:00:00.000Z",
+      updatedAt: "2026-04-23T09:00:00.000Z",
+      editable: true,
+      structure: {
+        startNodeId: "n1",
+        nodes: [
+          { id: "n1", label: "", isStart: true, hasIssue: false, options: [] },
+        ],
+      },
+      node: { id: "n1", text: "", label: "", image: null, audio: null },
+    });
+    await expect(getStoryDetail({ storyId: STORY_ID })).rejects.toBeInstanceOf(
+      StoryContractDriftError,
+    );
+  });
+
+  it("normalizes an undefined payload to null", async () => {
+    vi.mocked(invoke).mockResolvedValueOnce(undefined);
+    const result = await getStoryDetail({ storyId: STORY_ID });
+    expect(result).toBeNull();
   });
 
   it("forwards the targeted nodeId when provided", async () => {
@@ -255,6 +304,7 @@ describe("applyRecovery", () => {
       id: STORY_ID,
       title: "Recovered",
       updatedAt: "2026-04-25T12:00:00.000Z",
+      importState: null,
     });
     await applyRecovery({ storyId: STORY_ID });
     expect(invoke).toHaveBeenCalledWith("apply_recovery", {
@@ -267,6 +317,7 @@ describe("applyRecovery", () => {
       id: STORY_ID,
       title: "Recovered",
       updatedAt: "2026-04-25T12:00:00.000Z",
+      importState: null,
     };
     vi.mocked(invoke).mockResolvedValueOnce(output);
     const result = await applyRecovery({ storyId: STORY_ID });
@@ -342,6 +393,7 @@ describe("structural mutation facades", () => {
     updatedAt: "2026-07-04T10:00:00.000Z",
     contentChecksum: "a".repeat(64),
     structureJson: '{"schemaVersion":3,"startNodeId":"n1","nodes":[]}',
+    importState: null,
     structure: {
       startNodeId: "n1",
       nodes: [

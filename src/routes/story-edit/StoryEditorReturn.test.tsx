@@ -169,6 +169,8 @@ function buildDetail(): StoryDetailDto {
     createdAt: "2026-04-23T09:00:00.000Z",
     updatedAt: "2026-04-23T09:00:00.000Z",
     editable: true,
+    editScope: "full",
+    importState: null,
     structure: {
       startNodeId: "n1",
       nodes: [
@@ -222,6 +224,7 @@ describe("Library ↔ editor round trip (AC2)", () => {
       id: STORY_ID,
       title: NEW_TITLE,
       updatedAt: "2026-04-23T10:00:00.000Z",
+      importState: null,
     });
 
     invalidateLibraryOverviewCache();

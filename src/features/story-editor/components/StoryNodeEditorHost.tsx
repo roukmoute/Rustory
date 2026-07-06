@@ -222,6 +222,10 @@ export interface StoryNodeEditorHostProps {
    *  fields + media actions are locked and its own recovery banner is held
    *  back) so the two recovery surfaces never compete. */
   gated?: boolean;
+  /** When true (a device-pack story, `titleOnly` edit scope), the zone
+   *  renders the NAMED pack state INSTEAD of the controls — no field, no
+   *  media slot, no hosted option editor. Absent, never disabled (AC2). */
+  packScoped?: boolean;
   /** Hosted below the node's content (the `Option Link Editor`), keeping the
    *  tab order stable: fields → media slots → options. */
   children?: React.ReactNode;
@@ -230,8 +234,10 @@ export interface StoryNodeEditorHostProps {
 /**
  * `Story Node Editor` — the current-node zone of the editor shell. Edits the
  * node text + metadata label (autosaved) and hosts the image / audio media
- * slots. For an imported story the same projection renders read-only with a
- * named reason; the editor never shows a control that cannot be saved.
+ * slots. A full-scope story (native or `.rustory` import) edits its node the
+ * exact same way; a device-pack story (`packScoped`) renders the named pack
+ * state instead of the fields — the editor never shows a control that cannot
+ * be saved.
  *
  * When no node is projected (a degraded structure) the zone renders a NAMED
  * empty state, never a fabricated node.
@@ -240,6 +246,7 @@ export function StoryNodeEditorHost({
   storyId,
   editor,
   gated = false,
+  packScoped = false,
   children,
 }: StoryNodeEditorHostProps): React.JSX.Element {
   const headingId = useId();
@@ -252,6 +259,30 @@ export function StoryNodeEditorHost({
   const nodeRecovery =
     !gated && editor.recovery.kind === "recoverable" ? editor.recovery : null;
   const locked = !editor.editable || gated || nodeRecovery !== null;
+
+  if (packScoped) {
+    // Device pack (titleOnly edit scope): the content is carried by the
+    // binary pack copied from the device — its local placeholder node must
+    // never be rendered as editable material. The controls are ABSENT, not
+    // disabled (AC2), and the hosted option editor is not mounted either.
+    return (
+      <section className="story-node-editor-host" aria-labelledby={headingId}>
+        <h2 id={headingId} className="story-node-editor-host__heading">
+          Nœud courant
+        </h2>
+        <div className="story-node-editor-host__pack-state" tabIndex={0}>
+          <p className="story-node-editor-host__pack-title">
+            Contenu porté par le pack de l'appareil
+          </p>
+          <p className="story-node-editor-host__pack-explanation">
+            Le texte, les médias et les options de cette histoire vivent dans
+            le pack copié depuis l'appareil. Tu peux modifier le titre depuis
+            l'éditeur.
+          </p>
+        </div>
+      </section>
+    );
+  }
 
   if (editor.nodeId === null) {
     return (
@@ -274,12 +305,6 @@ export function StoryNodeEditorHost({
       <h2 id={headingId} className="story-node-editor-host__heading">
         Nœud courant
       </h2>
-
-      {!editor.editable ? (
-        <p className="story-node-editor-host__readonly" role="note">
-          Histoire importée (lecture seule)
-        </p>
-      ) : null}
 
       {nodeRecovery ? (
         <div

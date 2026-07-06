@@ -7,7 +7,10 @@ import type { UseStoryExport } from "../../import-export/hooks/use-story-export"
 import { Button, Field, StateChip } from "../../../shared/ui";
 import type { StateChipProps } from "../../../shared/ui";
 import type { AppError } from "../../../shared/errors/app-error";
-import type { StoryDetailDto } from "../../../shared/ipc-contracts/story";
+import type {
+  StoryDetailDto,
+  StoryImportState,
+} from "../../../shared/ipc-contracts/story";
 
 import { OptionLinkEditor } from "./OptionLinkEditor";
 import { RecoveryBanner } from "./RecoveryBanner";
@@ -38,6 +41,23 @@ function saveErrorMessage(error: AppError): string {
 interface SaveStatusPresentation {
   tone: StateChipProps["tone"];
   label: string;
+}
+
+/**
+ * The banner review chip label for a pending `.rustory` import review — the
+ * Story Card labels reused verbatim (product language). NOTHING is rendered
+ * for `recognized` / `resolved` / `null`: the chip's disappearance IS the
+ * feedback, never a success announcement.
+ */
+function importReviewChipLabel(state: StoryImportState | null): string | null {
+  switch (state) {
+    case "needsReview":
+      return "à revoir";
+    case "partial":
+      return "partiel";
+    default:
+      return null;
+  }
 }
 
 function presentSaveStatus(status: SaveStatus): SaveStatusPresentation {
@@ -108,6 +128,15 @@ export function StoryEditorShell({
   const presentation = presentSaveStatus(saveStatus);
   const saveStatusId = "story-edit-save-status";
   const saveAlertId = "story-edit-save-alert";
+  // Device pack (titleOnly edit scope): both content zones render a NAMED
+  // pack state instead of their controls — the navigator's placeholder graph
+  // and the node's placeholder content would be lying projections of the
+  // binary pack.
+  const packScoped = detail.editScope === "titleOnly";
+  // Pending `.rustory` import review: a STATIC banner chip (a durable state,
+  // never role="alert"). Null for recognized / resolved / no provenance —
+  // its disappearance is the feedback.
+  const reviewChipLabel = importReviewChipLabel(detail.importState);
 
   // Title field focus management. `autoFocus` only fires at mount, so a field
   // that was disabled behind a recovery surface never regained focus once the
@@ -198,6 +227,11 @@ export function StoryEditorShell({
             misrepresent what is actually saved. The editable Field below
             carries the draft. */}
         <h1 className="story-editor-shell__title">{detail.title}</h1>
+        {reviewChipLabel ? (
+          <div className="story-editor-shell__review-chip">
+            <StateChip tone="warning" label={reviewChipLabel} />
+          </div>
+        ) : null}
         <p className="story-editor-shell__message">
           Tu reprends le dernier brouillon local de cette histoire. L'appareil
           n'est pas consulté.
@@ -262,38 +296,56 @@ export function StoryEditorShell({
           the projections FROM RUST (`detail.structure` / `detail.node`),
           never re-parsing `structureJson`. Structural actions are gated
           while a recovery decision is pending — mutating the graph under an
-          undecided recovery would race the buffered content. */}
+          undecided recovery would race the buffered content. For a
+          device-pack story (titleOnly scope) the navigator is NOT mounted at
+          all: its placeholder graph would be a lying projection of the
+          binary pack, so a short named state replaces the zone (AC2). */}
       <div className="story-editor-shell__zones">
-        <StoryStructureNavigator
-          title={detail.title}
-          structure={detail.structure}
-          currentNodeId={nodeEditor.nodeId}
-          editable={detail.editable && !recoveryActive}
-          busy={structureEditor.busy}
-          nodeError={
-            structureEditor.lastError !== null &&
-            structureEditor.lastError.context.kind === "node"
-              ? {
-                  nodeId: structureEditor.lastError.context.nodeId,
-                  error: structureEditor.lastError.error,
-                }
-              : null
-          }
-          globalError={
-            structureEditor.lastError !== null &&
-            structureEditor.lastError.context.kind === "global"
-              ? structureEditor.lastError.error
-              : null
-          }
-          onSelectNode={structureEditor.selectNode}
-          onAddNode={structureEditor.addNode}
-          onMoveNode={structureEditor.moveNode}
-          onDeleteNode={structureEditor.deleteNode}
-        />
+        {packScoped ? (
+          <section
+            className="story-editor-shell__pack-structure"
+            aria-label="Structure de l'histoire"
+          >
+            <h2 className="story-editor-shell__pack-structure-heading">
+              Structure de l'histoire
+            </h2>
+            <p className="story-editor-shell__pack-structure-state" tabIndex={0}>
+              Structure portée par le pack de l'appareil
+            </p>
+          </section>
+        ) : (
+          <StoryStructureNavigator
+            title={detail.title}
+            structure={detail.structure}
+            currentNodeId={nodeEditor.nodeId}
+            editable={detail.editable && !recoveryActive}
+            busy={structureEditor.busy}
+            nodeError={
+              structureEditor.lastError !== null &&
+              structureEditor.lastError.context.kind === "node"
+                ? {
+                    nodeId: structureEditor.lastError.context.nodeId,
+                    error: structureEditor.lastError.error,
+                  }
+                : null
+            }
+            globalError={
+              structureEditor.lastError !== null &&
+              structureEditor.lastError.context.kind === "global"
+                ? structureEditor.lastError.error
+                : null
+            }
+            onSelectNode={structureEditor.selectNode}
+            onAddNode={structureEditor.addNode}
+            onMoveNode={structureEditor.moveNode}
+            onDeleteNode={structureEditor.deleteNode}
+          />
+        )}
         <StoryNodeEditorHost
           storyId={detail.id}
           editor={nodeEditor}
           gated={recoveryActive}
+          packScoped={packScoped}
         >
           <OptionLinkEditor
             node={

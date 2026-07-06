@@ -57,6 +57,7 @@ const updateOutput: UpdateStoryOutput = {
   id: STORY_ID,
   title: "Buffered",
   updatedAt: "2026-04-25T12:00:01.000Z",
+  importState: null,
 };
 
 const recoveryError: AppError = {

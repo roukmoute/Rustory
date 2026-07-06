@@ -242,8 +242,14 @@ function importMarkerLabel(state: ImportState): string | null {
       return "partiel";
     case "needsReview":
       return "à revoir";
+    case "resolved":
+      // A SETTLED review renders exactly like a recognized import: the
+      // provenance marker only, no chip, no report — the marker's
+      // disappearance IS the feedback (the findings trace stays in base,
+      // never rendered).
+      return null;
     default:
-      // `recognized` (and the non-card `blocked` / `resolved`) carry no
+      // `recognized` (and the never-persisted `blocked`) carry no
       // attention chip — only the provenance marker.
       return null;
   }

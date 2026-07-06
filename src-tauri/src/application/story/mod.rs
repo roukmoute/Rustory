@@ -1,5 +1,7 @@
 pub mod node;
 pub mod recovery;
+pub mod review;
+pub mod scope;
 pub mod structure;
 
 use rusqlite::OptionalExtension;
@@ -175,6 +177,12 @@ pub fn update_story(
     )
     .map_err(|err| map_update_transport_error(&err, "delete_draft", &input.id))?;
 
+    // A title write is a REAL write: it settles a pending import review when
+    // the canonical story is fully sound (AC3) — early-out inside, so a
+    // native autosave never pays a structure parse. The ACK carries the
+    // state read POST-UPDATE in this same transaction.
+    let import_state = review::settle_review_after_title_write(&tx, &input.id)?;
+
     tx.commit()
         .map_err(|err| map_update_transport_error(&err, "commit", &input.id))?;
 
@@ -182,6 +190,7 @@ pub fn update_story(
         id: input.id,
         title: normalized,
         updated_at: now_iso,
+        import_state,
     })
 }
 
@@ -233,7 +242,19 @@ pub fn get_story_detail(
         return Ok(None);
     };
 
-    let editable = node::is_story_editable(db.conn(), &id);
+    // The declared edit scope (FR21) + the durable import review state — the
+    // ACK side shares the exact same derivations (`scope::story_edit_scope`,
+    // `review::read_import_state`), so detail and acknowledgements can never
+    // diverge, even on forged data. Both stay projected under a Blocking
+    // degradation: they are story metadata, not canonical content. The
+    // review read is RE-MAPPED here to a read-flavored error: this is a
+    // story OPEN, so the copy must never speak about a modification that was
+    // never attempted (the ACK paths keep the write copy — their write
+    // transaction really is rolled back there).
+    let edit_scope = scope::story_edit_scope(db.conn(), &id);
+    let editable = edit_scope == scope::StoryEditScope::Full;
+    let import_state = review::read_import_state(db.conn(), &id, edit_scope)
+        .map_err(|_| map_review_read_error(&id))?;
     // Project the graph + the selected node FROM Rust. The gate is "no
     // BLOCKING blocker" — NOT "no blocker at all": a Fixable issue (a broken
     // option link, an invalid persisted title) MUST leave the structure and
@@ -282,6 +303,8 @@ pub fn get_story_detail(
         created_at,
         updated_at,
         editable,
+        edit_scope: edit_scope.wire_tag().to_string(),
+        import_state: import_state.map(|s| s.wire_tag().to_string()),
         structure: structure_dto,
         node,
     }))
@@ -369,6 +392,22 @@ fn map_detail_read_error(_err: rusqlite::Error) -> AppError {
     .with_details(serde_json::json!({
         "source": "sqlite_select",
         "table": "stories",
+    }))
+}
+
+/// A transient failure while reading the import-review provenance during a
+/// story OPEN (`get_story_detail`): read-flavored copy, never a message
+/// about a write that was never attempted (guardrail: no label may be false
+/// in one of its contexts). Same PII discipline as the other read mappers.
+fn map_review_read_error(story_id: &str) -> AppError {
+    AppError::local_storage_unavailable(
+        "Rustory n'a pas pu ouvrir cette histoire.",
+        "Réessaie dans un instant ; si le problème persiste, consulte les traces locales.",
+    )
+    .with_details(serde_json::json!({
+        "source": "sqlite_import_review",
+        "stage": "detail_read",
+        "id": story_id,
     }))
 }
 
@@ -778,6 +817,127 @@ mod tests {
         assert!(details.get("rollback").is_some());
     }
 
+    // AC3: a title write is a REAL write — it settles a pending import
+    // review when the canonical story is fully sound.
+    #[test]
+    fn update_story_resolves_a_pending_review_when_canonical_is_sound() {
+        let mut db = fresh_db();
+        let created = create_story(
+            &mut db,
+            CreateStoryInput {
+                title: "Avant".into(),
+            },
+        )
+        .expect("create");
+        db.conn()
+            .execute(
+                "INSERT INTO story_local_imports (story_id, source_format, source_format_version, source_name, artifact_checksum, import_state, findings_summary, imported_at) \
+                 VALUES (?1, 'rustory', 1, 'a.rustory', ?2, 'needs_review', '[{\"aspect\":\"title\",\"category\":\"ambiguous\"}]', '2026-07-06T00:00:00.000Z')",
+                rusqlite::params![created.id, "a".repeat(64)],
+            )
+            .expect("seed pending review");
+
+        let updated = update_story(
+            &mut db,
+            UpdateStoryInput {
+                id: created.id.clone(),
+                title: "Titre corrigé".into(),
+            },
+        )
+        .expect("update");
+        assert_eq!(updated.import_state.as_deref(), Some("resolved"));
+
+        let (state, summary): (String, Option<String>) = db
+            .conn()
+            .query_row(
+                "SELECT import_state, findings_summary FROM story_local_imports WHERE story_id = ?1",
+                rusqlite::params![created.id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .expect("provenance row");
+        assert_eq!(state, "resolved");
+        assert!(summary.is_some(), "findings trace kept");
+    }
+
+    // Early-out: a native story (no provenance row) never pays a canonical
+    // validation for its title autosave — proven by a corrupt structure the
+    // early-out must never parse. The ACK carries an explicit null.
+    #[test]
+    fn update_story_on_a_native_early_outs_and_acks_null() {
+        let mut db = fresh_db();
+        let created = create_story(
+            &mut db,
+            CreateStoryInput {
+                title: "Native".into(),
+            },
+        )
+        .expect("create");
+        db.conn()
+            .execute(
+                "UPDATE stories SET structure_json = 'not json' WHERE id = ?1",
+                rusqlite::params![created.id],
+            )
+            .expect("corrupt structure");
+
+        let updated = update_story(
+            &mut db,
+            UpdateStoryInput {
+                id: created.id,
+                title: "Toujours modifiable".into(),
+            },
+        )
+        .expect("a native title save never validates the canonical body");
+        assert_eq!(updated.import_state, None);
+    }
+
+    // The forged two-table case: the pack takes precedence (TitleOnly) — the
+    // title stays editable but the forged local review is NOT settled.
+    #[test]
+    fn update_story_on_a_forged_two_table_story_does_not_resolve() {
+        let mut db = fresh_db();
+        let created = create_story(
+            &mut db,
+            CreateStoryInput {
+                title: "Forgé".into(),
+            },
+        )
+        .expect("create");
+        db.conn()
+            .execute(
+                "INSERT INTO story_imports (story_id, pack_uuid, source_device_identifier, imported_at, pack_file_count, pack_total_bytes, pack_checksum) \
+                 VALUES (?1, '019739b2-0000-7000-8000-000000000000', '0123456789abcdef0123456789abcdef', '2026-07-06T00:00:00.000Z', 5, 18, ?2)",
+                rusqlite::params![created.id, "ab".repeat(32)],
+            )
+            .expect("pack provenance");
+        db.conn()
+            .execute(
+                "INSERT INTO story_local_imports (story_id, source_format, source_format_version, source_name, artifact_checksum, import_state, findings_summary, imported_at) \
+                 VALUES (?1, 'rustory', 1, 'a.rustory', ?2, 'needs_review', '[{\"aspect\":\"title\",\"category\":\"ambiguous\"}]', '2026-07-06T00:00:00.000Z')",
+                rusqlite::params![created.id, "a".repeat(64)],
+            )
+            .expect("forged local provenance");
+
+        let updated = update_story(
+            &mut db,
+            UpdateStoryInput {
+                id: created.id.clone(),
+                title: "Renommée localement".into(),
+            },
+        )
+        .expect("the title stays editable on a pack");
+        assert_eq!(updated.import_state, None, "None unless FULL scope");
+
+        let state: String = db
+            .conn()
+            .query_row(
+                "SELECT import_state FROM story_local_imports WHERE story_id = ?1",
+                rusqlite::params![created.id],
+                |r| r.get(0),
+            )
+            .expect("row");
+        assert_eq!(state, "needs_review", "the forged review is NOT settled");
+    }
+
     #[test]
     fn update_story_preserves_structure_json_and_checksum() {
         let mut db = fresh_db();
@@ -886,6 +1046,141 @@ mod tests {
         assert_eq!(details["kind"], "constraint_violation");
         assert_eq!(details["stage"], "update");
         assert_eq!(details["id"], created.id);
+    }
+
+    // Producer-side lock of the FR21 projection: editScope + importState per
+    // provenance, the None-unless-Full rule, and their survival under a
+    // Blocking canonical degradation.
+    #[test]
+    fn get_story_detail_projects_edit_scope_and_import_state_per_provenance() {
+        let mut db = fresh_db();
+        let tmp = std::env::temp_dir();
+
+        // (a) Native: full scope, no import state.
+        let native = create_story(
+            &mut db,
+            CreateStoryInput {
+                title: "Native".into(),
+            },
+        )
+        .expect("create")
+        .id;
+        let detail = get_story_detail(&db, &tmp, &native, None)
+            .expect("ok")
+            .expect("some");
+        assert_eq!(detail.edit_scope, "full");
+        assert!(detail.editable);
+        assert_eq!(detail.import_state, None);
+
+        // (b) `.rustory` import with a pending review: full + needsReview.
+        let imported = create_story(
+            &mut db,
+            CreateStoryInput {
+                title: "Importée".into(),
+            },
+        )
+        .expect("create")
+        .id;
+        db.conn()
+            .execute(
+                "INSERT INTO story_local_imports (story_id, source_format, source_format_version, source_name, artifact_checksum, import_state, findings_summary, imported_at) \
+                 VALUES (?1, 'rustory', 1, 'a.rustory', ?2, 'needs_review', '[{\"aspect\":\"title\",\"category\":\"ambiguous\"}]', '2026-07-06T00:00:00.000Z')",
+                rusqlite::params![imported, "a".repeat(64)],
+            )
+            .expect("local provenance");
+        let detail = get_story_detail(&db, &tmp, &imported, None)
+            .expect("ok")
+            .expect("some");
+        assert_eq!(detail.edit_scope, "full");
+        assert!(detail.editable, "a .rustory import is fully editable");
+        assert_eq!(detail.import_state.as_deref(), Some("needsReview"));
+
+        // (c) Device pack: titleOnly, no import state.
+        let pack = create_story(
+            &mut db,
+            CreateStoryInput {
+                title: "Pack".into(),
+            },
+        )
+        .expect("create")
+        .id;
+        db.conn()
+            .execute(
+                "INSERT INTO story_imports (story_id, pack_uuid, source_device_identifier, imported_at, pack_file_count, pack_total_bytes, pack_checksum) \
+                 VALUES (?1, '019739b2-0000-7000-8000-000000000001', '0123456789abcdef0123456789abcdef', '2026-07-06T00:00:00.000Z', 5, 18, ?2)",
+                rusqlite::params![pack, "ab".repeat(32)],
+            )
+            .expect("pack provenance");
+        let detail = get_story_detail(&db, &tmp, &pack, None)
+            .expect("ok")
+            .expect("some");
+        assert_eq!(detail.edit_scope, "titleOnly");
+        assert!(!detail.editable);
+        assert_eq!(detail.import_state, None);
+
+        // (d) Forged two-table story: the pack takes precedence — importState
+        // is NEVER projected outside the full scope, even with a local row.
+        db.conn()
+            .execute(
+                "INSERT INTO story_local_imports (story_id, source_format, source_format_version, source_name, artifact_checksum, import_state, findings_summary, imported_at) \
+                 VALUES (?1, 'rustory', 1, 'b.rustory', ?2, 'needs_review', '[{\"aspect\":\"title\",\"category\":\"ambiguous\"}]', '2026-07-06T00:00:00.000Z')",
+                rusqlite::params![pack, "b".repeat(64)],
+            )
+            .expect("forged local provenance");
+        let detail = get_story_detail(&db, &tmp, &pack, None)
+            .expect("ok")
+            .expect("some");
+        assert_eq!(detail.edit_scope, "titleOnly");
+        assert_eq!(detail.import_state, None, "None unless FULL scope");
+
+        // (e) A Blocking canonical degradation keeps BOTH FR21 fields
+        // projected (story metadata, not canonical content).
+        db.conn()
+            .execute(
+                "UPDATE stories SET content_checksum = ?1 WHERE id = ?2",
+                rusqlite::params!["0".repeat(64), imported],
+            )
+            .expect("corrupt checksum");
+        let detail = get_story_detail(&db, &tmp, &imported, None)
+            .expect("ok")
+            .expect("some");
+        assert!(detail.structure.is_none(), "canonical degrades");
+        assert!(detail.node.is_none(), "canonical degrades together");
+        assert_eq!(detail.edit_scope, "full", "metadata survives");
+        assert_eq!(
+            detail.import_state.as_deref(),
+            Some("needsReview"),
+            "the review chip stays honest even degraded"
+        );
+    }
+
+    // A transient failure of the review-provenance read during a story OPEN
+    // surfaces a READ-flavored error — never the write copy of the ACK
+    // paths (no label may be false in one of its contexts).
+    #[test]
+    fn get_story_detail_maps_a_review_read_failure_to_a_read_error() {
+        let mut db = fresh_db();
+        let created = create_story(
+            &mut db,
+            CreateStoryInput {
+                title: "Ouverture".into(),
+            },
+        )
+        .expect("create");
+        db.conn()
+            .execute("DROP TABLE story_local_imports", [])
+            .expect("drop the provenance table");
+
+        let err = get_story_detail(&db, &std::env::temp_dir(), &created.id, None)
+            .expect_err("the review read fails");
+        assert_eq!(err.code, AppErrorCode::LocalStorageUnavailable);
+        assert_eq!(
+            err.message, "Rustory n'a pas pu ouvrir cette histoire.",
+            "a story OPEN must never speak about a write"
+        );
+        let details = err.details.as_ref().expect("details");
+        assert_eq!(details["source"], "sqlite_import_review");
+        assert_eq!(details["stage"], "detail_read");
     }
 
     #[test]

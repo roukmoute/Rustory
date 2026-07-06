@@ -146,4 +146,22 @@ describe("isLibraryOverviewDto guard", () => {
     expect(isLibraryOverviewDto({})).toBe(false);
     expect(isLibraryOverviewDto({ stories: "nope" })).toBe(false);
   });
+
+  it("accepts every card-persistable import state — resolved included", () => {
+    // CRITICAL: the first settled review to reach the library must not
+    // drift-error the whole overview — "resolved" is a persisted state.
+    for (const state of ["recognized", "partial", "needsReview", "resolved"]) {
+      expect(
+        isLibraryOverviewDto({
+          stories: [{ id: "a", title: "A", importState: state }],
+        }),
+      ).toBe(true);
+    }
+    // `blocked` is never persisted, so never on a card.
+    expect(
+      isLibraryOverviewDto({
+        stories: [{ id: "a", title: "A", importState: "blocked" }],
+      }),
+    ).toBe(false);
+  });
 });

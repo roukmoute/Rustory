@@ -20,15 +20,20 @@ pub struct UpdateStoryInputDto {
     pub title: String,
 }
 
-/// Wire-level return shape for `update_story`. Carries the freshly
-/// persisted values so the UI can reconcile its draft against the source of
-/// truth without issuing a second read.
+/// Wire-level return shape for `update_story` (and `apply_recovery`, whose
+/// title write shares it). Carries the freshly persisted values so the UI
+/// can reconcile its draft against the source of truth without issuing a
+/// second read. `importState` mirrors the story-detail field — read
+/// POST-UPDATE in the same transaction, `None` unless the story carries the
+/// FULL edit scope — so the review chip never lies after an acknowledged
+/// write (an explicit `null` key, never absent).
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UpdateStoryOutputDto {
     pub id: String,
     pub title: String,
     pub updated_at: String,
+    pub import_state: Option<String>,
 }
 
 /// Full projection of a single story used by the edit surface. Mirrors the
@@ -37,16 +42,24 @@ pub struct UpdateStoryOutputDto {
 /// are what the `contentChecksum` covers, so the UI must never reserialize
 /// or reformat it.
 ///
-/// `editable` says whether the story may be edited (native stories) or is
-/// projected read-only (imported stories — their declared edit scope is a
-/// later iteration). `structure` is the LIGHT node graph PROJECTED BY RUST for
-/// the structure navigator; `node` is the SELECTED node's full content (the
-/// start node by default). The UI consumes both projections and never
-/// recomposes anything from `structureJson`. Both are `None` when a BLOCKING
-/// canonical issue prevents projecting (corrupt / drifted), which the UI
-/// renders as the named degraded state; a FIXABLE issue (a broken option
-/// link) keeps them projected so the flagged spot stays visible and
-/// repairable.
+/// `edit_scope` is the story's DECLARED edit scope (FR21), derived in Rust
+/// only: `"full"` (a native story or a `.rustory` import — the complete
+/// editor) or `"titleOnly"` (a device pack whose content is carried by the
+/// copied pack; only the title, a local metadata, is editable). `editable`
+/// is a DERIVED compatibility flag — always `edit_scope == "full"`.
+/// `import_state` is the durable `.rustory` review state
+/// (`"recognized" | "partial" | "needsReview" | "resolved"`), projected ONLY
+/// for a full-scope story (explicit `null` otherwise — a REQUIRED key);
+/// `blocked` is never persisted, so never projected. Both fields stay
+/// projected even under a BLOCKING canonical degradation — they are story
+/// metadata, not canonical content. `structure` is the LIGHT node graph
+/// PROJECTED BY RUST for the structure navigator; `node` is the SELECTED
+/// node's full content (the start node by default). The UI consumes both
+/// projections and never recomposes anything from `structureJson`. Both are
+/// `None` when a BLOCKING canonical issue prevents projecting (corrupt /
+/// drifted), which the UI renders as the named degraded state; a FIXABLE
+/// issue (a broken option link) keeps them projected so the flagged spot
+/// stays visible and repairable.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StoryDetailDto {
@@ -58,6 +71,8 @@ pub struct StoryDetailDto {
     pub created_at: String,
     pub updated_at: String,
     pub editable: bool,
+    pub edit_scope: String,
+    pub import_state: Option<String>,
     pub structure: Option<StoryStructureDto>,
     pub node: Option<NodeContentDto>,
 }
@@ -105,9 +120,11 @@ pub struct OptionLinkDto {
 /// `set_node_option_link`, `remove_node_option`). Carries the freshly
 /// committed `updatedAt` / `contentChecksum`, the EXACT committed
 /// `structureJson` bytes (the contract says those bytes are what the
-/// checksum covers — the local detail must never hold a stale pair), and
-/// the RE-PROJECTED graph so the UI reconciles from Rust's truth without a
-/// follow-up read.
+/// checksum covers — the local detail must never hold a stale pair), the
+/// RE-PROJECTED graph so the UI reconciles from Rust's truth without a
+/// follow-up read, and `importState` read POST-UPDATE in the same
+/// transaction (`None` unless the FULL edit scope; an explicit `null` key,
+/// never absent) so the review chip reconciles from the same truth.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StructureWriteOutputDto {
@@ -116,6 +133,7 @@ pub struct StructureWriteOutputDto {
     pub content_checksum: String,
     pub structure_json: String,
     pub structure: StoryStructureDto,
+    pub import_state: Option<String>,
 }
 
 /// The current node of a story, projected for the editor. Carries the stable
@@ -228,8 +246,10 @@ pub struct NodeMediaSlotInputDto {
 
 /// Wire outcome of every node write (`update_node_content`, `attach_node_media`,
 /// `remove_node_media`). Carries the freshly committed `updatedAt` /
-/// `contentChecksum` and the RE-PROJECTED node so the UI reconciles without a
-/// follow-up read.
+/// `contentChecksum`, the RE-PROJECTED node so the UI reconciles without a
+/// follow-up read, and `importState` read POST-UPDATE in the same
+/// transaction (`None` unless the FULL edit scope; an explicit `null` key,
+/// never absent) so the review chip reconciles from the same truth.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NodeWriteOutputDto {
@@ -237,6 +257,7 @@ pub struct NodeWriteOutputDto {
     pub updated_at: String,
     pub content_checksum: String,
     pub node: NodeContentDto,
+    pub import_state: Option<String>,
 }
 
 /// Attaching media can also report a typed validation result without an error
@@ -465,6 +486,7 @@ mod tests {
             id: "sid".into(),
             title: "Titre".into(),
             updated_at: "2026-04-23T10:00:00.000Z".into(),
+            import_state: None,
         };
         let v = serde_json::to_value(&dto).expect("serialize");
         assert_eq!(
@@ -473,9 +495,25 @@ mod tests {
                 "id": "sid",
                 "title": "Titre",
                 "updatedAt": "2026-04-23T10:00:00.000Z",
+                "importState": null,
             })
         );
         assert!(v.get("updated_at").is_none());
+        // `importState` is a REQUIRED key with an explicit null, never absent.
+        assert!(v.as_object().expect("obj").contains_key("importState"));
+    }
+
+    #[test]
+    fn update_story_output_carries_a_resolved_import_state() {
+        let dto = UpdateStoryOutputDto {
+            id: "sid".into(),
+            title: "Titre".into(),
+            updated_at: "2026-04-23T10:00:00.000Z".into(),
+            import_state: Some("resolved".into()),
+        };
+        let v = serde_json::to_value(&dto).expect("serialize");
+        assert_eq!(v["importState"], "resolved");
+        assert!(v.get("import_state").is_none(), "camelCase only");
     }
 
     // ------ StoryDetailDto ------
@@ -491,6 +529,8 @@ mod tests {
             created_at: "2026-04-23T09:00:00.000Z".into(),
             updated_at: "2026-04-23T10:00:00.000Z".into(),
             editable: true,
+            edit_scope: "full".into(),
+            import_state: Some("needsReview".into()),
             structure: Some(StoryStructureDto {
                 start_node_id: "n1".into(),
                 nodes: vec![NodeGraphDto {
@@ -527,6 +567,8 @@ mod tests {
         assert_eq!(v["createdAt"], "2026-04-23T09:00:00.000Z");
         assert_eq!(v["updatedAt"], "2026-04-23T10:00:00.000Z");
         assert_eq!(v["editable"], true);
+        assert_eq!(v["editScope"], "full");
+        assert_eq!(v["importState"], "needsReview");
         assert_eq!(v["structure"]["startNodeId"], "n1");
         assert_eq!(v["structure"]["nodes"][0]["id"], "n1");
         assert_eq!(v["structure"]["nodes"][0]["isStart"], true);
@@ -546,6 +588,8 @@ mod tests {
             "content_checksum",
             "created_at",
             "updated_at",
+            "edit_scope",
+            "import_state",
         ] {
             assert!(v.get(snake).is_none(), "{snake} must be camelCase");
         }
@@ -666,8 +710,8 @@ mod tests {
 
     #[test]
     fn story_detail_structure_is_a_required_key_even_when_null() {
-        // The `structure` field must serialize as an explicit null (not an
-        // absent key) so the TS mirror can require the key.
+        // The `structure`, `node` and `importState` fields must serialize as
+        // explicit nulls (not absent keys) so the TS mirror can require them.
         let dto = StoryDetailDto {
             id: "sid".into(),
             title: "Titre".into(),
@@ -677,12 +721,17 @@ mod tests {
             created_at: "2026-07-04T09:00:00.000Z".into(),
             updated_at: "2026-07-04T10:00:00.000Z".into(),
             editable: false,
+            edit_scope: "titleOnly".into(),
+            import_state: None,
             structure: None,
             node: None,
         };
         let v = serde_json::to_value(&dto).expect("serialize");
         assert!(v.as_object().expect("obj").contains_key("structure"));
         assert!(v["structure"].is_null());
+        assert_eq!(v["editScope"], "titleOnly");
+        assert!(v.as_object().expect("obj").contains_key("importState"));
+        assert!(v["importState"].is_null());
     }
 
     #[test]
@@ -696,6 +745,7 @@ mod tests {
                 start_node_id: "n1".into(),
                 nodes: vec![],
             },
+            import_state: Some("needsReview".into()),
         };
         let v = serde_json::to_value(&dto).expect("serialize");
         assert_eq!(v["id"], "sid");
@@ -706,9 +756,29 @@ mod tests {
             "{\"schemaVersion\":3,\"startNodeId\":\"n1\",\"nodes\":[]}"
         );
         assert_eq!(v["structure"]["startNodeId"], "n1");
+        assert_eq!(v["importState"], "needsReview");
         assert!(v.get("updated_at").is_none());
         assert!(v.get("content_checksum").is_none());
         assert!(v.get("structure_json").is_none());
+        assert!(v.get("import_state").is_none());
+    }
+
+    #[test]
+    fn structure_write_output_import_state_is_a_required_key_even_when_null() {
+        let dto = StructureWriteOutputDto {
+            id: "sid".into(),
+            updated_at: "2026-07-04T10:00:00.000Z".into(),
+            content_checksum: "0".repeat(64),
+            structure_json: "{}".into(),
+            structure: StoryStructureDto {
+                start_node_id: "n1".into(),
+                nodes: vec![],
+            },
+            import_state: None,
+        };
+        let v = serde_json::to_value(&dto).expect("serialize");
+        assert!(v.as_object().expect("obj").contains_key("importState"));
+        assert!(v["importState"].is_null());
     }
 
     // ------ Structural mutation inputs ------

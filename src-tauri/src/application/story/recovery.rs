@@ -11,6 +11,7 @@
 //! existing `update_story` / `get_story_detail` services and emits the
 //! diagnostic events.
 
+use crate::application::story::review;
 use crate::application::story::{now_iso_ms, sqlite_kind_label};
 use crate::domain::shared::AppError;
 use crate::domain::story::{map_error, normalize_title, validate_title, RecoveryDraft};
@@ -288,6 +289,11 @@ pub fn apply_recovery(
     )
     .map_err(|err| map_apply_transport_error(&err, "delete", &input.story_id))?;
 
+    // Applying a title recovery is a REAL write — the same review-settling
+    // step as `update_story` runs in this transaction (AC3). A node-content
+    // recovery goes through the node write spine and is covered there.
+    let import_state = review::settle_review_after_title_write(&tx, &input.story_id)?;
+
     tx.commit()
         .map_err(|err| map_apply_transport_error(&err, "commit", &input.story_id))?;
 
@@ -295,6 +301,7 @@ pub fn apply_recovery(
         id: input.story_id,
         title: normalized,
         updated_at: now_iso,
+        import_state,
     })
 }
 
@@ -766,6 +773,48 @@ mod tests {
             .expect("read title");
         assert_eq!(title, "New title");
         assert_eq!(count_drafts(&db, &id), 0, "draft must be consumed");
+    }
+
+    // AC3: applying a title recovery is a REAL write — it settles a pending
+    // import review exactly like `update_story`, and the ACK carries it.
+    #[test]
+    fn apply_recovery_resolves_a_pending_review() {
+        let mut db = fresh_db();
+        let id = seed_story(&mut db, "Old");
+        db.conn()
+            .execute(
+                "INSERT INTO story_local_imports (story_id, source_format, source_format_version, source_name, artifact_checksum, import_state, findings_summary, imported_at) \
+                 VALUES (?1, 'rustory', 1, 'a.rustory', ?2, 'needs_review', '[{\"aspect\":\"title\",\"category\":\"ambiguous\"}]', '2026-07-06T00:00:00.000Z')",
+                rusqlite::params![id, "a".repeat(64)],
+            )
+            .expect("seed pending review");
+        record_draft(
+            &mut db,
+            RecordDraftInput {
+                story_id: id.clone(),
+                draft_title: "Titre restauré".into(),
+            },
+        )
+        .expect("record");
+
+        let output = apply_recovery(
+            &mut db,
+            ApplyRecoveryInput {
+                story_id: id.clone(),
+            },
+        )
+        .expect("apply");
+        assert_eq!(output.import_state.as_deref(), Some("resolved"));
+
+        let state: String = db
+            .conn()
+            .query_row(
+                "SELECT import_state FROM story_local_imports WHERE story_id = ?1",
+                rusqlite::params![id],
+                |r| r.get(0),
+            )
+            .expect("provenance row");
+        assert_eq!(state, "resolved");
     }
 
     #[test]

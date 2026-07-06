@@ -16,12 +16,14 @@ export interface StoryCardDto {
   title: string;
   /** Present iff the story came from a local artifact import. Drives the
    *  `Importée` origin marker (any value) and the `Import Issue Marker`
-   *  chip (`partial` / `needsReview`). Absent on native / device-copied
+   *  chip (`partial` / `needsReview` — a `resolved` review renders NO chip:
+   *  its disappearance is the feedback). Absent on native / device-copied
    *  stories, which keep the bare `{ id, title }` shape. */
   importState?: ImportState;
   /** The FULL per-aspect report (recognized elements + points of attention)
    *  backing the on-demand `Import Review Flow`. Present only for a
-   *  `partial` / `needsReview` import. */
+   *  `partial` / `needsReview` import — a `resolved` review keeps its trace
+   *  in base but never on the wire. */
   importReport?: ImportFinding[];
 }
 
@@ -29,6 +31,7 @@ const CARD_IMPORT_STATES: ReadonlySet<string> = new Set([
   "recognized",
   "partial",
   "needsReview",
+  "resolved",
 ]);
 
 export interface LibraryOverviewDto {

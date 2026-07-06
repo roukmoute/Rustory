@@ -78,7 +78,7 @@ It exists to keep the same product concepts named the same way across:
 | Import report — recognized facts header | `Ce que Rustory a reconnu` | On-demand import report header grouping the global outcome + the recognized aspects | `résumé`, `rapport`, `détails` |
 | Import report — attention header | `Points d'attention` | On-demand import report header grouping the aspects to review | `warnings`, `problèmes`, `erreurs` |
 | Story editing screen | `Éditeur d'histoire` | Dedicated screen, separate from the library, where the user resumes and edits a local story | `workspace`, `projet`, `canvas`, `editor` |
-| Editor zone — global structure | `Structure de l'histoire` | Editor zone showing the story's overall layout (ordered node list, start node, option links) and the current node, clearly identified; projected from the core, with explicit per-node actions on a native story | `arbre`, `outline`, `tree`, `plan`, `canvas` |
+| Editor zone — global structure | `Structure de l'histoire` | Editor zone showing the story's overall layout (ordered node list, start node, option links) and the current node, clearly identified; projected from the core, with explicit per-node actions on a full-scope story (native or `.rustory` import) | `arbre`, `outline`, `tree`, `plan`, `canvas` |
 | Editor zone — current node | `Nœud courant` | Editor zone hosting the editor for the node currently in focus (its text, metadata and media) | `current node`, `panneau`, `étape courante` |
 | Story node | `nœud` | A single step of an interactive story (a narrative moment and its choices) | `node`, `step`, `écran` |
 | Node narrative text (field) | `Texte du nœud` | The narrative text of the current node | `contenu`, `body`, `script` |
@@ -109,6 +109,10 @@ It exists to keep the same product concepts named the same way across:
 | Option has no destination yet (state) | `non liée` | Normal authoring state: the option exists but points nowhere yet | `vide`, `incomplète`, `en attente` |
 | Option destination is present (state) | `liée` | The option points at an existing node, named next to the state | `ok`, `valide`, `connectée` |
 | Option destination must be repaired (state) | `destination à corriger` | The option points at a node that no longer exists; repairable in place | `lien cassé`, `broken`, `invalide`, `erreur` |
+| Device-pack content zone (editor, named state) | `Contenu porté par le pack de l'appareil` | Named state of the current-node zone for a device-pack story: the content lives in the binary pack copied from the device; no field, media or option control is rendered (absent, not disabled) | `lecture seule`, `read-only`, `verrouillée`, `Histoire importée (lecture seule)` |
+| Device-pack structure zone (editor, named state) | `Structure portée par le pack de l'appareil` | Named state of the structure zone for a device-pack story — shown INSTEAD of the node navigator (the local placeholder graph would be a lying projection of the pack) | `Structure illisible` (reserved for a corrupt canonical), `lecture seule` |
+| Editor review chip (imported story, review pending) | `à revoir` / `partiel` | The Story Card import-state labels reused as a STATIC chip in the editor shell banner while the `.rustory` import review is pending; nothing is rendered once settled | new ad-hoc labels, alert announcements |
+| Import review settled (durable `resolved` state) | — (no label rendered) | A `resolved` story renders NO chip and NO report anywhere — the marker's disappearance IS the feedback; the provenance marker `Importée` stays | `résolue`, `corrigée`, any success announcement |
 
 ## Preferred State Labels
 
@@ -209,7 +213,13 @@ The UI should favor these labels when they are user-visible:
 | A node media is present and ready (chip, with a humanized size) | `Média ajouté · {taille}` |
 | A node media needs attention (repairable; rest of the node still saves) | `Média à corriger` |
 | A node media is blocked (unsupported / unreadable / oversize; not saved) | `Média bloqué` |
-| An imported story's node is read-only at this stage | `Histoire importée (lecture seule)` |
+| Device-pack story — current-node zone named state | `Contenu porté par le pack de l'appareil` |
+| Device-pack story — current-node zone explanation | `Le texte, les médias et les options de cette histoire vivent dans le pack copié depuis l'appareil. Tu peux modifier le titre depuis l'éditeur.` |
+| Device-pack story — structure zone named state | `Structure portée par le pack de l'appareil` |
+| Content write refused on a device-pack story (message) | `Le contenu de cette histoire est porté par le pack copié depuis l'appareil et ne peut pas être modifié ici.` |
+| Content write refused on a device-pack story (next gesture) | `Tu peux modifier le titre depuis l'éditeur ; le contenu du pack reste celui de l'appareil.` |
+| Imported story with a pending review (editor banner chip) | `à revoir` / `partiel` (the Story Card labels, static) |
+| Import review settled (`resolved`) | no label rendered — the chip disappears; `Importée` stays |
 | Start node mark in the structure list | `Départ` |
 | Append a new empty node to the structure (action) | `Ajouter un nœud` |
 | Swap a node with its neighbor (actions) | `Monter` / `Descendre` |

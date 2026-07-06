@@ -28,7 +28,10 @@ import {
 } from "../../../ipc/commands/story";
 import { invalidateLibraryOverviewCache } from "../../library/hooks/use-library-overview";
 import { useStoryEditor } from "./use-story-editor";
-import type { StoryDetailDto } from "../../../shared/ipc-contracts/story";
+import type {
+  StoryDetailDto,
+  UpdateStoryOutput,
+} from "../../../shared/ipc-contracts/story";
 
 const STORY_ID = "0197a5d0-0000-7000-8000-000000000000";
 
@@ -48,6 +51,8 @@ function buildDetail(overrides: Partial<StoryDetailDto> = {}): StoryDetailDto {
         { id: "n1", label: "", isStart: true, hasIssue: false, options: [] },
       ],
     },
+    editScope: "full",
+    importState: null,
     node: { id: "n1", text: "", label: "", image: null, audio: null },
     ...overrides,
   };
@@ -71,6 +76,7 @@ beforeEach(() => {
     id: STORY_ID,
     title: "",
     updatedAt: "2026-04-23T00:00:00.000Z",
+    importState: null,
   });
   // Default mock for `recordDraft`: silently resolve. Tests that care
   // about the call (count, args, rejection) override with mockResolvedValueOnce
@@ -164,6 +170,7 @@ describe("useStoryEditor", () => {
       id: STORY_ID,
       title: "Nouveau",
       updatedAt: "2026-04-23T10:00:00.000Z",
+      importState: null,
     });
     const { result } = renderHook(() => useStoryEditor(STORY_ID));
     await flushPromises();
@@ -195,6 +202,7 @@ describe("useStoryEditor", () => {
       id: STORY_ID,
       title: "Final",
       updatedAt: "2026-04-23T10:00:00.000Z",
+      importState: null,
     });
     const { result } = renderHook(() => useStoryEditor(STORY_ID));
     await flushPromises();
@@ -230,6 +238,7 @@ describe("useStoryEditor", () => {
       id: STORY_ID,
       title: "X",
       updatedAt: "2026-04-23T10:00:00.000Z",
+      importState: null,
     });
     const { result } = renderHook(() => useStoryEditor(STORY_ID));
     await flushPromises();
@@ -295,6 +304,7 @@ describe("useStoryEditor", () => {
         id: STORY_ID,
         title: "Réessayé",
         updatedAt: "2026-04-23T10:05:00.000Z",
+        importState: null,
       });
     const { result } = renderHook(() => useStoryEditor(STORY_ID));
     await flushPromises();
@@ -330,6 +340,7 @@ describe("useStoryEditor", () => {
       id: STORY_ID,
       title: "Final",
       updatedAt: "2026-04-23T10:00:00.000Z",
+      importState: null,
     });
     const { result } = renderHook(() => useStoryEditor(STORY_ID));
     await flushPromises();
@@ -419,6 +430,7 @@ describe("useStoryEditor", () => {
       id: STORY_ID,
       title: "v1",
       updatedAt: "2026-04-23T10:00:00.000Z",
+      importState: null,
     });
     const { result } = renderHook(() => useStoryEditor(STORY_ID));
     await flushPromises();
@@ -446,6 +458,7 @@ describe("useStoryEditor", () => {
       id: STORY_ID,
       title: "Flushed",
       updatedAt: "2026-04-23T10:00:00.000Z",
+      importState: null,
     });
     const { result } = renderHook(() => useStoryEditor(STORY_ID));
     await flushPromises();
@@ -518,6 +531,7 @@ describe("useStoryEditor", () => {
       id: STORY_ID,
       title: "Unsaved",
       updatedAt: "2026-04-23T10:00:00.000Z",
+      importState: null,
     });
     const { result, unmount } = renderHook(() => useStoryEditor(STORY_ID));
     await flushPromises();
@@ -540,11 +554,7 @@ describe("useStoryEditor", () => {
   });
 
   it("does not paint Enregistré when a save succeeds for a value the user has already moved past", async () => {
-    let resolveSave: (v: {
-      id: string;
-      title: string;
-      updatedAt: string;
-    }) => void = () => undefined;
+    let resolveSave: (v: UpdateStoryOutput) => void = () => undefined;
     vi.mocked(getStoryDetail).mockResolvedValueOnce(buildDetail());
     vi.mocked(saveStory).mockImplementationOnce(
       () =>
@@ -575,6 +585,7 @@ describe("useStoryEditor", () => {
         id: STORY_ID,
         title: "A",
         updatedAt: "2026-04-23T10:00:00.000Z",
+        importState: null,
       });
       await Promise.resolve();
       await Promise.resolve();
@@ -585,11 +596,7 @@ describe("useStoryEditor", () => {
   });
 
   it("invalidates the library cache even when the save ACK arrives after unmount", async () => {
-    let resolveSave: (v: {
-      id: string;
-      title: string;
-      updatedAt: string;
-    }) => void = () => undefined;
+    let resolveSave: (v: UpdateStoryOutput) => void = () => undefined;
     vi.mocked(getStoryDetail).mockResolvedValueOnce(buildDetail());
     vi.mocked(saveStory).mockImplementationOnce(
       () =>
@@ -616,6 +623,7 @@ describe("useStoryEditor", () => {
         id: STORY_ID,
         title: "Après",
         updatedAt: "2026-04-23T10:00:00.000Z",
+        importState: null,
       });
       await Promise.resolve();
       await Promise.resolve();
@@ -624,11 +632,7 @@ describe("useStoryEditor", () => {
   });
 
   it("reschedules a debounced save when a prior save committed an older value (no silent pending)", async () => {
-    let resolveFirst: (v: {
-      id: string;
-      title: string;
-      updatedAt: string;
-    }) => void = () => undefined;
+    let resolveFirst: (v: UpdateStoryOutput) => void = () => undefined;
     vi.mocked(getStoryDetail).mockResolvedValueOnce(buildDetail());
     vi.mocked(saveStory)
       .mockImplementationOnce(
@@ -641,6 +645,7 @@ describe("useStoryEditor", () => {
         id: STORY_ID,
         title: "Final",
         updatedAt: "2026-04-23T10:05:00.000Z",
+        importState: null,
       });
 
     const { result } = renderHook(() => useStoryEditor(STORY_ID));
@@ -665,6 +670,7 @@ describe("useStoryEditor", () => {
         id: STORY_ID,
         title: "A",
         updatedAt: "2026-04-23T10:00:00.000Z",
+        importState: null,
       });
       await Promise.resolve();
       await Promise.resolve();
@@ -688,11 +694,7 @@ describe("useStoryEditor", () => {
   });
 
   it("retrySave clicked twice rapidly only fires one save (re-entrancy guard)", async () => {
-    let resolveRetry: (v: {
-      id: string;
-      title: string;
-      updatedAt: string;
-    }) => void = () => undefined;
+    let resolveRetry: (v: UpdateStoryOutput) => void = () => undefined;
     vi.mocked(getStoryDetail).mockResolvedValueOnce(buildDetail());
     vi.mocked(saveStory)
       .mockRejectedValueOnce({
@@ -739,6 +741,7 @@ describe("useStoryEditor", () => {
         id: STORY_ID,
         title: "Rejoué",
         updatedAt: "2026-04-24T10:00:00.000Z",
+        importState: null,
       });
       await Promise.resolve();
       await Promise.resolve();
@@ -773,11 +776,7 @@ describe("useStoryEditor", () => {
   });
 
   it("flushAutoSave fires a save even while a prior save is in flight so the latest draft wins", async () => {
-    let resolveFirst: (v: {
-      id: string;
-      title: string;
-      updatedAt: string;
-    }) => void = () => undefined;
+    let resolveFirst: (v: UpdateStoryOutput) => void = () => undefined;
     vi.mocked(getStoryDetail).mockResolvedValueOnce(buildDetail());
     vi.mocked(saveStory)
       .mockImplementationOnce(
@@ -790,6 +789,7 @@ describe("useStoryEditor", () => {
         id: STORY_ID,
         title: "Final",
         updatedAt: "2026-04-23T10:05:00.000Z",
+        importState: null,
       });
 
     const { result } = renderHook(() => useStoryEditor(STORY_ID));
@@ -824,6 +824,7 @@ describe("useStoryEditor", () => {
         id: STORY_ID,
         title: "Intermédiaire",
         updatedAt: "2026-04-23T10:00:00.000Z",
+        importState: null,
       });
       await Promise.resolve();
       await Promise.resolve();
@@ -927,6 +928,7 @@ describe("useStoryEditor — recovery draft buffering", () => {
       id: STORY_ID,
       title: "Saved",
       updatedAt: "2026-04-25T12:00:00.000Z",
+      importState: null,
     });
     const { result } = renderHook(() => useStoryEditor(STORY_ID));
     await flushPromises();
@@ -993,6 +995,7 @@ describe("useStoryEditor — recovery draft buffering", () => {
       id: STORY_ID,
       title: "Saved",
       updatedAt: "2026-04-25T12:00:00.000Z",
+      importState: null,
     });
     const { result } = renderHook(() => useStoryEditor(STORY_ID));
     await flushPromises();
@@ -1067,6 +1070,7 @@ describe("useStoryEditor — auto-discard on return-to-persisted", () => {
       id: STORY_ID,
       title: "Saved",
       updatedAt: "2026-04-25T12:00:00.000Z",
+      importState: null,
     });
     const { result } = renderHook(() => useStoryEditor(STORY_ID));
     await flushPromises();
@@ -1105,6 +1109,7 @@ describe("useStoryEditor — reloadDetailFromOutput", () => {
         id: STORY_ID,
         title: "Recovered",
         updatedAt: "2026-04-25T12:00:00.000Z",
+        importState: null,
       });
     });
 
@@ -1128,6 +1133,7 @@ describe("useStoryEditor — reloadDetailFromOutput", () => {
         id: "different",
         title: "Recovered",
         updatedAt: "2026-04-25T12:00:00.000Z",
+        importState: null,
       });
     });
 
@@ -1170,6 +1176,7 @@ describe("useStoryEditor — applyStructureOutput", () => {
             },
           ],
         },
+        importState: null,
       });
     });
 
@@ -1184,5 +1191,176 @@ describe("useStoryEditor — applyStructureOutput", () => {
     expect(detail.updatedAt).toBe("2026-07-04T12:00:00.000Z");
     // The title autosave machinery is untouched.
     expect(result.current.state.saveStatus.kind).toBe("idle");
+  });
+});
+
+describe("useStoryEditor — importState reconciliation (FR21)", () => {
+  const MINIMAL_STRUCTURE = {
+    startNodeId: "n1",
+    nodes: [
+      {
+        id: "n1",
+        label: "",
+        isStart: true,
+        hasIssue: false,
+        options: [],
+      },
+    ],
+  };
+
+  function structureAck(importState: "needsReview" | "resolved" | null) {
+    return {
+      id: STORY_ID,
+      updatedAt: "2026-07-06T12:00:00.000Z",
+      contentChecksum: "c".repeat(64),
+      structureJson: '{"schemaVersion":1,"nodes":[]}',
+      structure: MINIMAL_STRUCTURE,
+      importState,
+    };
+  }
+
+  it("a structural ACK that settles the review extinguishes the chip state", async () => {
+    vi.mocked(getStoryDetail).mockResolvedValueOnce(
+      buildDetail({ importState: "needsReview" }),
+    );
+    const { result } = renderHook(() => useStoryEditor(STORY_ID));
+    await flushPromises();
+
+    act(() => {
+      result.current.applyStructureOutput(structureAck("resolved"));
+    });
+
+    if (result.current.state.kind !== "ready") throw new Error("ready");
+    expect(result.current.state.detail.importState).toBe("resolved");
+  });
+
+  it("a node write ACK reconciles ONLY the review state (correlated by id)", async () => {
+    vi.mocked(getStoryDetail).mockResolvedValueOnce(
+      buildDetail({ importState: "needsReview" }),
+    );
+    const { result } = renderHook(() => useStoryEditor(STORY_ID));
+    await flushPromises();
+    if (result.current.state.kind !== "ready") throw new Error("ready");
+    const checksumBefore = result.current.state.detail.contentChecksum;
+
+    act(() => {
+      result.current.applyNodeWriteOutput({
+        id: STORY_ID,
+        updatedAt: "2026-07-06T12:00:00.000Z",
+        contentChecksum: "d".repeat(64),
+        node: { id: "n1", text: "corrigé", label: "", image: null, audio: null },
+        importState: "resolved",
+      });
+    });
+
+    if (result.current.state.kind !== "ready") throw new Error("ready");
+    expect(result.current.state.detail.importState).toBe("resolved");
+    // The detail's structureJson/contentChecksum PAIR is untouched: a node
+    // ACK carries no structureJson, so patching its checksum would break
+    // the byte↔digest contract.
+    expect(result.current.state.detail.contentChecksum).toBe(checksumBefore);
+
+    // A mismatched id is a no-op.
+    act(() => {
+      result.current.applyNodeWriteOutput({
+        id: "different",
+        updatedAt: "2026-07-06T13:00:00.000Z",
+        contentChecksum: "e".repeat(64),
+        node: { id: "n1", text: "x", label: "", image: null, audio: null },
+        importState: null,
+      });
+    });
+    if (result.current.state.kind !== "ready") throw new Error("ready");
+    expect(result.current.state.detail.importState).toBe("resolved");
+  });
+
+  it("a title ACK carries the review state into the detail", async () => {
+    vi.mocked(getStoryDetail).mockResolvedValueOnce(
+      buildDetail({ importState: "needsReview" }),
+    );
+    const { result } = renderHook(() => useStoryEditor(STORY_ID));
+    await flushPromises();
+
+    act(() => {
+      result.current.reloadDetailFromOutput({
+        id: STORY_ID,
+        title: "Titre corrigé",
+        updatedAt: "2026-07-06T12:00:00.000Z",
+        importState: "resolved",
+      });
+    });
+
+    if (result.current.state.kind !== "ready") throw new Error("ready");
+    expect(result.current.state.detail.importState).toBe("resolved");
+  });
+
+  it("LOCAL monotonicity: a stale pending ACK never resurrects a resolved chip", async () => {
+    // A media/node ACK still in flight while a structural repair settles the
+    // review: the stale `needsReview` it carries must NOT overwrite the
+    // fresher local `resolved` (the resolution is one-way in Rust).
+    vi.mocked(getStoryDetail).mockResolvedValueOnce(
+      buildDetail({ importState: "resolved" }),
+    );
+    const { result } = renderHook(() => useStoryEditor(STORY_ID));
+    await flushPromises();
+
+    act(() => {
+      result.current.applyNodeWriteOutput({
+        id: STORY_ID,
+        updatedAt: "2026-07-06T12:00:00.000Z",
+        contentChecksum: "d".repeat(64),
+        node: { id: "n1", text: "x", label: "", image: null, audio: null },
+        importState: "needsReview",
+      });
+    });
+    if (result.current.state.kind !== "ready") throw new Error("ready");
+    expect(result.current.state.detail.importState).toBe("resolved");
+
+    act(() => {
+      result.current.applyStructureOutput(structureAck("needsReview"));
+    });
+    if (result.current.state.kind !== "ready") throw new Error("ready");
+    expect(result.current.state.detail.importState).toBe("resolved");
+
+    // A null incoming value stays authoritative (e.g. a provenance row
+    // dropped) — monotonicity only guards the pending values.
+    act(() => {
+      result.current.applyStructureOutput(structureAck(null));
+    });
+    if (result.current.state.kind !== "ready") throw new Error("ready");
+    expect(result.current.state.detail.importState).toBeNull();
+  });
+
+  it("a stale targeted re-read never resurrects a resolved chip", async () => {
+    // A targeted re-read FIRED before a resolving write can land AFTER its
+    // ACK: the whole-detail replacement must go through the same local
+    // monotonicity as the ACK points, or the chip reappears.
+    vi.mocked(getStoryDetail).mockResolvedValueOnce(
+      buildDetail({ importState: "resolved" }),
+    );
+    const { result } = renderHook(() => useStoryEditor(STORY_ID));
+    await flushPromises();
+
+    act(() => {
+      result.current.replaceDetail(
+        buildDetail({
+          importState: "needsReview",
+          node: { id: "n1", text: "relu", label: "", image: null, audio: null },
+        }),
+      );
+    });
+
+    if (result.current.state.kind !== "ready") throw new Error("ready");
+    // The stale pending value is discarded…
+    expect(result.current.state.detail.importState).toBe("resolved");
+    // …while the rest of the authoritative re-read IS applied.
+    expect(result.current.state.detail.node?.text).toBe("relu");
+
+    // A null incoming value stays authoritative, same rule as the ACKs.
+    act(() => {
+      result.current.replaceDetail(buildDetail({ importState: null }));
+    });
+    if (result.current.state.kind !== "ready") throw new Error("ready");
+    expect(result.current.state.detail.importState).toBeNull();
   });
 });

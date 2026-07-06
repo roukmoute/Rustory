@@ -111,6 +111,8 @@ function buildDetail(overrides: Partial<StoryDetailDto> = {}): StoryDetailDto {
     createdAt: "2026-04-23T09:00:00.000Z",
     updatedAt: "2026-04-23T09:00:00.000Z",
     editable: true,
+    editScope: "full",
+    importState: null,
     structure: {
       startNodeId: "n1",
       nodes: [
@@ -142,6 +144,7 @@ describe("<StoryEditRoute />", () => {
       id: STORY_ID,
       title: "",
       updatedAt: "2026-04-23T00:00:00.000Z",
+      importState: null,
     });
     // Recovery flow defaults: no draft to recover. Tests that exercise
     // the banner override `readRecoverableDraft` per-case.
@@ -366,6 +369,7 @@ describe("<StoryEditRoute />", () => {
       id: STORY_ID,
       title: "Nouveau titre",
       updatedAt: "2026-04-23T10:00:00.000Z",
+      importState: null,
     });
     renderRoute(`/story/${STORY_ID}/edit`);
 
@@ -502,6 +506,7 @@ describe("<StoryEditRoute />", () => {
         id: STORY_ID,
         title: "Réessayé",
         updatedAt: "2026-04-23T10:00:00.000Z",
+        importState: null,
       });
     renderRoute(`/story/${STORY_ID}/edit`);
 
@@ -592,6 +597,7 @@ describe("<StoryEditRoute />", () => {
       id: STORY_ID,
       title: "Sauvé in extremis",
       updatedAt: "2026-04-23T10:00:00.000Z",
+      importState: null,
     });
     const router = renderRoute(`/story/${STORY_ID}/edit`);
 
@@ -833,6 +839,7 @@ describe("<StoryEditRoute />", () => {
         id: STORY_ID,
         title: "Titre en cours",
         updatedAt: "2026-04-24T10:30:00.000Z",
+        importState: null,
       });
       vi.mocked(exportStoryWithSaveDialog).mockResolvedValueOnce(
         cancelledOutcome,
@@ -867,6 +874,7 @@ describe("<StoryEditRoute />", () => {
         id: STORY_ID,
         title: "Titre en cours",
         updatedAt: "2026-04-24T10:30:00.000Z",
+        importState: null,
       });
 
       await user.click(
@@ -971,6 +979,7 @@ describe("<StoryEditRoute />", () => {
         id: STORY_ID,
         title: "Buffered live",
         updatedAt: "2026-04-25T12:00:01.000Z",
+        importState: null,
       });
 
       await userEvent.click(
@@ -1162,6 +1171,7 @@ describe("StoryEditRoute — node editor (schema v2)", () => {
       id: STORY_ID,
       title: "Le soleil couchant",
       updatedAt: "2026-04-23T00:00:00.000Z",
+      importState: null,
     });
     vi.mocked(readRecoverableDraft).mockReset();
     vi.mocked(readRecoverableDraft).mockResolvedValue({ kind: "none" });
@@ -1177,6 +1187,7 @@ describe("StoryEditRoute — node editor (schema v2)", () => {
       updatedAt: "2026-04-23T00:00:00.000Z",
       contentChecksum: "b".repeat(64),
       node: { id: "n1", text, label, image: null, audio: null },
+      importState: null,
     }));
     invalidateLibraryOverviewCacheMock.mockReset();
     vi.spyOn(console, "error").mockImplementation(() => {});
@@ -1243,19 +1254,33 @@ describe("StoryEditRoute — node editor (schema v2)", () => {
     expect(router.state.location.pathname).toBe("/library");
   });
 
-  it("renders an imported story's node read-only (no editable controls)", async () => {
-    vi.mocked(getStoryDetail).mockResolvedValue(buildDetail({ editable: false }));
+  it("renders the named pack states for a device-pack story (titleOnly scope)", async () => {
+    vi.mocked(getStoryDetail).mockResolvedValue(
+      buildDetail({ editable: false, editScope: "titleOnly" }),
+    );
     renderRoute(`/story/${STORY_ID}/edit`);
+    // Both content zones name the pack state — the controls are ABSENT,
+    // not disabled (AC2), and the title field stays editable (a local
+    // metadata).
     await waitFor(() =>
       expect(
-        screen.getByText("Histoire importée (lecture seule)"),
+        screen.getByText("Contenu porté par le pack de l'appareil"),
       ).toBeInTheDocument(),
     );
     expect(
-      screen.getByRole("textbox", { name: "Texte du nœud" }),
-    ).toBeDisabled();
+      screen.getByText("Structure portée par le pack de l'appareil"),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("textbox", { name: "Texte du nœud" }),
+    ).not.toBeInTheDocument();
     expect(
       screen.queryByRole("button", { name: "Ajouter" }),
     ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /ajouter un nœud/i }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("textbox", { name: /titre de l'histoire/i }),
+    ).toBeEnabled();
   });
 });

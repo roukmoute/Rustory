@@ -15,7 +15,11 @@ export interface StoryStructureNavigatorProps {
   structure: StoryStructure | null;
   /** The id of the node currently shown in the editor zone (AC3). */
   currentNodeId: string | null;
-  /** `false` for an imported story: NO structural action is rendered. */
+  /** Defensive non-editable projection: NO structural action is rendered.
+   *  A device pack never mounts this component at all (the named pack state
+   *  replaces the zone), and a `.rustory` import is fully editable — this
+   *  gate is defense in depth for transient states (e.g. a pending recovery
+   *  decision), never a reachable read-only screen. */
   editable: boolean;
   /** A structural mutation is in flight — actions are disabled. */
   busy: boolean;
@@ -47,10 +51,11 @@ function optionSummary(count: number): string {
  * vanished destination carries a localized glyph + text `à corriger` mark
  * that never hides the rest of the list. Structural actions (add / move /
  * delete, with a two-gesture inline delete confirmation) are rendered ONLY
- * for an editable (native) story. When Rust could not project the graph the
- * zone degrades to the NAMED `Structure illisible` state — never a crash,
- * never a fabricated node. Meaning is carried by glyph + text, never color
- * alone.
+ * when the story's edit scope is full (native or `.rustory` import — a
+ * device pack never mounts this component). When Rust could not project the
+ * graph the zone degrades to the NAMED `Structure illisible` state — never a
+ * crash, never a fabricated node. Meaning is carried by glyph + text, never
+ * color alone.
  */
 export function StoryStructureNavigator({
   title,

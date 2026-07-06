@@ -42,6 +42,7 @@ function outputWith(node: Partial<NodeContentDto>): NodeWriteOutput {
     updatedAt: "2026-06-27T10:00:00.000Z",
     contentChecksum: "a".repeat(64),
     node: { ...NODE, ...node },
+    importState: null,
   };
 }
 
@@ -190,7 +191,9 @@ describe("useNodeEditor", () => {
     await waitFor(() => expect(result.current.image).toBeNull());
   });
 
-  it("ignores edits when the node is read-only (imported story)", () => {
+  it("defensive no-op: ignores edits when the projection is not editable", () => {
+    // A device pack never mounts the node editor at all, and a `.rustory`
+    // import is fully editable — this gate is defense in depth only.
     const { result } = renderHook(() => useNodeEditor("s1", NODE, false));
     act(() => result.current.setText("nope"));
     expect(result.current.text).toBe("");
@@ -450,11 +453,17 @@ describe("useNodeEditor", () => {
 
   it("never starts a second content write while one is in flight (single-flight, P5)", async () => {
     let resolveFirst: (value: NodeWriteOutput) => void = () => {};
-    vi.mocked(updateNodeContent).mockReturnValueOnce(
-      new Promise<NodeWriteOutput>((resolve) => {
-        resolveFirst = resolve;
-      }),
-    );
+    vi.mocked(updateNodeContent)
+      .mockReturnValueOnce(
+        new Promise<NodeWriteOutput>((resolve) => {
+          resolveFirst = resolve;
+        }),
+      )
+      // Once the first write lands, the CHAINED re-plan legitimately fires a
+      // follow-up save carrying the newest keystroke (NFR8) — give it a
+      // resolvable default so the drain settles cleanly instead of tripping
+      // an exhausted mock (an unhandled rejection outside any assertion).
+      .mockResolvedValue(outputWith({ text: "second" }));
     const { result } = renderHook(() => useNodeEditor("s1", NODE, true));
 
     act(() => result.current.setText("first"));
@@ -474,9 +483,11 @@ describe("useNodeEditor", () => {
     });
     expect(updateNodeContent).toHaveBeenCalledTimes(1);
 
-    // Drain the deferred write so the hook settles cleanly.
+    // Drain the deferred write AND its chained follow-up so the hook settles
+    // cleanly.
     await act(async () => {
       resolveFirst(outputWith({ text: "first" }));
+      await Promise.resolve();
       await Promise.resolve();
     });
   });

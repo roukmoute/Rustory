@@ -20,14 +20,54 @@ export interface UpdateStoryInput {
 }
 
 /**
- * Wire contract returned by `update_story`. Mirror of
- * `UpdateStoryOutputDto`. `updatedAt` is the ISO-8601 UTC millisecond
- * timestamp the Rust core committed.
+ * Durable `.rustory` import review state as carried on the story detail and
+ * on every write acknowledgement. `blocked` is never persisted, so it never
+ * appears on this wire; `resolved` is written by the write-path review
+ * resolution only. `null` = nothing to carry (a native story, a device
+ * pack, or any non-full edit scope).
+ */
+export type StoryImportState =
+  | "recognized"
+  | "partial"
+  | "needsReview"
+  | "resolved";
+
+const STORY_IMPORT_STATES: readonly StoryImportState[] = [
+  "recognized",
+  "partial",
+  "needsReview",
+  "resolved",
+];
+
+/** The story's declared edit scope (FR21), derived in Rust only: `full` =
+ *  the complete editor (a native story or a `.rustory` import); `titleOnly`
+ *  = a device pack (only the title, a local metadata, is editable). */
+export type StoryEditScope = "full" | "titleOnly";
+
+/**
+ * The `importState` key of a detail / acknowledgement payload: REQUIRED
+ * (explicit `null`, never absent) and drawn from the closed persisted set.
+ * `undefined` (a missing key) is drift, not something to accommodate.
+ */
+function isImportStateKey(value: unknown): value is StoryImportState | null {
+  return (
+    value === null || STORY_IMPORT_STATES.includes(value as StoryImportState)
+  );
+}
+
+/**
+ * Wire contract returned by `update_story` (and `apply_recovery`). Mirror
+ * of `UpdateStoryOutputDto`. `updatedAt` is the ISO-8601 UTC millisecond
+ * timestamp the Rust core committed. `importState` is the durable review
+ * state read POST-UPDATE in the same transaction (`null` unless the story
+ * carries the full edit scope) — a REQUIRED key, so the review chip
+ * reconciles from the same truth as the detail.
  */
 export interface UpdateStoryOutput {
   id: string;
   title: string;
   updatedAt: string;
+  importState: StoryImportState | null;
 }
 
 /**
@@ -96,11 +136,16 @@ export interface StoryStructure {
  * Full wire projection of a single story for the edit surface. Mirror of
  * `src-tauri/src/ipc/dto/story.rs::StoryDetailDto`. `structureJson` is the
  * exact byte sequence covered by `contentChecksum` — never reserialize or
- * reformat it on the frontend. `editable` is `false` for an imported story
- * (read-only); `structure` is the Rust-projected node graph and `node` the
- * SELECTED node's content (the start node by default). Both are `null` when
- * a BLOCKING canonical issue prevents projecting (degraded state); a FIXABLE
- * issue (a broken option link) keeps them projected.
+ * reformat it on the frontend. `editScope` is the story's DECLARED edit
+ * scope (FR21) and `editable` its derived compatibility flag (always
+ * `editScope === "full"`); `importState` is the durable `.rustory` review
+ * state, projected ONLY for a full-scope story (explicit `null` otherwise —
+ * a REQUIRED key). Both survive a BLOCKING canonical degradation (story
+ * metadata, not canonical content). `structure` is the Rust-projected node
+ * graph and `node` the SELECTED node's content (the start node by default).
+ * Both are `null` when a BLOCKING canonical issue prevents projecting
+ * (degraded state); a FIXABLE issue (a broken option link) keeps them
+ * projected.
  */
 export interface StoryDetailDto {
   id: string;
@@ -111,6 +156,8 @@ export interface StoryDetailDto {
   createdAt: string;
   updatedAt: string;
   editable: boolean;
+  editScope: StoryEditScope;
+  importState: StoryImportState | null;
   structure: StoryStructure | null;
   node: NodeContentDto | null;
 }
@@ -118,13 +165,16 @@ export interface StoryDetailDto {
 /** Mirror of `StructureWriteOutputDto` — the outcome of every structural
  *  write; the UI reconciles from its re-projected `structure`, and the
  *  local detail keeps `structureJson` in step with `contentChecksum` (the
- *  contract says those exact bytes are what the checksum covers). */
+ *  contract says those exact bytes are what the checksum covers).
+ *  `importState` is read POST-UPDATE in the same transaction (a REQUIRED
+ *  key, `null` unless the full edit scope). */
 export interface StructureWriteOutput {
   id: string;
   updatedAt: string;
   contentChecksum: string;
   structureJson: string;
   structure: StoryStructure;
+  importState: StoryImportState | null;
 }
 
 /** Mirror of `OptionRefDto` (the `linkFrom` of `add_story_node`). */
@@ -174,12 +224,15 @@ export interface RemoveNodeOptionInput {
   optionIndex: number;
 }
 
-/** Mirror of `NodeWriteOutputDto` — the outcome of every node write. */
+/** Mirror of `NodeWriteOutputDto` — the outcome of every node write.
+ *  `importState` is read POST-UPDATE in the same transaction (a REQUIRED
+ *  key, `null` unless the full edit scope). */
 export interface NodeWriteOutput {
   id: string;
   updatedAt: string;
   contentChecksum: string;
   node: NodeContentDto;
+  importState: StoryImportState | null;
 }
 
 /** Mirror of `UpdateNodeContentInputDto`. */
@@ -287,6 +340,21 @@ export function isStoryDetailDto(value: unknown): value is StoryDetailDto {
     return false;
   }
   if (typeof candidate.editable !== "boolean") return false;
+  // FR21 fields: `editScope` is REQUIRED and closed; `importState` is a
+  // REQUIRED key (explicit null). A payload missing either is drift.
+  if (candidate.editScope !== "full" && candidate.editScope !== "titleOnly") {
+    return false;
+  }
+  if (!isImportStateKey(candidate.importState)) return false;
+  // `editable` is Rust-derived from the scope — a payload where the two
+  // disagree is an impossible DTO, not something to accommodate.
+  if (candidate.editable !== (candidate.editScope === "full")) return false;
+  // The import state is projected ONLY for a full-scope story (the forged
+  // two-table case is neutralized in Rust) — a non-null state on titleOnly
+  // is drift.
+  if (candidate.importState !== null && candidate.editScope !== "full") {
+    return false;
+  }
   if (
     candidate.structure !== null &&
     !isStoryStructureDto(candidate.structure)
@@ -379,7 +447,8 @@ export function isStoryStructureDto(value: unknown): value is StoryStructure {
   );
 }
 
-/** Runtime guard for a `StructureWriteOutput`. */
+/** Runtime guard for a `StructureWriteOutput`. The `importState` key is
+ *  REQUIRED (explicit null) — an acknowledgement missing it is drift. */
 export function isStructureWriteOutput(
   value: unknown,
 ): value is StructureWriteOutput {
@@ -398,6 +467,7 @@ export function isStructureWriteOutput(
   if (typeof c.structureJson !== "string" || c.structureJson.length === 0) {
     return false;
   }
+  if (!("importState" in c) || !isImportStateKey(c.importState)) return false;
   return isStoryStructureDto(c.structure);
 }
 
@@ -438,7 +508,8 @@ export function isNodeContentDto(value: unknown): value is NodeContentDto {
   return true;
 }
 
-/** Runtime guard for a `NodeWriteOutput`. */
+/** Runtime guard for a `NodeWriteOutput`. The `importState` key is REQUIRED
+ *  (explicit null) — an acknowledgement missing it is drift. */
 export function isNodeWriteOutput(value: unknown): value is NodeWriteOutput {
   if (typeof value !== "object" || value === null) return false;
   const c = value as Record<string, unknown>;
@@ -452,6 +523,7 @@ export function isNodeWriteOutput(value: unknown): value is NodeWriteOutput {
   ) {
     return false;
   }
+  if (!("importState" in c) || !isImportStateKey(c.importState)) return false;
   return isNodeContentDto(c.node);
 }
 
@@ -494,10 +566,10 @@ export function isRecoverableNodeDraft(
 }
 
 /**
- * Runtime guard for `UpdateStoryOutput`. The shape is small enough that
- * the wire contract is unlikely to drift, but `applyRecovery` resolves
- * with this exact payload — locking the shape here keeps the apply path
- * symmetric with the rest of the recovery contract.
+ * Runtime guard for `UpdateStoryOutput`. `saveStory` and `applyRecovery`
+ * both resolve with this exact payload — locking the shape here keeps the
+ * two title-write paths symmetric. The `importState` key is REQUIRED
+ * (explicit null): an acknowledgement missing it is drift.
  */
 export function isUpdateStoryOutput(value: unknown): value is UpdateStoryOutput {
   if (typeof value !== "object" || value === null) return false;
@@ -510,6 +582,9 @@ export function isUpdateStoryOutput(value: unknown): value is UpdateStoryOutput 
     typeof candidate.updatedAt !== "string" ||
     !ISO8601_UTC_PATTERN.test(candidate.updatedAt)
   ) {
+    return false;
+  }
+  if (!("importState" in candidate) || !isImportStateKey(candidate.importState)) {
     return false;
   }
   return true;

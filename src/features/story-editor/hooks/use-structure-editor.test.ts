@@ -47,6 +47,7 @@ function ackWith(structure: StoryStructure): StructureWriteOutput {
     contentChecksum: "a".repeat(64),
     structureJson: '{"schemaVersion":3,"startNodeId":"n1","nodes":[]}',
     structure,
+    importState: null,
   };
 }
 
@@ -60,6 +61,8 @@ function detailWith(nodeId: string): StoryDetailDto {
     createdAt: "2026-07-04T09:00:00.000Z",
     updatedAt: "2026-07-04T10:00:00.000Z",
     editable: true,
+    editScope: "full",
+    importState: null,
     structure: STRUCTURE,
     node: { id: nodeId, text: "", label: "", image: null, audio: null },
   };
@@ -421,7 +424,7 @@ describe("useStructureEditor", () => {
     expect(onDetailReloaded).not.toHaveBeenCalled();
   });
 
-  it("never fires a mutation for a non-editable (imported) story", () => {
+  it("defensive no-op: never fires a mutation when not editable", () => {
     const { result } = setup({ editable: false });
     act(() => {
       result.current.addNode();

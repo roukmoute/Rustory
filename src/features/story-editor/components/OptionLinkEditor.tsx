@@ -18,8 +18,11 @@ export interface OptionLinkEditorProps {
    *  canvas). Self-reference is a legitimate narrative loop, so the current
    *  node is listed too. */
   nodes: NodeGraph[];
-  /** `false` for an imported story: the options render read-only with their
-   *  states — NO link action. */
+  /** Defensive non-editable projection: the options render with their
+   *  states but NO link action. A device pack never mounts this component
+   *  at all (the pack state replaces the zone), and a `.rustory` import is
+   *  fully editable — this gate is defense in depth for transient states
+   *  (e.g. a pending recovery decision), never a reachable screen. */
   editable: boolean;
   /** A structural mutation is in flight — actions are disabled. */
   busy: boolean;

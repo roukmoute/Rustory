@@ -10,7 +10,9 @@ import {
 } from "../../../ipc/commands/story";
 import { toAppError, type AppError } from "../../../shared/errors/app-error";
 import type {
+  NodeWriteOutput,
   StoryDetailDto,
+  StoryImportState,
   StructureWriteOutput,
   UpdateStoryOutput,
 } from "../../../shared/ipc-contracts/story";
@@ -34,6 +36,28 @@ const MALFORMED_DETAIL_ERROR: AppError = {
   userAction: "Relance Rustory pour reconstruire la vue cohérente.",
   details: null,
 };
+
+/**
+ * LOCAL monotonicity of the durable review state: once the in-memory
+ * detail holds `"resolved"`, a STALE in-flight acknowledgement still
+ * carrying `"needsReview"` / `"partial"` (e.g. a media ACK fired before a
+ * structural repair settled the review) must NOT resurrect the chip — the
+ * resolution is one-way in Rust, so a pending value arriving AFTER a
+ * resolved one can only be older truth. Any other incoming value
+ * (including `null`) is authoritative.
+ */
+function reconcileImportState(
+  current: StoryImportState | null,
+  incoming: StoryImportState | null,
+): StoryImportState | null {
+  if (
+    current === "resolved" &&
+    (incoming === "needsReview" || incoming === "partial")
+  ) {
+    return current;
+  }
+  return incoming;
+}
 
 export type SaveStatus =
   | { kind: "idle" }
@@ -76,9 +100,13 @@ export interface UseStoryEditor {
   reloadDetailFromOutput: (output: UpdateStoryOutput) => void;
   /** Reconcile the in-memory `detail` from a structural write
    *  acknowledgement: the re-projected graph plus the freshly committed
-   *  `contentChecksum` / `updatedAt`. Never touches the title autosave
-   *  machinery. */
+   *  `contentChecksum` / `updatedAt` / `importState`. Never touches the
+   *  title autosave machinery. */
   applyStructureOutput: (output: StructureWriteOutput) => void;
+  /** Reconcile ONLY the durable review state (`importState`) from a node
+   *  write acknowledgement, correlated by `output.id`. The node projection
+   *  itself is owned by `useNodeEditor`. */
+  applyNodeWriteOutput: (output: NodeWriteOutput) => void;
   /** Replace the whole `detail` from an authoritative targeted re-read
    *  (a current-node selection change). Preserves the live title draft
    *  and save status — only the projections move. */
@@ -309,6 +337,10 @@ export function useStoryEditor(
               ...prev.detail,
               title: output.title,
               updatedAt: output.updatedAt,
+              importState: reconcileImportState(
+                prev.detail.importState,
+                output.importState,
+              ),
             };
             // The user has since typed a new value: commit the detail
             // (it IS persisted) and schedule a fresh debounce so the
@@ -508,6 +540,10 @@ export function useStoryEditor(
             ...prev.detail,
             title: output.title,
             updatedAt: output.updatedAt,
+            importState: reconcileImportState(
+              prev.detail.importState,
+              output.importState,
+            ),
           },
           draftTitle: output.title,
           saveStatus: { kind: "idle" },
@@ -537,8 +573,36 @@ export function useStoryEditor(
           structureJson: output.structureJson,
           contentChecksum: output.contentChecksum,
           updatedAt: output.updatedAt,
+          // `importState` moves WITH the rest of the ACK — a structural
+          // repair that settles the review must extinguish the chip in the
+          // same render, never partially.
+          importState: reconcileImportState(
+            prev.detail.importState,
+            output.importState,
+          ),
         },
       };
+    });
+  }, []);
+
+  /**
+   * Reconcile ONLY the durable review state from a node write ACK (text,
+   * label or media). The node projection itself is owned by
+   * `useNodeEditor`, and the detail's `structureJson`/`contentChecksum`
+   * PAIR must keep matching — a node ACK carries no `structureJson`, so
+   * patching its checksum here would break the byte↔digest contract.
+   * `importState` is story-level metadata and moves alone, under the same
+   * local monotonicity as every other reconciliation point.
+   */
+  const applyNodeWriteOutput = useCallback((output: NodeWriteOutput) => {
+    setState((prev) => {
+      if (prev.kind !== "ready" || prev.detail.id !== output.id) return prev;
+      const next = reconcileImportState(
+        prev.detail.importState,
+        output.importState,
+      );
+      if (next === prev.detail.importState) return prev;
+      return { ...prev, detail: { ...prev.detail, importState: next } };
     });
   }, []);
 
@@ -547,11 +611,23 @@ export function useStoryEditor(
    * current-node selection changed). The title draft and its save status
    * are PRESERVED — selecting a node must not clobber a mid-debounce title
    * keystroke (the content flush ran before the re-read).
+   * `importState` still goes through the local monotonicity: a re-read
+   * FIRED before a resolving write can land AFTER its ACK, and its stale
+   * `needsReview`/`partial` must not resurrect the chip.
    */
   const replaceDetail = useCallback((detail: StoryDetailDto) => {
     setState((prev) => {
       if (prev.kind !== "ready" || prev.detail.id !== detail.id) return prev;
-      return { ...prev, detail };
+      return {
+        ...prev,
+        detail: {
+          ...detail,
+          importState: reconcileImportState(
+            prev.detail.importState,
+            detail.importState,
+          ),
+        },
+      };
     });
   }, []);
 
@@ -643,6 +719,7 @@ export function useStoryEditor(
     flushAutoSave,
     reloadDetailFromOutput,
     applyStructureOutput,
+    applyNodeWriteOutput,
     replaceDetail,
   };
 }

@@ -6,6 +6,7 @@ import {
   isNodeWriteOutput,
   isRecoverableDraft,
   isRecoverableNodeDraft,
+  isStoryDetailDto,
   isStructureWriteOutput,
   isUpdateStoryOutput,
   type AddNodeOptionInput,
@@ -49,15 +50,43 @@ export function createStory(input: CreateStoryInput): Promise<StoryCardDto> {
 }
 
 /**
+ * Thrown when `update_story` or `get_story_detail` returns a payload that
+ * does not match its wire shape (e.g. a legacy payload missing the FR21
+ * `importState` / `editScope` keys). The captured `raw` value is kept on
+ * the error instance for support / debugging, never surfaced verbatim to
+ * the user.
+ */
+export class StoryContractDriftError extends Error {
+  public readonly raw: unknown;
+  constructor(message: string, options: { raw: unknown }) {
+    super(message);
+    this.name = "StoryContractDriftError";
+    this.raw = options.raw;
+  }
+}
+
+/**
  * Persist a story's metadata (title only in the current MVP) through the
  * Rust core. Synchronous bounded mutation — no timeout wrapper. Rejects
  * with a normalized `AppError` on validation (`INVALID_STORY_TITLE`),
  * storage (`LOCAL_STORAGE_UNAVAILABLE`) or consistency
  * (`LIBRARY_INCONSISTENT`) failures. Callers (specifically the autosave
- * hook) own the retry lifecycle.
+ * hook) own the retry lifecycle. The acknowledgement is VALIDATED at this
+ * boundary (`isUpdateStoryOutput`) — a payload missing the required
+ * `importState` key throws `StoryContractDriftError` instead of letting
+ * the editor reconcile against an out-of-contract object.
  */
-export function saveStory(input: UpdateStoryInput): Promise<UpdateStoryOutput> {
-  return invoke<UpdateStoryOutput>("update_story", { input });
+export async function saveStory(
+  input: UpdateStoryInput,
+): Promise<UpdateStoryOutput> {
+  const raw = await invoke<unknown>("update_story", { input });
+  if (!isUpdateStoryOutput(raw)) {
+    throw new StoryContractDriftError(
+      "update_story a renvoyé une forme inattendue.",
+      { raw },
+    );
+  }
+  return raw;
 }
 
 /**
@@ -68,15 +97,29 @@ export function saveStory(input: UpdateStoryInput): Promise<UpdateStoryOutput> {
  * `nodeId` targets the selected node's content projection; omitted, the
  * Rust core projects the start node. A stale id over a healthy graph
  * falls back to the start node on the Rust side.
+ *
+ * The payload is VALIDATED at this boundary (`isStoryDetailDto`): a shape
+ * missing the FR21 keys (`editScope`, `importState`) or breaking their
+ * coherences throws `StoryContractDriftError` — the edit surface never
+ * renders against an out-of-contract object. `undefined` (a transport
+ * quirk) normalizes to `null`.
  */
-export function getStoryDetail(input: {
+export async function getStoryDetail(input: {
   storyId: string;
   nodeId?: string;
 }): Promise<StoryDetailDto | null> {
-  return invoke<StoryDetailDto | null>("get_story_detail", {
+  const raw = await invoke<unknown>("get_story_detail", {
     storyId: input.storyId,
     nodeId: input.nodeId ?? null,
   });
+  if (raw === null || raw === undefined) return null;
+  if (!isStoryDetailDto(raw)) {
+    throw new StoryContractDriftError(
+      "get_story_detail a renvoyé une forme inattendue.",
+      { raw },
+    );
+  }
+  return raw;
 }
 
 /**
