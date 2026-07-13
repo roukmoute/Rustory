@@ -2,7 +2,10 @@ import type React from "react";
 import { useId } from "react";
 
 import type { AppError } from "../../../shared/errors/app-error";
-import type { SupportedOperationsDto } from "../../../shared/ipc-contracts/device";
+import type {
+  SupportedFamilyDto,
+  SupportedOperationsDto,
+} from "../../../shared/ipc-contracts/device";
 import type {
   ValidationBlocker,
   ValidationVerdict,
@@ -117,6 +120,12 @@ export interface LuniiDecisionPanelProps {
    *  "affiche les opérations officiellement supportées" requirement
    *  is satisfied. Omitted on non-idle states. */
   supportedOperations?: SupportedOperationsDto;
+  /** Family of the detected supported device. Drives ONLY the
+   *  family-correct label of the transfer capability line (Lunii keeps
+   *  `Transfert vers la Lunii`; any other family reads `Transfert vers
+   *  l'appareil`). State rendering NEVER branches on it — the
+   *  recognized-vs-ready rule derives from the capabilities. */
+  deviceFamily?: SupportedFamilyDto;
   /** Number of selected stories in the library. Drives the Éditer
    *  CTA's enabled state. */
   selectedCount?: number;
@@ -198,6 +207,7 @@ export function LuniiDecisionPanel({
   deviceLabel,
   deviceReason,
   supportedOperations,
+  deviceFamily,
   selectedCount = 0,
   comparison,
   onRetryComparison,
@@ -214,6 +224,25 @@ export function LuniiDecisionPanel({
   onRefreshDevice,
   onConsultSupportProfile,
 }: LuniiDecisionPanelProps): React.JSX.Element {
+  // GENERAL product rule "recognized ≠ ready": derived from the
+  // authoritative capability matrix, NEVER from the family name. A
+  // supported profile with zero activated capability (FLAM Gen1 today,
+  // any future such profile) renders the honest recognized state.
+  // Undefined operations (non-idle states, legacy tests) keep the
+  // historical ready behavior.
+  const hasAnyCapability =
+    supportedOperations === undefined ||
+    supportedOperations.readLibrary ||
+    supportedOperations.inspectStory ||
+    supportedOperations.importStory ||
+    supportedOperations.writeStory;
+  const isRecognizedWithoutCapability =
+    deviceState === "idle" && !hasAnyCapability;
+  // The recognized-without-capability idle state deliberately does NOT
+  // join this list: its support-profile pointer is the STATIC text
+  // below (zero navigation, zero network — NFR14), never the external
+  // link this CTA opens. The CTA keeps its pre-existing scope
+  // (unsupported / ambiguous / error).
   const showSupportProfile =
     onConsultSupportProfile !== undefined &&
     (deviceState === "unsupported" ||
@@ -225,7 +254,12 @@ export function LuniiDecisionPanel({
   const preparationReasonId = useId();
   const transferReasonId = useId();
 
-  const deviceChipLabel = formatDeviceChipLabel(deviceState, deviceLabel);
+  const deviceChipLabel = formatDeviceChipLabel(
+    deviceState,
+    deviceLabel,
+    hasAnyCapability,
+    deviceFamily,
+  );
   const deviceChipTone = formatDeviceChipTone(deviceState);
 
   const selectionChipLabel = formatSelectionLabel(selectedCount);
@@ -235,7 +269,7 @@ export function LuniiDecisionPanel({
   const editIsActive = selectedCount === 1;
 
   const sendDisabledReason =
-    deviceReason ?? formatSendReason(deviceState);
+    deviceReason ?? formatSendReason(deviceState, hasAnyCapability);
 
   const isScanning = deviceState === "scanning";
 
@@ -330,10 +364,27 @@ export function LuniiDecisionPanel({
             className="lunii-panel__operations"
             aria-label="Opérations supportées par l'appareil détecté"
           >
-            {formatSupportedOperationLabels(supportedOperations).map((line) => (
+            {formatSupportedOperationLabels(
+              supportedOperations,
+              deviceFamily,
+            ).map((line) => (
               <li key={line}>{line}</li>
             ))}
           </ul>
+        )}
+        {isRecognizedWithoutCapability && (
+          // Static, durable explanation (never role="alert"): the
+          // device is officially recognized while no operation is
+          // activated in this version. The support-profile pointer is
+          // TEXT ONLY — no navigation, no network (NFR14): consulting
+          // the profiles is a separate surface, so no internal target
+          // exists to wire yet. Rendered in this idle state ONLY,
+          // never in a capability-bearing idle (ui-states.md
+          // "Recognized ≠ ready").
+          <p className="lunii-panel__reason">
+            Appareil reconnu, aucune opération activée dans cette version.
+            Consulte le profil de support pour comprendre ce qui est permis.
+          </p>
         )}
         {transfer === undefined ? (
           // Legacy fallback (tests/storybook without the write flow): the send
@@ -875,15 +926,47 @@ function formatEditReason(count: number): string {
   return "Reprise indisponible: sélection multiple";
 }
 
+/** Canonical FAMILY names (product-language.md). Distinct from the
+ *  cohort labels (`formatSupportedLabel` in the route): the recognized
+ *  chip is contractually `Appareil reconnu — {famille}`, never a
+ *  cohort wording. */
+function formatFamilyLabel(family: SupportedFamilyDto): string {
+  switch (family) {
+    case "lunii":
+      return "Lunii";
+    case "flam":
+      return "FLAM";
+  }
+}
+
 function formatDeviceChipLabel(
   state: LuniiDeviceState,
-  deviceLabel?: string,
+  deviceLabel: string | undefined,
+  hasAnyCapability: boolean,
+  deviceFamily: SupportedFamilyDto | undefined,
 ): string {
   switch (state) {
     case "absent":
       return "Aucun appareil connecté";
-    case "idle":
+    case "idle": {
+      // "Recognized ≠ ready" (general product rule, ui-states.md):
+      // `Appareil prêt` REQUIRES at least one activated capability —
+      // derived from the matrix, never from the family. A recognized
+      // zero-capability profile renders the honest static state, and
+      // its suffix is the FAMILY name (`Appareil reconnu — {famille}`,
+      // product-language.md) — the cohort-flavored `deviceLabel` is
+      // only the fallback when no family is supplied.
+      if (!hasAnyCapability) {
+        const familyLabel =
+          deviceFamily !== undefined
+            ? formatFamilyLabel(deviceFamily)
+            : deviceLabel;
+        return familyLabel
+          ? `Appareil reconnu — ${familyLabel}`
+          : "Appareil reconnu";
+      }
       return deviceLabel ? `Appareil prêt — ${deviceLabel}` : "Appareil prêt";
+    }
     case "unsupported":
       return "Profil non supporté";
     case "ambiguous":
@@ -914,19 +997,31 @@ function formatDeviceChipTone(
 
 function formatSupportedOperationLabels(
   ops: SupportedOperationsDto,
+  family?: SupportedFamilyDto,
 ): string[] {
   // Stable, parent-friendly French copy mirroring the canonical
-  // labels in docs/architecture/device-support-profile.md.
+  // labels in docs/architecture/device-support-profile.md. The
+  // transfer line is family-correct: only a Lunii line may read
+  // "Transfert vers la Lunii" (product-language.md) — any other
+  // family gets the generic device wording. `undefined` (legacy
+  // callers without a family) keeps the historical Lunii copy.
+  const transferLabel =
+    family === undefined || family === "lunii"
+      ? "Transfert vers la Lunii"
+      : "Transfert vers l'appareil";
   const matrix: Array<[keyof SupportedOperationsDto, string]> = [
     ["readLibrary", "Lecture bibliothèque appareil"],
     ["inspectStory", "Inspection d'histoire"],
     ["importStory", "Copie dans la bibliothèque locale"],
-    ["writeStory", "Transfert vers la Lunii"],
+    ["writeStory", transferLabel],
   ];
   return matrix.map(([k, label]) => `${ops[k] ? "✓" : "—"} ${label}`);
 }
 
-function formatSendReason(state: LuniiDeviceState): string {
+function formatSendReason(
+  state: LuniiDeviceState,
+  hasAnyCapability: boolean,
+): string {
   switch (state) {
     case "absent":
       // Distinct from "appareil non supporté" so the user knows
@@ -935,6 +1030,13 @@ function formatSendReason(state: LuniiDeviceState): string {
       // docs/architecture/ui-states.md.
       return "Envoi indisponible: aucun appareil connecté";
     case "idle":
+      // A recognized zero-capability profile follows the EXISTING
+      // capability-closed path (the V3 pattern): the "MVP Phase 1"
+      // copy PROMISES a future transfer and stays exclusive to
+      // write-planned Lunii cohorts — never rendered here.
+      if (!hasAnyCapability) {
+        return "Envoi indisponible: profil non supporté";
+      }
       // MVP Phase 1: even a supported device cannot accept a transfer
       // yet — Epic 3 wires the gate. Distinct copy from "appareil
       // non supporté" so the user sees a positive "supported device,

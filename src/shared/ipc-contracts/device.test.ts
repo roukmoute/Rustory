@@ -16,6 +16,18 @@ const validSupported = {
   },
 };
 
+// REAL Rust wire for a recognized FLAM Gen1 (see the byte-for-byte
+// contract test src-tauri/tests/contracts/device.rs): the
+// `metadataFormatVersion` KEY is absent — never null — and every
+// operation is false. A verdict emitted by Rust must NEVER be rejected
+// by this guard.
+const validSupportedFlam = JSON.parse(
+  '{"kind":"supported","family":"flam","firmwareCohort":"flamGen1",' +
+    '"deviceIdentifier":"fedcba9876543210fedcba9876543210",' +
+    '"supportedOperations":{"readLibrary":false,"inspectStory":false,' +
+    '"importStory":false,"writeStory":false}}',
+) as Record<string, unknown>;
+
 describe("isConnectedDeviceDto — valid payloads", () => {
   it("accepts kind=none", () => {
     expect(isConnectedDeviceDto({ kind: "none" })).toBe(true);
@@ -65,6 +77,75 @@ describe("isConnectedDeviceDto — valid payloads", () => {
     expect(
       isConnectedDeviceDto({ kind: "ambiguous", candidateCount: 2 }),
     ).toBe(true);
+  });
+
+  it("accepts the real FLAM Gen1 wire (no metadataFormatVersion key)", () => {
+    expect(isConnectedDeviceDto(validSupportedFlam)).toBe(true);
+  });
+});
+
+describe("isConnectedDeviceDto — FAMILY_CONTRACTS closed combinations", () => {
+  // The five cross rejections: an illegal family⇔cohort⇔version
+  // combination must be unrepresentable at the boundary, even though
+  // each half would pass an independent set membership check.
+
+  it("rejects lunii paired with the flamGen1 cohort", () => {
+    expect(
+      isConnectedDeviceDto({ ...validSupported, firmwareCohort: "flamGen1" }),
+    ).toBe(false);
+  });
+
+  it("rejects flam paired with a lunii cohort", () => {
+    expect(
+      isConnectedDeviceDto({ ...validSupportedFlam, firmwareCohort: "origineV1" }),
+    ).toBe(false);
+  });
+
+  it("rejects flam carrying a metadataFormatVersion key", () => {
+    expect(
+      isConnectedDeviceDto({ ...validSupportedFlam, metadataFormatVersion: 3 }),
+    ).toBe(false);
+  });
+
+  it("rejects flam carrying a null metadataFormatVersion (absent means NO key)", () => {
+    expect(
+      isConnectedDeviceDto({
+        ...validSupportedFlam,
+        metadataFormatVersion: null,
+      }),
+    ).toBe(false);
+  });
+
+  it("rejects lunii missing its metadataFormatVersion", () => {
+    const { metadataFormatVersion: _dropped, ...withoutVersion } =
+      validSupported;
+    expect(isConnectedDeviceDto(withoutVersion)).toBe(false);
+  });
+
+  it("rejects an unknown family even with a known cohort", () => {
+    expect(
+      isConnectedDeviceDto({ ...validSupported, family: "tonies" }),
+    ).toBe(false);
+  });
+
+  it("rejects Object.prototype member names as family with a boolean, never a TypeError", () => {
+    // A plain `FAMILY_CONTRACTS[family]` indexation would walk the
+    // prototype chain for these names and crash the guard instead of
+    // rejecting the drift.
+    for (const hostile of ["constructor", "toString", "__proto__", "hasOwnProperty"]) {
+      expect(
+        isConnectedDeviceDto({ ...validSupported, family: hostile }),
+        hostile,
+      ).toBe(false);
+    }
+  });
+
+  it("rejects Object.prototype member names as kind with a boolean, never a TypeError", () => {
+    // Same prototype-safety discipline on the `kind` discriminant
+    // (ALLOWED_KEYS lookup).
+    for (const hostile of ["constructor", "toString", "__proto__"]) {
+      expect(isConnectedDeviceDto({ kind: hostile }), hostile).toBe(false);
+    }
   });
 });
 

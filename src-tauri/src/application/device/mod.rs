@@ -18,13 +18,13 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use crate::domain::device::{
-    classify_lunii, DeviceFamily, DeviceProfile, DeviceProfileClassification, SupportedOperation,
-    UnsupportedReason,
+    classify_flam, classify_lunii, DeviceFamily, DeviceProfile, DeviceProfileClassification,
+    SupportedOperation, UnsupportedReason,
 };
 use crate::domain::shared::AppError;
 use crate::infrastructure::device::{
     compute_device_identifier, parse_metadata_version, try_automount_lunii_candidates,
-    DeviceScanner, MetadataParseError, MountAttempt,
+    CandidateFacts, DeviceScanner, MetadataParseError, MountAttempt,
 };
 
 /// Result of `read_connected_lunii`. Mapped 1-to-1 by the IPC layer to
@@ -133,27 +133,52 @@ pub(crate) fn resolve_connected_lunii(
     let mut unsupported: Vec<(UnsupportedReason, Option<String>)> = Vec::new();
 
     for candidate in report.candidates {
-        // A candidate must carry a non-empty `.pi` payload: hashing an
-        // empty payload would still produce a valid 32-hex identifier,
-        // collapsing every plug of an empty-`.pi` volume to the same
-        // device_identifier and exposing a path to silently accept a
-        // corrupted Lunii. Treat empty `.pi` as `MetadataCorrupt`
-        // upstream of the version parse so the user receives the
-        // "marqueurs appareil incomplets" copy.
-        if candidate.pi_payload.is_empty() {
-            unsupported.push((UnsupportedReason::MetadataCorrupt, None));
-            continue;
-        }
-        let metadata_version = match parse_metadata_version(&candidate.metadata_payload) {
-            Ok(v) => v,
-            Err(MetadataParseError::Empty) | Err(MetadataParseError::OutOfRange(_)) => {
-                unsupported.push((UnsupportedReason::MetadataCorrupt, None));
-                continue;
+        // Classification dispatches on the per-family facts the probe
+        // collected; each arm feeds the SAME aggregation (supported /
+        // unsupported vectors) so every family flows through the common
+        // support contract — no parallel pipeline.
+        let classification = match &candidate.facts {
+            CandidateFacts::Lunii {
+                metadata_payload,
+                pi_payload,
+                has_bt,
+            } => {
+                // A candidate must carry a non-empty `.pi` payload: hashing an
+                // empty payload would still produce a valid 32-hex identifier,
+                // collapsing every plug of an empty-`.pi` volume to the same
+                // device_identifier and exposing a path to silently accept a
+                // corrupted Lunii. Treat empty `.pi` as `MetadataCorrupt`
+                // upstream of the version parse so the user receives the
+                // "marqueurs appareil incomplets" copy.
+                if pi_payload.is_empty() {
+                    unsupported.push((UnsupportedReason::MetadataCorrupt, None));
+                    continue;
+                }
+                let metadata_version = match parse_metadata_version(metadata_payload) {
+                    Ok(v) => v,
+                    Err(MetadataParseError::Empty) | Err(MetadataParseError::OutOfRange(_)) => {
+                        unsupported.push((UnsupportedReason::MetadataCorrupt, None));
+                        continue;
+                    }
+                };
+                let identifier =
+                    compute_device_identifier(pi_payload, candidate.volume_serial.as_deref());
+                classify_lunii(metadata_version, true, *has_bt, &identifier)
+            }
+            CandidateFacts::Flam {
+                mdf_payload,
+                has_str_dir,
+                has_etc_dir,
+            } => {
+                // Same recipe as Lunii: the family's PRIMARY marker payload
+                // (`.mdf`) is hashed with the volume serial. classify_flam
+                // refuses an empty `.mdf` before the identifier is ever used.
+                let identifier =
+                    compute_device_identifier(mdf_payload, candidate.volume_serial.as_deref());
+                classify_flam(mdf_payload, *has_str_dir, *has_etc_dir, &identifier)
             }
         };
-        let identifier =
-            compute_device_identifier(&candidate.pi_payload, candidate.volume_serial.as_deref());
-        match classify_lunii(metadata_version, true, candidate.has_bt, &identifier) {
+        match classification {
             DeviceProfileClassification::Supported(profile) => {
                 supported.push((profile, candidate.mount_path, candidate.volume_serial))
             }
@@ -252,6 +277,7 @@ pub fn check_operation_allowed(
         "operation": operation.diagnostic_tag(),
         "family": match profile.family {
             DeviceFamily::Lunii => "lunii",
+            DeviceFamily::Flam => "flam",
         },
         "firmware_cohort": profile.firmware_cohort.diagnostic_tag(),
     })))
@@ -260,7 +286,7 @@ pub fn check_operation_allowed(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::device::LuniiFirmwareCohort;
+    use crate::domain::device::{FirmwareCohort, FlamFirmwareCohort, LuniiFirmwareCohort};
     use crate::infrastructure::device::MockDeviceScanner;
 
     fn budget() -> Duration {
@@ -282,8 +308,11 @@ mod tests {
         let outcome = read_connected_lunii(&m, budget()).expect("scan");
         match outcome {
             ConnectedLuniiOutcome::Supported(p) => {
-                assert_eq!(p.firmware_cohort, LuniiFirmwareCohort::OrigineV1);
-                assert_eq!(p.metadata_format_version, 3);
+                assert_eq!(
+                    p.firmware_cohort,
+                    FirmwareCohort::Lunii(LuniiFirmwareCohort::OrigineV1)
+                );
+                assert_eq!(p.metadata_format_version, Some(3));
                 assert_eq!(p.device_identifier.len(), 32);
                 assert!(p.supported_operations.read_library);
                 assert!(p.supported_operations.import_story);
@@ -301,7 +330,35 @@ mod tests {
         let outcome = read_connected_lunii(&m, budget()).expect("scan");
         match outcome {
             ConnectedLuniiOutcome::Supported(p) => {
-                assert_eq!(p.firmware_cohort, LuniiFirmwareCohort::V3);
+                assert_eq!(
+                    p.firmware_cohort,
+                    FirmwareCohort::Lunii(LuniiFirmwareCohort::V3)
+                );
+                assert!(!p.supported_operations.import_story);
+                assert!(!p.supported_operations.write_story);
+            }
+            other => panic!("expected Supported, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn read_connected_lunii_returns_supported_recognized_flam_gen1_without_version() {
+        let m = MockDeviceScanner::new();
+        m.enqueue_supported_flam();
+        let outcome = read_connected_lunii(&m, budget()).expect("scan");
+        match outcome {
+            ConnectedLuniiOutcome::Supported(p) => {
+                assert_eq!(p.family, DeviceFamily::Flam);
+                assert_eq!(
+                    p.firmware_cohort,
+                    FirmwareCohort::Flam(FlamFirmwareCohort::Gen1)
+                );
+                // No version byte is ever invented for `.mdf`.
+                assert_eq!(p.metadata_format_version, None);
+                assert_eq!(p.device_identifier.len(), 32);
+                // Recognized ≠ ready: every capability stays closed.
+                assert!(!p.supported_operations.read_library);
+                assert!(!p.supported_operations.inspect_story);
                 assert!(!p.supported_operations.import_story);
                 assert!(!p.supported_operations.write_story);
             }
@@ -334,10 +391,12 @@ mod tests {
         let report = crate::infrastructure::device::DeviceScanReport {
             candidates: vec![crate::infrastructure::device::DeviceCandidate {
                 mount_path: std::path::PathBuf::from("/mock/no-pi"),
-                metadata_payload: vec![3],
-                pi_payload: Vec::new(),
-                has_bt: true,
                 volume_serial: None,
+                facts: CandidateFacts::Lunii {
+                    metadata_payload: vec![3],
+                    pi_payload: Vec::new(),
+                    has_bt: true,
+                },
             }],
             elapsed: Duration::from_millis(1),
             truncated_due_to_timeout: false,
@@ -359,10 +418,12 @@ mod tests {
         let report = crate::infrastructure::device::DeviceScanReport {
             candidates: vec![crate::infrastructure::device::DeviceCandidate {
                 mount_path: std::path::PathBuf::from("/mock/empty"),
-                metadata_payload: Vec::new(),
-                pi_payload: b"PI".to_vec(),
-                has_bt: true,
                 volume_serial: None,
+                facts: CandidateFacts::Lunii {
+                    metadata_payload: Vec::new(),
+                    pi_payload: b"PI".to_vec(),
+                    has_bt: true,
+                },
             }],
             elapsed: Duration::from_millis(1),
             truncated_due_to_timeout: false,
@@ -374,6 +435,68 @@ mod tests {
                 assert_eq!(reason, UnsupportedReason::MetadataCorrupt);
             }
             other => panic!("expected Unsupported, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn read_connected_lunii_returns_unsupported_metadata_corrupt_when_flam_mdf_empty() {
+        let m = MockDeviceScanner::new();
+        // An empty `.mdf` is a VISIBLE candidate: the user must SEE the
+        // broken FLAM explained, never a silent "no device".
+        let report = crate::infrastructure::device::DeviceScanReport {
+            candidates: vec![crate::infrastructure::device::DeviceCandidate {
+                mount_path: std::path::PathBuf::from("/mock/flam-empty-mdf"),
+                volume_serial: None,
+                facts: CandidateFacts::Flam {
+                    mdf_payload: Vec::new(),
+                    has_str_dir: true,
+                    has_etc_dir: true,
+                },
+            }],
+            elapsed: Duration::from_millis(1),
+            truncated_due_to_timeout: false,
+        };
+        m.enqueue(Ok(report));
+        let outcome = read_connected_lunii(&m, budget()).expect("scan");
+        match outcome {
+            ConnectedLuniiOutcome::Unsupported {
+                reason,
+                firmware_hint,
+            } => {
+                assert_eq!(reason, UnsupportedReason::MetadataCorrupt);
+                assert_eq!(firmware_hint.as_deref(), Some("flam"));
+            }
+            other => panic!("expected Unsupported(MetadataCorrupt), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn read_connected_lunii_returns_unsupported_metadata_when_flam_dirs_missing() {
+        let m = MockDeviceScanner::new();
+        let report = crate::infrastructure::device::DeviceScanReport {
+            candidates: vec![crate::infrastructure::device::DeviceCandidate {
+                mount_path: std::path::PathBuf::from("/mock/flam-no-str"),
+                volume_serial: None,
+                facts: CandidateFacts::Flam {
+                    mdf_payload: b"MDF".to_vec(),
+                    has_str_dir: false,
+                    has_etc_dir: true,
+                },
+            }],
+            elapsed: Duration::from_millis(1),
+            truncated_due_to_timeout: false,
+        };
+        m.enqueue(Ok(report));
+        let outcome = read_connected_lunii(&m, budget()).expect("scan");
+        match outcome {
+            ConnectedLuniiOutcome::Unsupported {
+                reason,
+                firmware_hint,
+            } => {
+                assert_eq!(reason, UnsupportedReason::MetadataUnsupported);
+                assert_eq!(firmware_hint.as_deref(), Some("flam"));
+            }
+            other => panic!("expected Unsupported(MetadataUnsupported), got {other:?}"),
         }
     }
 
@@ -407,6 +530,45 @@ mod tests {
     }
 
     #[test]
+    fn read_connected_lunii_returns_ambiguous_when_lunii_and_flam_are_both_connected() {
+        // Cross-family ambiguity: a recognized FLAM joins the SAME
+        // supported vector as a Lunii, so the pair cannot be bound to
+        // one device — `MultipleCandidates`, any families (the
+        // documented contract of the support profile).
+        let m = MockDeviceScanner::new();
+        let report = crate::infrastructure::device::DeviceScanReport {
+            candidates: vec![
+                crate::infrastructure::device::DeviceCandidate {
+                    mount_path: std::path::PathBuf::from("/mock/lunii"),
+                    volume_serial: Some("SERIAL_L".into()),
+                    facts: CandidateFacts::Lunii {
+                        metadata_payload: vec![3],
+                        pi_payload: b"PI_L".to_vec(),
+                        has_bt: true,
+                    },
+                },
+                crate::infrastructure::device::DeviceCandidate {
+                    mount_path: std::path::PathBuf::from("/mock/flam"),
+                    volume_serial: Some("SERIAL_F".into()),
+                    facts: CandidateFacts::Flam {
+                        mdf_payload: b"MDF".to_vec(),
+                        has_str_dir: true,
+                        has_etc_dir: true,
+                    },
+                },
+            ],
+            elapsed: Duration::from_millis(2),
+            truncated_due_to_timeout: false,
+        };
+        m.enqueue(Ok(report));
+        let outcome = read_connected_lunii(&m, budget()).expect("scan");
+        assert_eq!(
+            outcome,
+            ConnectedLuniiOutcome::Ambiguous { candidate_count: 2 }
+        );
+    }
+
+    #[test]
     fn read_connected_lunii_prioritizes_metadata_corrupt_over_metadata_unsupported() {
         let m = MockDeviceScanner::new();
         // Two candidates: one supported v3 + one with both unsupported
@@ -418,17 +580,21 @@ mod tests {
             candidates: vec![
                 crate::infrastructure::device::DeviceCandidate {
                     mount_path: std::path::PathBuf::from("/a"),
-                    metadata_payload: vec![99],
-                    pi_payload: b"PI".to_vec(),
-                    has_bt: true,
                     volume_serial: None,
+                    facts: CandidateFacts::Lunii {
+                        metadata_payload: vec![99],
+                        pi_payload: b"PI".to_vec(),
+                        has_bt: true,
+                    },
                 },
                 crate::infrastructure::device::DeviceCandidate {
                     mount_path: std::path::PathBuf::from("/b"),
-                    metadata_payload: Vec::new(), // empty → parse error → MetadataCorrupt
-                    pi_payload: b"PI".to_vec(),
-                    has_bt: true,
                     volume_serial: None,
+                    facts: CandidateFacts::Lunii {
+                        metadata_payload: Vec::new(), // empty → parse error → MetadataCorrupt
+                        pi_payload: b"PI".to_vec(),
+                        has_bt: true,
+                    },
                 },
             ],
             elapsed: Duration::from_millis(1),
@@ -478,18 +644,27 @@ mod tests {
     fn build_profile(cohort: LuniiFirmwareCohort, version: u8) -> DeviceProfile {
         match crate::domain::device::classify_lunii(version, true, true, "id") {
             crate::domain::device::DeviceProfileClassification::Supported(mut p) => {
-                p.firmware_cohort = cohort;
+                p.firmware_cohort = FirmwareCohort::Lunii(cohort);
                 p
             }
             other => panic!("expected Supported, got {other:?}"),
         }
     }
 
+    fn build_flam_profile() -> DeviceProfile {
+        match crate::domain::device::classify_flam(b"MDF", true, true, "id") {
+            crate::domain::device::DeviceProfileClassification::Supported(p) => p,
+            other => panic!("expected Supported, got {other:?}"),
+        }
+    }
+
     #[test]
-    fn check_operation_allowed_authorizes_write_story_for_v1_v2_and_blocks_v3() {
+    fn check_operation_allowed_authorizes_write_story_for_v1_v2_and_blocks_v3_and_flam() {
         // Epic 3 wires the write gate. Every matrix line is covered so a
         // silent regression on any cohort fails here (capability-gate
-        // discipline): V1/V2 are writable, V3 stays fail-closed.
+        // discipline): V1/V2 are writable, V3 stays fail-closed — and the
+        // lock EXTENDS to flam_gen1 (never weakened): write is blocked
+        // everywhere the matrix says ❌.
         for (cohort, version) in [
             (LuniiFirmwareCohort::OrigineV1, 3u8),
             (LuniiFirmwareCohort::MidGenV2, 6),
@@ -506,6 +681,47 @@ mod tests {
         assert_eq!(v["code"], "DEVICE_UNSUPPORTED");
         assert_eq!(v["details"]["source"], "capability_gate");
         assert_eq!(v["details"]["operation"], "write_story");
+
+        let flam = build_flam_profile();
+        let err = check_operation_allowed(&flam, SupportedOperation::WriteStory)
+            .expect_err("FLAM Gen1 write must stay blocked");
+        let v = serde_json::to_value(&err).expect("ser");
+        assert_eq!(v["code"], "DEVICE_UNSUPPORTED");
+        assert_eq!(v["details"]["source"], "capability_gate");
+        assert_eq!(v["details"]["operation"], "write_story");
+        assert_eq!(v["details"]["family"], "flam");
+        assert_eq!(v["details"]["firmware_cohort"], "flam_gen1");
+    }
+
+    /// One matrix line = one test ×4: FLAM Gen1 refuses EVERY operation
+    /// through the same gate the four call sites consult — `ALL_FALSE`
+    /// inherits the refusal everywhere by construction, with actionable
+    /// details (`family`/`firmware_cohort` tags, non-empty copy).
+    #[test]
+    fn check_operation_allowed_blocks_every_operation_for_flam_gen1() {
+        let flam = build_flam_profile();
+        for op in [
+            SupportedOperation::ReadLibrary,
+            SupportedOperation::InspectStory,
+            SupportedOperation::ImportStory,
+            SupportedOperation::WriteStory,
+        ] {
+            let err = match check_operation_allowed(&flam, op) {
+                Err(e) => e,
+                Ok(()) => panic!("{op:?} must be blocked for FLAM Gen1"),
+            };
+            let v = serde_json::to_value(&err).expect("ser");
+            assert_eq!(v["code"], "DEVICE_UNSUPPORTED", "{op:?}");
+            assert_eq!(v["details"]["source"], "capability_gate", "{op:?}");
+            assert_eq!(v["details"]["operation"], op.diagnostic_tag(), "{op:?}");
+            assert_eq!(v["details"]["family"], "flam", "{op:?}");
+            assert_eq!(v["details"]["firmware_cohort"], "flam_gen1", "{op:?}");
+            assert!(!err.message.is_empty(), "refusal needs a cause: {op:?}");
+            assert!(
+                !err.user_action.as_deref().unwrap_or("").is_empty(),
+                "refusal needs a next gesture: {op:?}"
+            );
+        }
     }
 
     #[test]

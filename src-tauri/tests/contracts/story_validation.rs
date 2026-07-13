@@ -189,7 +189,10 @@ fn write_capability_is_governed_by_the_cohort_gate_not_the_verdict() {
             DeviceProfileClassification::Supported(p) => p,
             other => panic!("md v{version} must classify as supported, got {other:?}"),
         };
-        assert_eq!(profile.firmware_cohort, cohort);
+        assert_eq!(
+            profile.firmware_cohort,
+            rustory_lib::domain::device::FirmwareCohort::Lunii(cohort)
+        );
         let result = check_operation_allowed(&profile, SupportedOperation::WriteStory);
         if writable {
             result.expect("V1/V2 write must be allowed by the gate");

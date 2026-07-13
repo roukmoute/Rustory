@@ -476,8 +476,8 @@ mod tests {
     use crate::infrastructure::db;
     use crate::infrastructure::device::fixtures::temp_lunii_mount_with_pack_content;
     use crate::infrastructure::device::{
-        compute_device_identifier, DeviceCandidate, DeviceScanReport, MockDeviceLibraryReader,
-        MockDevicePackReader, MockDeviceScanner, SystemDevicePackReader,
+        compute_device_identifier, CandidateFacts, DeviceCandidate, DeviceScanReport,
+        MockDeviceLibraryReader, MockDevicePackReader, MockDeviceScanner, SystemDevicePackReader,
     };
     use std::path::PathBuf;
     use tempfile::TempDir;
@@ -922,10 +922,12 @@ mod tests {
         let report = DeviceScanReport {
             candidates: vec![DeviceCandidate {
                 mount_path: mount.clone(),
-                metadata_payload: vec![3],
-                pi_payload: b"MOCK_PI".to_vec(),
-                has_bt: true,
                 volume_serial: Some("MOCK_SERIAL".into()),
+                facts: CandidateFacts::Lunii {
+                    metadata_payload: vec![3],
+                    pi_payload: b"MOCK_PI".to_vec(),
+                    has_bt: true,
+                },
             }],
             elapsed: Duration::from_millis(1),
             truncated_due_to_timeout: false,

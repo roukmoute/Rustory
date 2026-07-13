@@ -33,14 +33,17 @@ pub enum Event {
     /// elapsed time so support can spot scans that approached the
     /// budget without finding anything.
     DeviceAbsent { elapsed_ms: u64 },
-    /// A supported Lunii was detected. Carries the opaque
-    /// `device_identifier` (already hashed — never the raw `.pi`),
+    /// A supported device was detected. Carries the opaque
+    /// `device_identifier` (already hashed — never the raw payload),
     /// the firmware cohort tag, the metadata format version and the
-    /// wall-clock elapsed time of the full scan pipeline.
+    /// wall-clock elapsed time of the full scan pipeline. The version
+    /// key is OMITTED for profiles that carry none (FLAM) — never
+    /// `null`, never an invented `0`.
     DeviceDetectedSupported {
         device_identifier: String,
         firmware_cohort: &'static str,
-        metadata_format_version: u8,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        metadata_format_version: Option<u8>,
         elapsed_ms: u64,
     },
     /// A candidate was found but the profile is not in the allow-list.
@@ -192,7 +195,7 @@ mod tests {
         let event = Event::DeviceDetectedSupported {
             device_identifier: "abc".into(),
             firmware_cohort: "origine_v1",
-            metadata_format_version: 3,
+            metadata_format_version: Some(3),
             elapsed_ms: 42,
         };
         let v = serde_json::to_value(&event).expect("ser");
@@ -201,6 +204,26 @@ mod tests {
         assert_eq!(v["firmware_cohort"], "origine_v1");
         assert_eq!(v["metadata_format_version"], 3);
         assert_eq!(v["elapsed_ms"], 42);
+    }
+
+    #[test]
+    fn event_device_detected_supported_omits_version_key_when_profile_has_none() {
+        // A FLAM entry OMITS the version key entirely — never `null`,
+        // never an invented `0`.
+        let event = Event::DeviceDetectedSupported {
+            device_identifier: "abc".into(),
+            firmware_cohort: "flam_gen1",
+            metadata_format_version: None,
+            elapsed_ms: 42,
+        };
+        let v = serde_json::to_value(&event).expect("ser");
+        assert_eq!(v["category"], "device_detected_supported");
+        assert_eq!(v["firmware_cohort"], "flam_gen1");
+        assert!(v
+            .as_object()
+            .expect("object")
+            .get("metadata_format_version")
+            .is_none());
     }
 
     #[test]
@@ -253,7 +276,7 @@ mod tests {
             Event::DeviceDetectedSupported {
                 device_identifier: "id".into(),
                 firmware_cohort: "v3",
-                metadata_format_version: 7,
+                metadata_format_version: Some(7),
                 elapsed_ms: 0,
             },
         )
@@ -274,7 +297,7 @@ mod tests {
         let event = Event::DeviceDetectedSupported {
             device_identifier: "OPAQUE_HASH".into(),
             firmware_cohort: "origine_v1",
-            metadata_format_version: 3,
+            metadata_format_version: Some(3),
             elapsed_ms: 0,
         };
         let line = serde_json::to_string(&event).expect("ser");

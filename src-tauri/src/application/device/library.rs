@@ -29,7 +29,8 @@ pub enum DeviceLibraryOutcome {
     /// No supported device is connected anymore.
     None,
     /// A device is present but its profile is not in the allow-list, or
-    /// more than one supported Lunii is connected (cannot bind the read).
+    /// more than one supported device is connected — any families —
+    /// (cannot bind the read).
     Unsupported {
         reason: UnsupportedReason,
         firmware_hint: Option<String>,
@@ -63,9 +64,11 @@ pub fn read_device_library(
             firmware_hint,
         }),
         ConnectedLuniiOutcome::Ambiguous { candidate_count } => {
-            // More than one supported Lunii: we cannot bind the read to
-            // the requested device unambiguously. Surface the detection's
-            // `MultipleCandidates` reason rather than guessing.
+            // More than one supported device (any families — two Lunii,
+            // or a Lunii + a recognized FLAM): we cannot bind the read
+            // to the requested device unambiguously. Surface the
+            // detection's `MultipleCandidates` reason rather than
+            // guessing.
             Ok(DeviceLibraryOutcome::Unsupported {
                 reason: UnsupportedReason::MultipleCandidates,
                 firmware_hint: Some(format!("count_{candidate_count}")),

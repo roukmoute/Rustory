@@ -162,7 +162,12 @@ The UI should favor these labels when they are user-visible:
 | Abandon a failed / incomplete transfer (local draft intact) | `Abandonner` |
 | Relaunch is gated — no writable device is connected | `Rebranche la Lunii pour relancer.` |
 | No device is connected | `Aucun appareil connecté` |
-| Supported device detected | `Appareil prêt — {famille} {cohort}` |
+| Supported device detected (at least one activated capability) | `Appareil prêt — {famille} {cohort}` |
+| Supported device recognized with ZERO activated capability (static durable state, never an alert) | `Appareil reconnu — {famille}` |
+| Second supported family name (uppercase, invariant) | `FLAM` |
+| Recognized-without-capability explanation (TEXT-ONLY support-profile pointer — no navigation, no network; rendered in that idle state only) | `Appareil reconnu, aucune opération activée dans cette version. Consulte le profil de support pour comprendre ce qui est permis.` |
+| Non-activated capability line (per-operation rendering) | `— {libellé de l'opération}` |
+| Transfer capability line label for a non-Lunii family (Lunii keeps `Transfert vers la Lunii`) | `Transfert vers l'appareil` |
 | Detected device but profile not allow-listed | `Profil non supporté` |
 | Multiple supported devices detected at once | `Profil ambigu — plusieurs candidats détectés` |
 | Device scan transport itself failed | `Détection indisponible` |

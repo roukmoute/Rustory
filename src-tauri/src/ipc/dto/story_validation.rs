@@ -227,15 +227,21 @@ fn device_profile_copy(
     reason: &UnsupportedReason,
 ) -> (BlockerCauseDto, &'static str, &'static str) {
     match reason {
+        // Family-neutral copies: since FLAM recognition, a broken FLAM
+        // reaches these two reasons too (`.mdf` empty ⇒ corrupt,
+        // `str/`/`etc/` missing ⇒ unsupported) — naming the Lunii here
+        // would be factually wrong for a FLAM. `firmwareUnsupported`
+        // and `familyUnknown` below stay Lunii-worded on purpose: they
+        // have no FLAM emitter.
         UnsupportedReason::MetadataUnsupported => (
             BlockerCauseDto::MetadataUnsupported,
-            "Le profil de la Lunii connectée n'est pas pris en charge.",
-            "Consulte le profil de support pour voir les Lunii compatibles.",
+            "Le profil de l'appareil connecté n'est pas pris en charge.",
+            "Consulte le profil de support pour voir les appareils compatibles.",
         ),
         UnsupportedReason::MetadataCorrupt => (
             BlockerCauseDto::MetadataCorrupt,
-            "Les marqueurs de la Lunii connectée sont incomplets ou illisibles.",
-            "Rebranche la Lunii puis relance la vérification.",
+            "Les marqueurs de l'appareil connecté sont incomplets ou illisibles.",
+            "Rebranche l'appareil puis relance la vérification.",
         ),
         UnsupportedReason::FamilyUnknown => (
             BlockerCauseDto::FamilyUnknown,
@@ -244,8 +250,11 @@ fn device_profile_copy(
         ),
         UnsupportedReason::MultipleCandidates => (
             BlockerCauseDto::MultipleCandidates,
-            "Plusieurs Lunii compatibles sont connectées en même temps.",
-            "Ne garde qu'une seule Lunii branchée puis relance la vérification.",
+            // Family-neutral on purpose: since FLAM recognition joined
+            // the same supported vector, the ambiguous pair may mix
+            // families (a Lunii + a recognized FLAM).
+            "Plusieurs appareils compatibles sont connectés en même temps.",
+            "Ne garde qu'un seul appareil branché puis relance la vérification.",
         ),
         UnsupportedReason::FirmwareUnsupported => (
             BlockerCauseDto::FirmwareUnsupported,
@@ -376,6 +385,25 @@ mod tests {
             let (_, message, action) = device_profile_copy(&r);
             assert!(!message.is_empty(), "{r:?} message empty");
             assert!(!action.is_empty(), "{r:?} userAction empty");
+        }
+    }
+
+    #[test]
+    fn family_reachable_device_profile_copies_are_family_neutral() {
+        // Since FLAM recognition, a broken FLAM reaches MetadataCorrupt
+        // (`.mdf` empty), MetadataUnsupported (`str/`/`etc/` missing)
+        // and MultipleCandidates (mixed ambiguous pair): their copies
+        // must not name the Lunii. `firmwareUnsupported` and
+        // `familyUnknown` stay Lunii-worded on purpose (no FLAM
+        // emitter).
+        for r in [
+            UnsupportedReason::MetadataUnsupported,
+            UnsupportedReason::MetadataCorrupt,
+            UnsupportedReason::MultipleCandidates,
+        ] {
+            let (_, message, action) = device_profile_copy(&r);
+            assert!(!message.contains("Lunii"), "{r:?} message names Lunii");
+            assert!(!action.contains("Lunii"), "{r:?} userAction names Lunii");
         }
     }
 

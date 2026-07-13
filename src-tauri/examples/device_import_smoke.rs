@@ -95,7 +95,7 @@ fn main() {
     let identifier = match outcome {
         ConnectedLuniiOutcome::Supported(profile) => {
             println!(
-                "DETECTED supported: cohort={:?} metadata_v={} import={}",
+                "DETECTED supported: cohort={:?} metadata_v={:?} import={}",
                 profile.firmware_cohort,
                 profile.metadata_format_version,
                 profile.supported_operations.import_story,

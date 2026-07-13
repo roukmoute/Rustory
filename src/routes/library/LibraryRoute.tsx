@@ -55,6 +55,8 @@ import {
 } from "../../features/library/hooks/use-library-overview";
 import type {
   ConnectedDeviceDto,
+  FirmwareCohortDto,
+  SupportedFamilyDto,
   SupportedOperationsDto,
 } from "../../shared/ipc-contracts/device";
 import type { DeviceStoryDto } from "../../shared/ipc-contracts/device-library";
@@ -178,13 +180,20 @@ export function LibraryRoute(): React.JSX.Element {
     handleOpenStory(story.id);
   };
 
-  const { deviceState, deviceLabel, deviceReason, supportedOperations } =
-    mapDeviceForPanel(device.state, device.isRefreshing);
+  const {
+    deviceState,
+    deviceLabel,
+    deviceReason,
+    supportedOperations,
+    deviceFamily,
+  } = mapDeviceForPanel(device.state, device.isRefreshing);
 
-  // Derive the device whose library we may read: a supported Lunii that
-  // is read-authorized. Fall back to the cached snapshot so the device
-  // section survives a background detection refresh (SWR). `null` ⇒ the
-  // device-library hook stays idle and issues no IPC.
+  // Derive the device whose library we may read: a supported device
+  // that is read-authorized (the capability matrix decides — a
+  // recognized FLAM has readLibrary=false and never reads). Fall back
+  // to the cached snapshot so the device section survives a background
+  // detection refresh (SWR). `null` ⇒ the device-library hook stays
+  // idle and issues no IPC.
   const effectiveDevice: ConnectedDeviceDto | null =
     device.state.kind === "ready" ? device.state.device : device.cached;
   const readableDeviceId =
@@ -193,9 +202,10 @@ export function LibraryRoute(): React.JSX.Element {
     effectiveDevice.supportedOperations.readLibrary
       ? effectiveDevice.deviceIdentifier
       : null;
-  // The device whose WRITE gate is open: a supported Lunii that is
-  // write-authorized (V1/V2 in MVP; V3 stays read-only — the authoritative
-  // capability matrix decides, never the cohort name). `null` ⇒ no write target.
+  // The device whose WRITE gate is open: a supported device that is
+  // write-authorized (Lunii V1/V2 in MVP; V3 and recognized FLAM stay
+  // non-writable — the authoritative capability matrix decides, never
+  // the cohort or family name). `null` ⇒ no write target.
   const writableDeviceId =
     effectiveDevice &&
     effectiveDevice.kind === "supported" &&
@@ -556,6 +566,7 @@ export function LibraryRoute(): React.JSX.Element {
               deviceLabel={deviceLabel}
               deviceReason={deviceReason}
               supportedOperations={supportedOperations}
+              deviceFamily={deviceFamily}
               selectedCount={presentSelectedIds.size}
               comparison={transferComparison}
               onRetryComparison={transferPreview.refresh}
@@ -602,6 +613,9 @@ interface DevicePanelMapping {
    *  detected Lunii actually exposes (AC1 — "affiche le profil
    *  détecté et les opérations officiellement supportées"). */
   supportedOperations?: SupportedOperationsDto;
+  /** Family of the detected supported device — drives only the
+   *  family-correct transfer capability label in the panel. */
+  deviceFamily?: SupportedFamilyDto;
 }
 
 /**
@@ -901,6 +915,7 @@ function mapDeviceDtoForPanel(dto: ConnectedDeviceDto): DevicePanelMapping {
         deviceState: "idle",
         deviceLabel: formatSupportedLabel(dto.firmwareCohort),
         supportedOperations: dto.supportedOperations,
+        deviceFamily: dto.family,
       };
     case "unsupported":
       return {
@@ -915,9 +930,7 @@ function mapDeviceDtoForPanel(dto: ConnectedDeviceDto): DevicePanelMapping {
   }
 }
 
-function formatSupportedLabel(
-  cohort: "origineV1" | "midGenV2" | "v3",
-): string {
+function formatSupportedLabel(cohort: FirmwareCohortDto): string {
   switch (cohort) {
     case "origineV1":
       return "Lunii Origine";
@@ -925,6 +938,8 @@ function formatSupportedLabel(
       return "Lunii";
     case "v3":
       return "Lunii V3";
+    case "flamGen1":
+      return "FLAM";
   }
 }
 
@@ -934,7 +949,13 @@ function formatUnsupportedReason(
 ): string {
   switch (reason) {
     case "metadataUnsupported":
-      return hint
+      // Only a genuine version hint (`metadata_v{n}`, the Lunii
+      // classifier's shape) is rendered as a version. Any other hint —
+      // e.g. the FLAM family tag `"flam"` carried by an incomplete
+      // FLAM structure (`str/`/`etc/` missing) — would read as a fake
+      // version (`format métadonnées flam non géré`), so it folds into
+      // the standard copy instead.
+      return hint && /^metadata_v\d+$/.test(hint)
         ? `Profil non supporté: format métadonnées ${hint.replace("metadata_v", "v")} non géré`
         : "Profil non supporté: format métadonnées non géré";
     case "metadataCorrupt":

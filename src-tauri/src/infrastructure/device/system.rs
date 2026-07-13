@@ -6,12 +6,12 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::domain::device::{
-    LUNII_BINARY_TOKEN_MARKER, LUNII_DEVICE_ID_MARKER, LUNII_PRIMARY_MARKER,
-    MAX_METADATA_FILE_BYTES,
+    FLAM_CONFIG_DIR, FLAM_PRIMARY_MARKER, FLAM_STORY_DIR, LUNII_BINARY_TOKEN_MARKER,
+    LUNII_DEVICE_ID_MARKER, LUNII_PRIMARY_MARKER, MAX_METADATA_FILE_BYTES,
 };
 use crate::domain::shared::AppError;
 
-use super::scanner::{DeviceCandidate, DeviceScanReport, DeviceScanner};
+use super::scanner::{CandidateFacts, DeviceCandidate, DeviceScanReport, DeviceScanner};
 
 /// Env var consumed by the system scanner to inject additional mount
 /// roots beyond what `sysinfo::Disks` enumerates. Useful when the
@@ -238,11 +238,32 @@ fn probe_root(
     root: &Path,
     deadline_exceeded: &Arc<AtomicBool>,
 ) -> Result<Option<DeviceCandidate>, ProbeError> {
+    // Fixed family precedence: a volume carrying `.md` is a LUNII
+    // candidate — even when `.mdf` coexists — and the historical Lunii
+    // probe applies verbatim. Only a volume WITHOUT `.md` enters the
+    // FLAM probe. The observable Lunii behavior never changes by a
+    // byte (device-support-profile.md → FLAM recognition markers).
     let md_path = root.join(LUNII_PRIMARY_MARKER);
-    if !md_path.is_file() {
+    if md_path.is_file() {
+        return probe_lunii_root(root, &md_path, deadline_exceeded);
+    }
+    // A `.md` entry present under ANY other shape (directory, broken
+    // symlink, special file) keeps the volume OUT of the FLAM probe:
+    // such a volume was ignored before FLAM recognition existed, and
+    // "without `.md`" means without the ENTRY — not "without a regular
+    // `.md` file". The Lunii gate above stays `is_file()` VERBATIM so
+    // historical symlinked-regular `.md` volumes keep probing as Lunii.
+    if std::fs::symlink_metadata(&md_path).is_ok() {
         return Ok(None);
     }
+    probe_flam_root(root, deadline_exceeded)
+}
 
+fn probe_lunii_root(
+    root: &Path,
+    md_path: &Path,
+    deadline_exceeded: &Arc<AtomicBool>,
+) -> Result<Option<DeviceCandidate>, ProbeError> {
     let pi_path = root.join(LUNII_DEVICE_ID_MARKER);
     let bt_path = root.join(LUNII_BINARY_TOKEN_MARKER);
 
@@ -253,7 +274,7 @@ fn probe_root(
     // candidate entirely rather than truncating and feeding a
     // partial payload into the classifier (which would happily read
     // a fake version byte from the first byte).
-    let metadata_payload = match read_bounded(&md_path, deadline_exceeded) {
+    let metadata_payload = match read_bounded(md_path, deadline_exceeded) {
         Ok(p) => p,
         Err(ReadBoundedError::Oversize) => return Ok(None),
         Err(ReadBoundedError::Io(e)) => return Err(ProbeError::Soft(e)),
@@ -278,15 +299,55 @@ fn probe_root(
 
     Ok(Some(DeviceCandidate {
         mount_path: root.to_path_buf(),
-        metadata_payload,
-        pi_payload,
-        has_bt: bt_path.is_file(),
         // `sysinfo` exposes per-disk metadata on Windows but the cross-
         // platform serial story is uneven on Linux/macOS. Returning
         // `None` here keeps the scanner honest and the device_identifier
         // computed downstream remains stable across reboots because the
         // `.pi` payload is itself stable.
         volume_serial: None,
+        facts: CandidateFacts::Lunii {
+            metadata_payload,
+            pi_payload,
+            has_bt: bt_path.is_file(),
+        },
+    }))
+}
+
+/// FLAM probe — born hardened. The `.mdf` read is no-follow end to end
+/// ([`read_bounded_no_follow`]); the required `str/` and `etc/` entries
+/// must be REAL directories (`is_real_directory`, no-follow). An
+/// empty `.mdf` still surfaces the candidate so a broken FLAM is SEEN
+/// and explained by the classifier (`metadataCorrupt`), never silently
+/// skipped. The historical Lunii probe is deliberately NOT retrofitted
+/// here — its no-follow parity is a separate, deferred hardening of
+/// the most sensitive path of the product.
+fn probe_flam_root(
+    root: &Path,
+    deadline_exceeded: &Arc<AtomicBool>,
+) -> Result<Option<DeviceCandidate>, ProbeError> {
+    let mdf_path = root.join(FLAM_PRIMARY_MARKER);
+    let mdf_payload = match read_bounded_no_follow(&mdf_path, deadline_exceeded) {
+        Ok(Some(p)) => p,
+        // Absent / symlink / irregular / oversize / swapped-in entry /
+        // per-volume I/O failure: not a readable FLAM marker — the
+        // volume is ignored and the scan continues (never a scan-level
+        // `AppError` on the FLAM path).
+        Ok(None) => return Ok(None),
+        // Only the shared scan deadline reaches here; the soft error
+        // lets the scan loop surface the honest timeout outcome.
+        Err(e) => return Err(ProbeError::Soft(e)),
+    };
+    Ok(Some(DeviceCandidate {
+        mount_path: root.to_path_buf(),
+        // Same rationale as the Lunii probe: the serial story is uneven
+        // across platforms; the `.mdf` payload keeps the identifier
+        // stable across reboots.
+        volume_serial: None,
+        facts: CandidateFacts::Flam {
+            mdf_payload,
+            has_str_dir: is_real_directory(&root.join(FLAM_STORY_DIR)),
+            has_etc_dir: is_real_directory(&root.join(FLAM_CONFIG_DIR)),
+        },
     }))
 }
 
@@ -327,6 +388,168 @@ fn read_bounded(
         return Err(ReadBoundedError::Oversize);
     }
     Ok(buf)
+}
+
+/// Open the file WITHOUT following a symlink at its final component and
+/// WITHOUT blocking on a special file. On Unix the open itself carries
+/// `O_NOFOLLOW | O_NONBLOCK` (ABI-frozen per-OS/ARCH flag values —
+/// `libc` is not a direct dependency of this crate): a symlink swapped
+/// in after the lstat FAILS the open (`ELOOP`) instead of being
+/// followed, and a swapped-in FIFO opens non-blocking (then fails the
+/// handle re-check) instead of suspending the blocking worker forever.
+/// On other platforms the lstat + handle re-check in the caller remain
+/// the only guard — the swap window stays theoretical there
+/// (documented limit).
+///
+/// The numeric flags are only valid for the OS/arch couples listed
+/// below; any other Unix target fails the BUILD (`compile_error!`)
+/// rather than silently opening with wrong bits (on powerpc Linux for
+/// instance, `0o400000` is `O_DIRECT` — reads could fail `EINVAL`).
+fn open_no_follow(path: &Path) -> std::io::Result<File> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        // Linux asm-generic ABI (x86, x86_64, arm, aarch64, riscv,
+        // loongarch): O_NOFOLLOW = 0o400000, O_NONBLOCK = 0o4000.
+        #[cfg(all(
+            target_os = "linux",
+            any(
+                target_arch = "x86",
+                target_arch = "x86_64",
+                target_arch = "arm",
+                target_arch = "aarch64",
+                target_arch = "riscv32",
+                target_arch = "riscv64",
+                target_arch = "loongarch64",
+            )
+        ))]
+        const NO_FOLLOW_NON_BLOCK: i32 = 0o400000 | 0o4000;
+        #[cfg(all(
+            target_os = "linux",
+            not(any(
+                target_arch = "x86",
+                target_arch = "x86_64",
+                target_arch = "arm",
+                target_arch = "aarch64",
+                target_arch = "riscv32",
+                target_arch = "riscv64",
+                target_arch = "loongarch64",
+            ))
+        ))]
+        compile_error!(
+            "O_NOFOLLOW/O_NONBLOCK values are arch-specific on Linux (mips/sparc/alpha/parisc/powerpc differ); add the validated constants for this architecture"
+        );
+        // BSD-lineage ABI (macOS, iOS, FreeBSD, OpenBSD, NetBSD):
+        // O_NOFOLLOW = 0x0100, O_NONBLOCK = 0x0004.
+        #[cfg(any(
+            target_os = "macos",
+            target_os = "ios",
+            target_os = "freebsd",
+            target_os = "openbsd",
+            target_os = "netbsd",
+        ))]
+        const NO_FOLLOW_NON_BLOCK: i32 = 0x0100 | 0x0004;
+        #[cfg(not(any(
+            target_os = "linux",
+            target_os = "macos",
+            target_os = "ios",
+            target_os = "freebsd",
+            target_os = "openbsd",
+            target_os = "netbsd",
+        )))]
+        compile_error!(
+            "O_NOFOLLOW/O_NONBLOCK values are OS-specific (illumos/Solaris/AIX differ); add the validated constants for this Unix target"
+        );
+        std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(NO_FOLLOW_NON_BLOCK)
+            .open(path)
+    }
+    #[cfg(not(unix))]
+    {
+        File::open(path)
+    }
+}
+
+/// Bounded no-follow read of a candidate FLAM marker. Same deadline
+/// checks and byte bound as [`read_bounded`], hardened end to end
+/// (the `open_bounded_regular` pattern): `symlink_metadata` gates the
+/// common case up-front, [`open_no_follow`] closes the swap window at
+/// the open itself (Unix), then the OPENED handle is re-checked — it
+/// must still be a regular in-bound file whose `(dev, ino)` matches
+/// the lstat'ed entry, so a TOCTOU swap is refused instead of read.
+///
+/// Returns:
+/// - `Ok(Some(payload))` — the marker is a regular, in-bound file
+///   (an EMPTY payload is a valid, VISIBLE outcome);
+/// - `Ok(None)` — absent, symlink, irregular, oversize, swapped
+///   entry, OR any per-volume I/O failure (open/fstat/read): "not a
+///   readable FLAM marker", the volume is IGNORED and the scan
+///   continues. Unlike the Lunii probe, a failing FLAM volume never
+///   escalates to a scan-level `AppError` — it must not mask a
+///   healthy candidate sitting on another mount;
+/// - `Err(io)` — the shared scan DEADLINE only (budget exhausted),
+///   so a hostile volume cannot eat the other candidates' budget.
+fn read_bounded_no_follow(
+    path: &Path,
+    deadline_exceeded: &Arc<AtomicBool>,
+) -> Result<Option<Vec<u8>>, std::io::Error> {
+    if deadline_exceeded.load(Ordering::Relaxed) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "scan deadline exceeded before open",
+        ));
+    }
+    let Ok(pre) = std::fs::symlink_metadata(path) else {
+        // Absent marker: not a FLAM candidate. A transient lstat
+        // failure folds into the same "no candidate" outcome — the
+        // 3 s polling re-converges on the next pass.
+        return Ok(None);
+    };
+    if pre.file_type().is_symlink() || !pre.is_file() {
+        return Ok(None);
+    }
+    if pre.len() > MAX_METADATA_FILE_BYTES {
+        return Ok(None);
+    }
+    let Ok(file) = open_no_follow(path) else {
+        return Ok(None);
+    };
+    let Ok(meta) = file.metadata() else {
+        return Ok(None);
+    };
+    if !meta.is_file() || meta.len() > MAX_METADATA_FILE_BYTES {
+        return Ok(None);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        // The handle must be the very entry the lstat classified — a
+        // symlink/file swapped in between changes (dev, ino).
+        if meta.dev() != pre.dev() || meta.ino() != pre.ino() {
+            return Ok(None);
+        }
+    }
+    let mut buf = Vec::new();
+    // MAX + 1 so a file GROWN past the bound between the fstat and the
+    // read is still caught without a second metadata round-trip.
+    if file
+        .take(MAX_METADATA_FILE_BYTES + 1)
+        .read_to_end(&mut buf)
+        .is_err()
+    {
+        return Ok(None);
+    }
+    if deadline_exceeded.load(Ordering::Relaxed) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "scan deadline exceeded during read",
+        ));
+    }
+    if buf.len() as u64 > MAX_METADATA_FILE_BYTES {
+        return Ok(None);
+    }
+    Ok(Some(buf))
 }
 
 /// Whole-scan fatal error mapping. Only `os_enum` reaches this path.
@@ -378,5 +601,86 @@ fn io_kind_label(kind: std::io::ErrorKind) -> &'static str {
         std::io::ErrorKind::TimedOut => "timeout",
         std::io::ErrorKind::Interrupted => "interrupted",
         _ => "io_other",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::infrastructure::device::fixtures::{
+        temp_flam_mount, temp_flam_mount_corrupt, FlamCorruptKind,
+    };
+
+    fn no_deadline() -> Arc<AtomicBool> {
+        Arc::new(AtomicBool::new(false))
+    }
+
+    fn probe(root: &Path) -> Option<DeviceCandidate> {
+        probe_root(root, &no_deadline()).expect("probe must not error")
+    }
+
+    fn flam_facts(candidate: &DeviceCandidate) -> (&Vec<u8>, bool, bool) {
+        match &candidate.facts {
+            CandidateFacts::Flam {
+                mdf_payload,
+                has_str_dir,
+                has_etc_dir,
+            } => (mdf_payload, *has_str_dir, *has_etc_dir),
+            other => panic!("expected Flam facts, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn probe_root_recognizes_conforming_flam_fixture() {
+        let (_g, root) = temp_flam_mount();
+        let candidate = probe(&root).expect("conforming FLAM must surface");
+        let (mdf_payload, has_str_dir, has_etc_dir) = flam_facts(&candidate);
+        assert!(!mdf_payload.is_empty());
+        assert!(has_str_dir);
+        assert!(has_etc_dir);
+    }
+
+    #[test]
+    fn probe_root_surfaces_empty_mdf_fixture_as_visible_candidate() {
+        // A broken FLAM must be SEEN (classified corrupt downstream),
+        // never silently skipped.
+        let (_g, root) = temp_flam_mount_corrupt(FlamCorruptKind::EmptyMdf);
+        let candidate = probe(&root).expect("empty .mdf must stay visible");
+        let (mdf_payload, _, _) = flam_facts(&candidate);
+        assert!(mdf_payload.is_empty());
+    }
+
+    #[test]
+    fn probe_root_ignores_oversize_mdf_fixture() {
+        let (_g, root) = temp_flam_mount_corrupt(FlamCorruptKind::OversizeMdf);
+        assert!(probe(&root).is_none());
+    }
+
+    #[test]
+    fn probe_root_flags_missing_str_dir_fixture() {
+        let (_g, root) = temp_flam_mount_corrupt(FlamCorruptKind::MissingStrDir);
+        let candidate = probe(&root).expect("incomplete FLAM must stay visible");
+        let (_, has_str_dir, has_etc_dir) = flam_facts(&candidate);
+        assert!(!has_str_dir);
+        assert!(has_etc_dir);
+    }
+
+    #[test]
+    fn probe_root_flags_missing_etc_dir_fixture() {
+        let (_g, root) = temp_flam_mount_corrupt(FlamCorruptKind::MissingEtcDir);
+        let candidate = probe(&root).expect("incomplete FLAM must stay visible");
+        let (_, has_str_dir, has_etc_dir) = flam_facts(&candidate);
+        assert!(has_str_dir);
+        assert!(!has_etc_dir);
+    }
+
+    #[test]
+    fn probe_root_ignores_volume_whose_md_entry_is_a_directory() {
+        // Family precedence, historical shape: a `.md` DIRECTORY is not
+        // a Lunii marker, and its presence keeps the volume out of the
+        // FLAM probe too — ignored, the pre-FLAM behavior.
+        let (_g, root) = temp_flam_mount();
+        std::fs::create_dir(root.join(LUNII_PRIMARY_MARKER)).expect("mkdir .md");
+        assert!(probe(&root).is_none());
     }
 }

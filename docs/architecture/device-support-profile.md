@@ -20,7 +20,15 @@ behavior is a bug.
 | Lunii | Origine v1 (fw 1.x / 2.x) | v3 | ✅ | ✅ | ✅ | ✅ (round-trip d'une histoire importée) |
 | Lunii | Mid-Gen v2 (fw 3.0 – 3.1) | v6 | ✅ | ✅ | ✅ | ✅ (round-trip d'une histoire importée) |
 | Lunii | V3 (fw 3.2.x +) | v7 | ✅ | ✅ | ❌ (RE actif — corruption risk) | ❌ (RE actif — même rationale que l'import) |
-| FLAM | — | — | ❌ (Post-MVP) | ❌ | ❌ | ❌ |
+| FLAM | Gen1 (flam_gen1) | — | ❌ | ❌ | ❌ | ❌ |
+
+FLAM Gen1 is a **recognized** profile with **zero activated capability**:
+recognition proves the device is officially known (the panel renders
+`Appareil reconnu — FLAM`, never a lying `Profil non supporté`), while every
+operation stays ❌ until support activates them line by line. Its
+metadata format column stays `—`: the internal structure of `.mdf` is not
+publicly documented and Rustory refuses to invent a version byte (see the
+FLAM recognition markers below).
 
 The write column is wired by the transfer flow: `WriteStory` is `true` for
 **Origine v1** and **Mid-Gen v2**, and stays `false` for **V3** (device-write
@@ -83,6 +91,40 @@ projects AND validated against a physical Lunii V3 sample, 2026-04-26):
   `0x07`) + `.pi` 32 B + `.pi.hidden` + `.cfg` + `.content/` + `.logo`
   + `etc/` — NO `.bt` present. This sample is the empirical proof
   that `.bt` cannot be a required marker.
+
+### FLAM recognition markers
+
+FLAM volumes are recognized during the same stage-2 filesystem scan,
+with their own marker set at the volume root. **Lunii precedence is
+fixed**: a volume carrying a regular `.md` file is probed as a Lunii
+candidate even when `.mdf` coexists — the Lunii probe path is never
+altered by FLAM detection. Only a volume WITHOUT a `.md` entry and
+WITH `.mdf` enters the FLAM probe: a `.md` entry of any OTHER shape
+(directory, broken symlink, special file) keeps the volume out of
+BOTH probes — ignored, exactly the pre-FLAM behavior.
+
+| Marker | Required | Rule |
+| --- | --- | --- |
+| `.mdf` | ✅ | Primary FLAM identifier. Must be a REGULAR file, read no-follow (`symlink_metadata` refusal of symlinks/irregular files, open with `O_NOFOLLOW \| O_NONBLOCK` on Unix, then a `(dev, ino)` re-check of the opened handle against the lstat), within `MAX_METADATA_FILE_BYTES` (4 KiB). An EMPTY `.mdf` still surfaces the candidate (classified `metadataCorrupt` so a broken FLAM is SEEN and explained, never silently skipped); an OVERSIZE `.mdf` means "not a plausible FLAM" and the volume is ignored; a per-volume I/O error (open/read failure) IGNORES the volume and the scan continues — it never escalates to a scan-level error, so a failing FLAM volume cannot mask a healthy candidate on another mount (only the shared scan deadline escalates). |
+| `str/` | ✅ | Story content directory. Must be a REAL directory (`symlink_metadata(...).is_dir()`, no-follow — a symlink does not count). Missing ⇒ `metadataUnsupported`. |
+| `etc/` | ✅ | Device configuration directory. Same real-directory rule. Missing ⇒ `metadataUnsupported`. |
+
+Knowledge source: public FLAM observations from the `o-daneel/Lunii.QT`
+project (the same OSS reference already used for the Lunii marker set).
+The internal structure of `.mdf` is NOT publicly documented: Rustory
+reads its bytes only to hash the opaque `device_identifier` (same
+SHA-256 + volume-serial recipe as `.pi` — each family's PRIMARY marker
+is the hashed payload) and deliberately does NOT parse a version byte.
+Inventing one would fake a firmware cohort. Real FLAM cohorts are
+deferred until the format is confirmed on physical hardware; the single
+conservative `Gen1` cohort (`flam_gen1`) covers every recognized FLAM
+until then.
+
+Auto-mount note: the udisks2 auto-mount filter (stage 1 above) stays
+Lunii-only (the "STM" drive signature). A FLAM volume relies on the
+desktop session's own auto-mount, a manual mount, or
+`RUSTORY_DEVICE_MOUNT_ROOTS` — an assumed, documented limit until the
+FLAM USB bridge signature is confirmed on real hardware.
 
 ## Library Inventory
 
@@ -270,11 +312,11 @@ Reasons`.
 | Wire `reason` | Domain `UnsupportedReason` | Trigger |
 | --- | --- | --- |
 | `firmwareUnsupported` | `FirmwareUnsupported` | Reserved for future per-firmware blocklists |
-| `metadataUnsupported` | `MetadataUnsupported` | `.md` first byte is not in `{3, 6, 7}` |
-| `metadataCorrupt` | `MetadataCorrupt` | `.pi` missing or empty, `.md` empty / oversize, FS read failed (`.bt` is informational only and never gates this reason) |
-| `familyUnknown` | `FamilyUnknown` | Reserved for non-Lunii families discovered later |
+| `metadataUnsupported` | `MetadataUnsupported` | `.md` first byte is not in `{3, 6, 7}`; FLAM volume missing the required `str/` or `etc/` directory |
+| `metadataCorrupt` | `MetadataCorrupt` | `.pi` missing or empty, `.md` empty / oversize, FLAM `.mdf` empty, FS read failed (Lunii probe only — a FLAM `.mdf` I/O failure IGNORES the volume instead, see the FLAM recognition markers; `.bt` is informational only and never gates this reason) |
+| `familyUnknown` | `FamilyUnknown` | Reserved for genuinely unknown families. A RECOGNIZED family (Lunii, FLAM) NEVER maps here — FLAM classification failures reuse the same `metadataCorrupt` / `metadataUnsupported` reasons as Lunii |
 | `operationNotAuthorized` | `OperationNotAuthorized` | Capability gate refusal at Epic 3 wiring time |
-| `multipleCandidates` | `MultipleCandidates` | More than one supported Lunii detected at once |
+| `multipleCandidates` | `MultipleCandidates` | More than one supported device detected at once — any families: two Lunii, but also a Lunii + a recognized FLAM |
 
 ## Capability Gate Contract
 
@@ -404,6 +446,28 @@ Adding a new cohort:
 2. Add the metadata-version → cohort branch in `classify_lunii`.
 3. Update the matrix above with the operation values.
 4. Add a per-version classification test.
+
+Adding a new family:
+
+1. Add a `DeviceFamily` variant, a per-family firmware-cohort enum
+   wired into the `FirmwareCohort` sum (with its diagnostic tags), and
+   a per-family `CandidateFacts` variant (a candidate is mono-family by
+   construction — a bi-family candidate must stay unrepresentable).
+2. Add the family's marker probe to the scanner (documented in a
+   "recognition markers" table above) and the pure classification
+   function (`classify_<family>`) producing a `DeviceProfile`.
+3. Update the matrix above with one line per cohort. A recognized
+   family with zero activated capability keeps every operation ❌ —
+   recognition and capability are separate facts.
+4. Extend the gate tests in `tests::check_operation_*` (one matrix
+   line = one test, all four operations covered), the wire DTO
+   variants (+ contract tests), the TS guard family⇔cohort⇔version
+   combinations, and the UI labels (`product-language.md` Change
+   Control first).
+
+Both or none, never one without the other (the `family.rs` invariant):
+a family variant without its matrix/registry entries — or the reverse —
+is a bug.
 
 A line in the matrix that has no test is a bug — the test enforces
 that the gate behavior matches the published policy.

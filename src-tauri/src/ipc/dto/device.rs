@@ -2,7 +2,8 @@ use serde::Serialize;
 
 use crate::application::device::ConnectedLuniiOutcome;
 use crate::domain::device::{
-    DeviceFamily, DeviceProfile, LuniiFirmwareCohort, SupportedOperations, UnsupportedReason,
+    DeviceFamily, DeviceProfile, FirmwareCohort, FlamFirmwareCohort, LuniiFirmwareCohort,
+    SupportedOperations, UnsupportedReason,
 };
 
 /// Wire shape returned by the `read_connected_lunii` Tauri command.
@@ -20,7 +21,12 @@ pub enum ConnectedDeviceDto {
     Supported {
         family: SupportedFamilyDto,
         firmware_cohort: FirmwareCohortDto,
-        metadata_format_version: u8,
+        /// Omitted from the JSON when the profile carries no metadata
+        /// version (FLAM): the key is ABSENT, never `null` — a `null`
+        /// would invent an "unknown version" semantics no consumer
+        /// reads. The Lunii wire keeps the key byte-for-byte.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        metadata_format_version: Option<u8>,
         device_identifier: String,
         supported_operations: SupportedOperationsDto,
     },
@@ -39,6 +45,7 @@ pub enum ConnectedDeviceDto {
 #[serde(rename_all = "camelCase")]
 pub enum SupportedFamilyDto {
     Lunii,
+    Flam,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -47,6 +54,7 @@ pub enum FirmwareCohortDto {
     OrigineV1,
     MidGenV2,
     V3,
+    FlamGen1,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -97,14 +105,16 @@ impl ConnectedDeviceDto {
 fn family_dto(f: DeviceFamily) -> SupportedFamilyDto {
     match f {
         DeviceFamily::Lunii => SupportedFamilyDto::Lunii,
+        DeviceFamily::Flam => SupportedFamilyDto::Flam,
     }
 }
 
-fn cohort_dto(c: LuniiFirmwareCohort) -> FirmwareCohortDto {
+fn cohort_dto(c: FirmwareCohort) -> FirmwareCohortDto {
     match c {
-        LuniiFirmwareCohort::OrigineV1 => FirmwareCohortDto::OrigineV1,
-        LuniiFirmwareCohort::MidGenV2 => FirmwareCohortDto::MidGenV2,
-        LuniiFirmwareCohort::V3 => FirmwareCohortDto::V3,
+        FirmwareCohort::Lunii(LuniiFirmwareCohort::OrigineV1) => FirmwareCohortDto::OrigineV1,
+        FirmwareCohort::Lunii(LuniiFirmwareCohort::MidGenV2) => FirmwareCohortDto::MidGenV2,
+        FirmwareCohort::Lunii(LuniiFirmwareCohort::V3) => FirmwareCohortDto::V3,
+        FirmwareCohort::Flam(FlamFirmwareCohort::Gen1) => FirmwareCohortDto::FlamGen1,
     }
 }
 
@@ -145,7 +155,7 @@ mod tests {
         let dto = ConnectedDeviceDto::Supported {
             family: SupportedFamilyDto::Lunii,
             firmware_cohort: FirmwareCohortDto::OrigineV1,
-            metadata_format_version: 3,
+            metadata_format_version: Some(3),
             device_identifier: "abc".into(),
             supported_operations: SupportedOperationsDto {
                 read_library: true,
@@ -165,6 +175,34 @@ mod tests {
         assert!(
             v.get("supported_operations").is_none(),
             "snake_case must not leak"
+        );
+    }
+
+    #[test]
+    fn supported_flam_variant_omits_metadata_format_version_key_entirely() {
+        let dto = ConnectedDeviceDto::Supported {
+            family: SupportedFamilyDto::Flam,
+            firmware_cohort: FirmwareCohortDto::FlamGen1,
+            metadata_format_version: None,
+            device_identifier: "abc".into(),
+            supported_operations: SupportedOperationsDto {
+                read_library: false,
+                inspect_story: false,
+                import_story: false,
+                write_story: false,
+            },
+        };
+        let v = serde_json::to_value(&dto).expect("ser");
+        assert_eq!(v["kind"], "supported");
+        assert_eq!(v["family"], "flam");
+        assert_eq!(v["firmwareCohort"], "flamGen1");
+        // The key is ABSENT — never `null`.
+        assert!(
+            v.as_object()
+                .expect("object")
+                .get("metadataFormatVersion")
+                .is_none(),
+            "metadataFormatVersion must be omitted for FLAM"
         );
     }
 
@@ -285,11 +323,43 @@ mod tests {
         assert_eq!(v, serde_json::Value::String("midGenV2".into()));
         let v = serde_json::to_value(&FirmwareCohortDto::V3).expect("ser");
         assert_eq!(v, serde_json::Value::String("v3".into()));
+        let v = serde_json::to_value(&FirmwareCohortDto::FlamGen1).expect("ser");
+        assert_eq!(v, serde_json::Value::String("flamGen1".into()));
     }
 
     #[test]
     fn supported_family_dto_serializes_lunii_in_camel_case() {
         let v = serde_json::to_value(&SupportedFamilyDto::Lunii).expect("ser");
         assert_eq!(v, serde_json::Value::String("lunii".into()));
+    }
+
+    #[test]
+    fn supported_family_dto_serializes_flam_in_camel_case() {
+        let v = serde_json::to_value(&SupportedFamilyDto::Flam).expect("ser");
+        assert_eq!(v, serde_json::Value::String("flam".into()));
+    }
+
+    #[test]
+    fn from_outcome_maps_supported_flam_gen1_without_version_and_all_operations_false() {
+        let outcome = ConnectedLuniiOutcome::Supported(match crate::domain::device::classify_flam(
+            b"MDF", true, true, "id",
+        ) {
+            crate::domain::device::DeviceProfileClassification::Supported(p) => p,
+            _ => unreachable!(),
+        });
+        let dto = ConnectedDeviceDto::from_outcome(outcome);
+        let v = serde_json::to_value(&dto).expect("ser");
+        assert_eq!(v["kind"], "supported");
+        assert_eq!(v["family"], "flam");
+        assert_eq!(v["firmwareCohort"], "flamGen1");
+        assert!(v
+            .as_object()
+            .expect("object")
+            .get("metadataFormatVersion")
+            .is_none());
+        assert_eq!(v["supportedOperations"]["readLibrary"], false);
+        assert_eq!(v["supportedOperations"]["inspectStory"], false);
+        assert_eq!(v["supportedOperations"]["importStory"], false);
+        assert_eq!(v["supportedOperations"]["writeStory"], false);
     }
 }

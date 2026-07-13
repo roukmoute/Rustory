@@ -147,6 +147,7 @@ vi.mock("../../ipc/commands/import-export", async () => {
 import { invalidateConnectedLuniiCache } from "../../features/device/hooks/use-connected-lunii";
 import { invalidateDeviceLibraryCache } from "../../features/device/hooks/use-device-library";
 import { invalidateLibraryOverviewCache } from "../../features/library/hooks/use-library-overview";
+import type { ConnectedDeviceDto } from "../../shared/ipc-contracts/device";
 import { useLibraryShell } from "../../shell/state/library-shell-store";
 import {
   LibraryRoute,
@@ -2408,6 +2409,67 @@ describe("<LibraryRoute />", () => {
     );
     expect(mapped.deviceState).toBe("error");
     expect(mapped.deviceReason).toBe("Réessaie la détection.");
+  });
+
+  it("mapDeviceForPanel renders the standard copy for a FLAM metadataUnsupported (never the family tag as a version)", () => {
+    // An incomplete FLAM structure (str/ or etc/ missing) carries the
+    // family tag "flam" as firmwareHint — it must NOT read as a fake
+    // version ("format métadonnées flam non géré").
+    const mapped = mapDeviceForPanel(
+      {
+        kind: "ready",
+        device: {
+          kind: "unsupported",
+          reason: "metadataUnsupported",
+          firmwareHint: "flam",
+        },
+      },
+      false,
+    );
+    expect(mapped.deviceState).toBe("unsupported");
+    expect(mapped.deviceReason).toBe(
+      "Profil non supporté: format métadonnées non géré",
+    );
+  });
+
+  it("mapDeviceForPanel still renders a genuine metadata version hint as a version", () => {
+    const mapped = mapDeviceForPanel(
+      {
+        kind: "ready",
+        device: {
+          kind: "unsupported",
+          reason: "metadataUnsupported",
+          firmwareHint: "metadata_v99",
+        },
+      },
+      false,
+    );
+    expect(mapped.deviceReason).toBe(
+      "Profil non supporté: format métadonnées v99 non géré",
+    );
+  });
+
+  it("mapDeviceForPanel maps a recognized FLAM DTO to idle with the FLAM label, family and closed matrix", () => {
+    // Real wire: the metadataFormatVersion key is absent for FLAM.
+    const flamDto = JSON.parse(
+      '{"kind":"supported","family":"flam","firmwareCohort":"flamGen1",' +
+        '"deviceIdentifier":"fedcba9876543210fedcba9876543210",' +
+        '"supportedOperations":{"readLibrary":false,"inspectStory":false,' +
+        '"importStory":false,"writeStory":false}}',
+    ) as ConnectedDeviceDto;
+    const mapped = mapDeviceForPanel(
+      { kind: "ready", device: flamDto },
+      false,
+    );
+    expect(mapped.deviceState).toBe("idle");
+    expect(mapped.deviceLabel).toBe("FLAM");
+    expect(mapped.deviceFamily).toBe("flam");
+    expect(mapped.supportedOperations).toEqual({
+      readLibrary: false,
+      inspectStory: false,
+      importStory: false,
+      writeStory: false,
+    });
   });
 
   // --- Pure mapper unit tests (mapPreparationView) ---

@@ -21,7 +21,7 @@ fn device_log_appends_one_line_per_event() {
         Event::DeviceDetectedSupported {
             device_identifier: "abc".into(),
             firmware_cohort: "origine_v1",
-            metadata_format_version: 3,
+            metadata_format_version: Some(3),
             elapsed_ms: 0,
         },
     )
@@ -39,7 +39,7 @@ fn device_log_serializes_supported_event_with_typed_fields() {
         Event::DeviceDetectedSupported {
             device_identifier: "id-42".into(),
             firmware_cohort: "v3",
-            metadata_format_version: 7,
+            metadata_format_version: Some(7),
             elapsed_ms: 0,
         },
     )
@@ -50,6 +50,34 @@ fn device_log_serializes_supported_event_with_typed_fields() {
     assert_eq!(parsed["event"]["device_identifier"], "id-42");
     assert_eq!(parsed["event"]["firmware_cohort"], "v3");
     assert_eq!(parsed["event"]["metadata_format_version"], 7);
+}
+
+#[test]
+fn device_log_omits_metadata_version_key_for_flam_supported_event() {
+    // The FLAM entry OMITS the version key — never `null`, never an
+    // invented `0` (the profile carries no metadata version).
+    let tmp = TempDir::new().expect("tempdir");
+    let path = log_path_for(tmp.path());
+    record_event_at_path(
+        &path,
+        Event::DeviceDetectedSupported {
+            device_identifier: "id-flam".into(),
+            firmware_cohort: "flam_gen1",
+            metadata_format_version: None,
+            elapsed_ms: 0,
+        },
+    )
+    .expect("rec");
+    let lines = read_lines(&path);
+    let parsed: serde_json::Value = serde_json::from_str(&lines[0]).expect("parsable");
+    assert_eq!(parsed["event"]["category"], "device_detected_supported");
+    assert_eq!(parsed["event"]["firmware_cohort"], "flam_gen1");
+    assert!(parsed["event"]
+        .as_object()
+        .expect("object")
+        .get("metadata_format_version")
+        .is_none());
+    assert!(!lines[0].contains("null"));
 }
 
 #[test]
@@ -100,7 +128,7 @@ fn device_log_does_not_leak_pi_payload_in_serialized_event() {
         Event::DeviceDetectedSupported {
             device_identifier: "OPAQUE_HASH".into(),
             firmware_cohort: "origine_v1",
-            metadata_format_version: 3,
+            metadata_format_version: Some(3),
             elapsed_ms: 0,
         },
     )
@@ -124,7 +152,7 @@ fn device_log_does_not_leak_filesystem_path_in_serialized_event() {
         Event::DeviceDetectedSupported {
             device_identifier: "abc".into(),
             firmware_cohort: "v3",
-            metadata_format_version: 7,
+            metadata_format_version: Some(7),
             elapsed_ms: 0,
         },
     )

@@ -37,6 +37,16 @@ const supported = {
   },
 };
 
+// REAL Rust wire for a recognized FLAM Gen1: the metadataFormatVersion
+// key is ABSENT (never null) and every operation is false — mirrors the
+// byte-for-byte contract test (src-tauri/tests/contracts/device.rs).
+const supportedFlam = JSON.parse(
+  '{"kind":"supported","family":"flam","firmwareCohort":"flamGen1",' +
+    '"deviceIdentifier":"fedcba9876543210fedcba9876543210",' +
+    '"supportedOperations":{"readLibrary":false,"inspectStory":false,' +
+    '"importStory":false,"writeStory":false}}',
+);
+
 function mockHandle(promise: Promise<unknown>): { promise: Promise<unknown>; cancel: () => void } {
   return { promise, cancel: vi.fn() };
 }
@@ -73,6 +83,26 @@ describe("useConnectedLunii", () => {
     await waitFor(() => expect(result.current.state.kind).toBe("ready"));
     if (result.current.state.kind === "ready") {
       expect(result.current.state.device.kind).toBe("none");
+    }
+  });
+
+  it("resolves to ready with a recognized FLAM device (real wire, no version key)", async () => {
+    vi.mocked(readConnectedLunii).mockReturnValueOnce(
+      mockHandle(Promise.resolve(supportedFlam)) as never,
+    );
+    const { result } = renderHook(() => useConnectedLunii());
+    await waitFor(() => expect(result.current.state.kind).toBe("ready"));
+    if (result.current.state.kind === "ready") {
+      const device = result.current.state.device;
+      expect(device.kind).toBe("supported");
+      if (device.kind === "supported") {
+        expect(device.family).toBe("flam");
+        expect(device.firmwareCohort).toBe("flamGen1");
+        // Absent key reads as undefined on the typed DTO — never null.
+        expect(device.metadataFormatVersion).toBeUndefined();
+        expect(device.supportedOperations.readLibrary).toBe(false);
+        expect(device.supportedOperations.writeStory).toBe(false);
+      }
     }
   });
 

@@ -1,20 +1,25 @@
-use super::family::{DeviceFamily, LuniiFirmwareCohort};
+use super::family::{DeviceFamily, FirmwareCohort, FlamFirmwareCohort, LuniiFirmwareCohort};
 use super::operations::SupportedOperations;
 
-/// Canonical description of a recognized device. Built only by
-/// [`classify_lunii`] — a `DeviceProfile` value is the proof that the
-/// candidate volume passed every required check (markers + metadata
-/// version + identifier hashing).
+/// Canonical description of a recognized device. Built only by the
+/// per-family classifiers ([`classify_lunii`], [`classify_flam`]) — a
+/// `DeviceProfile` value is the proof that the candidate volume passed
+/// every required check (markers + metadata version + identifier
+/// hashing).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeviceProfile {
     pub family: DeviceFamily,
-    pub firmware_cohort: LuniiFirmwareCohort,
+    pub firmware_cohort: FirmwareCohort,
     /// Raw metadata format version read from `.md` (3, 6, 7 in MVP).
-    pub metadata_format_version: u8,
-    /// Hashed device identifier (digest of `.pi` content + volume
-    /// serial when available). Stable across reboots, opaque to UI.
-    /// NEVER carries the raw `.pi` bytes — those may include a hardware
-    /// serial that the user did not consent to expose.
+    /// `None` for families whose primary marker carries no documented
+    /// version byte (FLAM `.mdf`): no value is ever invented — the
+    /// wire omits the field instead of faking one.
+    pub metadata_format_version: Option<u8>,
+    /// Hashed device identifier (digest of the family's primary
+    /// device-id payload — `.pi` for Lunii, `.mdf` for FLAM — plus the
+    /// volume serial when available). Stable across reboots, opaque to
+    /// UI. NEVER carries the raw payload bytes — those may include a
+    /// hardware serial that the user did not consent to expose.
     pub device_identifier: String,
     pub supported_operations: SupportedOperations,
 }
@@ -138,15 +143,66 @@ pub fn classify_lunii(
 
     DeviceProfileClassification::Supported(DeviceProfile {
         family: DeviceFamily::Lunii,
-        firmware_cohort: cohort,
-        metadata_format_version: metadata_version,
+        firmware_cohort: FirmwareCohort::Lunii(cohort),
+        metadata_format_version: Some(metadata_version),
         device_identifier: hashed_id.to_string(),
         supported_operations: ops,
     })
 }
 
+/// Classify a candidate FLAM volume into a [`DeviceProfileClassification`].
+///
+/// Pure like [`classify_lunii`]: facts in, classification out, zero I/O.
+///
+/// Inputs:
+/// - `mdf_payload`: raw `.mdf` bytes (bounded by the scanner). An EMPTY
+///   payload signals `MetadataCorrupt` — the candidate stays VISIBLE so a
+///   broken FLAM is seen and explained, never silently skipped (FR33).
+/// - `has_str_dir` / `has_etc_dir`: presence of the required REAL
+///   directories `str/` and `etc/` (no-follow — a symlink does not
+///   count). Either missing signals `MetadataUnsupported`.
+/// - `hashed_id`: opaque digest of `.mdf` + volume serial. Never the raw
+///   payload.
+///
+/// A conforming FLAM is SUPPORTED-recognized with the conservative
+/// `Gen1` cohort, NO metadata version (the `.mdf` structure is not
+/// publicly documented — no version byte is invented) and ZERO
+/// activated capability ([`SupportedOperations::ALL_FALSE`]): the
+/// support matrix keeps every operation ❌ for FLAM Gen1, and the
+/// capability gate inherits the refusal everywhere by construction.
+pub fn classify_flam(
+    mdf_payload: &[u8],
+    has_str_dir: bool,
+    has_etc_dir: bool,
+    hashed_id: &str,
+) -> DeviceProfileClassification {
+    if mdf_payload.is_empty() {
+        return DeviceProfileClassification::Unsupported {
+            reason: UnsupportedReason::MetadataCorrupt,
+            family_hint: Some(DeviceFamily::Flam),
+            firmware_hint: Some("flam".to_string()),
+        };
+    }
+    if !has_str_dir || !has_etc_dir {
+        return DeviceProfileClassification::Unsupported {
+            reason: UnsupportedReason::MetadataUnsupported,
+            family_hint: Some(DeviceFamily::Flam),
+            firmware_hint: Some("flam".to_string()),
+        };
+    }
+
+    DeviceProfileClassification::Supported(DeviceProfile {
+        family: DeviceFamily::Flam,
+        firmware_cohort: FirmwareCohort::Flam(FlamFirmwareCohort::Gen1),
+        metadata_format_version: None,
+        device_identifier: hashed_id.to_string(),
+        supported_operations: SupportedOperations::ALL_FALSE,
+    })
+}
+
 #[cfg(test)]
 mod tests {
+    use super::super::operations::SupportedOperation;
     use super::*;
 
     fn supported_profile(c: DeviceProfileClassification) -> DeviceProfile {
@@ -167,8 +223,11 @@ mod tests {
     fn classify_lunii_v3_metadata_returns_supported_origine_with_write_enabled() {
         let p = supported_profile(classify_lunii(3, true, true, "abc"));
         assert_eq!(p.family, DeviceFamily::Lunii);
-        assert_eq!(p.firmware_cohort, LuniiFirmwareCohort::OrigineV1);
-        assert_eq!(p.metadata_format_version, 3);
+        assert_eq!(
+            p.firmware_cohort,
+            FirmwareCohort::Lunii(LuniiFirmwareCohort::OrigineV1)
+        );
+        assert_eq!(p.metadata_format_version, Some(3));
         assert_eq!(p.device_identifier, "abc");
         assert!(p.supported_operations.read_library);
         assert!(p.supported_operations.inspect_story);
@@ -179,8 +238,11 @@ mod tests {
     #[test]
     fn classify_lunii_v6_metadata_returns_supported_midgen_v2_with_write_enabled() {
         let p = supported_profile(classify_lunii(6, true, true, "abc"));
-        assert_eq!(p.firmware_cohort, LuniiFirmwareCohort::MidGenV2);
-        assert_eq!(p.metadata_format_version, 6);
+        assert_eq!(
+            p.firmware_cohort,
+            FirmwareCohort::Lunii(LuniiFirmwareCohort::MidGenV2)
+        );
+        assert_eq!(p.metadata_format_version, Some(6));
         assert!(p.supported_operations.read_library);
         assert!(p.supported_operations.inspect_story);
         assert!(p.supported_operations.import_story);
@@ -190,8 +252,11 @@ mod tests {
     #[test]
     fn classify_lunii_v7_metadata_returns_supported_v3_with_import_disabled() {
         let p = supported_profile(classify_lunii(7, true, true, "abc"));
-        assert_eq!(p.firmware_cohort, LuniiFirmwareCohort::V3);
-        assert_eq!(p.metadata_format_version, 7);
+        assert_eq!(
+            p.firmware_cohort,
+            FirmwareCohort::Lunii(LuniiFirmwareCohort::V3)
+        );
+        assert_eq!(p.metadata_format_version, Some(7));
         assert!(p.supported_operations.read_library);
         assert!(p.supported_operations.inspect_story);
         assert!(!p.supported_operations.import_story);
@@ -281,7 +346,10 @@ mod tests {
         // marker is informational only — `.md` + `.pi` are the
         // universal gates.
         let p = supported_profile(classify_lunii(7, true, false, "id"));
-        assert_eq!(p.firmware_cohort, LuniiFirmwareCohort::V3);
+        assert_eq!(
+            p.firmware_cohort,
+            FirmwareCohort::Lunii(LuniiFirmwareCohort::V3)
+        );
         assert!(p.supported_operations.read_library);
         assert!(!p.supported_operations.write_story);
     }
@@ -361,5 +429,116 @@ mod tests {
         let p1 = supported_profile(classify_lunii(3, true, true, "id"));
         let p2 = p1.clone();
         assert_eq!(p1, p2);
+    }
+
+    #[test]
+    fn classify_flam_empty_mdf_returns_metadata_corrupt_with_flam_hints() {
+        // An empty `.mdf` is a VISIBLE candidate: a broken FLAM must be
+        // seen and explained, never silently skipped (FR33).
+        let c = classify_flam(&[], true, true, "id");
+        assert_eq!(unsupported_reason(&c), &UnsupportedReason::MetadataCorrupt);
+        match c {
+            DeviceProfileClassification::Unsupported {
+                family_hint,
+                firmware_hint,
+                ..
+            } => {
+                assert_eq!(family_hint, Some(DeviceFamily::Flam));
+                assert_eq!(firmware_hint.as_deref(), Some("flam"));
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn classify_flam_missing_str_dir_returns_metadata_unsupported_with_flam_hints() {
+        let c = classify_flam(b"MDF", false, true, "id");
+        assert_eq!(
+            unsupported_reason(&c),
+            &UnsupportedReason::MetadataUnsupported
+        );
+        match c {
+            DeviceProfileClassification::Unsupported {
+                family_hint,
+                firmware_hint,
+                ..
+            } => {
+                assert_eq!(family_hint, Some(DeviceFamily::Flam));
+                assert_eq!(firmware_hint.as_deref(), Some("flam"));
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn classify_flam_missing_etc_dir_returns_metadata_unsupported_with_flam_hints() {
+        let c = classify_flam(b"MDF", true, false, "id");
+        assert_eq!(
+            unsupported_reason(&c),
+            &UnsupportedReason::MetadataUnsupported
+        );
+        match c {
+            DeviceProfileClassification::Unsupported { family_hint, .. } => {
+                assert_eq!(family_hint, Some(DeviceFamily::Flam));
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn classify_flam_empty_mdf_takes_precedence_over_missing_directories() {
+        // Rule order is fixed: corruption dominates structure so the
+        // user fixes the most fundamental issue first (same discipline
+        // as the Lunii missing-`.pi` precedence).
+        let c = classify_flam(&[], false, false, "id");
+        assert_eq!(unsupported_reason(&c), &UnsupportedReason::MetadataCorrupt);
+    }
+
+    #[test]
+    fn classify_flam_conforming_returns_supported_gen1_without_metadata_version() {
+        let p = supported_profile(classify_flam(b"MDF_PAYLOAD", true, true, "flam_id"));
+        assert_eq!(p.family, DeviceFamily::Flam);
+        assert_eq!(
+            p.firmware_cohort,
+            FirmwareCohort::Flam(FlamFirmwareCohort::Gen1)
+        );
+        // No version byte is ever invented for `.mdf`.
+        assert_eq!(p.metadata_format_version, None);
+        assert_eq!(p.device_identifier, "flam_id");
+    }
+
+    // One matrix line = one test: every cell of the FLAM Gen1 line is
+    // ❌ (device-support-profile.md MVP matrix), asserted per operation.
+
+    #[test]
+    fn flam_gen1_profile_denies_read_library() {
+        let p = supported_profile(classify_flam(b"MDF", true, true, "id"));
+        assert!(!p
+            .supported_operations
+            .allows(SupportedOperation::ReadLibrary));
+    }
+
+    #[test]
+    fn flam_gen1_profile_denies_inspect_story() {
+        let p = supported_profile(classify_flam(b"MDF", true, true, "id"));
+        assert!(!p
+            .supported_operations
+            .allows(SupportedOperation::InspectStory));
+    }
+
+    #[test]
+    fn flam_gen1_profile_denies_import_story() {
+        let p = supported_profile(classify_flam(b"MDF", true, true, "id"));
+        assert!(!p
+            .supported_operations
+            .allows(SupportedOperation::ImportStory));
+    }
+
+    #[test]
+    fn flam_gen1_profile_denies_write_story() {
+        let p = supported_profile(classify_flam(b"MDF", true, true, "id"));
+        assert!(!p
+            .supported_operations
+            .allows(SupportedOperation::WriteStory));
     }
 }

@@ -9,7 +9,7 @@ use crate::domain::shared::AppError;
 use super::catalog_source::OfficialCatalogSource;
 use super::library_reader::DeviceLibraryReader;
 use super::pack_reader::{AcquiredPack, DevicePackReader};
-use super::scanner::{DeviceCandidate, DeviceScanReport, DeviceScanner};
+use super::scanner::{CandidateFacts, DeviceCandidate, DeviceScanReport, DeviceScanner};
 use super::writer::{DevicePackWriter, WriteFailure, WriteProgress};
 use crate::domain::transfer::{PackWritePlan, TransferFailureCause};
 
@@ -41,10 +41,12 @@ impl MockDeviceScanner {
         let report = DeviceScanReport {
             candidates: vec![DeviceCandidate {
                 mount_path: std::path::PathBuf::from("/mock/lunii"),
-                metadata_payload: vec![metadata_version],
-                pi_payload: b"MOCK_PI".to_vec(),
-                has_bt: true,
                 volume_serial: Some("MOCK_SERIAL".into()),
+                facts: CandidateFacts::Lunii {
+                    metadata_payload: vec![metadata_version],
+                    pi_payload: b"MOCK_PI".to_vec(),
+                    has_bt: true,
+                },
             }],
             elapsed: Duration::from_millis(2),
             truncated_due_to_timeout: false,
@@ -59,10 +61,32 @@ impl MockDeviceScanner {
         let report = DeviceScanReport {
             candidates: vec![DeviceCandidate {
                 mount_path: std::path::PathBuf::from("/mock/lunii_other"),
-                metadata_payload: vec![metadata_version],
-                pi_payload: b"OTHER_PI".to_vec(),
-                has_bt: true,
                 volume_serial: Some("OTHER_SERIAL".into()),
+                facts: CandidateFacts::Lunii {
+                    metadata_payload: vec![metadata_version],
+                    pi_payload: b"OTHER_PI".to_vec(),
+                    has_bt: true,
+                },
+            }],
+            elapsed: Duration::from_millis(2),
+            truncated_due_to_timeout: false,
+        };
+        self.enqueue(Ok(report));
+    }
+
+    /// A conforming FLAM candidate (non-empty `.mdf` + real `str/` and
+    /// `etc/`): classifies as SUPPORTED-recognized FLAM Gen1 with zero
+    /// activated capability.
+    pub fn enqueue_supported_flam(&self) {
+        let report = DeviceScanReport {
+            candidates: vec![DeviceCandidate {
+                mount_path: std::path::PathBuf::from("/mock/flam"),
+                volume_serial: Some("FLAM_SERIAL".into()),
+                facts: CandidateFacts::Flam {
+                    mdf_payload: b"MOCK_MDF".to_vec(),
+                    has_str_dir: true,
+                    has_etc_dir: true,
+                },
             }],
             elapsed: Duration::from_millis(2),
             truncated_due_to_timeout: false,
@@ -83,10 +107,12 @@ impl MockDeviceScanner {
         let report = DeviceScanReport {
             candidates: vec![DeviceCandidate {
                 mount_path: std::path::PathBuf::from("/mock/lunii_corrupt"),
-                metadata_payload: vec![3],
-                pi_payload: Vec::new(),
-                has_bt: true,
                 volume_serial: None,
+                facts: CandidateFacts::Lunii {
+                    metadata_payload: vec![3],
+                    pi_payload: Vec::new(),
+                    has_bt: true,
+                },
             }],
             elapsed: Duration::from_millis(1),
             truncated_due_to_timeout: false,
@@ -98,10 +124,12 @@ impl MockDeviceScanner {
         let report = DeviceScanReport {
             candidates: vec![DeviceCandidate {
                 mount_path: std::path::PathBuf::from("/mock/lunii_no_bt"),
-                metadata_payload: vec![3],
-                pi_payload: b"MOCK_PI".to_vec(),
-                has_bt: false,
                 volume_serial: None,
+                facts: CandidateFacts::Lunii {
+                    metadata_payload: vec![3],
+                    pi_payload: b"MOCK_PI".to_vec(),
+                    has_bt: false,
+                },
             }],
             elapsed: Duration::from_millis(1),
             truncated_due_to_timeout: false,
@@ -114,17 +142,21 @@ impl MockDeviceScanner {
             candidates: vec![
                 DeviceCandidate {
                     mount_path: std::path::PathBuf::from("/mock/lunii_a"),
-                    metadata_payload: vec![3],
-                    pi_payload: b"PI_A".to_vec(),
-                    has_bt: true,
                     volume_serial: Some("SERIAL_A".into()),
+                    facts: CandidateFacts::Lunii {
+                        metadata_payload: vec![3],
+                        pi_payload: b"PI_A".to_vec(),
+                        has_bt: true,
+                    },
                 },
                 DeviceCandidate {
                     mount_path: std::path::PathBuf::from("/mock/lunii_b"),
-                    metadata_payload: vec![6],
-                    pi_payload: b"PI_B".to_vec(),
-                    has_bt: true,
                     volume_serial: Some("SERIAL_B".into()),
+                    facts: CandidateFacts::Lunii {
+                        metadata_payload: vec![6],
+                        pi_payload: b"PI_B".to_vec(),
+                        has_bt: true,
+                    },
                 },
             ],
             elapsed: Duration::from_millis(3),

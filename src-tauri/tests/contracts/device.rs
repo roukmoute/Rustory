@@ -7,12 +7,27 @@ fn supported_dto() -> ConnectedDeviceDto {
     ConnectedDeviceDto::Supported {
         family: SupportedFamilyDto::Lunii,
         firmware_cohort: FirmwareCohortDto::OrigineV1,
-        metadata_format_version: 3,
+        metadata_format_version: Some(3),
         device_identifier: "0123456789abcdef0123456789abcdef".into(),
         supported_operations: SupportedOperationsDto {
             read_library: true,
             inspect_story: true,
             import_story: true,
+            write_story: false,
+        },
+    }
+}
+
+fn supported_flam_dto() -> ConnectedDeviceDto {
+    ConnectedDeviceDto::Supported {
+        family: SupportedFamilyDto::Flam,
+        firmware_cohort: FirmwareCohortDto::FlamGen1,
+        metadata_format_version: None,
+        device_identifier: "fedcba9876543210fedcba9876543210".into(),
+        supported_operations: SupportedOperationsDto {
+            read_library: false,
+            inspect_story: false,
+            import_story: false,
             write_story: false,
         },
     }
@@ -50,7 +65,7 @@ fn connected_device_supported_v3_serializes_with_import_story_false() {
     let dto = ConnectedDeviceDto::Supported {
         family: SupportedFamilyDto::Lunii,
         firmware_cohort: FirmwareCohortDto::V3,
-        metadata_format_version: 7,
+        metadata_format_version: Some(7),
         device_identifier: "fedcba9876543210fedcba9876543210".into(),
         supported_operations: SupportedOperationsDto {
             read_library: true,
@@ -181,4 +196,50 @@ fn connected_device_supported_does_not_emit_snake_case_aliases() {
     ] {
         assert!(v.get(snake).is_none(), "snake_case must not leak: {snake}");
     }
+}
+
+/// Byte-for-byte INVARIANCE of the Lunii supported wire: the exact JSON
+/// string emitted before the FLAM extension, frozen as a literal. The
+/// `Option<u8>` migration of `metadataFormatVersion` must not deform the
+/// MVP wire by a single byte — key present, plain integer, same order.
+#[test]
+fn connected_device_supported_lunii_wire_string_is_byte_for_byte_unchanged() {
+    let s = serde_json::to_string(&supported_dto()).expect("ser");
+    assert_eq!(
+        s,
+        "{\"kind\":\"supported\",\"family\":\"lunii\",\"firmwareCohort\":\"origineV1\",\
+         \"metadataFormatVersion\":3,\
+         \"deviceIdentifier\":\"0123456789abcdef0123456789abcdef\",\
+         \"supportedOperations\":{\"readLibrary\":true,\"inspectStory\":true,\
+         \"importStory\":true,\"writeStory\":false}}"
+    );
+}
+
+/// Twin of the invariance test for the FLAM wire: `family`/`firmwareCohort`
+/// discriminate, all four operations are `false`, and the
+/// `metadataFormatVersion` key is ABSENT from the string (never `null`).
+#[test]
+fn connected_device_supported_flam_wire_string_omits_version_key() {
+    let s = serde_json::to_string(&supported_flam_dto()).expect("ser");
+    assert_eq!(
+        s,
+        "{\"kind\":\"supported\",\"family\":\"flam\",\"firmwareCohort\":\"flamGen1\",\
+         \"deviceIdentifier\":\"fedcba9876543210fedcba9876543210\",\
+         \"supportedOperations\":{\"readLibrary\":false,\"inspectStory\":false,\
+         \"importStory\":false,\"writeStory\":false}}"
+    );
+    assert!(!s.contains("metadataFormatVersion"));
+    assert!(!s.contains("null"));
+}
+
+#[test]
+fn firmware_cohort_flam_gen1_serializes_as_camel_case_string() {
+    let v = serde_json::to_value(FirmwareCohortDto::FlamGen1).expect("ser");
+    assert_eq!(v, serde_json::Value::String("flamGen1".into()));
+}
+
+#[test]
+fn supported_family_flam_serializes_as_camel_case_string() {
+    let v = serde_json::to_value(SupportedFamilyDto::Flam).expect("ser");
+    assert_eq!(v, serde_json::Value::String("flam".into()));
 }

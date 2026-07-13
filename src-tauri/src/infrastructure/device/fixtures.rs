@@ -12,8 +12,8 @@ use std::fs;
 use std::path::PathBuf;
 
 use crate::domain::device::{
-    pack_short_id, LUNII_BINARY_TOKEN_MARKER, LUNII_CONTENT_DIR, LUNII_DEVICE_ID_MARKER,
-    LUNII_HIDDEN_INDEX_MARKER, LUNII_PRIMARY_MARKER,
+    pack_short_id, FLAM_CONFIG_DIR, FLAM_PRIMARY_MARKER, FLAM_STORY_DIR, LUNII_BINARY_TOKEN_MARKER,
+    LUNII_CONTENT_DIR, LUNII_DEVICE_ID_MARKER, LUNII_HIDDEN_INDEX_MARKER, LUNII_PRIMARY_MARKER,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -36,6 +36,51 @@ pub fn temp_lunii_mount(metadata_version: u8) -> (tempfile::TempDir, PathBuf) {
     .expect("write .md");
     fs::write(root.join(LUNII_DEVICE_ID_MARKER), b"FIXTURE_PI_PAYLOAD").expect("write .pi");
     fs::write(root.join(LUNII_BINARY_TOKEN_MARKER), b"FIXTURE_BT").expect("write .bt");
+    (dir, root)
+}
+
+/// Build a TempDir whose root carries the marker set of a conforming
+/// FLAM: a non-empty `.mdf` + the REAL directories `str/` and `etc/`.
+/// Returns `(TempDir guard, mount path)`.
+pub fn temp_flam_mount() -> (tempfile::TempDir, PathBuf) {
+    let dir = tempfile::tempdir().expect("create tempdir");
+    let root = dir.path().to_path_buf();
+    fs::write(root.join(FLAM_PRIMARY_MARKER), b"FIXTURE_MDF_PAYLOAD").expect("write .mdf");
+    fs::create_dir(root.join(FLAM_STORY_DIR)).expect("mkdir str");
+    fs::create_dir(root.join(FLAM_CONFIG_DIR)).expect("mkdir etc");
+    (dir, root)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FlamCorruptKind {
+    /// `.mdf` present but EMPTY — a VISIBLE candidate that classifies
+    /// `metadataCorrupt`.
+    EmptyMdf,
+    /// `.mdf` beyond the 4 KiB bound — not a plausible FLAM, the volume
+    /// is ignored by the probe.
+    OversizeMdf,
+    /// `str/` missing — classifies `metadataUnsupported`.
+    MissingStrDir,
+    /// `etc/` missing — classifies `metadataUnsupported`.
+    MissingEtcDir,
+}
+
+/// Same as [`temp_flam_mount`] but injects a controlled corruption.
+pub fn temp_flam_mount_corrupt(kind: FlamCorruptKind) -> (tempfile::TempDir, PathBuf) {
+    let dir = tempfile::tempdir().expect("create tempdir");
+    let root = dir.path().to_path_buf();
+    let mdf_payload: Vec<u8> = match kind {
+        FlamCorruptKind::EmptyMdf => Vec::new(),
+        FlamCorruptKind::OversizeMdf => vec![0x4D; 8 * 1024],
+        _ => b"FIXTURE_MDF".to_vec(),
+    };
+    fs::write(root.join(FLAM_PRIMARY_MARKER), &mdf_payload).expect("write .mdf");
+    if kind != FlamCorruptKind::MissingStrDir {
+        fs::create_dir(root.join(FLAM_STORY_DIR)).expect("mkdir str");
+    }
+    if kind != FlamCorruptKind::MissingEtcDir {
+        fs::create_dir(root.join(FLAM_CONFIG_DIR)).expect("mkdir etc");
+    }
     (dir, root)
 }
 

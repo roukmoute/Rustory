@@ -115,7 +115,7 @@ Preferred patterns:
 - `Envoi indisponible: aucune histoire sélectionnée`
 - `Envoi indisponible: sélection multiple`
 - `Envoi indisponible: aucun appareil connecté`
-- `Envoi indisponible: profil non supporté` — covers a V3 (device write is still being reverse-engineered, like import), FLAM, and any unsupported profile
+- `Envoi indisponible: profil non supporté` — covers a V3 (device write is still being reverse-engineered, like import), any recognized profile with zero write capability (FLAM Gen1 — the capability-closed path, never the "MVP Phase 1" promise), and any unsupported profile
 - `Envoi indisponible: profil ambigu`
 - `Envoi indisponible: détection en cours`
 - `Envoi indisponible: détection en échec`
@@ -239,11 +239,42 @@ as a fallback.
 | Internal State | Wire `kind` | Panel Label | Disabled Actions |
 | --- | --- | --- | --- |
 | no device | `none` | `Aucun appareil connecté` | Envoi |
-| supported | `supported` | `Appareil prêt — {family} {cohort}` | Envoi (Phase 1 — wired Epic 3) |
+| supported (≥ 1 activated capability) | `supported` | `Appareil prêt — {family} {cohort}` | Envoi (Phase 1 — wired Epic 3) |
+| supported (zero activated capability) | `supported` | `Appareil reconnu — {famille}` | Envoi (capability-closed path) |
 | unsupported | `unsupported` | `Profil non supporté` + standardized reason | Envoi |
 | ambiguous | `ambiguous` | `Profil ambigu — {n} candidats` | Envoi |
 | scanning | (transient) | `Détection en cours…` | Envoi, Réessayer |
 | error | (`AppError DEVICE_SCAN_FAILED`) | `Détection indisponible` | Envoi |
+
+**Recognized ≠ ready (general product rule).** `Appareil prêt — …` REQUIRES
+at least one activated capability: the panel derives
+`hasAnyCapability = readLibrary || inspectStory || importStory || writeStory`
+from the authoritative DTO — never from the family name (no
+`if family === "flam"` in state rendering; any future zero-capability
+profile is honest by construction). A supported profile whose capabilities
+are ALL `false` (FLAM Gen1 today) renders:
+
+- the STATIC chip `Appareil reconnu — {famille}` (a durable state, never
+  `role="alert"`),
+- its four capability lines as `—` (the standard non-activated rendering),
+- a sober TEXT-ONLY support-profile explanation (`Appareil reconnu, aucune
+  opération activée dans cette version. Consulte le profil de support pour
+  comprendre ce qui est permis.`) — rendered in this
+  recognized-without-capability idle state ONLY, never in a
+  capability-bearing idle (Lunii). The pointer is informative text with NO
+  navigation and NO network (NFR14): consulting the profiles is a separate
+  surface, so no internal target exists to wire yet; the external
+  `Consulter le profil de support` CTA keeps its pre-existing scope
+  (unsupported / ambiguous / error) and is NOT offered here,
+- the send disabled through the EXISTING capability-closed path
+  (`Envoi indisponible: profil non supporté`, the V3 pattern). The idle copy
+  `Envoi indisponible: transfert pas encore activé (MVP Phase 1)` stays
+  EXCLUSIVE to write-planned Lunii cohorts and is never rendered for a
+  zero-capability profile.
+
+The metadata format version NEVER appears in a FLAM rendering — the wire
+omits the `metadataFormatVersion` key entirely for a profile that has no
+metadata version (never `null`, never an invented `0`).
 
 Error payloads under `DEVICE_SCAN_FAILED` carry a stable
 `details.source` discriminator so support can triage without parsing
@@ -581,10 +612,10 @@ both strings, React renders them verbatim.
 | `media` | `mediaUnsupported` | blocking | Ce média utilise un format non pris en charge. | Choisis une image PNG ou JPEG, ou un son MP3, WAV ou OGG. |
 | `media` | `mediaUnreadable` | blocking | Ce média est illisible ou dépasse la taille autorisée. | Choisis un fichier plus léger et lisible puis réessaie. |
 | `media` | `mediaSourceMissing` | fixable | Le fichier d'un média associé n'est plus accessible. | Ré-associe le média ou retire-le ; le reste du nœud reste modifiable. |
-| `deviceProfile` | `metadataUnsupported` | blocking | Le profil de la Lunii connectée n'est pas pris en charge. | Consulte le profil de support pour voir les Lunii compatibles. |
-| `deviceProfile` | `metadataCorrupt` | blocking | Les marqueurs de la Lunii connectée sont incomplets ou illisibles. | Rebranche la Lunii puis relance la vérification. |
+| `deviceProfile` | `metadataUnsupported` | blocking | Le profil de l'appareil connecté n'est pas pris en charge. | Consulte le profil de support pour voir les appareils compatibles. |
+| `deviceProfile` | `metadataCorrupt` | blocking | Les marqueurs de l'appareil connecté sont incomplets ou illisibles. | Rebranche l'appareil puis relance la vérification. |
 | `deviceProfile` | `familyUnknown` | blocking | La famille de l'appareil connecté n'est pas reconnue. | Branche une Lunii prise en charge puis relance la vérification. |
-| `deviceProfile` | `multipleCandidates` | blocking | Plusieurs Lunii compatibles sont connectées en même temps. | Ne garde qu'une seule Lunii branchée puis relance la vérification. |
+| `deviceProfile` | `multipleCandidates` | blocking | Plusieurs appareils compatibles sont connectés en même temps. | Ne garde qu'un seul appareil branché puis relance la vérification. |
 | `deviceProfile` | `firmwareUnsupported` | blocking | Le firmware de la Lunii connectée n'est pas pris en charge. | Consulte le profil de support pour les firmwares compatibles. |
 | `deviceProfile` | `operationNotAuthorized` | blocking | Le profil détecté n'autorise pas la lecture de la bibliothèque de l'appareil. | Consulte le profil de support pour comprendre ce qui est permis. |
 
@@ -768,7 +799,8 @@ The transfer state is **composed in Rust** and only **presented** by the panel.
 checked **before any write I/O**: the send is allowed only on a write-authorized
 cohort. In MVP Phase 1 the matrix wires writes for **Lunii Origine v1** and
 **Mid-Gen v2**; **V3 stays read-only** (active reverse-engineering, same rationale
-as import) and FLAM is unsupported. The `Envoyer vers la Lunii` CTA is therefore
+as import) and FLAM Gen1 is recognized with zero capability (its write stays ❌
+through the same gate). The `Envoyer vers la Lunii` CTA is therefore
 **activable** — active ONLY on (write-authorized cohort + `Préparée` story + a
 single clear target), disabled everywhere else with a standardized
 `Envoi indisponible: …` reason. **No confirmation modal** is shown when the

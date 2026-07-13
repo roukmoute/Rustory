@@ -9,9 +9,9 @@
  * shape symmetric.
  */
 
-export type SupportedFamilyDto = "lunii";
+export type SupportedFamilyDto = "lunii" | "flam";
 
-export type FirmwareCohortDto = "origineV1" | "midGenV2" | "v3";
+export type FirmwareCohortDto = "origineV1" | "midGenV2" | "v3" | "flamGen1";
 
 export interface SupportedOperationsDto {
   readLibrary: boolean;
@@ -34,7 +34,10 @@ export type ConnectedDeviceDto =
       kind: "supported";
       family: SupportedFamilyDto;
       firmwareCohort: FirmwareCohortDto;
-      metadataFormatVersion: number;
+      /** Present for families whose primary marker carries a version
+       *  byte (Lunii). ABSENT — the key itself, never `null` — for
+       *  families without one (FLAM): the Rust serializer omits it. */
+      metadataFormatVersion?: number;
       deviceIdentifier: string;
       supportedOperations: SupportedOperationsDto;
     }
@@ -45,12 +48,25 @@ export type ConnectedDeviceDto =
     }
   | { kind: "ambiguous"; candidateCount: number };
 
-const SUPPORTED_FAMILIES: ReadonlySet<string> = new Set(["lunii"]);
-const FIRMWARE_COHORTS: ReadonlySet<string> = new Set([
-  "origineV1",
-  "midGenV2",
-  "v3",
-]);
+/** Closed per-family contract: which cohorts are legal for the family
+ *  and whether `metadataFormatVersion` must be PRESENT (an integer in
+ *  0..127) or ABSENT (the key itself — JSON has no `undefined`, and
+ *  `null` is refused). Replaces the former independent family/cohort
+ *  sets: an illegal combination (`lunii`+`flamGen1`, `flam` carrying a
+ *  version, …) is unrepresentable at the boundary. */
+const FAMILY_CONTRACTS: Record<
+  string,
+  { cohorts: ReadonlySet<string>; metadataFormatVersion: "required" | "absent" }
+> = {
+  lunii: {
+    cohorts: new Set(["origineV1", "midGenV2", "v3"]),
+    metadataFormatVersion: "required",
+  },
+  flam: {
+    cohorts: new Set(["flamGen1"]),
+    metadataFormatVersion: "absent",
+  },
+};
 const UNSUPPORTED_REASONS: ReadonlySet<string> = new Set([
   "firmwareUnsupported",
   "metadataUnsupported",
@@ -95,11 +111,22 @@ const ALLOWED_KEYS: Record<string, ReadonlySet<string>> = {
   ambiguous: new Set(["kind", "candidateCount"]),
 };
 
+/** Prototype-safe own-property lookup. A plain indexation
+ *  (`record[key]`) walks the prototype chain: a hostile discriminant
+ *  such as `"constructor"` or `"__proto__"` would resolve to a truthy
+ *  `Object.prototype` member and crash the guard with a `TypeError`
+ *  instead of a boolean rejection. */
+function ownEntry<T>(record: Record<string, T>, key: string): T | undefined {
+  return Object.prototype.hasOwnProperty.call(record, key)
+    ? record[key]
+    : undefined;
+}
+
 function hasOnlyAllowedKeys(
   value: Record<string, unknown>,
   kind: string,
 ): boolean {
-  const allowed = ALLOWED_KEYS[kind];
+  const allowed = ownEntry(ALLOWED_KEYS, kind);
   if (!allowed) return false;
   for (const k of Object.keys(value)) {
     if (!allowed.has(k)) return false;
@@ -124,21 +151,28 @@ export function isConnectedDeviceDto(
   switch (c.kind) {
     case "none":
       return true;
-    case "supported":
-      if (typeof c.family !== "string" || !SUPPORTED_FAMILIES.has(c.family))
-        return false;
+    case "supported": {
+      if (typeof c.family !== "string") return false;
+      const contract = ownEntry(FAMILY_CONTRACTS, c.family);
+      if (!contract) return false;
       if (
         typeof c.firmwareCohort !== "string" ||
-        !FIRMWARE_COHORTS.has(c.firmwareCohort)
+        !contract.cohorts.has(c.firmwareCohort)
       )
         return false;
-      if (
-        typeof c.metadataFormatVersion !== "number" ||
-        !Number.isInteger(c.metadataFormatVersion) ||
-        c.metadataFormatVersion < 0 ||
-        c.metadataFormatVersion > 127
-      )
-        return false;
+      if (contract.metadataFormatVersion === "required") {
+        if (
+          typeof c.metadataFormatVersion !== "number" ||
+          !Number.isInteger(c.metadataFormatVersion) ||
+          c.metadataFormatVersion < 0 ||
+          c.metadataFormatVersion > 127
+        )
+          return false;
+      } else {
+        // ABSENT means the KEY is absent: a present key — even
+        // `null`/`undefined`-valued — is a producer drift, refused.
+        if ("metadataFormatVersion" in c) return false;
+      }
       if (
         typeof c.deviceIdentifier !== "string" ||
         !DEVICE_IDENTIFIER_PATTERN.test(c.deviceIdentifier)
@@ -146,6 +180,7 @@ export function isConnectedDeviceDto(
         return false;
       if (!isSupportedOperationsDto(c.supportedOperations)) return false;
       return true;
+    }
     case "unsupported":
       if (
         typeof c.reason !== "string" ||

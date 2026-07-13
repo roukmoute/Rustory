@@ -40,11 +40,27 @@ pub const LUNII_HIDDEN_INDEX_MARKER: &str = ".pi.hidden";
 /// the volume; its absence flags an ambiguous/orphan entry (FR33).
 pub const LUNII_CONTENT_DIR: &str = ".content";
 
+/// FLAM marker set (see `docs/architecture/device-support-profile.md`
+/// → "FLAM recognition markers"). Source: public FLAM observations from
+/// the `o-daneel/Lunii.QT` project. Lunii precedence is fixed: a volume
+/// carrying `.md` is probed as a Lunii candidate even when `.mdf`
+/// coexists — only a volume WITHOUT `.md` and WITH `.mdf` enters the
+/// FLAM probe.
+///
+/// **Required for recognized FLAM**: `.mdf` (primary identifier; the
+/// payload is hashed into the opaque `device_identifier`, never parsed
+/// — its internal structure is not publicly documented) + the REAL
+/// directories `str/` and `etc/` (no-follow — a symlink does not
+/// count).
+pub const FLAM_PRIMARY_MARKER: &str = ".mdf";
+pub const FLAM_STORY_DIR: &str = "str";
+pub const FLAM_CONFIG_DIR: &str = "etc";
+
 /// Tight upper bound on the `.md` (and other marker) file size we are
 /// willing to read into memory during the scan. A genuine `.md` is < 1 KB;
 /// anything bigger is treated as `metadata_corrupt`. Bounded I/O on the
 /// scan path keeps the NFR4 5-second budget honest even on adversarial
-/// mounts.
+/// mounts. Shared by the FLAM `.mdf` probe (same bound, same rationale).
 pub const MAX_METADATA_FILE_BYTES: u64 = 4 * 1024;
 
 #[cfg(test)]
@@ -93,5 +109,19 @@ mod tests {
     #[test]
     fn lunii_content_dir_is_dot_content() {
         assert_eq!(LUNII_CONTENT_DIR, ".content");
+    }
+
+    #[test]
+    fn flam_primary_marker_is_dot_mdf() {
+        assert_eq!(FLAM_PRIMARY_MARKER, ".mdf");
+    }
+
+    #[test]
+    fn flam_required_marker_set_is_mdf_str_and_etc() {
+        // The required set for a recognized FLAM is exactly the `.mdf`
+        // primary marker plus the two REAL directories `str/` and
+        // `etc/` (device-support-profile.md → FLAM recognition markers).
+        assert_eq!(FLAM_STORY_DIR, "str");
+        assert_eq!(FLAM_CONFIG_DIR, "etc");
     }
 }

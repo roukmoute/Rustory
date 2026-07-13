@@ -41,13 +41,36 @@ impl DeviceScanReport {
 pub struct DeviceCandidate {
     /// OS mount path (kept Rust-side only — never crosses IPC).
     pub mount_path: PathBuf,
-    /// Raw `.md` payload (≤ MAX_METADATA_FILE_BYTES).
-    pub metadata_payload: Vec<u8>,
-    /// Raw `.pi` payload, used to compute device_identifier.
-    pub pi_payload: Vec<u8>,
-    /// `.bt` presence (content not needed at this stage).
-    pub has_bt: bool,
     /// Stable, OS-provided volume serial when available; falls back to
     /// `None` on platforms or filesystems where it cannot be queried.
     pub volume_serial: Option<String>,
+    /// Per-family facts probed at the volume root. The sum makes a
+    /// bi-family candidate UNREPRESENTABLE by construction — no runtime
+    /// validation to forget. Family precedence is decided by the probe
+    /// (`.md` present ⇒ Lunii, even when `.mdf` coexists).
+    pub facts: CandidateFacts,
+}
+
+/// Family-tagged facts collected by the volume probe. Each variant
+/// carries exactly what that family's classifier consumes — nothing
+/// cross-family.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CandidateFacts {
+    Lunii {
+        /// Raw `.md` payload (≤ MAX_METADATA_FILE_BYTES).
+        metadata_payload: Vec<u8>,
+        /// Raw `.pi` payload, used to compute device_identifier.
+        pi_payload: Vec<u8>,
+        /// `.bt` presence (content not needed at this stage).
+        has_bt: bool,
+    },
+    Flam {
+        /// Raw `.mdf` payload (≤ MAX_METADATA_FILE_BYTES), read
+        /// no-follow. Hashed into the device identifier, never parsed.
+        mdf_payload: Vec<u8>,
+        /// `str/` present as a REAL directory (no-follow).
+        has_str_dir: bool,
+        /// `etc/` present as a REAL directory (no-follow).
+        has_etc_dir: bool,
+    },
 }
