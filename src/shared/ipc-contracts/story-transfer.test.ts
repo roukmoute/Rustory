@@ -111,6 +111,21 @@ describe("isTransferStateDto", () => {
     ).toBe(false);
   });
 
+  it("accepts the devicePackUnprovable cause (the protective update refusal)", () => {
+    expect(
+      isTransferStateDto({
+        kind: "retryable",
+        story,
+        cause: "devicePackUnprovable",
+        message:
+          "Envoi interrompu : la copie présente sur l'appareil est dans un état que Rustory ne reconnaît pas, rien n'a été modifié.",
+        userAction:
+          "Vérifie l'appareil, débranche-le puis rebranche-le, puis relance l'envoi.",
+        completeness: "failed",
+      }),
+    ).toBe(true);
+  });
+
   it("rejects an empty userAction on retryable", () => {
     expect(
       isTransferStateDto({
@@ -210,6 +225,18 @@ describe("isTransferOutcomeDto", () => {
         ...base,
         terminalKind: "retryable",
         cause: "deviceChanged",
+      }),
+    ).toBe(true);
+  });
+
+  it("accepts a remembered devicePackUnprovable retryable outcome", () => {
+    // The durable memory re-hydrates the protective FR23 refusal like any other
+    // write-phase cause.
+    expect(
+      isTransferOutcomeDto({
+        ...base,
+        terminalKind: "retryable",
+        cause: "devicePackUnprovable",
       }),
     ).toBe(true);
   });

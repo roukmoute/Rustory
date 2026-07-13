@@ -4,9 +4,10 @@
 //! (`src/shared/ipc-contracts/story-transfer.ts`) must stay byte-compatible.
 
 use rustory_lib::application::transfer::{StoredTransferOutcome, TransferStateView};
+use rustory_lib::domain::device::DeviceFamily;
 use rustory_lib::domain::transfer::{
-    PersistedTransferOutcome, TransferCompleteness, TransferFailureCause, VerifiedSummary,
-    VerifyVerdict,
+    compose_verified_summary, PersistedTransferOutcome, TransferCompleteness, TransferFailureCause,
+    VerifiedSummary, VerifyVerdict, WriteOutcome,
 };
 use rustory_lib::ipc::dto::{
     DiscardTransferOutcomeInputDto, PreparationStoryDto, ReadTransferOutcomeInputDto,
@@ -126,6 +127,7 @@ fn every_cause_serializes_to_a_distinct_camel_case_discriminant() {
         TransferFailureCause::NotTransferable,
         TransferFailureCause::DeviceChanged,
         TransferFailureCause::WriteRejected,
+        TransferFailureCause::DevicePackUnprovable,
         TransferFailureCause::Interrupted,
     ] {
         let v = serde_json::to_value(TransferStateDto::retryable(
@@ -136,6 +138,9 @@ fn every_cause_serializes_to_a_distinct_camel_case_discriminant() {
         .expect("ser");
         let tag = v["cause"].as_str().expect("cause").to_string();
         assert!(!tag.is_empty());
+        // The serde discriminant IS the domain wire tag: the persisted value
+        // parses back into the same closed cause (the re-hydration inverse).
+        assert_eq!(TransferFailureCause::from_wire_cause(&tag), Some(cause));
         seen.push(tag);
     }
     let mut unique = seen.clone();
@@ -146,6 +151,73 @@ fn every_cause_serializes_to_a_distinct_camel_case_discriminant() {
         seen.len(),
         "causes must be distinct on the wire"
     );
+}
+
+#[test]
+fn device_pack_unprovable_cause_round_trips_with_its_frozen_copy() {
+    // FR23 — the dedicated protective refusal: exact wire discriminant + the
+    // frozen honest copy (Rustory protects; never "the device refused").
+    let dto = TransferStateDto::retryable(
+        story(),
+        TransferFailureCause::DevicePackUnprovable,
+        TransferCompleteness::Failed,
+    );
+    let v = serde_json::to_value(&dto).expect("ser");
+    assert_eq!(v["kind"], "retryable");
+    assert_eq!(v["cause"], "devicePackUnprovable");
+    assert_eq!(
+        v["message"],
+        "Envoi interrompu : la copie présente sur l'appareil est dans un état que Rustory ne reconnaît pas, rien n'a été modifié."
+    );
+    assert_eq!(
+        v["userAction"],
+        "Vérifie l'appareil, débranche-le puis rebranche-le, puis relance l'envoi."
+    );
+    assert_eq!(
+        TransferFailureCause::from_wire_cause("devicePackUnprovable"),
+        Some(TransferFailureCause::DevicePackUnprovable),
+        "the persisted tag re-hydrates into the same cause"
+    );
+}
+
+#[test]
+fn the_three_verified_summary_variants_are_frozen_on_the_wire() {
+    // FR23/AC2 — the summary's `changed` line is a VALUE of the existing
+    // `summary.changed` field (zero new wire fields): the three variants are
+    // frozen literals, and the first-send Lunii literal is INVARIANT (the
+    // historical wire byte-for-byte).
+    for (outcome, expected) in [
+        (
+            WriteOutcome::CreatedNew,
+            "« Mon histoire » est maintenant sur la Lunii.",
+        ),
+        (
+            WriteOutcome::ReplacedDivergent,
+            "« Mon histoire » a été mise à jour sur la Lunii.",
+        ),
+        (
+            WriteOutcome::ReusedIdentical,
+            "« Mon histoire » était déjà à jour sur la Lunii.",
+        ),
+    ] {
+        let summary = compose_verified_summary("Mon histoire", 2, DeviceFamily::Lunii, outcome);
+        let dto = TransferStateDto::from_view(TransferStateView::Verified {
+            device_identifier: DEVICE.into(),
+            story_id: STORY.into(),
+            story_title: "Mon histoire".into(),
+            summary,
+        });
+        let v = serde_json::to_value(&dto).expect("ser");
+        assert_eq!(v["kind"], "verified", "{outcome:?}");
+        assert_eq!(v["summary"]["changed"], expected, "{outcome:?}");
+        assert_eq!(
+            v["summary"]["unchanged"],
+            "2 autres histoires de l'appareil restent inchangées."
+        );
+        // No new wire key appeared alongside the summary lines.
+        let summary_keys: Vec<&String> = v["summary"].as_object().expect("obj").keys().collect();
+        assert_eq!(summary_keys, ["changed", "unchanged"], "{outcome:?}");
+    }
 }
 
 #[test]

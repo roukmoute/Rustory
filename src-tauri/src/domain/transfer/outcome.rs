@@ -369,6 +369,7 @@ mod tests {
             TransferFailureCause::NotTransferable,
             TransferFailureCause::DeviceChanged,
             TransferFailureCause::WriteRejected,
+            TransferFailureCause::DevicePackUnprovable,
             TransferFailureCause::Interrupted,
         ] {
             for completeness in [

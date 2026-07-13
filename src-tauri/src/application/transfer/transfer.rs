@@ -32,7 +32,7 @@ use rusqlite::OptionalExtension;
 use crate::application::device::{
     check_operation_allowed, resolve_connected_lunii, ConnectedLuniiOutcome,
 };
-use crate::domain::device::SupportedOperation;
+use crate::domain::device::{DeviceFamily, SupportedOperation};
 use crate::domain::shared::AppError;
 use crate::domain::story::{validate_canonical, CanonicalBlocker, CanonicalStoryFacts};
 use crate::domain::transfer::{
@@ -40,7 +40,7 @@ use crate::domain::transfer::{
     ensure_descriptor_coherent, failure_copy, gate_prepare, short_id_from_pack_uuid,
     verify_aggregate, ChecksumProbe, PreparationFailureCause, PreparationPhase,
     TransferArtifactDescriptor, TransferCompleteness, TransferFailureCause, VerifiedSummary,
-    VerifyVerdict,
+    VerifyVerdict, WriteOutcome,
 };
 use crate::infrastructure::db::DbHandle;
 use crate::infrastructure::device::{
@@ -59,12 +59,15 @@ use super::prepare::PreparationEventEmitter;
 pub enum TransferOutcome {
     /// The write landed AND the `verify` phase confirmed it (indexed + content
     /// present + byte-faithful) — the legitimate success `transférée et vérifiée`.
-    /// `summary` carries the AC2/FR15 confirmation lines (composed in Rust).
+    /// `summary` carries the AC2/FR15 confirmation lines (composed in Rust);
+    /// `write_outcome` is the outcome the writer CONSTATED (first send / reuse /
+    /// replacement — FR23), carried for the diagnostics trace only.
     Verified {
         device_identifier: String,
         story_id: String,
         story_title: String,
         summary: VerifiedSummary,
+        write_outcome: WriteOutcome,
     },
     /// The write landed but the `verify` phase did NOT confirm it: `Partial`
     /// (`état partiel`) or `Failed` (`échec récupérable`) — a non-success terminal,
@@ -111,6 +114,9 @@ pub enum TransferStateView {
 struct ConfirmedTransfer {
     device_identifier: String,
     device_cohort: String,
+    /// The FRESH preflight profile's family — the summary bifurcation input
+    /// (never a cached value; FR23).
+    family: DeviceFamily,
     story_title: String,
     /// The imported pack's canonical UUID, or `None` for a native story (which
     /// has no device-format pack and is therefore not transferable).
@@ -307,9 +313,11 @@ pub fn transfer_story(
         write_budget,
         &report,
     ) {
-        Ok(()) => {
-            // The writer reports success; PROVE it (NFR: "no success without
-            // explicit verification of the expected result"). Enter the FINAL
+        Ok(write_outcome) => {
+            // The writer reports success AND the outcome it CONSTATED (first
+            // send / reuse / replacement — FR23); PROVE the claim (NFR: "no
+            // success without explicit verification of the expected result").
+            // EVERY outcome — including `ReusedIdentical` — enters the FINAL
             // `verify` phase of the SAME job: re-read the device and re-checksum
             // what landed, then classify the verdict. "écriture effectuée —
             // vérification à venir" is now the TRANSIENT label of this phase.
@@ -335,9 +343,15 @@ pub fn transfer_story(
                     // Compose the AC2 summary in Rust and carry it ON the terminal
                     // event (F1/F5): the UI renders `verified` straight from the
                     // event, never via a re-read with the now-stale pre-write
-                    // identifier, and never re-composes the lines in React.
-                    let summary =
-                        compose_verified_summary(&confirmed.story_title, facts.unchanged_count);
+                    // identifier, and never re-composes the lines in React. The
+                    // summary names the write outcome, bifurcated by the FRESH
+                    // preflight profile's family (FR23).
+                    let summary = compose_verified_summary(
+                        &confirmed.story_title,
+                        facts.unchanged_count,
+                        confirmed.family,
+                        write_outcome,
+                    );
                     emitter.completed_verified(
                         &summary.changed,
                         &summary.unchanged,
@@ -348,6 +362,7 @@ pub fn transfer_story(
                         story_id: story_id.to_string(),
                         story_title: confirmed.story_title,
                         summary,
+                        write_outcome,
                     }
                 }
                 // Honest non-success: NEVER dressed up as a success, NEVER the
@@ -591,7 +606,17 @@ pub fn read_transfer_state(
         if byte_faithful {
             let unchanged_count = (confirmed.device_entry_count as u32)
                 .saturating_sub(confirmed.pack_match_count as u32);
-            let summary = compose_verified_summary(&confirmed.story_title, unchanged_count);
+            // The passive re-read proves PRESENCE (pack there + byte-faithful),
+            // never which write outcome produced it — the present-state wording
+            // IS the first-send literal ("est maintenant sur…"), so it composes
+            // with `CreatedNew`. The outcome-named summaries live on the job
+            // terminal only (the terminal carries the result, never a re-read).
+            let summary = compose_verified_summary(
+                &confirmed.story_title,
+                unchanged_count,
+                confirmed.family,
+                WriteOutcome::CreatedNew,
+            );
             return Ok(TransferStateView::Verified {
                 device_identifier: confirmed.device_identifier,
                 story_id: story_id.to_string(),
@@ -749,6 +774,7 @@ fn run_transfer_preflight(
     let device_entry_count = library.entries.len();
 
     Ok(TransferPreflight::Confirmed(Box::new(ConfirmedTransfer {
+        family: profile.family,
         device_identifier: profile.device_identifier,
         device_cohort: target_cohort.clone(),
         story_title: facts.facts.title.clone(),
@@ -1201,6 +1227,133 @@ mod tests {
             );
             assert!(is_monotonic(&emitter.sequences()));
         }
+    }
+
+    #[test]
+    fn the_constated_write_outcome_reaches_the_verified_terminal_summary() {
+        // FR23/AC2: the summary of the `verified` terminal names the outcome the
+        // WRITER constated — never deduced from a pre-write state. The recorder
+        // mock proves which outcome was returned; the summary must match it.
+        let dir = tempfile::tempdir().expect("app data");
+        for (outcome, expected_changed) in [
+            (
+                WriteOutcome::ReplacedDivergent,
+                "« Mon histoire » a été mise à jour sur la Lunii.",
+            ),
+            (
+                WriteOutcome::ReusedIdentical,
+                "« Mon histoire » était déjà à jour sur la Lunii.",
+            ),
+            (
+                WriteOutcome::CreatedNew,
+                "« Mon histoire » est maintenant sur la Lunii.",
+            ),
+        ] {
+            let db = fresh_db();
+            insert_story(&db, "s1");
+            insert_import(&db, "s1");
+            let scanner = supported_scanner(3);
+            scanner.enqueue_supported_lunii(3); // F5
+            scanner.enqueue_supported_lunii(3); // verify re-scan
+            let reader = MockDeviceLibraryReader::new();
+            reader.enqueue_library_with(1);
+            reader.enqueue(Ok(verify_library_with_pack()));
+            let artifacts = MockTransferArtifactSource::new();
+            artifacts.enqueue(Ok(imported_descriptor("s1", "origine_v1")));
+            artifacts.enqueue_reaggregate(Ok(PACK_CHECKSUM.to_string()));
+            let writer = MockDevicePackWriter::new();
+            writer.enqueue_success_with_outcome(outcome);
+            let emitter = CapturingEmitter::default();
+
+            let result = transfer_story(
+                &db,
+                &scanner,
+                &reader,
+                &artifacts,
+                &writer,
+                dir.path(),
+                "s1",
+                &mock_identifier(),
+                budget(),
+                budget(),
+                &emitter,
+            );
+            assert_eq!(
+                writer.returned_outcomes(),
+                vec![outcome],
+                "the recorder mock proves the outcome the writer returned"
+            );
+            match result {
+                TransferOutcome::Verified {
+                    summary,
+                    write_outcome,
+                    ..
+                } => {
+                    assert_eq!(write_outcome, outcome, "the outcome reaches the terminal");
+                    assert_eq!(
+                        summary.changed, expected_changed,
+                        "{outcome:?}: the summary names the constated outcome"
+                    );
+                }
+                other => panic!("{outcome:?}: expected Verified, got {other:?}"),
+            }
+            // EVERY outcome — including ReusedIdentical — passes the same full
+            // verify phase (no success without verification, NFR7): the verify
+            // phase transition was emitted before the terminal.
+            assert!(
+                emitter.recorded().contains(&Recorded::Progress {
+                    phase: PreparationPhase::Verify,
+                    sequence: 4
+                }),
+                "{outcome:?}: the verify phase must run"
+            );
+        }
+    }
+
+    #[test]
+    fn a_device_pack_unprovable_failure_is_an_honest_retryable_terminal() {
+        // FR23/AC1: the writer's protective refusal (unprovable on-device state)
+        // reaches the terminal as `retryable` with the dedicated cause — device
+        // intact (`Failed`), draft preserved.
+        let dir = tempfile::tempdir().expect("app data");
+        let db = fresh_db();
+        insert_story(&db, "s1");
+        insert_import(&db, "s1");
+        let scanner = supported_scanner(3);
+        scanner.enqueue_supported_lunii(3); // F5
+        let reader = readable_reader();
+        let artifacts = MockTransferArtifactSource::new();
+        artifacts.enqueue(Ok(imported_descriptor("s1", "origine_v1")));
+        let writer = MockDevicePackWriter::new();
+        writer.enqueue_failure(TransferFailureCause::DevicePackUnprovable);
+        let emitter = CapturingEmitter::default();
+
+        let before = read_story_row(&db, "s1");
+        let outcome = transfer_story(
+            &db,
+            &scanner,
+            &reader,
+            &artifacts,
+            &writer,
+            dir.path(),
+            "s1",
+            &mock_identifier(),
+            budget(),
+            budget(),
+            &emitter,
+        );
+        assert_eq!(
+            outcome,
+            TransferOutcome::Retryable {
+                cause: TransferFailureCause::DevicePackUnprovable,
+                completeness: TransferCompleteness::Failed,
+            }
+        );
+        assert_eq!(
+            read_story_row(&db, "s1"),
+            before,
+            "the protective refusal never mutates the canonical draft"
+        );
     }
 
     #[test]

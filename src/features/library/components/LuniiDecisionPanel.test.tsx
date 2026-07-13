@@ -1480,6 +1480,73 @@ describe("<LuniiDecisionPanel /> — transfer", () => {
     expect(screen.queryAllByRole("status")).toHaveLength(0);
   });
 
+  it("renders the update and already-up-to-date verified summaries VERBATIM under the unchanged chip (FR23)", () => {
+    // The three summary variants are composed in Rust; the panel renders the
+    // lines verbatim and the state chip NEVER varies (controlled vocabulary).
+    for (const changed of [
+      "« Mon histoire » a été mise à jour sur la Lunii.",
+      "« Mon histoire » était déjà à jour sur la Lunii.",
+    ]) {
+      const { unmount } = render(
+        <LuniiDecisionPanel
+          deviceState="idle"
+          transfer={{
+            kind: "verified",
+            changed,
+            unchanged: "2 autres histoires de l'appareil restent inchangées.",
+          }}
+          onEdit={noop}
+        />,
+      );
+      const region = screen.getByRole("region", { name: /^transfert$/i });
+      // The exact composed line, byte-for-byte.
+      expect(within(region).getByText(changed)).toBeInTheDocument();
+      // The chip stays the canonical success label — "mise à jour" is never a
+      // chip or a state, only a summary sentence.
+      const chip = within(region)
+        .getByText(/transférée et vérifiée/i)
+        .closest(".ds-chip");
+      expect(chip).toHaveClass("ds-chip--success");
+      expect(within(region).queryByRole("alert")).toBeNull();
+      unmount();
+    }
+  });
+
+  it("renders the devicePackUnprovable refusal through the retryable path with its honest copy and gesture", async () => {
+    // FR23/AC1 — the protective refusal is a plain `retryable` for the panel:
+    // message + gesture verbatim, role="alert" in-context, never a toast.
+    const onRetryTransfer = vi.fn();
+    render(
+      <LuniiDecisionPanel
+        deviceState="idle"
+        transfer={{
+          kind: "retryable",
+          message:
+            "Envoi interrompu : la copie présente sur l'appareil est dans un état que Rustory ne reconnaît pas, rien n'a été modifié.",
+          userAction:
+            "Vérifie l'appareil, débranche-le puis rebranche-le, puis relance l'envoi.",
+        }}
+        onRetryTransfer={onRetryTransfer}
+        onEdit={noop}
+      />,
+    );
+    const alert = screen.getByRole("alert");
+    expect(alert).toHaveTextContent(
+      /la copie présente sur l'appareil est dans un état que rustory ne reconnaît pas/i,
+    );
+    expect(alert).toHaveTextContent(/rien n'a été modifié/i);
+    expect(alert).toHaveTextContent(
+      /vérifie l'appareil, débranche-le puis rebranche-le/i,
+    );
+    // The honest copy never claims the device refused.
+    expect(alert).not.toHaveTextContent(/la lunii a refusé/i);
+    expect(within(alert).getByText(/échec récupérable/i)).toBeInTheDocument();
+    await userEvent.click(
+      screen.getByRole("button", { name: /relancer le transfert/i }),
+    );
+    expect(onRetryTransfer).toHaveBeenCalledTimes(1);
+  });
+
   it("renders the 'état partiel' terminal distinct from 'transfert incomplet' AND 'échec récupérable', with Relancer + Abandonner (AC3)", async () => {
     const onRetryTransfer = vi.fn();
     const onDismissTransfer = vi.fn();

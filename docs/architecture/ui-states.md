@@ -842,7 +842,7 @@ Verification Contract` below):
 | --- | --- | --- |
 | `transferring` | `en transfert` + honest progress | The write runs in the background; the library stays usable. A `%` bar appears ONLY during the measurable content copy — never a fake value nor 100 % before the terminal; a named phase otherwise. A non-destructive `Consulter le détail` discloses the phase / progress in-context (no cancel — out of scope). |
 | `verify` (TRANSIENT, not a resting terminal) | `écriture effectuée — vérification à venir` | The write is done; the read-only verification re-read is running. It settles to one of the verdicts below. |
-| `verified` (terminal) | `transférée et vérifiée` | Verification PROVED the write (indexed + content present + byte-faithful). The sober success + the AC2 summary (what changed / stayed unchanged / final state). |
+| `verified` (terminal) | `transférée et vérifiée` | Verification PROVED the write (indexed + content present + byte-faithful). The sober success + the AC2 summary (what changed / stayed unchanged / final state). The chip NEVER varies; only the summary's `changed` line names the write outcome the writer constated — first send / update / already up to date (see the three frozen variants in the Story Verification Contract below). |
 | `partial` (terminal) | `état partiel` | Verification re-read the device but confirmed only an incoherent/incomplete result. Never collapsed into success. Distinct from `transfert incomplet`. `Relancer` / `Abandonner`. |
 | `retryable` (`échoué`) | `échec récupérable` | The device was left UNTOUCHED (a write-phase refusal), OR the verification could not confirm the result (device gone / unreadable during `verify`). Keep enough context for `Relancer` / `Abandonner`. The local draft is preserved in full. |
 | `incomplete` | `transfert incomplet` | The write STARTED then was interrupted (device mutated): the Lunii may hold a partial copy; a relaunch (full cycle) restores a safe state. Distinct from `état partiel`. `Relancer` / `Abandonner`. |
@@ -867,8 +867,39 @@ device was left untouched (the failure happened before the atomic promotion), an
 folder may exist before the index update). The writer reports a
 `reached_device_mutation` signal; the closed cause taxonomy stays orthogonal.
 Neither is a success nor a false failure; a relaunch is always a full cycle (never
-a hidden partial resume), and the writer proves-or-refuses an existing target pack
-so a relaunch converges safely.
+a hidden partial resume), and the writer PROVES the state of an existing target
+pack — identical → idempotent reuse, divergent-but-sound → atomic replacement,
+unprovable → the dedicated refusal below — so a relaunch converges safely (the
+full three-outcome contract lives in
+[device-support-profile.md#Capability Gate Contract](./device-support-profile.md)).
+
+**Update without a modal (FR23, explicit UX decision).** Updating a story already
+present on the device introduces NO confirmation modal, NO new CTA and NO consent
+flag: `Envoyer vers la Lunii` stays the single action (the Confirmation Rules —
+`Exporter` and `Envoyer` ask no default confirmation — hold). AC1's "never
+silently" is realized by three existing mechanisms instead of friction: (a) the
+pre-send comparison already says `Déjà présente sur l'appareil — un envoi la
+remplacerait.` BEFORE the send (its presence-only contract and copy stay
+VERBATIM); (b) an unprovable device state is REFUSED with zero byte modified;
+(c) the terminal summary NAMES what really happened (update vs first send).
+
+**Unprovable device pack (dedicated refusal, honest copy).** When the write-job
+state proof meets a state it cannot vouch for (a symlinked or non-directory
+target root, a symlink / unplanned EMPTY directory / special file inside — a
+non-empty out-of-plan directory is a container whose files decide, see the
+device-support profile —, an entry whose bytes could not be read, an unreadable
+I/O during the proof, or a divergent folder that cannot be ATTRIBUTED to the
+target UUID: not referenced by the device index, or another indexed UUID shares
+the target SHORT_ID — either way the folder would be clobbered blindly), the job
+ends `retryable` with the dedicated cause `devicePackUnprovable` and this frozen
+copy — message: `Envoi
+interrompu : la copie présente sur l'appareil est dans un état que Rustory ne
+reconnaît pas, rien n'a été modifié.`; next gesture: `Vérifie l'appareil,
+débranche-le puis rebranche-le, puis relance l'envoi.` The copy says RUSTORY is
+protecting the present content — never that the device refused the write
+(`writeRejected` keeps its existing copy for the pure write-I/O failures it
+still owns). Rendered by the existing `retryable` path (`role="alert"`,
+in-context, never a toast).
 
 **Context preserved in-session (AC3).** The `échoué` / `incomplet` outcome (cause
 + message + next action) lives in the CURRENT context — the live state of the
@@ -890,8 +921,10 @@ boot probe — live in the **Transfer Resume Contract** below.
 `device_changed` (the live re-scan no longer resolves to the requested device),
 `checksum_mismatch` (the assembled artifact no longer matches its stored
 reference), `timeout` (budget exceeded), `interrupted` (deadline / close /
-unplugged). Each maps to one canonical `message` + `userAction` — Rust owns both
-strings, React renders them verbatim.
+unplugged), `device_pack_unprovable` (the already-present pack under the target
+folder is in a state the write-job proof cannot vouch for — Rustory refuses
+protectively, zero device byte modified). Each maps to one canonical `message` +
+`userAction` — Rust owns both strings, React renders them verbatim.
 
 **Safe, atomic, offline write.** The write reuses the safe-write pattern: stage on
 the device volume → promote atomically (`rename`) → `fsync` the promoted tree +
@@ -987,15 +1020,32 @@ DIVERGENCE is `état partiel`, while an ABSENT pack or an UNCONFIRMABLE re-check
 is `failed`. The later authoritative `read_transfer_state` is pinned to the
 (re-detected) target device.
 
-**Confirmation summary (FR15), composed in Rust, carried on the terminal.** On
-`verified` the panel shows a sober confirmation summarizing what changed (`« <Titre>
-» est maintenant sur la Lunii`) and what stayed unchanged (the N other device
-stories — reusing the comparison's `unchanged_count`). Both lines are **composed in
-Rust** and travel READY-MADE on the `job:completed` event, so the UI renders the
-success straight from the terminal — never via a re-read with the now-stale
-pre-write identifier — and never recomposes the text in React. `aria-live="polite"`,
-never a toast / modal. `état partiel` and `échec récupérable` are shown
-`role="alert"` in-context with `Relancer` / `Abandonner`.
+**Confirmation summary (FR15/FR23), composed in Rust, carried on the terminal.**
+On `verified` the panel shows a sober confirmation summarizing what changed and
+what stayed unchanged (the N other device stories — reusing the comparison's
+`unchanged_count`). The `changed` line NAMES the outcome the writer CONSTATED
+(never deduced from a pre-write state), bifurcated by the FRESH preflight
+profile's family (the Lunii wording stays VERBATIM; the generic variants are
+declared-without-a-live-emitter until a non-Lunii write exists — the
+`formatSendCtaLabel` pattern). Three frozen variants:
+
+| Write outcome | Lunii panel (VERBATIM) | Non-Lunii family panel |
+| --- | --- | --- |
+| `created_new` (first send) | `« <Titre> » est maintenant sur la Lunii.` | `« <Titre> » est maintenant sur l'appareil.` |
+| `replaced_divergent` (update) | `« <Titre> » a été mise à jour sur la Lunii.` | `« <Titre> » a été mise à jour sur l'appareil.` |
+| `reused_identical` (already up to date) | `« <Titre> » était déjà à jour sur la Lunii.` | `« <Titre> » était déjà à jour sur l'appareil.` |
+
+The state chip stays `transférée et vérifiée` in ALL three cases (controlled
+vocabulary unchanged) — only the summary line distinguishes; `reused_identical`
+is named honestly (a send that changed nothing never claims a replacement). Both
+lines are **composed in Rust** and travel READY-MADE on the `job:completed`
+event, so the UI renders the success straight from the terminal — never via a
+re-read with the now-stale pre-write identifier — and never recomposes the text
+in React. The passive `read_transfer_state` re-derivation keeps the
+present-state wording (`est maintenant sur…`): a passive re-read proves PRESENCE,
+never which write outcome produced it. `aria-live="polite"`, never a toast /
+modal. `état partiel` and `échec récupérable` are shown `role="alert"` in-context
+with `Relancer` / `Abandonner`.
 
 **Durable resume memory.** The verdict lives in the live transfer-hook state (sticky
 via the same settle/teardown discipline); the `verified` success is settled from

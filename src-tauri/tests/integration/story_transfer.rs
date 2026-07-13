@@ -25,7 +25,7 @@ use rustory_lib::domain::shared::AppError;
 use rustory_lib::domain::story::content_checksum;
 use rustory_lib::domain::transfer::{
     append_pack_uuid, pack_uuid_bytes, PackWritePlan, PreparationPhase, TransferCompleteness,
-    TransferFailureCause, VerifyVerdict,
+    TransferFailureCause, VerifyVerdict, WriteOutcome,
 };
 use rustory_lib::infrastructure::db::{self, DbHandle};
 use rustory_lib::infrastructure::device::{
@@ -192,10 +192,26 @@ fn transfers_an_imported_pack_to_a_writable_device() {
         &emitter,
     );
     match outcome {
-        TransferOutcome::Verified { summary, .. } => assert!(
-            summary.unchanged.starts_with("1 autre histoire"),
-            "the target's pre-existing pack stays unchanged alongside the new one: {summary:?}"
-        ),
+        TransferOutcome::Verified {
+            summary,
+            write_outcome,
+            ..
+        } => {
+            assert!(
+                summary.unchanged.starts_with("1 autre histoire"),
+                "the target's pre-existing pack stays unchanged alongside the new one: {summary:?}"
+            );
+            // FR23 invariance: a first send keeps the historical literal VERBATIM
+            // (the imported story carries the default device-copy title).
+            assert_eq!(
+                summary.changed,
+                format!(
+                    "« Histoire de ma Lunii ({}) » est maintenant sur la Lunii.",
+                    pack_short_id(&pack_bytes)
+                )
+            );
+            assert_eq!(write_outcome, WriteOutcome::CreatedNew);
+        }
         other => panic!("expected Verified, got {other:?}"),
     }
     // The job reports preflight, HONEST in-flight progress during the write, the
@@ -544,6 +560,7 @@ fn transfer_trace_channel_records_a_closed_pii_free_event_set() {
         transfer_log::Event::TransferCompleted {
             story_ref: story_ref.clone(),
             verify_verdict: "verified",
+            write_outcome: "created_new",
             elapsed_ms: 12,
         },
     )
@@ -654,7 +671,7 @@ impl DevicePackWriter for IncompleteAfterPromoteWriter {
         plan: &PackWritePlan,
         _budget: Duration,
         _progress: &dyn Fn(WriteProgress),
-    ) -> Result<(), WriteFailure> {
+    ) -> Result<WriteOutcome, WriteFailure> {
         // Promote real content under `.content/<SHORT_ID>` — the device IS now
         // mutated — but never touch `.pi` (the durability/index step "failed").
         let target = mount_path.join(".content").join(&plan.short_id);
@@ -743,8 +760,9 @@ fn an_incomplete_transfer_leaves_promoted_content_unindexed_and_preserves_the_dr
 #[test]
 fn relaunching_a_transfer_converges_without_clobber() {
     // A relaunch is a FRESH full cycle (never a hidden partial resume): the
-    // writer's prove-or-refuse reuse path converges on the healthy pack
-    // idempotently — no duplicate index entry, no clobbered content.
+    // writer's three-outcome reuse path proves the identical pack and converges
+    // idempotently — no duplicate index entry, no clobbered content, not a
+    // single content byte rewritten, and the summary NAMES the reuse (FR23).
     let db_tmp = tempfile::tempdir().expect("db dir");
     let app_data = tempfile::tempdir().expect("app data");
     let db = Mutex::new(open_db(&db_tmp));
@@ -768,14 +786,34 @@ fn relaunching_a_transfer_converges_without_clobber() {
         budget(),
         &CapturingEmitter::default(),
     );
-    assert!(
-        matches!(first, TransferOutcome::Verified { .. }),
-        "{first:?}"
-    );
     let short = pack_short_id(&pack_bytes);
-    let content_after_first =
-        std::fs::read(target_root.join(".content").join(&short).join("ni")).expect("ni");
+    match &first {
+        TransferOutcome::Verified {
+            summary,
+            write_outcome,
+            ..
+        } => {
+            assert_eq!(
+                summary.changed,
+                format!("« Histoire de ma Lunii ({short}) » est maintenant sur la Lunii."),
+                "the first send keeps the historical literal"
+            );
+            assert_eq!(*write_outcome, WriteOutcome::CreatedNew);
+        }
+        other => panic!("expected Verified, got {other:?}"),
+    }
+    let landed_ni = target_root.join(".content").join(&short).join("ni");
+    let content_after_first = std::fs::read(&landed_ni).expect("ni");
     let pi_after_first = std::fs::read(target_root.join(".pi")).expect(".pi");
+    // Byte-rewrite witness: pin a known old mtime on a landed file — an
+    // idempotent reuse must not even re-open it for writing.
+    let witness_mtime = std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
+    std::fs::File::options()
+        .write(true)
+        .open(&landed_ni)
+        .expect("open witness")
+        .set_modified(witness_mtime)
+        .expect("pin witness mtime");
 
     // A write changes `.pi`, hence the device identifier Rustory derives from it;
     // a relaunch re-detects the device (as the UI does) and uses the fresh id.
@@ -794,14 +832,34 @@ fn relaunching_a_transfer_converges_without_clobber() {
         budget(),
         &CapturingEmitter::default(),
     );
-    assert!(
-        matches!(second, TransferOutcome::Verified { .. }),
-        "a relaunch converges to the verified terminal: {second:?}"
-    );
+    match &second {
+        TransferOutcome::Verified {
+            summary,
+            write_outcome,
+            ..
+        } => {
+            // FR23/AC2: an identical re-send is named honestly — already up to
+            // date, never a claimed replacement, never a fake first send.
+            assert_eq!(
+                summary.changed,
+                format!("« Histoire de ma Lunii ({short}) » était déjà à jour sur la Lunii.")
+            );
+            assert_eq!(*write_outcome, WriteOutcome::ReusedIdentical);
+        }
+        other => panic!("a relaunch converges to the verified terminal: {other:?}"),
+    }
     assert_eq!(
-        std::fs::read(target_root.join(".content").join(&short).join("ni")).expect("ni"),
+        std::fs::read(&landed_ni).expect("ni"),
         content_after_first,
         "the content is not clobbered on relaunch"
+    );
+    assert_eq!(
+        std::fs::metadata(&landed_ni)
+            .expect("witness meta")
+            .modified()
+            .expect("witness mtime"),
+        witness_mtime,
+        "not a single pack byte is rewritten on an identical re-send"
     );
     assert_eq!(
         std::fs::read(target_root.join(".pi")).expect(".pi"),
@@ -814,6 +872,287 @@ fn relaunching_a_transfer_converges_without_clobber() {
         .filter(|u| **u == pack_bytes)
         .count();
     assert_eq!(count, 1, "the transferred UUID is indexed exactly once");
+}
+
+#[test]
+fn a_divergent_preseeded_pack_is_replaced_and_the_summary_names_the_update() {
+    // FR23/AC1+AC2 — the nominal update: a DIFFERENT version of the story
+    // already sits on the device under the same SHORT_ID (re-installed by
+    // another tool / an older version). The send replaces it atomically and the
+    // terminal summary names the update; the other device story is untouched.
+    let db_tmp = tempfile::tempdir().expect("db dir");
+    let app_data = tempfile::tempdir().expect("app data");
+    let db = Mutex::new(open_db(&db_tmp));
+    let pack = uuid([0x5D, 0x5D, 0x5D, 0x5D]);
+    let (story_id, pack_bytes, _src) = import_one(&db, app_data.path(), pack);
+
+    // Target device: one unrelated pack + a DIVERGENT pack pre-seeded under OUR
+    // story's SHORT_ID, already indexed (the realistic "other version" state).
+    let other = uuid([0x07, 0x07, 0x07, 0x07]);
+    let (_target, target_root, _target_id, _) = build_mount_with_pack(3, other);
+    let short = pack_short_id(&pack_bytes);
+    let preseeded = target_root.join(".content").join(&short);
+    std::fs::create_dir_all(&preseeded).expect("preseed dir");
+    std::fs::write(preseeded.join("ni"), b"AN-OLDER-VERSION").expect("preseed ni");
+    std::fs::write(preseeded.join("legacy-extra"), b"OLD").expect("preseed extra");
+    let mut pi = other.to_vec();
+    pi.extend_from_slice(&pack_bytes);
+    std::fs::write(target_root.join(".pi"), &pi).expect("preseed .pi");
+    let target_id = compute_device_identifier(&pi, None);
+    let other_ni_before = std::fs::read(
+        target_root
+            .join(".content")
+            .join(pack_short_id(&other))
+            .join("ni"),
+    )
+    .expect("other ni");
+
+    let scanner = SystemDeviceScanner::with_explicit_mount_roots(vec![target_root.clone()]);
+    let outcome = transfer_story(
+        &db,
+        &scanner,
+        &SystemDeviceLibraryReader,
+        &SystemTransferArtifactSource,
+        &SystemDevicePackWriter,
+        app_data.path(),
+        &story_id,
+        &target_id,
+        budget(),
+        budget(),
+        &CapturingEmitter::default(),
+    );
+    match outcome {
+        TransferOutcome::Verified {
+            summary,
+            write_outcome,
+            ..
+        } => {
+            assert_eq!(
+                summary.changed,
+                format!("« Histoire de ma Lunii ({short}) » a été mise à jour sur la Lunii."),
+                "the summary names the UPDATE, not a first send"
+            );
+            assert!(
+                summary.unchanged.starts_with("1 autre histoire"),
+                "the unrelated device story is counted unchanged: {summary:?}"
+            );
+            assert_eq!(write_outcome, WriteOutcome::ReplacedDivergent);
+        }
+        other => panic!("expected Verified, got {other:?}"),
+    }
+    // Byte fidelity of the final content: the plan's bytes, the old ones gone.
+    assert_eq!(
+        std::fs::read(preseeded.join("ni")).expect("ni"),
+        vec![0x4E; 512],
+        "the replaced pack carries the plan's bytes"
+    );
+    assert!(
+        !preseeded.join("legacy-extra").exists(),
+        "the old content must be gone"
+    );
+    // The OTHER device story is byte-for-byte intact.
+    assert_eq!(
+        std::fs::read(
+            target_root
+                .join(".content")
+                .join(pack_short_id(&other))
+                .join("ni")
+        )
+        .expect("other ni"),
+        other_ni_before,
+        "the unrelated pack must stay untouched"
+    );
+    // No `.rustory-*` residue remains at the mount root.
+    let residues: Vec<String> = std::fs::read_dir(&target_root)
+        .expect("read mount root")
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.starts_with(".rustory-"))
+        .collect();
+    assert!(
+        residues.is_empty(),
+        "no residue after the swap: {residues:?}"
+    );
+    // The index still references the UUID exactly once.
+    let pi_after = std::fs::read(target_root.join(".pi")).expect(".pi");
+    let count = parse_pack_index(&pi_after)
+        .uuids
+        .iter()
+        .filter(|u| **u == pack_bytes)
+        .count();
+    assert_eq!(count, 1);
+}
+
+#[test]
+fn an_unprovable_preseeded_pack_refuses_with_the_dedicated_cause_and_an_intact_tree() {
+    // FR23/AC1 — "never silently": an on-device state the proof cannot vouch
+    // for (a symlink inside the pack folder) is refused with the DEDICATED
+    // honest cause, and the device tree stays byte-for-byte intact.
+    let db_tmp = tempfile::tempdir().expect("db dir");
+    let app_data = tempfile::tempdir().expect("app data");
+    let db = Mutex::new(open_db(&db_tmp));
+    let pack = uuid([0x6E, 0x6E, 0x6E, 0x6E]);
+    let (story_id, pack_bytes, _src) = import_one(&db, app_data.path(), pack);
+
+    let other = uuid([0x08, 0x08, 0x08, 0x08]);
+    let (_target, target_root, _target_id, _) = build_mount_with_pack(3, other);
+    let short = pack_short_id(&pack_bytes);
+    let preseeded = target_root.join(".content").join(&short);
+    std::fs::create_dir_all(&preseeded).expect("preseed dir");
+    std::fs::write(preseeded.join("ni"), b"UNKNOWN-STATE").expect("preseed ni");
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(preseeded.join("ni"), preseeded.join("li"))
+        .expect("preseed symlink");
+    #[cfg(not(unix))]
+    std::fs::create_dir_all(preseeded.join("li")).expect("preseed empty dir");
+    let mut pi = other.to_vec();
+    pi.extend_from_slice(&pack_bytes);
+    std::fs::write(target_root.join(".pi"), &pi).expect("preseed .pi");
+    let target_id = compute_device_identifier(&pi, None);
+
+    let scanner = SystemDeviceScanner::with_explicit_mount_roots(vec![target_root.clone()]);
+    let outcome = transfer_story(
+        &db,
+        &scanner,
+        &SystemDeviceLibraryReader,
+        &SystemTransferArtifactSource,
+        &SystemDevicePackWriter,
+        app_data.path(),
+        &story_id,
+        &target_id,
+        budget(),
+        budget(),
+        &CapturingEmitter::default(),
+    );
+    assert_eq!(
+        outcome,
+        TransferOutcome::Retryable {
+            cause: TransferFailureCause::DevicePackUnprovable,
+            completeness: TransferCompleteness::Failed,
+        },
+        "the dedicated protective refusal, device intact"
+    );
+    // The honest copy: Rustory protects — never "the device refused".
+    let (message, action) = TransferFailureCause::DevicePackUnprovable.copy();
+    assert!(message.contains("Rustory ne reconnaît pas"));
+    assert!(message.contains("rien n'a été modifié"));
+    assert!(action.contains("relance l'envoi"));
+    // The device tree is byte-for-byte intact: the unprovable folder, its
+    // symlink, the unrelated pack and the index.
+    assert_eq!(
+        std::fs::read(preseeded.join("ni")).expect("ni"),
+        b"UNKNOWN-STATE"
+    );
+    #[cfg(unix)]
+    assert!(preseeded.join("li").is_symlink(), "the symlink survives");
+    assert_eq!(std::fs::read(target_root.join(".pi")).expect(".pi"), pi);
+    assert!(target_root
+        .join(".content")
+        .join(pack_short_id(&other))
+        .join("ni")
+        .is_file());
+}
+
+#[test]
+fn a_relaunch_after_a_swap_interrupted_mid_replacement_converges_to_verified() {
+    // FR23 — reproduce the exact mid-swap device state (old pack set aside,
+    // promotion never ran, UUID still indexed: what a power loss between the
+    // set-aside and the promotion leaves). A FULL fresh cycle sweeps the
+    // residue, re-writes the pack and verifies green.
+    let db_tmp = tempfile::tempdir().expect("db dir");
+    let app_data = tempfile::tempdir().expect("app data");
+    let db = Mutex::new(open_db(&db_tmp));
+    let pack = uuid([0x7F, 0x7F, 0x7F, 0x7F]);
+    let (story_id, pack_bytes, _src) = import_one(&db, app_data.path(), pack);
+
+    let other = uuid([0x09, 0x09, 0x09, 0x09]);
+    let (_target, target_root, _target_id, _) = build_mount_with_pack(3, other);
+    let short = pack_short_id(&pack_bytes);
+    // Mid-swap state: `.content/<SHORT_ID>` ABSENT, the old pack under the
+    // sweepable set-aside name, the UUID still in `.pi`.
+    let set_aside = target_root.join(format!(".rustory-replaced-{short}"));
+    std::fs::create_dir_all(&set_aside).expect("seed set-aside");
+    std::fs::write(set_aside.join("ni"), b"THE-OLD-VERSION").expect("seed old ni");
+    let mut pi = other.to_vec();
+    pi.extend_from_slice(&pack_bytes);
+    std::fs::write(target_root.join(".pi"), &pi).expect("seed .pi");
+    let target_id = compute_device_identifier(&pi, None);
+
+    let scanner = SystemDeviceScanner::with_explicit_mount_roots(vec![target_root.clone()]);
+    let outcome = transfer_story(
+        &db,
+        &scanner,
+        &SystemDeviceLibraryReader,
+        &SystemTransferArtifactSource,
+        &SystemDevicePackWriter,
+        app_data.path(),
+        &story_id,
+        &target_id,
+        budget(),
+        budget(),
+        &CapturingEmitter::default(),
+    );
+    match outcome {
+        TransferOutcome::Verified { write_outcome, .. } => {
+            assert_eq!(
+                write_outcome,
+                WriteOutcome::CreatedNew,
+                "the canonical folder was absent — the relaunch re-creates it"
+            );
+        }
+        other => panic!("the relaunch must converge to Verified, got {other:?}"),
+    }
+    assert!(!set_aside.exists(), "the mid-swap residue must be swept");
+    assert_eq!(
+        std::fs::read(target_root.join(".content").join(&short).join("ni")).expect("ni"),
+        vec![0x4E; 512],
+        "the relaunched write landed the plan's bytes"
+    );
+}
+
+#[test]
+fn flam_gen1_write_stays_refused_end_to_end() {
+    // FR23 re-affirmed lock: the update flow exists family-generically but
+    // NEVER weakens the FLAM write gate — a send toward a recognized FLAM ends
+    // `WriteNotAuthorized` before any device I/O.
+    let db_tmp = tempfile::tempdir().expect("db dir");
+    let app_data = tempfile::tempdir().expect("app data");
+    let db = Mutex::new(open_db(&db_tmp));
+    let pack = uuid([0x8A, 0x8A, 0x8A, 0x8A]);
+    let (story_id, _pack_bytes, _src) = import_one(&db, app_data.path(), pack);
+
+    let (_guard, flam_root, flam_id) = crate::flam_support::temp_flam_mount_with_entries(&[]);
+    let scanner = SystemDeviceScanner::with_explicit_mount_roots(vec![flam_root.clone()]);
+    let outcome = transfer_story(
+        &db,
+        &scanner,
+        &SystemDeviceLibraryReader,
+        &SystemTransferArtifactSource,
+        &SystemDevicePackWriter,
+        app_data.path(),
+        &story_id,
+        &flam_id,
+        budget(),
+        budget(),
+        &CapturingEmitter::default(),
+    );
+    assert_eq!(
+        outcome,
+        TransferOutcome::Retryable {
+            cause: TransferFailureCause::WriteNotAuthorized,
+            completeness: TransferCompleteness::Failed,
+        },
+        "the FLAM write lock holds through the update flow"
+    );
+    // Not a single Rustory artifact appeared on the FLAM volume.
+    assert!(!flam_root.join(".content").exists());
+    let residues: Vec<String> = std::fs::read_dir(&flam_root)
+        .expect("read flam root")
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.starts_with(".rustory-"))
+        .collect();
+    assert!(residues.is_empty(), "zero write on FLAM: {residues:?}");
 }
 
 /// A writer that promotes content with bytes that DIVERGE from the prepared pack
@@ -830,7 +1169,7 @@ impl DevicePackWriter for ByteDivergentWriter {
         plan: &PackWritePlan,
         _budget: Duration,
         _progress: &dyn Fn(WriteProgress),
-    ) -> Result<(), WriteFailure> {
+    ) -> Result<WriteOutcome, WriteFailure> {
         let target = mount_path.join(".content").join(&plan.short_id);
         std::fs::create_dir_all(&target).expect("create promoted dir");
         for file in &plan.files {
@@ -848,7 +1187,7 @@ impl DevicePackWriter for ByteDivergentWriter {
         let pi = std::fs::read(&pi_path).unwrap_or_default();
         let uuid_bytes = pack_uuid_bytes(pack_uuid).expect("canonical pack uuid");
         std::fs::write(&pi_path, append_pack_uuid(&pi, &uuid_bytes)).expect("write .pi");
-        Ok(())
+        Ok(WriteOutcome::CreatedNew)
     }
 }
 
@@ -964,11 +1303,11 @@ impl DevicePackWriter for PromoteWithoutIndexWriter {
         plan: &PackWritePlan,
         _budget: Duration,
         _progress: &dyn Fn(WriteProgress),
-    ) -> Result<(), WriteFailure> {
+    ) -> Result<WriteOutcome, WriteFailure> {
         // The standard plausible pack equals the import baseline, so the verify
         // re-checksum reads it back as byte-faithful — only the index is missing.
         write_pack(&mount_path.join(".content").join(&plan.short_id));
-        Ok(())
+        Ok(WriteOutcome::CreatedNew)
     }
 }
 

@@ -40,6 +40,7 @@ export type TransferCause =
   | "notTransferable"
   | "deviceChanged"
   | "writeRejected"
+  | "devicePackUnprovable"
   | "interrupted";
 
 export type TransferStateDto =
@@ -118,6 +119,7 @@ const CAUSES: ReadonlySet<string> = new Set([
   "notTransferable",
   "deviceChanged",
   "writeRejected",
+  "devicePackUnprovable",
   "interrupted",
 ]);
 

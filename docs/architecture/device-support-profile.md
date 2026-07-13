@@ -20,13 +20,17 @@ behavior is a bug.
 | Lunii | Origine v1 (fw 1.x / 2.x) | v3 | ✅ | ✅ | ✅ | ✅ (round-trip d'une histoire importée) |
 | Lunii | Mid-Gen v2 (fw 3.0 – 3.1) | v6 | ✅ | ✅ | ✅ | ✅ (round-trip d'une histoire importée) |
 | Lunii | V3 (fw 3.2.x +) | v7 | ✅ | ✅ | ❌ (RE actif — corruption risk) | ❌ (RE actif — même rationale que l'import) |
-| FLAM | Gen1 (flam_gen1) | — | ✅ | ✅ | ✅ | ❌ (écriture non prouvée — activée par le flux de mise à jour) |
+| FLAM | Gen1 (flam_gen1) | — | ✅ | ✅ | ✅ | ❌ (écriture non prouvée — décisions de format sur matériel réel requises) |
 
 FLAM Gen1 is a **recognized** profile whose READ-side capabilities are
 activated line by line: library inventory, story inspection and story
 import are ✅ (their contract is the "FLAM library inventory & story
-import" section below), while every device WRITE stays ❌ until the
-update flow proves it end to end. Its metadata format column stays `—`:
+import" section below), while every device WRITE stays ❌. The update
+flow (write semantics on an already-present pack, below) now EXISTS
+without activating FLAM writes: the write column only flips once the
+FLAM on-device format decisions are proven on real hardware (see the
+deferred-work ledger) — a flow existing family-generically never
+weakens the gate. Its metadata format column stays `—`:
 the internal structure of `.mdf` is not publicly documented and Rustory
 refuses to invent a version byte (see the FLAM recognition markers
 below). The general rule stays in force for any FUTURE zero-capability
@@ -52,9 +56,11 @@ the `.pi` index update are post-mutation. From this the flow derives the two hon
 interruption terminals — **`échoué`** (untouched → recoverable) vs **`incomplet`**
 (mutation started → the device may hold a partial copy). The invariant stays
 **files first, index last** (a pack is never indexed without its content present);
-there is **no resume** (a relaunch is a full cycle, and the writer
-proves-or-refuses an existing target pack so it converges safely); orphan staging
-directories (`.rustory-staging-*`) are swept best-effort.
+there is **no resume** (a relaunch is a full cycle, and the writer PROVES the
+state of an existing target pack — reusing it, replacing it, or refusing an
+unprovable one, see "Write on an already-present pack" below — so it converges
+safely); orphan staging directories (`.rustory-staging-*`) and set-aside
+replaced packs (`.rustory-replaced-*`) are swept best-effort.
 
 ## Detection Strategy
 
@@ -490,6 +496,68 @@ UUID, write a temp + `rename`). Files first, index after: a pack UUID is never
 added to `.pi` until its content is safely present. The write is idempotent (a UUID
 already present with content is not duplicated), offline (USB only — no network),
 and never decrypts.
+
+**Write on an already-present pack (update flow, FR23).** When something sits at
+`.content/<SHORT_ID>`, the writer PROVES its state and resolves to exactly one of
+THREE provable outcomes — the comparison that matters runs INSIDE the write job
+(fresh preflight + state proof), never from a cache or the read-only preview. The
+proof is exhaustive and no-follow at every level: the target ROOT itself is
+probed `lstat`-first (a symlinked root — dangling or not —, a regular file or a
+special entry where the pack folder should be is unprovable; `exists()` would
+follow or hide those), then every entry is enumerated AND read in full —
+readability is part of the proof, because a replacement verdict leads to deleting
+the old content. A non-empty unplanned directory is a CONTAINER, not an entry of
+its own: it is traversed and its files decide (only an EMPTY directory — nothing
+a files-only pack can explain — is unprovable; refusing every out-of-plan
+directory would kill the nominal "another version re-installed" update). And
+because the initial proof ages across the staging phase (copy + fsync can be
+long), the state is RE-PROVEN ADJACENT to the set-aside mutation — a residual
+window of the order of the `rename` itself remains (not eliminable with stdlib
+primitives), the same honesty class as the FAT index-without-content window
+below.
+
+1. **Identical** (`reused_identical`): every planned file present as a regular
+   file with the exact size + SHA-256, and NOT A SINGLE extra entry → the pack is
+   already the plan's bytes. Idempotent re-index only; zero content byte written.
+2. **Divergent-but-sound** (`replaced_divergent`): any content drift (missing,
+   differing or extra files) where EVERY entry encountered is a regular file
+   PROVEN readable (opened and read in full during the proof), AND the folder is
+   ATTRIBUTABLE to the target UUID: the device index must reference that UUID,
+   and NO OTHER indexed UUID may share the target SHORT_ID (the folder name is
+   only the last 8 hex — an unindexed divergent folder is an unknown residue or
+   a collision with an unindexed UUID, and a BI-INDEXED SHORT_ID collision means
+   the folder may hold the other story's only content; both are REFUSED, never
+   replaced). When authorized → controlled atomic replacement. The F2
+   spirit is preserved — "the old content is never lost before the replacement
+   is complete": the new pack is staged IN FULL and fsynced BEFORE any mutation
+   (the budget is re-checked after that durability sync AND after the re-proof —
+   a mutation never starts over budget); then the state is re-proven, the old
+   `.content/<SHORT_ID>` is set aside by a same-volume `rename` to a sweepable
+   `.rustory-replaced-*` name (the device mutation starts HERE —
+   `reached_device_mutation = true`), the staging is promoted to
+   `.content/<SHORT_ID>`, the tree is fsynced, the `.pi` index is converged
+   idempotently (the UUID is already there), and the set-aside folder is removed
+   best-effort AFTER the fsyncs. An interruption between set-aside and promotion
+   is an HONEST `transfert incomplet` (never a false success); a relaunch (always
+   a full cycle) converges. Orphan `.rustory-replaced-*` residues are swept with
+   the staging residues before any write.
+3. **Unprovable** (`device_pack_unprovable`): a non-directory target root, an
+   irregular entry (symlink, unplanned EMPTY directory, special file), an entry
+   whose bytes could not be read, an unreadable I/O during the proof, or a
+   divergent folder that cannot be attributed to the target UUID (not referenced
+   by the index, or another indexed UUID shares the SHORT_ID) → REFUSAL with the
+   dedicated cause, ZERO device byte modified. Rustory never deletes what it
+   cannot understand or attribute (fail-closed); the copy explicitly says
+   Rustory is protecting the present content — never that the device refused.
+
+The outcome the writer CONSTATED (`created_new` / `reused_identical` /
+`replaced_divergent`) travels to the job's `verified` terminal, where the summary
+names it (first send / update / already up to date — see
+[ui-states.md#Story Verification Contract](./ui-states.md)). Every outcome —
+including `reused_identical` — passes through the SAME full `verify` phase (no
+success without verification). A FAT volume has no atomic directory swap: the
+index-without-content window between set-aside and promotion is assumed and
+classified honestly, exactly like the existing post-promotion interruption.
 
 `SHORT_ID` is the **last 8 hex characters, UPPERCASED**, of the canonical pack
 UUID — the same `.content/<SHORT_ID>` folder the library reader enumerates. Cohort

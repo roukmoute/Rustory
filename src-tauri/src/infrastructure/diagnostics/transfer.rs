@@ -39,9 +39,14 @@ pub enum Event {
     /// `verify_verdict` is the stable tag of
     /// [`VerifyVerdict`](crate::domain::transfer::VerifyVerdict) — always
     /// `"verified"` here (a `completed` terminal only fires on a confirmed write).
+    /// `write_outcome` is the stable tag of
+    /// [`WriteOutcome`](crate::domain::transfer::WriteOutcome) the writer
+    /// constated (`created_new` / `reused_identical` / `replaced_divergent`) —
+    /// observability only, never rendered by the UI.
     TransferCompleted {
         story_ref: String,
         verify_verdict: &'static str,
+        write_outcome: &'static str,
         elapsed_ms: u64,
     },
     /// A transfer job reached a non-success terminal. A WRITE-phase failure carries
@@ -196,11 +201,16 @@ mod tests {
         let v = serde_json::to_value(Event::TransferCompleted {
             story_ref: "abcd".into(),
             verify_verdict: "verified",
+            write_outcome: "replaced_divergent",
             elapsed_ms: 9,
         })
         .expect("ser");
         assert_eq!(v["category"], "transfer_completed");
         assert_eq!(v["verify_verdict"], "verified");
+        assert_eq!(
+            v["write_outcome"], "replaced_divergent",
+            "the constated write outcome is traced"
+        );
 
         let v = serde_json::to_value(Event::TransferFailed {
             story_ref: "abcd".into(),

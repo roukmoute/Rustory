@@ -62,6 +62,7 @@ pub enum TransferCauseDto {
     NotTransferable,
     DeviceChanged,
     WriteRejected,
+    DevicePackUnprovable,
     Interrupted,
 }
 
@@ -182,6 +183,7 @@ pub fn cause_dto(cause: TransferFailureCause) -> TransferCauseDto {
         TransferFailureCause::NotTransferable => TransferCauseDto::NotTransferable,
         TransferFailureCause::DeviceChanged => TransferCauseDto::DeviceChanged,
         TransferFailureCause::WriteRejected => TransferCauseDto::WriteRejected,
+        TransferFailureCause::DevicePackUnprovable => TransferCauseDto::DevicePackUnprovable,
         TransferFailureCause::Interrupted => TransferCauseDto::Interrupted,
     }
 }
@@ -378,11 +380,41 @@ mod tests {
             (TransferFailureCause::NotTransferable, "notTransferable"),
             (TransferFailureCause::DeviceChanged, "deviceChanged"),
             (TransferFailureCause::WriteRejected, "writeRejected"),
+            (
+                TransferFailureCause::DevicePackUnprovable,
+                "devicePackUnprovable",
+            ),
             (TransferFailureCause::Interrupted, "interrupted"),
         ] {
             let v = serde_json::to_value(cause_dto(cause)).expect("ser");
             assert_eq!(v, json!(expected));
+            // The serde discriminant and the domain wire tag are the SAME closed
+            // identifier (the re-hydration path parses the persisted value back).
+            assert_eq!(v, json!(cause.wire_cause()));
         }
+    }
+
+    #[test]
+    fn device_pack_unprovable_retryable_carries_the_frozen_honest_copy() {
+        // The dedicated FR23 refusal serializes with its Change Control copy —
+        // Rustory protecting the present content, never "the device refused".
+        let dto = TransferStateDto::retryable(
+            story_dto(),
+            TransferFailureCause::DevicePackUnprovable,
+            TransferCompleteness::Failed,
+        );
+        let v = serde_json::to_value(&dto).expect("ser");
+        assert_eq!(v["kind"], "retryable");
+        assert_eq!(v["cause"], "devicePackUnprovable");
+        assert_eq!(v["completeness"], "failed");
+        assert_eq!(
+            v["message"],
+            "Envoi interrompu : la copie présente sur l'appareil est dans un état que Rustory ne reconnaît pas, rien n'a été modifié."
+        );
+        assert_eq!(
+            v["userAction"],
+            "Vérifie l'appareil, débranche-le puis rebranche-le, puis relance l'envoi."
+        );
     }
 
     #[test]

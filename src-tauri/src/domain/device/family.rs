@@ -7,7 +7,9 @@ pub enum DeviceFamily {
     Lunii,
     /// FLAM device family. Read-side capabilities (inventory,
     /// inspection, import) are activated on the support matrix; device
-    /// write stays ❌ until the update flow proves it end to end.
+    /// write stays ❌ — the update flow exists family-generically
+    /// without activating it (FLAM on-device format decisions require
+    /// real hardware, see the deferred-work ledger).
     Flam,
     // Tonies, etc. — future families.
 }

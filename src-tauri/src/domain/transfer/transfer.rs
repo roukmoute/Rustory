@@ -16,7 +16,9 @@
 //! A functional failure is the terminal `retryable` state of the job (NOT an
 //! `AppError`); each cause maps to one canonical FR `message` + `userAction`.
 
-use crate::domain::device::{is_canonical_pack_uuid, parse_pack_index, LUNII_PACK_UUID_BYTES};
+use crate::domain::device::{
+    is_canonical_pack_uuid, parse_pack_index, DeviceFamily, LUNII_PACK_UUID_BYTES,
+};
 use crate::domain::story::Severity;
 
 use super::{PreparedArtifactKind, TransferArtifactDescriptor};
@@ -41,6 +43,17 @@ pub enum TransferFailureCause {
     DeviceChanged,
     /// The device refused the write (no space, I/O error, read-only volume).
     WriteRejected,
+    /// The pack already present under the target `.content/<SHORT_ID>` is in a
+    /// state the write-job proof cannot vouch for: a non-directory or symlinked
+    /// target root; an irregular entry inside (symlink, unplanned EMPTY
+    /// directory, special file); an entry whose bytes could not be read (or any
+    /// unreadable I/O during the proof); or a divergent folder that cannot be
+    /// ATTRIBUTED to the target UUID (not referenced by the device index, or
+    /// another indexed UUID shares the target SHORT_ID). RUSTORY refuses
+    /// protectively, zero device byte modified — never worded as the device
+    /// refusing (that copy stays with [`WriteRejected`], which keeps the pure
+    /// write-I/O failures).
+    DevicePackUnprovable,
     /// The wall-clock budget was exhausted, or the operation was interrupted
     /// (device yanked mid-write, window close). The local draft is preserved.
     Interrupted,
@@ -56,6 +69,7 @@ impl TransferFailureCause {
             Self::NotTransferable => "not_transferable",
             Self::DeviceChanged => "device_changed",
             Self::WriteRejected => "write_rejected",
+            Self::DevicePackUnprovable => "device_pack_unprovable",
             Self::Interrupted => "interrupted",
         }
     }
@@ -70,6 +84,7 @@ impl TransferFailureCause {
             Self::NotTransferable => "notTransferable",
             Self::DeviceChanged => "deviceChanged",
             Self::WriteRejected => "writeRejected",
+            Self::DevicePackUnprovable => "devicePackUnprovable",
             Self::Interrupted => "interrupted",
         }
     }
@@ -85,6 +100,7 @@ impl TransferFailureCause {
             "notTransferable" => Some(Self::NotTransferable),
             "deviceChanged" => Some(Self::DeviceChanged),
             "writeRejected" => Some(Self::WriteRejected),
+            "devicePackUnprovable" => Some(Self::DevicePackUnprovable),
             "interrupted" => Some(Self::Interrupted),
             _ => None,
         }
@@ -100,9 +116,13 @@ impl TransferFailureCause {
     pub const fn severity(self) -> Severity {
         match self {
             Self::NotPrepared | Self::DeviceChanged | Self::Interrupted => Severity::Fixable,
-            Self::WriteNotAuthorized | Self::NotTransferable | Self::WriteRejected => {
-                Severity::Blocking
-            }
+            // `DevicePackUnprovable` is an integrity problem of the on-device
+            // content (an irregular entry a re-plug does not clear), extracted
+            // from the `WriteRejected` branch — it inherits its `Blocking`.
+            Self::WriteNotAuthorized
+            | Self::NotTransferable
+            | Self::WriteRejected
+            | Self::DevicePackUnprovable => Severity::Blocking,
         }
     }
 
@@ -132,6 +152,13 @@ impl TransferFailureCause {
             Self::WriteRejected => (
                 "Envoi interrompu : la Lunii a refusé l'enregistrement de l'histoire.",
                 "Vérifie l'espace disponible sur la Lunii puis relance l'envoi.",
+            ),
+            // The honest wording for a PROTECTIVE refusal: Rustory declines to
+            // touch an on-device state it cannot vouch for — never "the device
+            // refused" (frozen in product-language.md, Change Control).
+            Self::DevicePackUnprovable => (
+                "Envoi interrompu : la copie présente sur l'appareil est dans un état que Rustory ne reconnaît pas, rien n'a été modifié.",
+                "Vérifie l'appareil, débranche-le puis rebranche-le, puis relance l'envoi.",
             ),
             Self::Interrupted => ("Envoi interrompu avant la fin.", "Relance l'envoi."),
         }
@@ -326,21 +353,87 @@ pub const fn classify_verify(
     }
 }
 
-/// The `verified` confirmation summary (AC2/FR15), COMPOSED in Rust and rendered
-/// VERBATIM by the panel (no frontend reinterpretation): what CHANGED (the story
-/// is now on the device) and what stayed UNCHANGED (the other device stories).
+/// The outcome the writer CONSTATED on the target `.content/<SHORT_ID>` — a fact
+/// of the write itself, never deduced from a pre-write state (FR23). Orthogonal
+/// to [`VerifyVerdict`]: every outcome — including [`ReusedIdentical`] — still
+/// passes the same full `verify` phase before any success is claimed.
+///
+/// [`ReusedIdentical`]: WriteOutcome::ReusedIdentical
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WriteOutcome {
+    /// No pack existed under the target folder — the write created it (the
+    /// historical first-send path).
+    CreatedNew,
+    /// The existing pack was PROVEN byte-identical to the plan (every planned
+    /// file present, exact size + checksum, no extra entry): idempotent
+    /// re-index only, zero content byte rewritten.
+    ReusedIdentical,
+    /// The existing pack diverged (missing / differing / extra files, all
+    /// readable regular entries) and was atomically REPLACED by the plan's
+    /// bytes — the FR23 update.
+    ReplacedDivergent,
+}
+
+impl WriteOutcome {
+    /// Stable snake_case diagnostics tag (`transfer.jsonl`) — never a localized
+    /// message, never rendered by the UI.
+    pub const fn diagnostic_tag(self) -> &'static str {
+        match self {
+            Self::CreatedNew => "created_new",
+            Self::ReusedIdentical => "reused_identical",
+            Self::ReplacedDivergent => "replaced_divergent",
+        }
+    }
+}
+
+/// The `verified` confirmation summary (AC2/FR15/FR23), COMPOSED in Rust and
+/// rendered VERBATIM by the panel (no frontend reinterpretation): what CHANGED
+/// (the write outcome, named) and what stayed UNCHANGED (the other device
+/// stories).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerifiedSummary {
-    /// "« <Titre> » est maintenant sur la Lunii." — what changed + the final state.
+    /// "« <Titre> » est maintenant sur la Lunii." / "… a été mise à jour sur…" /
+    /// "… était déjà à jour sur…" — what changed + the final state.
     pub changed: String,
     /// "N autres histoires de l'appareil restent inchangées." — what stayed.
     pub unchanged: String,
 }
 
-/// Compose the `verified` summary lines in Rust (AC2/FR15). `unchanged_count`
-/// reuses the 3.1 comparison count. The panel renders both strings verbatim.
-pub fn compose_verified_summary(story_title: &str, unchanged_count: u32) -> VerifiedSummary {
-    let changed = format!("« {story_title} » est maintenant sur la Lunii.");
+/// Compose the `verified` summary lines in Rust (AC2/FR15/FR23).
+/// `unchanged_count` reuses the pre-send comparison count; `family` is the FRESH
+/// preflight profile's family (never a cached value) and `write_outcome` the
+/// fact the writer constated. The `changed` line bifurcates: the Lunii wording
+/// is the frozen historical literal for [`WriteOutcome::CreatedNew`] and the
+/// FR23 update/already-up-to-date sentences otherwise; the generic "l'appareil"
+/// variants are declared-without-a-live-emitter until a non-Lunii write exists
+/// (the `formatSendCtaLabel` pattern). The panel renders both strings verbatim.
+pub fn compose_verified_summary(
+    story_title: &str,
+    unchanged_count: u32,
+    family: DeviceFamily,
+    write_outcome: WriteOutcome,
+) -> VerifiedSummary {
+    let lunii = matches!(family, DeviceFamily::Lunii);
+    let changed = match (write_outcome, lunii) {
+        (WriteOutcome::CreatedNew, true) => {
+            format!("« {story_title} » est maintenant sur la Lunii.")
+        }
+        (WriteOutcome::CreatedNew, false) => {
+            format!("« {story_title} » est maintenant sur l'appareil.")
+        }
+        (WriteOutcome::ReplacedDivergent, true) => {
+            format!("« {story_title} » a été mise à jour sur la Lunii.")
+        }
+        (WriteOutcome::ReplacedDivergent, false) => {
+            format!("« {story_title} » a été mise à jour sur l'appareil.")
+        }
+        (WriteOutcome::ReusedIdentical, true) => {
+            format!("« {story_title} » était déjà à jour sur la Lunii.")
+        }
+        (WriteOutcome::ReusedIdentical, false) => {
+            format!("« {story_title} » était déjà à jour sur l'appareil.")
+        }
+    };
     let unchanged = match unchanged_count {
         0 => "Aucune autre histoire de l'appareil n'a été modifiée.".to_string(),
         1 => "1 autre histoire de l'appareil reste inchangée.".to_string(),
@@ -634,6 +727,48 @@ mod tests {
         );
     }
 
+    /// Every closed cause, in declaration order — the one list every
+    /// closed-set test iterates. Nothing ties an array literal to the enum by
+    /// itself: the REAL guard is [`all_causes_list_is_exhaustive`], whose
+    /// exhaustive `match` breaks the compilation when a variant is added,
+    /// forcing this list (whose length it asserts) to grow with it.
+    const ALL_CAUSES: [TransferFailureCause; 7] = [
+        TransferFailureCause::WriteNotAuthorized,
+        TransferFailureCause::NotPrepared,
+        TransferFailureCause::NotTransferable,
+        TransferFailureCause::DeviceChanged,
+        TransferFailureCause::WriteRejected,
+        TransferFailureCause::DevicePackUnprovable,
+        TransferFailureCause::Interrupted,
+    ];
+
+    #[test]
+    fn all_causes_list_is_exhaustive() {
+        // Compile-time tripwire: this match refuses to compile when the enum
+        // gains a variant — the fix necessarily revisits this test, whose
+        // assertions then force ALL_CAUSES to cover the new variant too.
+        let assert_listed = |cause: TransferFailureCause| match cause {
+            TransferFailureCause::WriteNotAuthorized
+            | TransferFailureCause::NotPrepared
+            | TransferFailureCause::NotTransferable
+            | TransferFailureCause::DeviceChanged
+            | TransferFailureCause::WriteRejected
+            | TransferFailureCause::DevicePackUnprovable
+            | TransferFailureCause::Interrupted => (),
+        };
+        for cause in ALL_CAUSES {
+            assert_listed(cause);
+        }
+        // 7 DISTINCT entries (tags are pairwise distinct, asserted below) out
+        // of a 7-variant enum = every variant is present exactly once.
+        let mut tags = ALL_CAUSES
+            .map(TransferFailureCause::diagnostic_tag)
+            .to_vec();
+        tags.sort_unstable();
+        tags.dedup();
+        assert_eq!(tags.len(), ALL_CAUSES.len(), "no duplicate in ALL_CAUSES");
+    }
+
     #[test]
     fn failure_cause_severity_mapping_is_frozen() {
         assert_eq!(
@@ -660,18 +795,18 @@ mod tests {
             TransferFailureCause::WriteRejected.severity(),
             Severity::Blocking
         );
+        // The unprovable-state refusal is an on-device integrity problem (a
+        // re-plug does not clear an irregular entry) — Blocking, inherited from
+        // the WriteRejected branch it was extracted from.
+        assert_eq!(
+            TransferFailureCause::DevicePackUnprovable.severity(),
+            Severity::Blocking
+        );
     }
 
     #[test]
     fn every_failure_cause_has_non_empty_copy() {
-        for cause in [
-            TransferFailureCause::WriteNotAuthorized,
-            TransferFailureCause::NotPrepared,
-            TransferFailureCause::NotTransferable,
-            TransferFailureCause::DeviceChanged,
-            TransferFailureCause::WriteRejected,
-            TransferFailureCause::Interrupted,
-        ] {
+        for cause in ALL_CAUSES {
             let (message, action) = cause.copy();
             assert!(!message.is_empty(), "{cause:?} message empty");
             assert!(!action.is_empty(), "{cause:?} userAction empty");
@@ -680,19 +815,55 @@ mod tests {
 
     #[test]
     fn failure_cause_diagnostic_tags_are_stable_and_distinct() {
-        let tags = [
-            TransferFailureCause::WriteNotAuthorized.diagnostic_tag(),
-            TransferFailureCause::NotPrepared.diagnostic_tag(),
-            TransferFailureCause::NotTransferable.diagnostic_tag(),
-            TransferFailureCause::DeviceChanged.diagnostic_tag(),
-            TransferFailureCause::WriteRejected.diagnostic_tag(),
-            TransferFailureCause::Interrupted.diagnostic_tag(),
-        ];
+        let tags = ALL_CAUSES.map(TransferFailureCause::diagnostic_tag);
         let mut unique = tags.to_vec();
         unique.sort_unstable();
         unique.dedup();
         assert_eq!(unique.len(), tags.len(), "tags must be distinct");
         assert!(tags.iter().all(|t| !t.is_empty()));
+        assert_eq!(
+            TransferFailureCause::DevicePackUnprovable.diagnostic_tag(),
+            "device_pack_unprovable"
+        );
+    }
+
+    #[test]
+    fn every_failure_cause_wire_tag_round_trips() {
+        for cause in ALL_CAUSES {
+            assert_eq!(
+                TransferFailureCause::from_wire_cause(cause.wire_cause()),
+                Some(cause),
+                "{cause:?} must round-trip"
+            );
+        }
+        assert_eq!(
+            TransferFailureCause::DevicePackUnprovable.wire_cause(),
+            "devicePackUnprovable"
+        );
+        assert_eq!(TransferFailureCause::from_wire_cause("unknown"), None);
+    }
+
+    #[test]
+    fn device_pack_unprovable_copy_is_honest_about_who_protects() {
+        // The protective refusal must say RUSTORY declines and nothing was
+        // modified — never re-serve the "device refused / check free space"
+        // wording that stays with the pure write-I/O `WriteRejected`.
+        let (message, action) = TransferFailureCause::DevicePackUnprovable.copy();
+        assert_eq!(
+            message,
+            "Envoi interrompu : la copie présente sur l'appareil est dans un état que Rustory ne reconnaît pas, rien n'a été modifié."
+        );
+        assert_eq!(
+            action,
+            "Vérifie l'appareil, débranche-le puis rebranche-le, puis relance l'envoi."
+        );
+        let (rejected_message, rejected_action) = TransferFailureCause::WriteRejected.copy();
+        assert_ne!(message, rejected_message);
+        assert_ne!(action, rejected_action);
+        assert!(
+            !message.contains("a refusé"),
+            "never worded as the device refusing"
+        );
     }
 
     #[test]
@@ -708,14 +879,7 @@ mod tests {
             TransferCompleteness::Incomplete
         );
         // Orthogonal to the cause: the result folds purely on the mutation flag.
-        for cause in [
-            WriteNotAuthorized,
-            NotPrepared,
-            NotTransferable,
-            DeviceChanged,
-            WriteRejected,
-            Interrupted,
-        ] {
+        for cause in ALL_CAUSES {
             assert_eq!(classify(cause, false), TransferCompleteness::Failed);
             assert_eq!(classify(cause, true), TransferCompleteness::Incomplete);
         }
@@ -813,18 +977,99 @@ mod tests {
 
     #[test]
     fn compose_verified_summary_composes_changed_and_unchanged_lines() {
-        let zero = compose_verified_summary("Mon histoire", 0);
+        let zero = compose_verified_summary(
+            "Mon histoire",
+            0,
+            DeviceFamily::Lunii,
+            WriteOutcome::CreatedNew,
+        );
         assert!(zero.changed.contains("Mon histoire"));
         assert!(zero.changed.contains("sur la Lunii"));
         assert!(zero.unchanged.to_lowercase().contains("aucune autre"));
 
-        let one = compose_verified_summary("T", 1);
+        let one = compose_verified_summary("T", 1, DeviceFamily::Lunii, WriteOutcome::CreatedNew);
         assert!(one.unchanged.starts_with("1 autre histoire"));
         assert!(one.unchanged.contains("reste inchangée"));
 
-        let many = compose_verified_summary("T", 3);
+        let many = compose_verified_summary("T", 3, DeviceFamily::Lunii, WriteOutcome::CreatedNew);
         assert!(many.unchanged.starts_with("3 autres histoires"));
         assert!(many.unchanged.contains("restent inchangées"));
+    }
+
+    #[test]
+    fn compose_verified_summary_first_send_lunii_literal_is_frozen() {
+        // Invariance guard: the historical first-send Lunii literal must not
+        // change by a byte (the existing tests and persisted rows rely on it).
+        let summary = compose_verified_summary(
+            "Mon histoire",
+            2,
+            DeviceFamily::Lunii,
+            WriteOutcome::CreatedNew,
+        );
+        assert_eq!(
+            summary.changed,
+            "« Mon histoire » est maintenant sur la Lunii."
+        );
+    }
+
+    #[test]
+    fn compose_verified_summary_bifurcates_by_outcome_and_family() {
+        // One decision = one test: every (outcome, family) pair yields its exact
+        // frozen literal (product-language.md, Change Control). The generic
+        // variants are declared-without-a-live-emitter (no non-Lunii write
+        // exists) but frozen and tested in both directions.
+        for (outcome, family, expected) in [
+            (
+                WriteOutcome::CreatedNew,
+                DeviceFamily::Lunii,
+                "« T » est maintenant sur la Lunii.",
+            ),
+            (
+                WriteOutcome::CreatedNew,
+                DeviceFamily::Flam,
+                "« T » est maintenant sur l'appareil.",
+            ),
+            (
+                WriteOutcome::ReplacedDivergent,
+                DeviceFamily::Lunii,
+                "« T » a été mise à jour sur la Lunii.",
+            ),
+            (
+                WriteOutcome::ReplacedDivergent,
+                DeviceFamily::Flam,
+                "« T » a été mise à jour sur l'appareil.",
+            ),
+            (
+                WriteOutcome::ReusedIdentical,
+                DeviceFamily::Lunii,
+                "« T » était déjà à jour sur la Lunii.",
+            ),
+            (
+                WriteOutcome::ReusedIdentical,
+                DeviceFamily::Flam,
+                "« T » était déjà à jour sur l'appareil.",
+            ),
+        ] {
+            let summary = compose_verified_summary("T", 0, family, outcome);
+            assert_eq!(summary.changed, expected, "{outcome:?}/{family:?}");
+        }
+    }
+
+    #[test]
+    fn write_outcome_diagnostic_tags_are_stable_and_distinct() {
+        let tags = [
+            WriteOutcome::CreatedNew.diagnostic_tag(),
+            WriteOutcome::ReusedIdentical.diagnostic_tag(),
+            WriteOutcome::ReplacedDivergent.diagnostic_tag(),
+        ];
+        assert_eq!(
+            tags,
+            ["created_new", "reused_identical", "replaced_divergent"]
+        );
+        let mut unique = tags.to_vec();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(unique.len(), tags.len());
     }
 
     #[test]

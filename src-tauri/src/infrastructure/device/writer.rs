@@ -29,6 +29,21 @@
 //! existing content intact; there is NO partial resume (a fresh cycle re-writes
 //! everything). Zero network, zero decryption.
 //!
+//! An already-present `.content/<SHORT_ID>` resolves to one of THREE PROVEN
+//! outcomes (FR23, see `docs/architecture/device-support-profile.md`): identical
+//! → idempotent re-index ([`WriteOutcome::ReusedIdentical`]); divergent, made
+//! exclusively of regular entries PROVEN readable (read in full) AND
+//! ATTRIBUTABLE to the target UUID (indexed, with no other indexed UUID sharing
+//! the SHORT_ID) → atomic replacement ([`WriteOutcome::ReplacedDivergent`], old
+//! content set aside by `rename` only AFTER the full replacement is staged +
+//! fsynced AND the state RE-PROVEN adjacent to that mutation — a residual
+//! window of the order of the `rename` remains, not eliminable in stdlib);
+//! unprovable (non-directory / symlinked target root, symlink / empty
+//! directory / special file inside, unreadable entry or I/O, or a divergent
+//! folder that cannot be attributed to the target UUID) → refusal with the
+//! dedicated [`TransferFailureCause::DevicePackUnprovable`], zero device byte
+//! modified.
+//!
 //! A trait keeps the application layer testable without a real volume:
 //! [`MockDevicePackWriter`](super::mock::MockDevicePackWriter) scripts successes
 //! and failures without hardware.
@@ -44,10 +59,11 @@ use sha2::{Digest, Sha256};
 use tempfile::Builder;
 
 use crate::domain::device::{
-    LUNII_CONTENT_DIR, LUNII_DEVICE_ID_MARKER, LUNII_PACK_UUID_BYTES, MAX_PACK_INDEX_BYTES,
+    pack_short_id, parse_pack_index, LUNII_CONTENT_DIR, LUNII_DEVICE_ID_MARKER,
+    LUNII_PACK_UUID_BYTES, MAX_PACK_INDEX_BYTES,
 };
 use crate::domain::transfer::{
-    append_pack_uuid, pack_uuid_bytes, PackWritePlan, TransferFailureCause,
+    append_pack_uuid, pack_uuid_bytes, PackWritePlan, TransferFailureCause, WriteOutcome,
 };
 
 /// Streaming copy buffer — matches the import copier so large packs never hold
@@ -58,6 +74,14 @@ const COPY_BUF_BYTES: usize = 64 * 1024;
 /// [`sweep_device_transfer_staging`] can reclaim residues from an interrupted
 /// write without ever touching the device's own content.
 const DEVICE_STAGING_PREFIX: &str = ".rustory-staging-";
+
+/// Recognizable prefix for the set-aside folder holding the OLD pack during an
+/// atomic replacement (FR23). An orphan under this prefix is the residue of a
+/// write interrupted mid-swap — the job already ended `transfert incomplet`, the
+/// old content is superseded by construction (the full replacement was staged +
+/// fsynced BEFORE the set-aside), so the sweep reclaims it exactly like a
+/// staging residue.
+const DEVICE_REPLACED_PREFIX: &str = ".rustory-replaced-";
 
 /// Progress of the content-copy step, reported by [`DevicePackWriter::write_pack`]
 /// so the application can surface an HONEST fraction. Emitted ONLY during the
@@ -109,9 +133,11 @@ pub trait DevicePackWriter: Send + Sync + 'static {
     /// (read-only source of the opaque bytes); `pack_uuid` is the canonical
     /// lowercase UUID added to `.pi`; `plan` lists the files to reproduce under
     /// `.content/<plan.short_id>`. `progress` is called during the content copy
-    /// with a monotone [`WriteProgress`]. On failure the [`WriteFailure`] reports
-    /// whether the device was already mutated (for the `Failed`/`Incomplete`
-    /// distinction).
+    /// with a monotone [`WriteProgress`]. On success the returned
+    /// [`WriteOutcome`] is the outcome the writer CONSTATED (created / reused
+    /// identical / replaced divergent — FR23); on failure the [`WriteFailure`]
+    /// reports whether the device was already mutated (for the
+    /// `Failed`/`Incomplete` distinction).
     fn write_pack(
         &self,
         mount_path: &Path,
@@ -120,7 +146,7 @@ pub trait DevicePackWriter: Send + Sync + 'static {
         plan: &PackWritePlan,
         budget: Duration,
         progress: &dyn Fn(WriteProgress),
-    ) -> Result<(), WriteFailure>;
+    ) -> Result<WriteOutcome, WriteFailure>;
 }
 
 /// Production writer: stdlib filesystem copies + atomic renames + fsync.
@@ -136,7 +162,7 @@ impl DevicePackWriter for SystemDevicePackWriter {
         plan: &PackWritePlan,
         budget: Duration,
         progress: &dyn Fn(WriteProgress),
-    ) -> Result<(), WriteFailure> {
+    ) -> Result<WriteOutcome, WriteFailure> {
         // The UUID must be canonical — callers pass the value the import
         // recorded (schema-canonical), so a non-canonical value is a caller
         // invariant violation, refused WITHOUT touching the device.
@@ -147,6 +173,12 @@ impl DevicePackWriter for SystemDevicePackWriter {
         // I/O: a `..`, absolute or empty/dot component is refused, never followed.
         for file in &plan.files {
             validate_rel_path(&file.rel_path).map_err(clean)?;
+        }
+        // Defense in depth, same F8 spirit: the plan's `short_id` must be the
+        // one THIS UUID derives — a drifted caller invariant would aim every
+        // proof and mutation at another story's folder. Refused before any I/O.
+        if pack_short_id(&uuid_bytes) != plan.short_id {
+            return Err(clean(TransferFailureCause::WriteRejected));
         }
 
         // F3 — serialize writes to THIS mount: a single USB volume is written
@@ -167,28 +199,60 @@ impl DevicePackWriter for SystemDevicePackWriter {
 
         // F7 — refuse a corrupt `.pi` (length not a whole number of 16-byte
         // UUIDs) BEFORE any mutation; an append would misalign the new entry.
-        // (Guard lives in `read_pi`; the index is re-read fresh before the append.)
-        read_pi(&pi_path).map_err(clean)?;
+        // The bytes also feed the attribution guard below (can the divergent
+        // folder be attributed to the target UUID?); the index is re-read fresh
+        // before the append.
+        let pi_bytes = read_pi(&pi_path).map_err(clean)?;
+        let attributable = divergent_folder_attributable(&pi_bytes, &uuid_bytes, &plan.short_id);
 
-        // F2 — an existing `.content/<SHORT_ID>` is NEVER deleted or overwritten.
-        // It must be PROVEN to be the same healthy pack (every planned file
-        // present, matching size + checksum) before we reuse it; a collision,
-        // stale or incomplete folder under this SHORT_ID is refused, not clobbered.
-        if target.exists() {
-            if !pack_dir_matches_plan(&target, plan, started, budget).map_err(clean)? {
-                return Err(clean(TransferFailureCause::WriteRejected));
+        // F2 (FR23 evolution) — an existing `.content/<SHORT_ID>` is never lost
+        // before its replacement is complete, and never touched when its state
+        // cannot be PROVEN. The state proof classifies the target ROOT (no-follow
+        // — a symlinked / non-directory root is unprovable) then its contents:
+        //   - identical (every planned file present with exact size + checksum,
+        //     not a single extra entry) → idempotent re-index only;
+        //   - divergent-but-sound (any drift, but EVERY entry is a readable
+        //     regular file — readability PROVEN by reading them) → atomic
+        //     replacement further below, and ONLY when the folder is
+        //     ATTRIBUTABLE to the target UUID: the index must reference it and
+        //     no OTHER indexed UUID may share the target SHORT_ID — an
+        //     unindexed divergent folder is ambiguous (an unknown residue, a
+        //     collision with an unindexed UUID), and a bi-indexed SHORT_ID
+        //     collision means the folder may hold the OTHER story's only
+        //     content. Both are refused, never replaced;
+        //   - unprovable (symlink / unplanned empty directory / special file /
+        //     unreadable I/O) → refused with the dedicated cause, not clobbered.
+        let replacing = match prove_target_state(&target, plan, started, budget).map_err(clean)? {
+            Some(ExistingPackState::Identical) => {
+                // C3 — budget adherence "between steps": proving the existing
+                // pack may have consumed the budget; do not run the (durable)
+                // index step over budget. Pre-mutation for THIS run → `Failed`.
+                if started.elapsed() >= budget {
+                    return Err(clean(TransferFailureCause::Interrupted));
+                }
+                // The pack is already the plan's bytes (a prior write promoted
+                // it). Converging the index now touches the device, so an index
+                // failure here leaves content-present-not-indexed → `Incomplete`.
+                index_pack(mount_path, &pi_path, &uuid_bytes).map_err(mutated)?;
+                return Ok(WriteOutcome::ReusedIdentical);
             }
-            // C3 — budget adherence "between steps": validating the existing pack
-            // may have consumed the budget; do not run the (durable) index step
-            // over budget. This is pre-mutation for THIS run → `Failed`.
-            if started.elapsed() >= budget {
-                return Err(clean(TransferFailureCause::Interrupted));
+            Some(ExistingPackState::DivergentSound) => {
+                if !attributable {
+                    // Attribution guard: nothing proves this divergent folder
+                    // IS "the story already present" — fail-closed, zero byte
+                    // touched (see `divergent_folder_attributable`).
+                    return Err(clean(TransferFailureCause::DevicePackUnprovable));
+                }
+                true
             }
-            // The healthy pack is already present (a prior write promoted it).
-            // Converging the index now touches the device, so an index failure
-            // here leaves content-present-not-indexed → `Incomplete`.
-            return index_pack(mount_path, &pi_path, &uuid_bytes).map_err(mutated);
-        }
+            Some(ExistingPackState::Unprovable) => {
+                // Rustory never deletes what it cannot understand: refuse with
+                // the HONEST dedicated cause (it is Rustory protecting the
+                // present content, not the device refusing), zero byte touched.
+                return Err(clean(TransferFailureCause::DevicePackUnprovable));
+            }
+            None => false,
+        };
 
         // 1. Stage the opaque bytes in a temp dir ON THE DEVICE VOLUME.
         let staging = Builder::new()
@@ -229,17 +293,88 @@ impl DevicePackWriter for SystemDevicePackWriter {
         }
 
         // 2. Persist the staged contents' directory entries before promotion.
+        //    For a replacement this completes the F2 promise: the old content is
+        //    only set aside AFTER the full replacement is staged AND durable.
         fsync_tree(staging.path()).map_err(|_| clean(TransferFailureCause::WriteRejected))?;
 
-        // 3. Promote atomically. FILES FIRST: `.pi` is touched only afterwards. A
-        //    failed `rename` did not move anything → still `Failed`.
+        // Budget adherence after the durability sync too: the staging fsync may
+        // have consumed the remaining budget — a mutation NEVER starts over
+        // budget. Still pre-mutation → `Failed`.
+        if started.elapsed() >= budget {
+            return Err(clean(TransferFailureCause::Interrupted));
+        }
+
+        // 3. Promote atomically. FILES FIRST: `.pi` is touched only afterwards.
         fs::create_dir_all(&content_dir).map_err(|_| clean(TransferFailureCause::WriteRejected))?;
-        promote(staging.path(), &target).map_err(clean)?;
+        let set_aside = if replacing {
+            // RE-PROVE immediately before the set-aside: the initial proof aged
+            // across the whole staging phase (copy + fsync can be long), and the
+            // state that gets set aside MUST be the state that was proven. The
+            // fresh classification decides:
+            //   - still divergent-but-sound AND still attributable → replace;
+            //   - became identical (something wrote exactly the plan meanwhile)
+            //     → drop the staging, idempotent re-index, `ReusedIdentical`;
+            //   - became unprovable / no longer attributable → refuse untouched;
+            //   - vanished → nothing to set aside, plain creation below.
+            match prove_target_state(&target, plan, started, budget).map_err(clean)? {
+                Some(ExistingPackState::DivergentSound) => {
+                    let pi_now = read_pi(&pi_path).map_err(clean)?;
+                    if !divergent_folder_attributable(&pi_now, &uuid_bytes, &plan.short_id) {
+                        return Err(clean(TransferFailureCause::DevicePackUnprovable));
+                    }
+                    // The re-proof re-read the whole old pack — its internal
+                    // deadline checks run per entry, so the last read may end
+                    // past the budget: re-check before the FIRST mutating act
+                    // (still pre-mutation → `Failed`, old pack intact). The
+                    // residual window between this check and the `rename` is
+                    // not deterministically triggerable without an fs hook.
+                    if started.elapsed() >= budget {
+                        return Err(clean(TransferFailureCause::Interrupted));
+                    }
+                    // Set the old pack aside by a same-volume `rename` to a
+                    // sweepable name. THE DEVICE MUTATION STARTS HERE: a
+                    // successful set-aside that is not followed by a completed
+                    // promotion is an honest `transfert incomplet` (a relaunch
+                    // converges — the swept residue and the fresh cycle re-create
+                    // the pack). A FAILED rename moved nothing → still `Failed`.
+                    // No budget check between set-aside and promotion: the swap
+                    // is deliberately not interrupted at its most fragile point.
+                    let set_aside =
+                        mount_path.join(format!("{DEVICE_REPLACED_PREFIX}{}", plan.short_id));
+                    fs::rename(&target, &set_aside)
+                        .map_err(|_| clean(TransferFailureCause::WriteRejected))?;
+                    Some(set_aside)
+                }
+                Some(ExistingPackState::Identical) => {
+                    if started.elapsed() >= budget {
+                        return Err(clean(TransferFailureCause::Interrupted));
+                    }
+                    index_pack(mount_path, &pi_path, &uuid_bytes).map_err(mutated)?;
+                    return Ok(WriteOutcome::ReusedIdentical);
+                }
+                Some(ExistingPackState::Unprovable) => {
+                    return Err(clean(TransferFailureCause::DevicePackUnprovable));
+                }
+                None => None,
+            }
+        } else {
+            None
+        };
+        // Failures from here on are post-mutation for a replacement (the old pack
+        // left its canonical folder), pre-mutation otherwise.
+        let promoted = |cause: TransferFailureCause| {
+            if set_aside.is_some() {
+                mutated(cause)
+            } else {
+                clean(cause)
+            }
+        };
+        promote(staging.path(), &target).map_err(promoted)?;
         // The staged path no longer exists; the TempDir drop is a no-op.
 
         // FROM HERE the device IS mutated (content promoted): a durability or
         // index I/O failure is `Incomplete` (a partial copy may remain until the
-        // next relaunch converges it via the prove-or-refuse reuse path), never
+        // next relaunch converges it via the three-outcome reuse path), never
         // `Failed`.
         // 4. Persist the promoted tree + `.content` parent so a power loss after
         //    the `.pi` update cannot resurrect a half-written folder.
@@ -249,16 +384,32 @@ impl DevicePackWriter for SystemDevicePackWriter {
         // 5. Add the UUID to `.pi` atomically (idempotent), re-reading the
         //    freshest index first (F3). A promoted folder left unreferenced if
         //    this step fails is benign unused content; the forbidden inverse (an
-        //    index entry without content) cannot happen — this is the LAST step.
-        index_pack(mount_path, &pi_path, &uuid_bytes).map_err(mutated)
+        //    index entry without content) cannot happen FROM THIS STEP — the
+        //    transient set-aside window of a replacement (between set-aside and
+        //    promotion) is the assumed, honestly-classified exception (see the
+        //    module doc). For a replacement the UUID is normally already
+        //    indexed — the append is a no-op.
+        index_pack(mount_path, &pi_path, &uuid_bytes).map_err(mutated)?;
+
+        // 6. Best-effort cleanup of the set-aside old pack, AFTER the fsyncs and
+        //    the index convergence: a failure leaves a sweepable residue, never a
+        //    failed transfer.
+        if let Some(old_pack) = set_aside {
+            let _ = fs::remove_dir_all(&old_pack);
+            return Ok(WriteOutcome::ReplacedDivergent);
+        }
+        Ok(WriteOutcome::CreatedNew)
     }
 }
 
-/// Best-effort sweep of on-device transfer staging residues (a temp dir or `.pi`
-/// temp file left by an interrupted write). Recognized by the
-/// [`DEVICE_STAGING_PREFIX`]; NEVER touches the device's own content. Returns the
-/// number of entries removed (diagnostic only). Run before a write (and safe to
-/// call whenever a writable device is present).
+/// Best-effort sweep of on-device transfer residues: staging temp dirs / `.pi`
+/// temp files ([`DEVICE_STAGING_PREFIX`]) left by an interrupted write, and
+/// set-aside old packs ([`DEVICE_REPLACED_PREFIX`]) orphaned by a write
+/// interrupted mid-replacement (their job already ended `transfert incomplet`;
+/// the old content was superseded by a fully staged replacement before being
+/// set aside). NEVER touches the device's own content. Returns the number of
+/// entries removed (diagnostic only). Run before a write (and safe to call
+/// whenever a writable device is present).
 pub fn sweep_device_transfer_staging(mount_path: &Path) -> u32 {
     let mut removed = 0;
     let Ok(entries) = fs::read_dir(mount_path) else {
@@ -266,7 +417,8 @@ pub fn sweep_device_transfer_staging(mount_path: &Path) -> u32 {
     };
     for entry in entries.flatten() {
         let name = entry.file_name();
-        if !name.to_string_lossy().starts_with(DEVICE_STAGING_PREFIX) {
+        let name = name.to_string_lossy();
+        if !name.starts_with(DEVICE_STAGING_PREFIX) && !name.starts_with(DEVICE_REPLACED_PREFIX) {
             continue;
         }
         let path = entry.path();
@@ -307,12 +459,17 @@ fn read_pi(pi_path: &Path) -> Result<Vec<u8>, TransferFailureCause> {
 }
 
 /// Promote the staged folder to `target` by an atomic `rename`. The caller has
-/// already proven `target` does NOT exist (an existing folder under this SHORT_ID
-/// is refused upstream, never clobbered — F2), so promotion must not silently
-/// replace device content: refuse if the target appeared meanwhile (a race).
+/// already proven `target` does NOT exist — either nothing was there, or the
+/// proven-divergent old pack was just set aside by `rename` (FR23); an
+/// unprovable folder was refused upstream, never clobbered — so promotion must
+/// not silently replace device content: refuse if ANY entry appeared meanwhile
+/// (a race). The probe is no-follow (`symlink_metadata`): `exists()` would
+/// report a dangling symlink as absent and the `rename` would clobber it.
 fn promote(staging_path: &Path, target: &Path) -> Result<(), TransferFailureCause> {
-    if target.exists() {
-        return Err(TransferFailureCause::WriteRejected);
+    match fs::symlink_metadata(target) {
+        Ok(_) => return Err(TransferFailureCause::WriteRejected),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => return Err(TransferFailureCause::WriteRejected),
     }
     fs::rename(staging_path, target).map_err(|_| TransferFailureCause::WriteRejected)
 }
@@ -491,122 +648,264 @@ fn index_pack(
     Ok(())
 }
 
-/// Whether the existing `.content/<SHORT_ID>` folder is EXACTLY the pack the plan
-/// describes — every planned file present as a regular file with the matching
-/// size and a re-computed checksum that matches. Used to decide a safe idempotent
-/// reuse WITHOUT trusting a folder we did not just write (F2): a missing / extra /
-/// drifted file means "not the same pack" → the caller refuses, never deletes.
-/// Deadline-checked so a stalled mount aborts as `Interrupted`.
-fn pack_dir_matches_plan(
+/// The PROVEN classification of an existing `.content/<SHORT_ID>` folder against
+/// the plan (FR23). The proof is the write-job comparison of record — fresh, run
+/// immediately before any mutation, never a cache or the read-only preview.
+enum ExistingPackState {
+    /// Every planned file present as a regular file with the exact size and a
+    /// matching re-computed checksum, and NOT A SINGLE extra entry: the folder
+    /// IS the plan's bytes.
+    Identical,
+    /// Any drift (missing / differing / extra files) where EVERY entry
+    /// encountered is a readable regular file (directories only as containers of
+    /// such files): safe to replace atomically.
+    DivergentSound,
+    /// An entry the proof cannot vouch for: a symlink, a special file, an empty
+    /// directory (nothing a files-only pack can explain), or an unreadable I/O
+    /// during the proof. Never reused, never replaced, never deleted.
+    Unprovable,
+}
+
+/// Whether a divergent folder at the target SHORT_ID can be ATTRIBUTED to the
+/// target UUID — the guard that authorizes a replacement. Two conditions, both
+/// required:
+///   - the index references the target UUID (an unindexed divergent folder is
+///     an unknown residue or a collision with an unindexed UUID — nothing says
+///     it is "the story already present");
+///   - no OTHER indexed UUID shares the target SHORT_ID (the folder name is
+///     only the last 8 hex — a bi-indexed collision means the folder may hold
+///     the OTHER story's only content, and replacing it would strand that
+///     story as index-without-content, the forbidden inverse, definitively).
+///
+/// Consulted at the initial proof AND at the re-proof (fresh `.pi` each time).
+fn divergent_folder_attributable(
+    pi_bytes: &[u8],
+    uuid_bytes: &[u8; LUNII_PACK_UUID_BYTES],
+    short_id: &str,
+) -> bool {
+    let index = parse_pack_index(pi_bytes);
+    let ours_indexed = index.uuids.iter().any(|existing| existing == uuid_bytes);
+    let colliding_other = index
+        .uuids
+        .iter()
+        .any(|existing| existing != uuid_bytes && pack_short_id(existing) == short_id);
+    ours_indexed && !colliding_other
+}
+
+/// Classify what sits at the target path, STARTING with the root itself,
+/// no-follow: `Ok(None)` when nothing exists there; `Some(Unprovable)` when the
+/// root entry is not a real directory (a symlink — dangling or not —, a regular
+/// file, a special file: `exists()` would follow or hide those) or is unreadable
+/// during the proof; otherwise the content classification of
+/// [`prove_existing_pack_state`]. The write path calls this for the initial
+/// decision AND re-calls it immediately before the set-aside mutation (the
+/// proof must be adjacent to what it authorizes — a proof aged across the
+/// staging phase proves nothing).
+fn prove_target_state(
     target: &Path,
     plan: &PackWritePlan,
     started: Instant,
     budget: Duration,
-) -> Result<bool, TransferFailureCause> {
-    for file in &plan.files {
+) -> Result<Option<ExistingPackState>, TransferFailureCause> {
+    match fs::symlink_metadata(target) {
+        Ok(meta) if meta.is_dir() => {}
+        Ok(_) => return Ok(Some(ExistingPackState::Unprovable)),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Ok(Some(ExistingPackState::Unprovable)),
+    }
+    prove_existing_pack_state(target, plan, started, budget).map(Some)
+}
+
+/// Classify the existing target folder against the plan (see
+/// [`ExistingPackState`]). EVERY existing entry is opened and read in full
+/// (no-follow) — readability is part of the proof, for the divergent case too:
+/// a folder is only "divergent-but-sound" when each of its entries could
+/// actually be read, since the replacement verdict leads to deleting it.
+/// Deadline-checked so a stalled mount aborts as `Interrupted`; every other
+/// proof-time I/O failure classifies as [`ExistingPackState::Unprovable`]
+/// rather than erroring (fail-closed refusal, not a transport failure).
+fn prove_existing_pack_state(
+    target: &Path,
+    plan: &PackWritePlan,
+    started: Instant,
+    budget: Duration,
+) -> Result<ExistingPackState, TransferFailureCause> {
+    let Some(existing) = collect_regular_pack_files(target, started, budget)? else {
+        return Ok(ExistingPackState::Unprovable);
+    };
+
+    let planned: std::collections::HashMap<&str, &crate::domain::transfer::PackWriteFile> = plan
+        .files
+        .iter()
+        .map(|f| (f.rel_path.as_str(), f))
+        .collect();
+
+    // A missing or extra file is a divergence — recorded WITHOUT returning yet:
+    // every existing entry below must still prove its readability first.
+    let mut divergent = existing.len() != planned.len()
+        || !existing
+            .iter()
+            .all(|(rel, _)| planned.contains_key(rel.as_str()));
+
+    // Read EVERY existing entry in full (readability proof), comparing against
+    // the plan when the path matches (size + checksum decide the divergence).
+    for (rel, byte_len) in &existing {
         if started.elapsed() >= budget {
             return Err(TransferFailureCause::Interrupted);
         }
-        let path = safe_rel_join(target, &file.rel_path)?;
-        match fs::symlink_metadata(&path) {
-            Ok(meta) if meta.is_file() => {
-                if meta.len() != file.byte_len {
-                    return Ok(false);
-                }
-            }
-            _ => return Ok(false),
-        }
-        if file_checksum(&path, started, budget)? != file.checksum {
-            return Ok(false);
-        }
-    }
-    // C4 — fail-closed on EXTRA files: a folder holding exactly the planned files
-    // PLUS anything else was NOT produced by this plan, so it is not the same pack
-    // and must be refused (never reused or indexed). Enumerate the target and
-    // reject any entry absent from the plan.
-    let planned: std::collections::HashSet<&str> =
-        plan.files.iter().map(|f| f.rel_path.as_str()).collect();
-    for rel in collect_pack_files(target, started, budget)? {
-        if !planned.contains(rel.as_str()) {
-            return Ok(false);
+        let path = safe_rel_join(target, rel)?;
+        match checksum_regular_no_follow(&path, started, budget) {
+            Ok(Some(sum)) => match planned.get(rel.as_str()) {
+                Some(file) if *byte_len == file.byte_len && sum == file.checksum => {}
+                _ => divergent = true,
+            },
+            // The entry stopped being a provable regular file mid-proof, or its
+            // bytes could not be read: unprovable, refuse — an unreadable entry
+            // must never be classified "sound" and deleted.
+            Ok(None) => return Ok(ExistingPackState::Unprovable),
+            Err(cause) => return Err(cause),
         }
     }
-    Ok(true)
+    if divergent {
+        Ok(ExistingPackState::DivergentSound)
+    } else {
+        Ok(ExistingPackState::Identical)
+    }
 }
 
-/// Recursively collect the forward-slash relative paths of every non-directory
-/// entry under `root` (regular files, symlinks — anything that is not a dir),
-/// used by [`pack_dir_matches_plan`] to detect entries absent from the plan (C4).
-/// Deadline-checked so a stalled mount aborts as `Interrupted`.
-fn collect_pack_files(
+/// Recursively collect `(forward-slash rel path, byte length)` for every entry
+/// under `root`, PROVING regularity along the way: returns `Ok(None)` as soon as
+/// an entry is not a readable regular file or a non-empty directory of such
+/// files (symlink, special file, empty directory, unreadable I/O — the
+/// [`ExistingPackState::Unprovable`] triggers). Deadline-checked so a stalled
+/// mount aborts as `Interrupted`.
+#[allow(clippy::type_complexity)]
+fn collect_regular_pack_files(
     root: &Path,
     started: Instant,
     budget: Duration,
-) -> Result<Vec<String>, TransferFailureCause> {
+) -> Result<Option<Vec<(String, u64)>>, TransferFailureCause> {
     fn walk(
         root: &Path,
         dir: &Path,
         started: Instant,
         budget: Duration,
-        out: &mut Vec<String>,
-    ) -> Result<(), TransferFailureCause> {
+        out: &mut Vec<(String, u64)>,
+    ) -> Result<bool, TransferFailureCause> {
         if started.elapsed() >= budget {
             return Err(TransferFailureCause::Interrupted);
         }
-        let entries = fs::read_dir(dir).map_err(|_| TransferFailureCause::WriteRejected)?;
+        let Ok(entries) = fs::read_dir(dir) else {
+            return Ok(false);
+        };
+        let mut seen_any = false;
         for entry in entries {
-            let path = entry
-                .map_err(|_| TransferFailureCause::WriteRejected)?
-                .path();
-            let meta =
-                fs::symlink_metadata(&path).map_err(|_| TransferFailureCause::WriteRejected)?;
+            seen_any = true;
+            let Ok(entry) = entry else {
+                return Ok(false);
+            };
+            let path = entry.path();
+            let Ok(meta) = fs::symlink_metadata(&path) else {
+                return Ok(false);
+            };
             if meta.is_dir() {
-                walk(root, &path, started, budget, out)?;
+                if !walk(root, &path, started, budget, out)? {
+                    return Ok(false);
+                }
                 continue;
             }
-            let rel = path
-                .strip_prefix(root)
-                .map_err(|_| TransferFailureCause::WriteRejected)?;
+            if !meta.is_file() {
+                // Symlink / FIFO / socket / device: not provable.
+                return Ok(false);
+            }
+            let Ok(rel) = path.strip_prefix(root) else {
+                return Ok(false);
+            };
             let mut parts = Vec::new();
             for component in rel.components() {
                 match component {
                     std::path::Component::Normal(c) => parts.push(c.to_string_lossy().into_owned()),
-                    // Defensive: a non-normal component cannot be a planned file.
-                    _ => return Err(TransferFailureCause::WriteRejected),
+                    // Defensive: a non-normal component cannot be a pack file.
+                    _ => return Ok(false),
                 }
             }
-            out.push(parts.join("/"));
+            out.push((parts.join("/"), meta.len()));
         }
-        Ok(())
+        // An empty directory is nothing a files-only pack can explain — the
+        // "unplanned directory" trigger of the unprovable refusal. The pack ROOT
+        // itself is exempt: an empty target folder simply diverges (every
+        // planned file missing) and is replaced.
+        if !seen_any && dir != root {
+            return Ok(false);
+        }
+        Ok(true)
     }
     let mut out = Vec::new();
-    walk(root, root, started, budget, &mut out)?;
-    Ok(out)
+    if walk(root, root, started, budget, &mut out)? {
+        Ok(Some(out))
+    } else {
+        Ok(None)
+    }
 }
 
-/// Stream the SHA-256 of an existing file (deadline-checked), to compare against a
-/// plan checksum without copying.
-fn file_checksum(
+/// Stream the SHA-256 of an existing REGULAR file without ever following a
+/// symlink: `lstat` first, open, then re-check the OPEN HANDLE's identity
+/// (`fstat`, `(dev, ino)` on Unix) — the TOCTOU guard the copy path already
+/// applies, required here because the proof's verdict can lead to deleting the
+/// old pack. `Ok(None)` when the entry is not (or stopped being) a provable
+/// regular file; deadline-checked (`Interrupted`).
+fn checksum_regular_no_follow(
     path: &Path,
     started: Instant,
     budget: Duration,
-) -> Result<String, TransferFailureCause> {
-    let mut reader = File::open(path).map_err(|_| TransferFailureCause::WriteRejected)?;
+) -> Result<Option<String>, TransferFailureCause> {
+    let Ok(expected_meta) = fs::symlink_metadata(path) else {
+        return Ok(None);
+    };
+    if !expected_meta.is_file() {
+        return Ok(None);
+    }
+    let Ok(mut reader) = File::open(path) else {
+        return Ok(None);
+    };
+    let Ok(opened) = reader.metadata() else {
+        return Ok(None);
+    };
+    if !opened.is_file() {
+        return Ok(None);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if opened.dev() != expected_meta.dev() || opened.ino() != expected_meta.ino() {
+            return Ok(None);
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        // Windows: the device is a FAT volume with no symlink support and
+        // the lstat above already refused reparse points; the open handle is
+        // verified to be a regular file, which is the available guarantee —
+        // the same assumed limit as the shared copier pattern. This matters
+        // here because the proof's verdict can lead to deleting the old pack.
+        let _ = expected_meta;
+    }
+
     let mut hasher = Sha256::new();
     let mut buf = vec![0u8; COPY_BUF_BYTES];
     loop {
         if started.elapsed() >= budget {
             return Err(TransferFailureCause::Interrupted);
         }
-        let read = reader
-            .read(&mut buf)
-            .map_err(|_| TransferFailureCause::WriteRejected)?;
+        let Ok(read) = reader.read(&mut buf) else {
+            return Ok(None);
+        };
         if read == 0 {
             break;
         }
         hasher.update(&buf[..read]);
     }
-    Ok(format!("{:x}", hasher.finalize()))
+    Ok(Some(format!("{:x}", hasher.finalize())))
 }
 
 #[cfg(test)]
@@ -723,7 +1022,7 @@ mod tests {
         let short_id = pack_short_id(&uuid);
         let plan = plan_for(source.path(), &short_id);
 
-        SystemDevicePackWriter
+        let outcome = SystemDevicePackWriter
             .write_pack(
                 mount.path(),
                 source.path(),
@@ -733,6 +1032,11 @@ mod tests {
                 &noop_progress,
             )
             .expect("write must succeed");
+        assert_eq!(
+            outcome,
+            WriteOutcome::CreatedNew,
+            "nothing pre-existed — a first send"
+        );
 
         // Content reproduced byte-for-byte under `.content/<SHORT_ID>`.
         let pack_dir = mount.path().join(".content").join(&short_id);
@@ -770,7 +1074,7 @@ mod tests {
                 &noop_progress,
             )
             .expect("first write");
-        SystemDevicePackWriter
+        let second = SystemDevicePackWriter
             .write_pack(
                 mount.path(),
                 source.path(),
@@ -780,6 +1084,11 @@ mod tests {
                 &noop_progress,
             )
             .expect("second write is a no-op");
+        assert_eq!(
+            second,
+            WriteOutcome::ReusedIdentical,
+            "an identical pack is constated as already up to date"
+        );
 
         let pi = std::fs::read(mount.path().join(".pi")).expect("read .pi");
         assert_eq!(pi.len(), 16, "the UUID must not be duplicated in the index");
@@ -883,10 +1192,30 @@ mod tests {
     }
 
     #[test]
-    fn an_existing_mismatched_pack_under_the_same_short_id_is_refused_not_clobbered() {
-        // F2 — a different / stale / incomplete folder already sits at this
-        // SHORT_ID (a collision). It must be refused, NEVER deleted or
-        // overwritten, and the index left intact.
+    fn sweep_removes_orphan_set_aside_packs_too() {
+        // FR23 — a `.rustory-replaced-*` residue (a swap interrupted between
+        // set-aside and promotion) is reclaimed exactly like a staging residue,
+        // and the device's own content survives.
+        let mount = empty_mount();
+        let orphan = mount
+            .path()
+            .join(format!("{DEVICE_REPLACED_PREFIX}FAC5562D"));
+        std::fs::create_dir_all(&orphan).expect("mk orphan set-aside");
+        std::fs::write(orphan.join("ni"), b"OLD").expect("seed old content");
+        let content = mount.path().join(".content");
+        std::fs::create_dir_all(&content).expect("mk content");
+
+        assert_eq!(sweep_device_transfer_staging(mount.path()), 1);
+        assert!(!orphan.exists(), "orphan set-aside must be removed");
+        assert!(content.is_dir(), "real content must survive the sweep");
+    }
+
+    #[test]
+    fn an_existing_divergent_sound_pack_under_the_same_short_id_is_replaced_atomically() {
+        // FR23 — RE-SCOPED from the historical refused-not-clobbered semantics
+        // by the update flow: a divergent folder made exclusively of readable
+        // regular files is now REPLACED byte-faithfully by the plan's bytes.
+        // The old content is gone, no residue remains, and the index converges.
         let mount = empty_mount();
         let source = source_pack();
         let uuid = uuid_bytes([0x11, 0x22, 0x33, 0x44]);
@@ -894,11 +1223,77 @@ mod tests {
         let short_id = pack_short_id(&uuid);
         let plan = plan_for(source.path(), &short_id);
 
-        // Pre-seed a DIFFERENT pack folder under the SAME SHORT_ID.
+        // Pre-seed a DIFFERENT pack folder under the SAME SHORT_ID (regular
+        // files only — the divergent-but-sound case), with the target UUID
+        // ALREADY indexed alongside another one: the realistic "an older
+        // version of THIS story sits on the device" state (an unindexed
+        // divergent folder is ambiguous and refused — its own test below).
         let target = mount.path().join(".content").join(&short_id);
-        std::fs::create_dir_all(&target).expect("seed collision dir");
+        std::fs::create_dir_all(&target).expect("seed divergent dir");
         std::fs::write(target.join("ni"), b"STALE-AND-DIFFERENT").expect("seed stale ni");
-        // A `.pi` that does NOT yet reference our UUID.
+        std::fs::write(target.join("old-extra"), b"OLD").expect("seed old extra");
+        let other = uuid_bytes([9, 9, 9, 9]);
+        let mut pi_seed = other.to_vec();
+        pi_seed.extend_from_slice(&uuid);
+        std::fs::write(mount.path().join(".pi"), &pi_seed).expect("seed .pi");
+
+        let outcome = SystemDevicePackWriter
+            .write_pack(
+                mount.path(),
+                source.path(),
+                &canonical,
+                &plan,
+                budget(),
+                &noop_progress,
+            )
+            .expect("a divergent-but-sound indexed pack is replaced");
+        assert_eq!(outcome, WriteOutcome::ReplacedDivergent);
+
+        // Byte-faithful replacement: the planned bytes landed, the old content
+        // and the old extra file are gone.
+        assert_eq!(
+            std::fs::read(target.join("ni")).unwrap(),
+            std::fs::read(source.path().join("ni")).unwrap(),
+            "the plan's bytes must have replaced the stale ones"
+        );
+        assert!(
+            !target.join("old-extra").exists(),
+            "the old extra file must not survive the replacement"
+        );
+        assert!(target.join("rf").join("000").join("AAAAAAAA").is_file());
+        // The index gained our UUID (and kept the other), and no set-aside /
+        // staging residue remains.
+        let pi = std::fs::read(mount.path().join(".pi")).expect("read .pi");
+        assert!(index_contains(&pi, &uuid));
+        assert!(index_contains(&pi, &other));
+        assert_eq!(
+            sweep_device_transfer_staging(mount.path()),
+            0,
+            "the set-aside old pack must be cleaned after a successful replacement"
+        );
+    }
+
+    #[test]
+    fn an_existing_unprovable_pack_under_the_same_short_id_is_refused_not_clobbered() {
+        // FR23 — the historical refused-not-clobbered promise survives VERBATIM
+        // for the UNPROVABLE case: an entry the proof cannot vouch for (here a
+        // symlink) refuses with the dedicated cause, and the device tree is left
+        // byte-for-byte intact.
+        let mount = empty_mount();
+        let source = source_pack();
+        let uuid = uuid_bytes([0x12, 0x23, 0x34, 0x45]);
+        let canonical = format_pack_uuid(&uuid);
+        let short_id = pack_short_id(&uuid);
+        let plan = plan_for(source.path(), &short_id);
+
+        let target = mount.path().join(".content").join(&short_id);
+        std::fs::create_dir_all(&target).expect("seed dir");
+        std::fs::write(target.join("ni"), b"WHO-KNOWS").expect("seed ni");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(target.join("ni"), target.join("li"))
+            .expect("seed symlink entry");
+        #[cfg(not(unix))]
+        std::fs::create_dir_all(target.join("li")).expect("seed empty dir entry");
         let other = uuid_bytes([9, 9, 9, 9]);
         std::fs::write(mount.path().join(".pi"), other).expect("seed .pi");
 
@@ -911,23 +1306,162 @@ mod tests {
                 budget(),
                 &noop_progress,
             )
-            .expect_err("a mismatched existing pack must be refused");
-        assert_eq!(err.cause, TransferFailureCause::WriteRejected);
+            .expect_err("an unprovable existing pack must be refused");
+        assert_eq!(err.cause, TransferFailureCause::DevicePackUnprovable);
         assert!(
             !err.reached_device_mutation,
-            "a failure before promotion leaves the device unmutated"
+            "a protective refusal leaves the device unmutated"
         );
         // The existing folder is intact (not clobbered) and `.pi` is unchanged.
-        assert_eq!(
-            std::fs::read(target.join("ni")).unwrap(),
-            b"STALE-AND-DIFFERENT",
-            "the colliding folder must be left intact"
+        assert_eq!(std::fs::read(target.join("ni")).unwrap(), b"WHO-KNOWS");
+        #[cfg(unix)]
+        assert!(
+            target.join("li").is_symlink(),
+            "the unexplained entry must survive untouched"
         );
         assert_eq!(
             std::fs::read(mount.path().join(".pi")).unwrap(),
             other.to_vec()
         );
         assert_eq!(sweep_device_transfer_staging(mount.path()), 0);
+    }
+
+    #[test]
+    fn an_empty_directory_inside_the_existing_pack_refuses_unprovable() {
+        // An empty directory is nothing a files-only pack can explain — the
+        // "unplanned directory" trigger: refuse, never replace, tree intact.
+        let mount = empty_mount();
+        let source = source_pack();
+        let uuid = uuid_bytes([0x21, 0x32, 0x43, 0x54]);
+        let canonical = format_pack_uuid(&uuid);
+        let short_id = pack_short_id(&uuid);
+        let plan = plan_for(source.path(), &short_id);
+
+        // Write the healthy pack first, then plant an empty directory inside.
+        SystemDevicePackWriter
+            .write_pack(
+                mount.path(),
+                source.path(),
+                &canonical,
+                &plan,
+                budget(),
+                &noop_progress,
+            )
+            .expect("initial write");
+        let target = mount.path().join(".content").join(&short_id);
+        std::fs::create_dir_all(target.join("mystery")).expect("seed empty dir");
+        let pi_before = std::fs::read(mount.path().join(".pi")).expect("read .pi");
+
+        let err = SystemDevicePackWriter
+            .write_pack(
+                mount.path(),
+                source.path(),
+                &canonical,
+                &plan,
+                budget(),
+                &noop_progress,
+            )
+            .expect_err("an empty directory makes the pack unprovable");
+        assert_eq!(err.cause, TransferFailureCause::DevicePackUnprovable);
+        assert!(!err.reached_device_mutation);
+        assert!(target.join("mystery").is_dir(), "the entry must survive");
+        assert!(target.join("ni").is_file(), "planned content stays intact");
+        assert_eq!(std::fs::read(mount.path().join(".pi")).unwrap(), pi_before);
+    }
+
+    #[test]
+    fn a_staging_failure_on_a_divergent_pack_leaves_the_old_content_intact() {
+        // FR23 / F2 spirit — the old content is only lost AFTER the full
+        // replacement is staged: a copy failure during staging (missing source
+        // file) must leave the divergent old pack byte-for-byte in place.
+        let mount = empty_mount();
+        let source = source_pack();
+        let uuid = uuid_bytes([0x31, 0x42, 0x53, 0x64]);
+        let canonical = format_pack_uuid(&uuid);
+        let short_id = pack_short_id(&uuid);
+        let plan = plan_for(source.path(), &short_id);
+
+        let target = mount.path().join(".content").join(&short_id);
+        std::fs::create_dir_all(&target).expect("seed divergent dir");
+        std::fs::write(target.join("ni"), b"OLD-DIVERGENT").expect("seed old ni");
+        // The target UUID is indexed (the replacement would be authorized) —
+        // the staging failure alone must stop the write.
+        let other = uuid_bytes([9, 9, 9, 9]);
+        let mut pi_seed = other.to_vec();
+        pi_seed.extend_from_slice(&uuid);
+        std::fs::write(mount.path().join(".pi"), &pi_seed).expect("seed .pi");
+        // Break the SOURCE so the staging copy fails after the proof.
+        std::fs::remove_file(source.path().join("ni")).expect("drop source ni");
+
+        let err = SystemDevicePackWriter
+            .write_pack(
+                mount.path(),
+                source.path(),
+                &canonical,
+                &plan,
+                budget(),
+                &noop_progress,
+            )
+            .expect_err("a staging failure must fail the write");
+        assert_eq!(err.cause, TransferFailureCause::WriteRejected);
+        assert!(
+            !err.reached_device_mutation,
+            "the old pack never left its folder — the device is unmutated"
+        );
+        assert_eq!(
+            std::fs::read(target.join("ni")).unwrap(),
+            b"OLD-DIVERGENT",
+            "the old content must be intact when the staging fails"
+        );
+        assert_eq!(std::fs::read(mount.path().join(".pi")).unwrap(), pi_seed);
+        assert_eq!(sweep_device_transfer_staging(mount.path()), 0);
+    }
+
+    #[test]
+    fn a_relaunch_converges_after_an_interrupted_swap() {
+        // Reproduce the exact mid-swap state (set-aside done, promotion not):
+        // `.content/<SHORT_ID>` absent, the old pack under the set-aside name,
+        // the UUID still indexed. A fresh cycle sweeps the residue and re-creates
+        // the pack byte-faithfully — the honest convergence FR23 promises.
+        let mount = empty_mount();
+        let source = source_pack();
+        let uuid = uuid_bytes([0x41, 0x52, 0x63, 0x74]);
+        let canonical = format_pack_uuid(&uuid);
+        let short_id = pack_short_id(&uuid);
+        let plan = plan_for(source.path(), &short_id);
+
+        let set_aside = mount
+            .path()
+            .join(format!("{DEVICE_REPLACED_PREFIX}{short_id}"));
+        std::fs::create_dir_all(&set_aside).expect("seed set-aside residue");
+        std::fs::write(set_aside.join("ni"), b"OLD").expect("seed old ni");
+        std::fs::create_dir_all(mount.path().join(".content")).expect("mk content");
+        std::fs::write(mount.path().join(".pi"), uuid).expect("seed .pi with uuid");
+
+        let outcome = SystemDevicePackWriter
+            .write_pack(
+                mount.path(),
+                source.path(),
+                &canonical,
+                &plan,
+                budget(),
+                &noop_progress,
+            )
+            .expect("the relaunch must converge");
+        assert_eq!(
+            outcome,
+            WriteOutcome::CreatedNew,
+            "the canonical folder was absent — the relaunch re-creates it"
+        );
+        assert!(!set_aside.exists(), "the residue must have been swept");
+        let target = mount.path().join(".content").join(&short_id);
+        assert_eq!(
+            std::fs::read(target.join("ni")).unwrap(),
+            std::fs::read(source.path().join("ni")).unwrap()
+        );
+        let pi = std::fs::read(mount.path().join(".pi")).expect("read .pi");
+        assert_eq!(pi.len(), 16, "the UUID stays indexed exactly once");
+        assert!(index_contains(&pi, &uuid));
     }
 
     #[test]
@@ -957,7 +1491,7 @@ mod tests {
         let content_before =
             std::fs::read(mount.path().join(".content").join(&short_id).join("ni")).unwrap();
 
-        SystemDevicePackWriter
+        let outcome = SystemDevicePackWriter
             .write_pack(
                 mount.path(),
                 source.path(),
@@ -967,6 +1501,11 @@ mod tests {
                 &noop_progress,
             )
             .expect("recovery indexes the existing healthy pack");
+        assert_eq!(
+            outcome,
+            WriteOutcome::ReusedIdentical,
+            "the healthy pack is reused, not re-written"
+        );
 
         let pi = std::fs::read(mount.path().join(".pi")).expect("read .pi");
         assert!(index_contains(&pi, &uuid), "the UUID must be (re)indexed");
@@ -1138,10 +1677,11 @@ mod tests {
     }
 
     #[test]
-    fn an_existing_pack_with_an_extra_file_is_refused_not_reused() {
-        // C4 — a folder holding exactly the planned files PLUS an extra file was
-        // not produced by this plan, so it is not the same pack: refuse, never
-        // reuse/index, and leave the folder + `.pi` intact.
+    fn an_existing_pack_with_an_extra_regular_file_is_replaced_not_refused() {
+        // C4 RE-SCOPED by the FR23 update flow: a folder holding the planned
+        // files PLUS an extra REGULAR file was not produced by this plan — it
+        // is a sound divergence now resolved by the atomic replacement (the
+        // extra file does not survive), no longer a refusal.
         let mount = empty_mount();
         let source = source_pack();
         let uuid = uuid_bytes([0xE4, 0xE4, 0xE4, 0xE4]);
@@ -1164,6 +1704,57 @@ mod tests {
         std::fs::write(target.join("EXTRA"), b"unexpected").expect("seed extra file");
         let pi_before = std::fs::read(mount.path().join(".pi")).expect("read .pi");
 
+        let outcome = SystemDevicePackWriter
+            .write_pack(
+                mount.path(),
+                source.path(),
+                &canonical,
+                &plan,
+                budget(),
+                &noop_progress,
+            )
+            .expect("an extra regular file is a sound divergence — replaced");
+        assert_eq!(outcome, WriteOutcome::ReplacedDivergent);
+        assert!(
+            !target.join("EXTRA").exists(),
+            "the extra file must not survive the replacement"
+        );
+        assert_eq!(
+            std::fs::read(target.join("ni")).unwrap(),
+            std::fs::read(source.path().join("ni")).unwrap(),
+            "planned content is the plan's bytes"
+        );
+        assert_eq!(
+            std::fs::read(mount.path().join(".pi")).unwrap(),
+            pi_before,
+            ".pi already referenced the UUID — the append is a no-op"
+        );
+        assert_eq!(sweep_device_transfer_staging(mount.path()), 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_target_root_refuses_unprovable() {
+        // The target ROOT itself is proven no-follow: a `.content/<SHORT_ID>`
+        // that is a symlink to a real directory elsewhere must refuse — never
+        // be traversed, classified, reused or replaced.
+        let mount = empty_mount();
+        let source = source_pack();
+        let uuid = uuid_bytes([0x91, 0x91, 0x91, 0x91]);
+        let canonical = format_pack_uuid(&uuid);
+        let short_id = pack_short_id(&uuid);
+        let plan = plan_for(source.path(), &short_id);
+
+        // A REAL directory elsewhere on the volume, symlinked at the target.
+        let elsewhere = mount.path().join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).expect("mk elsewhere");
+        std::fs::write(elsewhere.join("ni"), b"ELSEWHERE").expect("seed elsewhere ni");
+        let target = mount.path().join(".content").join(&short_id);
+        std::fs::create_dir_all(mount.path().join(".content")).expect("mk content");
+        std::os::unix::fs::symlink(&elsewhere, &target).expect("symlink root");
+        // Indexed or not makes no difference: the root is unprovable first.
+        std::fs::write(mount.path().join(".pi"), uuid).expect("seed .pi");
+
         let err = SystemDevicePackWriter
             .write_pack(
                 mount.path(),
@@ -1173,24 +1764,539 @@ mod tests {
                 budget(),
                 &noop_progress,
             )
-            .expect_err("an extra file makes the existing pack untrusted");
-        assert_eq!(err.cause, TransferFailureCause::WriteRejected);
+            .expect_err("a symlinked target root must be refused");
+        assert_eq!(err.cause, TransferFailureCause::DevicePackUnprovable);
+        assert!(!err.reached_device_mutation);
+        // The symlink AND its destination are byte-for-byte intact.
+        assert!(target.is_symlink(), "the symlink itself must survive");
+        assert_eq!(
+            std::fs::read(elsewhere.join("ni")).unwrap(),
+            b"ELSEWHERE",
+            "the symlink destination must never be touched"
+        );
+        assert_eq!(sweep_device_transfer_staging(mount.path()), 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_dangling_symlink_at_the_target_root_refuses_unprovable() {
+        // `exists()` reports a dangling symlink as ABSENT — the old probe would
+        // have taken the creation path and the promotion `rename` would have
+        // clobbered the link. The no-follow root proof refuses instead.
+        let mount = empty_mount();
+        let source = source_pack();
+        let uuid = uuid_bytes([0x92, 0x92, 0x92, 0x92]);
+        let canonical = format_pack_uuid(&uuid);
+        let short_id = pack_short_id(&uuid);
+        let plan = plan_for(source.path(), &short_id);
+
+        let target = mount.path().join(".content").join(&short_id);
+        std::fs::create_dir_all(mount.path().join(".content")).expect("mk content");
+        std::os::unix::fs::symlink(mount.path().join("nowhere"), &target)
+            .expect("dangling symlink");
+
+        let err = SystemDevicePackWriter
+            .write_pack(
+                mount.path(),
+                source.path(),
+                &canonical,
+                &plan,
+                budget(),
+                &noop_progress,
+            )
+            .expect_err("a dangling symlink at the target root must be refused");
+        assert_eq!(err.cause, TransferFailureCause::DevicePackUnprovable);
+        assert!(!err.reached_device_mutation);
+        assert!(
+            target.is_symlink(),
+            "the dangling link must survive untouched"
+        );
+        assert!(!mount.path().join(".pi").exists(), "no index mutation");
+        assert_eq!(sweep_device_transfer_staging(mount.path()), 0);
+    }
+
+    #[test]
+    fn a_target_mutated_during_staging_is_re_proven_and_refused() {
+        // The initial proof ages across the staging phase: the state is
+        // RE-PROVEN immediately before the set-aside. Here the progress
+        // callback (which fires during the staging copy) swaps a file of the
+        // proven-divergent pack for a symlink — the re-proof must classify the
+        // NEW state unprovable and refuse with zero mutation.
+        let mount = empty_mount();
+        let source = source_pack();
+        let uuid = uuid_bytes([0x93, 0x93, 0x93, 0x93]);
+        let canonical = format_pack_uuid(&uuid);
+        let short_id = pack_short_id(&uuid);
+        let plan = plan_for(source.path(), &short_id);
+
+        let target = mount.path().join(".content").join(&short_id);
+        std::fs::create_dir_all(&target).expect("seed divergent dir");
+        std::fs::write(target.join("ni"), b"DIVERGENT-AT-PROOF-TIME").expect("seed ni");
+        let mut pi_seed = Vec::new();
+        pi_seed.extend_from_slice(&uuid);
+        std::fs::write(mount.path().join(".pi"), &pi_seed).expect("seed .pi");
+
+        // Mutate the target DURING the staging copy (after the initial proof).
+        let mutate_once = {
+            let target = target.clone();
+            let done = Mutex::new(false);
+            move |_p: WriteProgress| {
+                let mut done = done.lock().unwrap();
+                if !*done {
+                    *done = true;
+                    #[cfg(unix)]
+                    {
+                        std::fs::remove_file(target.join("ni")).expect("drop ni");
+                        std::os::unix::fs::symlink(target.join("nowhere"), target.join("ni"))
+                            .expect("swap for symlink");
+                    }
+                    #[cfg(not(unix))]
+                    {
+                        std::fs::remove_file(target.join("ni")).expect("drop ni");
+                        std::fs::create_dir_all(target.join("ni")).expect("swap for empty dir");
+                    }
+                }
+            }
+        };
+
+        let err = SystemDevicePackWriter
+            .write_pack(
+                mount.path(),
+                source.path(),
+                &canonical,
+                &plan,
+                budget(),
+                &mutate_once,
+            )
+            .expect_err("a target mutated during staging must be re-proven and refused");
+        assert_eq!(err.cause, TransferFailureCause::DevicePackUnprovable);
         assert!(
             !err.reached_device_mutation,
-            "a failure before promotion leaves the device unmutated"
+            "the refusal happens BEFORE the set-aside — zero device mutation"
         );
-        // The extra file + planned content are left intact (never clobbered) and
-        // `.pi` is unchanged.
-        assert_eq!(
-            std::fs::read(target.join("EXTRA")).unwrap(),
-            b"unexpected",
-            "the extra file must be left intact"
-        );
+        // The mutated state survives untouched: no set-aside, no staging residue.
+        #[cfg(unix)]
+        assert!(target.join("ni").is_symlink(), "the swapped entry survives");
+        assert_eq!(std::fs::read(mount.path().join(".pi")).unwrap(), pi_seed);
+        assert_eq!(sweep_device_transfer_staging(mount.path()), 0);
+    }
+
+    /// Make `path` unreadable (mode 000). Returns `false` when the running
+    /// process can still open it (root — permissions are inoperative), in
+    /// which case the caller skips: the unreadable path is untestable.
+    #[cfg(unix)]
+    fn make_unreadable(path: &Path) -> bool {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o000)).expect("chmod");
+        File::open(path).is_err()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_extra_file_refuses_unprovable() {
+        // Readability is part of the proof for EVERY existing entry, extra
+        // files included: an extra regular file that cannot be read must
+        // refuse (it would otherwise be deleted by the replacement without
+        // ever having been provable).
+        let mount = empty_mount();
+        let source = source_pack();
+        let uuid = uuid_bytes([0x94, 0x94, 0x94, 0x94]);
+        let canonical = format_pack_uuid(&uuid);
+        let short_id = pack_short_id(&uuid);
+        let plan = plan_for(source.path(), &short_id);
+
+        // A healthy indexed pack + an EXTRA unreadable file.
+        SystemDevicePackWriter
+            .write_pack(
+                mount.path(),
+                source.path(),
+                &canonical,
+                &plan,
+                budget(),
+                &noop_progress,
+            )
+            .expect("initial write");
+        let target = mount.path().join(".content").join(&short_id);
+        let extra = target.join("EXTRA");
+        std::fs::write(&extra, b"cannot-read-me").expect("seed extra");
+        if !make_unreadable(&extra) {
+            return; // root: permissions inoperative, path untestable here.
+        }
+        let pi_before = std::fs::read(mount.path().join(".pi")).expect("read .pi");
+
+        let err = SystemDevicePackWriter
+            .write_pack(
+                mount.path(),
+                source.path(),
+                &canonical,
+                &plan,
+                budget(),
+                &noop_progress,
+            )
+            .expect_err("an unreadable extra file must refuse, not be replaced away");
+        assert_eq!(err.cause, TransferFailureCause::DevicePackUnprovable);
+        assert!(!err.reached_device_mutation);
+        assert!(extra.exists(), "the unreadable entry must survive");
         assert!(target.join("ni").is_file(), "planned content stays intact");
+        assert_eq!(std::fs::read(mount.path().join(".pi")).unwrap(), pi_before);
+        assert_eq!(sweep_device_transfer_staging(mount.path()), 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_planned_file_with_size_drift_refuses_unprovable() {
+        // A planned file whose size drifts AND which cannot be read: the size
+        // drift alone must not shortcut to "divergent-but-sound" — the entry
+        // never proved its readability, so the pack is unprovable.
+        let mount = empty_mount();
+        let source = source_pack();
+        let uuid = uuid_bytes([0x95, 0x95, 0x95, 0x95]);
+        let canonical = format_pack_uuid(&uuid);
+        let short_id = pack_short_id(&uuid);
+        let plan = plan_for(source.path(), &short_id);
+
+        let target = mount.path().join(".content").join(&short_id);
+        std::fs::create_dir_all(&target).expect("seed dir");
+        // Only `ni`, with a size that differs from the plan, unreadable.
+        let ni = target.join("ni");
+        std::fs::write(&ni, b"SHORT").expect("seed drifted ni");
+        if !make_unreadable(&ni) {
+            return; // root: permissions inoperative, path untestable here.
+        }
+        let mut pi_seed = Vec::new();
+        pi_seed.extend_from_slice(&uuid);
+        std::fs::write(mount.path().join(".pi"), &pi_seed).expect("seed .pi");
+
+        let err = SystemDevicePackWriter
+            .write_pack(
+                mount.path(),
+                source.path(),
+                &canonical,
+                &plan,
+                budget(),
+                &noop_progress,
+            )
+            .expect_err("an unreadable planned file must refuse despite the size drift");
+        assert_eq!(err.cause, TransferFailureCause::DevicePackUnprovable);
+        assert!(!err.reached_device_mutation);
+        assert!(ni.exists(), "the unreadable entry must survive");
+        assert_eq!(std::fs::read(mount.path().join(".pi")).unwrap(), pi_seed);
+        assert_eq!(sweep_device_transfer_staging(mount.path()), 0);
+    }
+
+    #[test]
+    fn a_divergent_pack_not_referenced_by_the_index_is_refused_as_ambiguous() {
+        // Ambiguity guard: a divergent folder whose UUID is NOT in `.pi` is not
+        // provably "the story already present" — it can be a SHORT_ID collision
+        // with ANOTHER UUID (the last 8 hex are not unique) or an unknown
+        // residue. Fail-closed: refuse, never replace, never index.
+        let mount = empty_mount();
+        let source = source_pack();
+        let uuid = uuid_bytes([0x96, 0x96, 0x96, 0x96]);
+        let canonical = format_pack_uuid(&uuid);
+        let short_id = pack_short_id(&uuid);
+        let plan = plan_for(source.path(), &short_id);
+
+        // A divergent folder at OUR SHORT_ID, `.pi` referencing only ANOTHER
+        // UUID (the collision scenario).
+        let target = mount.path().join(".content").join(&short_id);
+        std::fs::create_dir_all(&target).expect("seed collision dir");
+        std::fs::write(target.join("ni"), b"SOMEONE-ELSES-PACK").expect("seed ni");
+        let other = uuid_bytes([9, 9, 9, 9]);
+        std::fs::write(mount.path().join(".pi"), other).expect("seed .pi");
+
+        let err = SystemDevicePackWriter
+            .write_pack(
+                mount.path(),
+                source.path(),
+                &canonical,
+                &plan,
+                budget(),
+                &noop_progress,
+            )
+            .expect_err("an unindexed divergent folder is ambiguous — refused");
+        assert_eq!(err.cause, TransferFailureCause::DevicePackUnprovable);
+        assert!(!err.reached_device_mutation);
+        assert_eq!(
+            std::fs::read(target.join("ni")).unwrap(),
+            b"SOMEONE-ELSES-PACK",
+            "the ambiguous folder must be left intact"
+        );
         assert_eq!(
             std::fs::read(mount.path().join(".pi")).unwrap(),
-            pi_before,
-            ".pi must be unchanged"
+            other.to_vec(),
+            "the index must not gain our UUID"
         );
+        assert_eq!(sweep_device_transfer_staging(mount.path()), 0);
+    }
+
+    #[test]
+    fn a_budget_exhausted_during_the_staging_copy_never_starts_the_mutation() {
+        // Budget adherence around the mutation: exhaust the budget from inside
+        // the staging copy (the progress callback sleeps past it) — the write
+        // must end `Interrupted` PRE-mutation: the proven-divergent old pack is
+        // never set aside, nothing is promoted, no residue remains. (The
+        // narrower fsync-only window is guarded by the same post-durability
+        // check but cannot be triggered deterministically without an fs hook.)
+        let mount = empty_mount();
+        let source = source_pack();
+        let uuid = uuid_bytes([0x97, 0x97, 0x97, 0x97]);
+        let canonical = format_pack_uuid(&uuid);
+        let short_id = pack_short_id(&uuid);
+        let plan = plan_for(source.path(), &short_id);
+
+        let target = mount.path().join(".content").join(&short_id);
+        std::fs::create_dir_all(&target).expect("seed divergent dir");
+        std::fs::write(target.join("ni"), b"OLD-DIVERGENT").expect("seed ni");
+        let mut pi_seed = Vec::new();
+        pi_seed.extend_from_slice(&uuid);
+        std::fs::write(mount.path().join(".pi"), &pi_seed).expect("seed .pi");
+
+        let tight_budget = Duration::from_millis(300);
+        let sleep_past_budget = |_p: WriteProgress| std::thread::sleep(Duration::from_millis(400));
+
+        let err = SystemDevicePackWriter
+            .write_pack(
+                mount.path(),
+                source.path(),
+                &canonical,
+                &plan,
+                tight_budget,
+                &sleep_past_budget,
+            )
+            .expect_err("an exhausted budget must interrupt before any mutation");
+        assert_eq!(err.cause, TransferFailureCause::Interrupted);
+        assert!(
+            !err.reached_device_mutation,
+            "the old pack was never set aside — pre-mutation"
+        );
+        assert_eq!(
+            std::fs::read(target.join("ni")).unwrap(),
+            b"OLD-DIVERGENT",
+            "the proven-divergent pack must be intact"
+        );
+        assert_eq!(std::fs::read(mount.path().join(".pi")).unwrap(), pi_seed);
+        assert_eq!(sweep_device_transfer_staging(mount.path()), 0);
+    }
+
+    #[test]
+    fn a_bi_indexed_short_id_collision_is_refused_not_replaced() {
+        // Attribution guard, second direction: TWO indexed UUIDs share the
+        // target SHORT_ID (the folder name is only the last 8 hex). The
+        // divergent folder may hold the OTHER story's only content — replacing
+        // it would strand that story as index-without-content. Refuse, arbre
+        // and index intact.
+        let mount = empty_mount();
+        let source = source_pack();
+        let uuid = uuid_bytes([0x98, 0x98, 0x98, 0x98]);
+        // A DIFFERENT UUID with the SAME last-8-hex SHORT_ID.
+        let mut colliding = uuid;
+        colliding[0] = 0xCD;
+        assert_ne!(uuid, colliding);
+        assert_eq!(pack_short_id(&uuid), pack_short_id(&colliding));
+        let canonical = format_pack_uuid(&uuid);
+        let short_id = pack_short_id(&uuid);
+        let plan = plan_for(source.path(), &short_id);
+
+        // The divergent folder (plausibly the OTHER story's pack), with BOTH
+        // UUIDs indexed.
+        let target = mount.path().join(".content").join(&short_id);
+        std::fs::create_dir_all(&target).expect("seed dir");
+        std::fs::write(target.join("ni"), b"THE-OTHER-STORYS-PACK").expect("seed ni");
+        let mut pi_seed = uuid.to_vec();
+        pi_seed.extend_from_slice(&colliding);
+        std::fs::write(mount.path().join(".pi"), &pi_seed).expect("seed .pi");
+
+        let err = SystemDevicePackWriter
+            .write_pack(
+                mount.path(),
+                source.path(),
+                &canonical,
+                &plan,
+                budget(),
+                &noop_progress,
+            )
+            .expect_err("a bi-indexed SHORT_ID collision must be refused");
+        assert_eq!(err.cause, TransferFailureCause::DevicePackUnprovable);
+        assert!(!err.reached_device_mutation);
+        assert_eq!(
+            std::fs::read(target.join("ni")).unwrap(),
+            b"THE-OTHER-STORYS-PACK",
+            "the possibly-foreign folder must be left intact"
+        );
+        assert_eq!(
+            std::fs::read(mount.path().join(".pi")).unwrap(),
+            pi_seed,
+            "the index must be untouched"
+        );
+        assert_eq!(sweep_device_transfer_staging(mount.path()), 0);
+    }
+
+    /// Copy the plausible pack's files from `source` to `target` with the
+    /// exact plan path-set — used by the re-prove tests to make the target
+    /// IDENTICAL to the plan mid-staging.
+    fn copy_plan_files(source: &Path, target: &Path) {
+        for rel in [
+            "li",
+            "ni",
+            "ri",
+            "si",
+            "nm",
+            "bt",
+            "rf/000/AAAAAAAA",
+            "sf/000/BBBBBBBB",
+        ] {
+            let src = safe_rel_join(source, rel).expect("trusted test rel");
+            let dst = safe_rel_join(target, rel).expect("trusted test rel");
+            if let Some(parent) = dst.parent() {
+                std::fs::create_dir_all(parent).expect("mk parent");
+            }
+            std::fs::copy(&src, &dst).expect("copy plan file");
+        }
+    }
+
+    #[test]
+    fn a_target_become_identical_during_staging_is_reused_not_replaced() {
+        // Re-prove outcome "became identical": something wrote exactly the
+        // plan's bytes during the staging phase — the fresh proof classifies
+        // Identical, the staging is dropped, the index converges idempotently
+        // and the outcome is HONESTLY ReusedIdentical (nothing was replaced).
+        let mount = empty_mount();
+        let source = source_pack();
+        let uuid = uuid_bytes([0x99, 0x99, 0x99, 0x99]);
+        let canonical = format_pack_uuid(&uuid);
+        let short_id = pack_short_id(&uuid);
+        let plan = plan_for(source.path(), &short_id);
+
+        let target = mount.path().join(".content").join(&short_id);
+        std::fs::create_dir_all(&target).expect("seed divergent dir");
+        std::fs::write(target.join("ni"), b"DIVERGENT-AT-PROOF-TIME").expect("seed ni");
+        let mut pi_seed = Vec::new();
+        pi_seed.extend_from_slice(&uuid);
+        std::fs::write(mount.path().join(".pi"), &pi_seed).expect("seed .pi");
+
+        // During the staging copy, make the target EXACTLY the plan's bytes.
+        let make_identical_once = {
+            let source = source.path().to_path_buf();
+            let target = target.clone();
+            let done = Mutex::new(false);
+            move |_p: WriteProgress| {
+                let mut done = done.lock().unwrap();
+                if !*done {
+                    *done = true;
+                    std::fs::remove_file(target.join("ni")).expect("drop divergent ni");
+                    copy_plan_files(&source, &target);
+                }
+            }
+        };
+
+        let outcome = SystemDevicePackWriter
+            .write_pack(
+                mount.path(),
+                source.path(),
+                &canonical,
+                &plan,
+                budget(),
+                &make_identical_once,
+            )
+            .expect("a target become identical is reused");
+        assert_eq!(outcome, WriteOutcome::ReusedIdentical);
+        assert_eq!(
+            std::fs::read(target.join("ni")).unwrap(),
+            std::fs::read(source.path().join("ni")).unwrap(),
+            "the target holds the plan's bytes"
+        );
+        let pi = std::fs::read(mount.path().join(".pi")).expect("read .pi");
+        assert_eq!(pi.len(), 16, "the UUID stays indexed exactly once");
+        assert!(index_contains(&pi, &uuid));
+        assert_eq!(
+            sweep_device_transfer_staging(mount.path()),
+            0,
+            "the dropped staging leaves no residue"
+        );
+    }
+
+    #[test]
+    fn a_target_vanished_during_staging_falls_back_to_plain_creation() {
+        // Re-prove outcome "vanished": the divergent folder disappeared during
+        // the staging phase — nothing to set aside, the write falls back to a
+        // plain creation and reports CreatedNew honestly.
+        let mount = empty_mount();
+        let source = source_pack();
+        let uuid = uuid_bytes([0x9A, 0x9A, 0x9A, 0x9A]);
+        let canonical = format_pack_uuid(&uuid);
+        let short_id = pack_short_id(&uuid);
+        let plan = plan_for(source.path(), &short_id);
+
+        let target = mount.path().join(".content").join(&short_id);
+        std::fs::create_dir_all(&target).expect("seed divergent dir");
+        std::fs::write(target.join("ni"), b"ABOUT-TO-VANISH").expect("seed ni");
+        let mut pi_seed = Vec::new();
+        pi_seed.extend_from_slice(&uuid);
+        std::fs::write(mount.path().join(".pi"), &pi_seed).expect("seed .pi");
+
+        // During the staging copy, remove the target entirely.
+        let vanish_once = {
+            let target = target.clone();
+            let done = Mutex::new(false);
+            move |_p: WriteProgress| {
+                let mut done = done.lock().unwrap();
+                if !*done {
+                    *done = true;
+                    std::fs::remove_dir_all(&target).expect("vanish target");
+                }
+            }
+        };
+
+        let outcome = SystemDevicePackWriter
+            .write_pack(
+                mount.path(),
+                source.path(),
+                &canonical,
+                &plan,
+                budget(),
+                &vanish_once,
+            )
+            .expect("a vanished target falls back to plain creation");
+        assert_eq!(outcome, WriteOutcome::CreatedNew);
+        assert_eq!(
+            std::fs::read(target.join("ni")).unwrap(),
+            std::fs::read(source.path().join("ni")).unwrap(),
+            "the created pack holds the plan's bytes"
+        );
+        assert!(target.join("rf").join("000").join("AAAAAAAA").is_file());
+        let pi = std::fs::read(mount.path().join(".pi")).expect("read .pi");
+        assert_eq!(pi.len(), 16);
+        assert!(index_contains(&pi, &uuid));
+        assert_eq!(sweep_device_transfer_staging(mount.path()), 0);
+    }
+
+    #[test]
+    fn a_plan_short_id_incoherent_with_the_uuid_is_refused_before_any_io() {
+        // Defense in depth at the write boundary: a plan whose `short_id` is
+        // not the one the UUID derives would aim every proof and mutation at
+        // ANOTHER story's folder — refused before a single device I/O.
+        let mount = empty_mount();
+        let source = source_pack();
+        let uuid = uuid_bytes([0x9B, 0x9B, 0x9B, 0x9B]);
+        let canonical = format_pack_uuid(&uuid);
+        // A plan built for a DIFFERENT short id.
+        let plan = plan_for(source.path(), "DEADBEEF");
+
+        let err = SystemDevicePackWriter
+            .write_pack(
+                mount.path(),
+                source.path(),
+                &canonical,
+                &plan,
+                budget(),
+                &noop_progress,
+            )
+            .expect_err("an incoherent plan short_id must be refused");
+        assert_eq!(err.cause, TransferFailureCause::WriteRejected);
+        assert!(!err.reached_device_mutation);
+        assert!(!mount.path().join(".content").exists());
+        assert!(!mount.path().join(".pi").exists());
+        assert_eq!(sweep_device_transfer_staging(mount.path()), 0);
     }
 }

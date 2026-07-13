@@ -11,7 +11,7 @@ use super::library_reader::DeviceLibraryReader;
 use super::pack_reader::{AcquiredPack, DevicePackReader};
 use super::scanner::{CandidateFacts, DeviceCandidate, DeviceScanReport, DeviceScanner};
 use super::writer::{DevicePackWriter, WriteFailure, WriteProgress};
-use crate::domain::transfer::{PackWritePlan, TransferFailureCause};
+use crate::domain::transfer::{PackWritePlan, TransferFailureCause, WriteOutcome};
 
 /// Programmable mock for tests. Each `scan()` call pops the next queued
 /// outcome (FIFO). When the queue is empty, returns an empty report — a
@@ -505,24 +505,31 @@ impl OfficialCatalogSource for MockOfficialCatalogSource {
 }
 
 /// One scripted outcome of [`MockDevicePackWriter`]. A success can drive the
-/// progress reporter (so the service's `job:progress` emission is testable); a
-/// failure carries whether the device was already mutated (for the
-/// `Failed`/`Incomplete` distinction).
+/// progress reporter (so the service's `job:progress` emission is testable) and
+/// carries the [`WriteOutcome`] the writer constates (FR23); a failure carries
+/// whether the device was already mutated (for the `Failed`/`Incomplete`
+/// distinction).
 enum WriteScript {
-    Success { progress: Vec<WriteProgress> },
+    Success {
+        progress: Vec<WriteProgress>,
+        outcome: WriteOutcome,
+    },
     Failure(WriteFailure),
 }
 
-/// Programmable mock for the device write path. Records call count and returns
-/// the next scripted outcome (FIFO); an empty queue succeeds. Lets the transfer
-/// service prove its orchestration (gate-before-mutation, event sequence +
-/// progress, terminal mapping incl. `Failed` vs `Incomplete`) without a real
-/// volume. The recorded call count proves the writer is NEVER reached on an
-/// unauthorized profile ("block before mutation").
+/// Programmable mock for the device write path. Records call count and the
+/// outcomes it RETURNED (recorder mock: the application tests assert the
+/// dispatch, not just the call), and returns the next scripted outcome (FIFO);
+/// an empty queue succeeds as a first send. Lets the transfer service prove its
+/// orchestration (gate-before-mutation, event sequence + progress, terminal
+/// mapping incl. `Failed` vs `Incomplete`, outcome-to-summary plumbing) without
+/// a real volume. The recorded call count proves the writer is NEVER reached on
+/// an unauthorized profile ("block before mutation").
 #[derive(Clone, Default)]
 pub struct MockDevicePackWriter {
     queue: Arc<Mutex<Vec<WriteScript>>>,
     calls: Arc<Mutex<u32>>,
+    returned: Arc<Mutex<Vec<WriteOutcome>>>,
 }
 
 impl MockDevicePackWriter {
@@ -530,10 +537,20 @@ impl MockDevicePackWriter {
         Self::default()
     }
 
-    /// A plain success (no progress reported).
+    /// A plain success (no progress reported) — a first send (`CreatedNew`).
     pub fn enqueue_success(&self) {
         self.push(WriteScript::Success {
             progress: Vec::new(),
+            outcome: WriteOutcome::CreatedNew,
+        });
+    }
+
+    /// A plain success constating the given [`WriteOutcome`] (FR23: reuse /
+    /// replacement scripting).
+    pub fn enqueue_success_with_outcome(&self, outcome: WriteOutcome) {
+        self.push(WriteScript::Success {
+            progress: Vec::new(),
+            outcome,
         });
     }
 
@@ -552,6 +569,7 @@ impl MockDevicePackWriter {
                     bytes_total: 2,
                 },
             ],
+            outcome: WriteOutcome::CreatedNew,
         });
     }
 
@@ -579,6 +597,15 @@ impl MockDevicePackWriter {
         *self.calls.lock().unwrap_or_else(|p| p.into_inner())
     }
 
+    /// The [`WriteOutcome`]s this mock RETURNED, in call order — lets the
+    /// application tests assert which outcome reached the terminal.
+    pub fn returned_outcomes(&self) -> Vec<WriteOutcome> {
+        self.returned
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
+    }
+
     fn push(&self, script: WriteScript) {
         self.queue
             .lock()
@@ -596,24 +623,32 @@ impl DevicePackWriter for MockDevicePackWriter {
         _plan: &PackWritePlan,
         _budget: Duration,
         progress: &dyn Fn(WriteProgress),
-    ) -> Result<(), WriteFailure> {
+    ) -> Result<WriteOutcome, WriteFailure> {
         *self.calls.lock().unwrap_or_else(|p| p.into_inner()) += 1;
         let script = {
             let mut g = self.queue.lock().unwrap_or_else(|p| p.into_inner());
             if g.is_empty() {
                 WriteScript::Success {
                     progress: Vec::new(),
+                    outcome: WriteOutcome::CreatedNew,
                 }
             } else {
                 g.remove(0)
             }
         };
         match script {
-            WriteScript::Success { progress: steps } => {
+            WriteScript::Success {
+                progress: steps,
+                outcome,
+            } => {
                 for step in steps {
                     progress(step);
                 }
-                Ok(())
+                self.returned
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .push(outcome);
+                Ok(outcome)
             }
             WriteScript::Failure(failure) => Err(failure),
         }

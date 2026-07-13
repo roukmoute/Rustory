@@ -494,11 +494,14 @@ pub async fn start_transfer_story(
         let elapsed_ms = started.elapsed().as_millis() as u64;
         let story_ref = transfer_log::story_ref(&emitter_story_id);
         let trace = match &outcome {
-            Ok(TransferOutcome::Verified { .. }) => transfer_log::Event::TransferCompleted {
-                story_ref,
-                verify_verdict: "verified",
-                elapsed_ms,
-            },
+            Ok(TransferOutcome::Verified { write_outcome, .. }) => {
+                transfer_log::Event::TransferCompleted {
+                    story_ref,
+                    verify_verdict: "verified",
+                    write_outcome: write_outcome.diagnostic_tag(),
+                    elapsed_ms,
+                }
+            }
             // A verify terminal records the verdict, not a write-phase cause.
             Ok(TransferOutcome::Unverified { verdict }) => transfer_log::Event::TransferFailed {
                 story_ref,
