@@ -25,10 +25,17 @@ export interface CreateStoryDialogProps {
    *  stays the whole dialog). */
   onCreateFromFolderRequest?: () => void;
   /** Cross-flow exclusivity: while ANOTHER import/creation flow is busy
-   *  (a `.rustory` analysis in flight, a folder analysis/creation), the
-   *  folder entry is disabled — two native dialogs / review surfaces must
-   *  never stack. Mirrors the library bar's import CTA gating. */
+   *  (a `.rustory` analysis in flight, a folder analysis/creation, an RSS
+   *  fetch/creation), the folder entry is disabled — two native dialogs /
+   *  review surfaces must never stack. Mirrors the library bar's import
+   *  CTA gating. */
   isCreateFromFolderUnavailable?: boolean;
+  /** Start the external-source creation path (`Démarrer depuis une source
+   *  externe (RSS)`): closes this dialog and hands over to the RSS flow.
+   *  Optional — when absent, the third entry is not rendered. */
+  onCreateFromRssRequest?: () => void;
+  /** Same cross-flow exclusivity for the RSS entry. */
+  isCreateFromRssUnavailable?: boolean;
 }
 
 /**
@@ -46,6 +53,8 @@ export function CreateStoryDialog({
   onCreated,
   onCreateFromFolderRequest,
   isCreateFromFolderUnavailable = false,
+  onCreateFromRssRequest,
+  isCreateFromRssUnavailable = false,
 }: CreateStoryDialogProps): React.JSX.Element {
   const descriptionId = useId();
   const titleFieldId = useId();
@@ -155,6 +164,15 @@ export function CreateStoryDialog({
     onCreateFromFolderRequest?.();
   };
 
+  const handleCreateFromRss = (): void => {
+    // Same cross-flow exclusivity as the folder entry.
+    if (isSubmitting || isCreateFromRssUnavailable) return;
+    // Hand over to the external-source flow: close this dialog first so
+    // the in-context surface never sits under a modal.
+    onClose();
+    onCreateFromRssRequest?.();
+  };
+
   return (
     <Dialog
       open={open}
@@ -255,6 +273,19 @@ export function CreateStoryDialog({
             }
           >
             Choisir un dossier…
+          </Button>
+        </div>
+      ) : null}
+      {onCreateFromRssRequest ? (
+        <div className="create-story-dialog__rss-entry">
+          <Button
+            variant="quiet"
+            onClick={handleCreateFromRss}
+            aria-disabled={
+              isSubmitting || isCreateFromRssUnavailable || undefined
+            }
+          >
+            Démarrer depuis une source externe (RSS)
           </Button>
         </div>
       ) : null}

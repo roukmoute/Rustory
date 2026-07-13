@@ -177,7 +177,10 @@ fn migration_ledger_records_every_declared_version() {
         .expect("query")
         .collect::<Result<Vec<_>, _>>()
         .expect("collect");
-    assert_eq!(versions, (1..=12).collect::<Vec<u32>>());
+    assert_eq!(
+        versions,
+        (1..=MIGRATIONS.len() as u32).collect::<Vec<u32>>()
+    );
     assert_eq!(versions.len(), MIGRATIONS.len());
 }
 

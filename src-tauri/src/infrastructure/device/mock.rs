@@ -9,6 +9,7 @@ use crate::domain::shared::AppError;
 use super::catalog_source::OfficialCatalogSource;
 use super::library_reader::DeviceLibraryReader;
 use super::pack_reader::{AcquiredPack, DevicePackReader};
+use super::rss_source::RssFeedSource;
 use super::scanner::{CandidateFacts, DeviceCandidate, DeviceScanReport, DeviceScanner};
 use super::writer::{DevicePackWriter, WriteFailure, WriteProgress};
 use crate::domain::transfer::{PackWritePlan, TransferFailureCause, WriteOutcome};
@@ -501,6 +502,73 @@ impl OfficialCatalogSource for MockOfficialCatalogSource {
             ));
         }
         Ok(MOCK_PNG.to_vec())
+    }
+}
+
+/// One programmed RSS fetch response: raw body bytes or a typed error.
+type RssFetchResult = Result<Vec<u8>, AppError>;
+
+/// RECORDER mock for the RSS feed source: record what the service
+/// dispatched, not just that it was called. Every `fetch` appends the
+/// received `(url, budget)` to `requests` — the proof that the accept
+/// RE-FETCHES from zero rides on it — and pops the next programmed
+/// response (FIFO: raw bytes or a typed `AppError`). An empty queue serves
+/// an empty body (which parses to the unreadable-envelope verdict) so a
+/// forgetful test fails on assertion, not panic.
+#[derive(Clone, Default)]
+pub struct MockRssFeedSource {
+    queue: Arc<Mutex<Vec<RssFetchResult>>>,
+    requests: Arc<Mutex<Vec<(String, Duration)>>>,
+}
+
+impl MockRssFeedSource {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn enqueue_body(&self, body: impl Into<Vec<u8>>) {
+        self.queue
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .push(Ok(body.into()));
+    }
+
+    pub fn enqueue_failure(&self, err: AppError) {
+        self.queue
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .push(Err(err));
+    }
+
+    /// Every `(url, budget)` received, in call order — `len() == 0` proves
+    /// no network dispatch, `len() == 2` proves the accept's re-fetch.
+    pub fn requests(&self) -> Vec<(String, Duration)> {
+        self.requests
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
+    }
+
+    pub fn fetch_count(&self) -> usize {
+        self.requests
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .len()
+    }
+}
+
+impl RssFeedSource for MockRssFeedSource {
+    fn fetch(&self, url: &str, budget: Duration) -> Result<Vec<u8>, AppError> {
+        self.requests
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .push((url.to_string(), budget));
+        let mut g = self.queue.lock().unwrap_or_else(|p| p.into_inner());
+        if g.is_empty() {
+            Ok(Vec::new())
+        } else {
+            g.remove(0)
+        }
     }
 }
 

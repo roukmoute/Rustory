@@ -235,7 +235,7 @@ fn existing_v2_database_upgrades_to_v3() {
         .expect("collect");
     assert_eq!(
         versions,
-        vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
+        (1..=rustory_lib::infrastructure::db::MIGRATIONS.len() as u32).collect::<Vec<u32>>(),
         "v1+v2 preserved, v3 added (and later migrations recorded)"
     );
 

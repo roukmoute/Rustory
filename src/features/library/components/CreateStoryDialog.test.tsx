@@ -311,4 +311,68 @@ describe("<CreateStoryDialog />", () => {
     expect(onCreateFromFolderRequest).not.toHaveBeenCalled();
     expect(onClose).not.toHaveBeenCalled();
   });
+
+  it("hides the RSS entry when no RSS handler is wired", () => {
+    renderDialog();
+    expect(
+      screen.queryByRole("button", {
+        name: "Démarrer depuis une source externe (RSS)",
+      }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("renders the third RSS entry without touching the title and folder paths", () => {
+    renderDialog({
+      onCreateFromFolderRequest: vi.fn(),
+      onCreateFromRssRequest: vi.fn(),
+    });
+    // The interactive path is INTACT: field + primary CTA still there.
+    expect(screen.getByLabelText(/^titre$/i)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /^créer$/i })).toBeInTheDocument();
+    // The folder entry is INTACT.
+    expect(
+      screen.getByRole("button", { name: "Choisir un dossier…" }),
+    ).toBeInTheDocument();
+    // The third entry, with its frozen copy.
+    expect(
+      screen.getByRole("button", {
+        name: "Démarrer depuis une source externe (RSS)",
+      }),
+    ).toBeInTheDocument();
+  });
+
+  it("Démarrer depuis une source externe (RSS) closes the dialog THEN hands over, without any interactive IPC", async () => {
+    const user = userEvent.setup();
+    const onCreateFromRssRequest = vi.fn();
+    const { onClose } = renderDialog({ onCreateFromRssRequest });
+    await user.click(
+      screen.getByRole("button", {
+        name: "Démarrer depuis une source externe (RSS)",
+      }),
+    );
+    expect(onClose).toHaveBeenCalledTimes(1);
+    expect(onCreateFromRssRequest).toHaveBeenCalledTimes(1);
+    // The dialog closes BEFORE the handover (the in-context surface must
+    // never sit under a modal).
+    expect(onClose.mock.invocationCallOrder[0]).toBeLessThan(
+      onCreateFromRssRequest.mock.invocationCallOrder[0],
+    );
+    expect(createStory).not.toHaveBeenCalled();
+  });
+
+  it("disables the RSS entry while a sibling import/creation flow is busy (cross-flow exclusivity)", async () => {
+    const user = userEvent.setup();
+    const onCreateFromRssRequest = vi.fn();
+    const { onClose } = renderDialog({
+      onCreateFromRssRequest,
+      isCreateFromRssUnavailable: true,
+    });
+    const rssButton = screen.getByRole("button", {
+      name: "Démarrer depuis une source externe (RSS)",
+    });
+    expect(rssButton).toHaveAttribute("aria-disabled", "true");
+    await user.click(rssButton);
+    expect(onCreateFromRssRequest).not.toHaveBeenCalled();
+    expect(onClose).not.toHaveBeenCalled();
+  });
 });

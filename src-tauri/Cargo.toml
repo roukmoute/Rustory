@@ -39,6 +39,13 @@ sysinfo = "=0.32"
 # runs on a deliberate user action (offline-first guardrail) and is driven
 # on a `spawn_blocking` worker behind the `OfficialCatalogSource` trait.
 reqwest = { version = "=0.12.9", default-features = false, features = ["blocking", "native-tls"] }
+# Event-driven XML reader for the bounded RSS 2.0 ingestion parse. Pure
+# Rust, zero cmake (CI TLS constraint), no external-entity resolution and
+# no DTD expansion by construction (no XXE, no entity bombs); the domain
+# parser adds its own depth/count/length bounds. `feed-rs` was refused
+# (chrono/mime/regex transitives, a second time stack next to `time`, a
+# model oversized for the minimal RSS 2.0 scope).
+quick-xml = "=0.40.1"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # Linux-only D-Bus binding used to talk to udisks2 and auto-mount a

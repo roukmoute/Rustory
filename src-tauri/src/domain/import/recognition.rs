@@ -38,7 +38,9 @@ pub enum RecognitionQuality {
 /// / `Structure` / `Integrity` / `Title` / `Timestamps`; the
 /// structured-folder flow analyzes `Envelope` / `FormatVersion` / `Title`
 /// / `Structure` / `Media` (an author manifest has no declared schema, no
-/// checksum, no timestamps).
+/// checksum, no timestamps); the RSS ingestion flow analyzes `Envelope` /
+/// `FormatVersion` / `Source` / `Title` / `Structure` (+ `Media` when the
+/// chosen item references an enclosure).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RecognitionAspect {
     Envelope,
@@ -48,9 +50,16 @@ pub enum RecognitionAspect {
     Integrity,
     Title,
     Timestamps,
-    /// The referenced media files of a structured folder. Emitted by the
-    /// folder flow ONLY — a `.rustory` artifact carries no media.
+    /// The referenced media files of a structured folder, or the remote
+    /// enclosure of an ingested RSS item (never downloaded — `Missing`).
+    /// Never emitted by the `.rustory` flow.
     Media,
+    /// The external source an ingestion came from (an RSS feed). Emitted
+    /// by the RSS ingestion flow ONLY, and always as `Ambiguous`: external
+    /// content that was not reread by a human is never "clean", so this
+    /// nominal finding structurally floors the durable state at
+    /// `needs_review`.
+    Source,
 }
 
 /// The recognition category of a single finding (UI: `reconnu` /

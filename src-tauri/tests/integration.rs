@@ -33,8 +33,14 @@ mod structured_folder_provenance_migration;
 #[path = "integration/story_imports_source_family_migration.rs"]
 mod story_imports_source_family_migration;
 
+#[path = "integration/rss_provenance_migration.rs"]
+mod rss_provenance_migration;
+
 #[path = "integration/structured_folder_creation.rs"]
 mod structured_folder_creation;
+
+#[path = "integration/rss_creation.rs"]
+mod rss_creation;
 
 #[path = "integration/story_edit_scope.rs"]
 mod story_edit_scope;

@@ -25,6 +25,8 @@ const mockReadTransferOutcome = vi.fn();
 const mockDiscardTransferOutcome = vi.fn();
 const mockAnalyzeFolder = vi.fn();
 const mockAnalyzeArtifact = vi.fn();
+const mockFetchRssPreview = vi.fn();
+const mockAcceptRssCreation = vi.fn();
 
 vi.mock("../../ipc/commands/library", () => ({
   getLibraryOverview: () => ({
@@ -141,6 +143,9 @@ vi.mock("../../ipc/commands/import-export", async () => {
     ...actual,
     analyzeStructuredFolderForCreation: () => mockAnalyzeFolder(),
     analyzeArtifactForImport: () => mockAnalyzeArtifact(),
+    fetchRssSourcePreview: (url: string) => mockFetchRssPreview(url),
+    acceptRssStoryCreation: (url: string, ref: unknown) =>
+      mockAcceptRssCreation(url, ref),
   };
 });
 
@@ -237,6 +242,12 @@ describe("<LibraryRoute />", () => {
     // Default: the artifact import analysis is user-triggered too.
     mockAnalyzeArtifact.mockReset();
     mockAnalyzeArtifact.mockResolvedValue({ kind: "cancelled" });
+    // Default: the RSS preview is user-triggered; a never-settling fetch is
+    // overridden by the tests that exercise the flow.
+    mockFetchRssPreview.mockReset();
+    mockFetchRssPreview.mockImplementation(() => new Promise(() => {}));
+    mockAcceptRssCreation.mockReset();
+    mockAcceptRssCreation.mockImplementation(() => new Promise(() => {}));
     // The hooks keep module-local stale-while-revalidate caches; reset
     // them between tests so no stray snapshot bleeds across cases.
     invalidateLibraryOverviewCache();
@@ -762,6 +773,169 @@ describe("<LibraryRoute />", () => {
     expect(
       screen.getByRole("dialog", { name: /créer une histoire/i }),
     ).toBeInTheDocument();
+  });
+
+  it("keeps the collection's import CTA inert while an RSS fetch is in flight (cross-flow exclusivity)", async () => {
+    const user = userEvent.setup();
+    mockGet.mockResolvedValueOnce({
+      stories: [{ id: "s1", title: "Le soleil" }],
+    });
+    // An RSS fetch that never settles: the flow stays busy.
+    mockFetchRssPreview.mockImplementationOnce(() => new Promise(() => {}));
+    renderLibrary();
+
+    await screen.findByRole("button", { name: /le soleil/i });
+    // Open the creation dialog and hand over to the RSS flow.
+    await user.click(
+      screen.getByRole("button", { name: /créer une histoire/i }),
+    );
+    await user.click(
+      await screen.findByRole("button", {
+        name: "Démarrer depuis une source externe (RSS)",
+      }),
+    );
+    // Type an address and fetch — the flow is now busy.
+    await user.type(
+      screen.getByLabelText("Adresse du flux RSS"),
+      "https://exemple.fr/flux.xml",
+    );
+    await user.click(
+      screen.getByRole("button", { name: "Récupérer le flux" }),
+    );
+    expect(mockFetchRssPreview).toHaveBeenCalledTimes(1);
+
+    const importButton = screen.getByRole("button", {
+      name: /importer une histoire/i,
+    });
+    expect(importButton).toBeDisabled();
+    await user.click(importButton);
+    expect(mockAnalyzeArtifact).not.toHaveBeenCalled();
+  });
+
+  it("keeps the folder entry inert while an RSS review surface is open (cross-flow exclusivity)", async () => {
+    const user = userEvent.setup();
+    mockGet.mockResolvedValueOnce({
+      stories: [{ id: "s1", title: "Le soleil" }],
+    });
+    renderLibrary();
+
+    await screen.findByRole("button", { name: /le soleil/i });
+    // Open the RSS surface through the dialog's third entry: the flow is
+    // now ACTIVE (surface open) even though nothing is in flight yet.
+    await user.click(
+      screen.getByRole("button", { name: /créer une histoire/i }),
+    );
+    await user.click(
+      await screen.findByRole("button", {
+        name: "Démarrer depuis une source externe (RSS)",
+      }),
+    );
+    expect(screen.getByLabelText("Adresse du flux RSS")).toBeInTheDocument();
+
+    // Re-open the creation dialog: both secondary entries are inert while
+    // the RSS surface is open — two review surfaces must never stack.
+    await user.click(
+      screen.getByRole("button", { name: /créer une histoire/i }),
+    );
+    const dialog = await screen.findByRole("dialog", {
+      name: /créer une histoire/i,
+    });
+    const folderButton = within(dialog).getByRole("button", {
+      name: "Choisir un dossier…",
+    });
+    expect(folderButton).toHaveAttribute("aria-disabled", "true");
+    await user.click(folderButton);
+    expect(mockAnalyzeFolder).not.toHaveBeenCalled();
+    const rssButton = within(dialog).getByRole("button", {
+      name: "Démarrer depuis une source externe (RSS)",
+    });
+    expect(rssButton).toHaveAttribute("aria-disabled", "true");
+  });
+
+  it("a completed RSS creation surfaces the à revoir chip on the created library card (review steps visible)", async () => {
+    const user = userEvent.setup();
+    // Initial overview: one native story. After the creation, the reload
+    // returns the fresh card WITH its durable import state.
+    mockGet.mockResolvedValueOnce({
+      stories: [{ id: "s1", title: "Le soleil" }],
+    });
+    mockGet.mockResolvedValue({
+      stories: [
+        { id: "s1", title: "Le soleil" },
+        {
+          id: "s-rss",
+          title: "Episode 1",
+          importState: "needsReview",
+          importReport: [
+            {
+              aspect: "source",
+              category: "ambiguous",
+              message:
+                "Contenu ingéré depuis une source externe (RSS). Relis le texte et complète l'histoire avant de l'utiliser.",
+            },
+          ],
+        },
+      ],
+    });
+    mockFetchRssPreview.mockResolvedValueOnce({
+      sourceHost: "exemple.fr",
+      items: [
+        {
+          title: "Episode 1",
+          summary: "Premier texte.",
+          hasEnclosure: false,
+          itemRef: { kind: "guid", guid: "g-1", fingerprint: "a".repeat(64) },
+        },
+      ],
+      findings: [
+        {
+          aspect: "source",
+          category: "ambiguous",
+          message:
+            "Contenu ingéré depuis une source externe (RSS). Relis le texte et complète l'histoire avant de l'utiliser.",
+        },
+      ],
+      state: "needsReview",
+      blocked: false,
+    });
+    mockAcceptRssCreation.mockResolvedValueOnce({
+      kind: "created",
+      story: { id: "s-rss", title: "Episode 1", importState: "needsReview" },
+      report: [],
+    });
+    renderLibrary();
+
+    await screen.findByRole("button", { name: /le soleil/i });
+    // Full journey: dialog → third entry → type → fetch → select → accept.
+    await user.click(
+      screen.getByRole("button", { name: /créer une histoire/i }),
+    );
+    await user.click(
+      await screen.findByRole("button", {
+        name: "Démarrer depuis une source externe (RSS)",
+      }),
+    );
+    await user.type(
+      screen.getByLabelText("Adresse du flux RSS"),
+      "https://exemple.fr/flux.xml",
+    );
+    await user.click(
+      screen.getByRole("button", { name: "Récupérer le flux" }),
+    );
+    await user.click(
+      await screen.findByRole("button", { name: /Episode 1/ }),
+    );
+    await user.click(
+      screen.getByRole("button", { name: "Créer le brouillon" }),
+    );
+    // The success terminal renders (live region + chip), then the reloaded
+    // library card carries the review chip — THE visible materialization
+    // of the pending review (rendered NEXT to the card button, with the
+    // provenance marker).
+    await screen.findAllByText("Histoire créée dans ta bibliothèque");
+    await screen.findByRole("button", { name: /episode 1/i });
+    expect(await screen.findByText("à revoir")).toBeInTheDocument();
+    expect(screen.getByText("Importée")).toBeInTheDocument();
   });
 
   it("Choisir un dossier… in the Créer dialog closes it and surfaces the folder report in-context", async () => {

@@ -1,11 +1,16 @@
 pub mod export;
 pub mod import;
+pub mod rss_creation;
 pub mod structured_creation;
 
 pub use export::{export_story, ExportStoryInput, ExportStoryOutput};
 pub use import::{
     accept_import, analyze_artifact, read_local_import_provenance, ImportAnalysis,
     LocalImportProvenance,
+};
+pub use rss_creation::{
+    accept_rss_story_creation, commit_rss_story_creation, prepare_rss_story_creation,
+    preview_rss_source, PreparedRssCreation, RssAcceptPhase, RssCreationOutcome, RssPreviewOutcome,
 };
 pub use structured_creation::{
     accept_structured_creation, analyze_structured_folder, commit_structured_creation,

@@ -53,3 +53,11 @@
   font-size: var(--font-size-meta);
   color: var(--color-text-secondary);
 }
+
+.create-story-dialog__rss-entry {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-1);
+  margin-top: var(--space-2);
+}

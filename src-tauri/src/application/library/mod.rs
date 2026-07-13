@@ -7,13 +7,17 @@ use crate::infrastructure::db::DbHandle;
 use crate::infrastructure::filesystem::ensure_app_data_dir;
 use crate::ipc::dto::import_export::{
     folder_import_findings_from_summary, import_findings_from_summary, import_state_dto_from_tag,
-    ImportStateDto,
+    rss_import_findings_from_summary, ImportStateDto,
 };
 use crate::ipc::dto::{LibraryOverviewDto, StoryCardDto};
 
 /// The `story_local_imports.source_format` tag of a structured-folder
 /// creation — selects the FOLDER per-pair copy for the durable card report.
 const STRUCTURED_FOLDER_FORMAT: &str = "structured-folder";
+
+/// The `story_local_imports.source_format` tag of an RSS ingestion —
+/// selects the RSS per-pair copy (feed / episode wording).
+const RSS_FORMAT: &str = "rss";
 
 /// Application service for the `library` flow.
 ///
@@ -114,10 +118,10 @@ fn project_story_card(
     // its manifest, a `.rustory` one of its artifact.
     let review_pending = matches!(state, ImportStateDto::Partial | ImportStateDto::NeedsReview);
     let import_report = if review_pending {
-        let render = if source_format.as_deref() == Some(STRUCTURED_FOLDER_FORMAT) {
-            folder_import_findings_from_summary
-        } else {
-            import_findings_from_summary
+        let render = match source_format.as_deref() {
+            Some(STRUCTURED_FOLDER_FORMAT) => folder_import_findings_from_summary,
+            Some(RSS_FORMAT) => rss_import_findings_from_summary,
+            _ => import_findings_from_summary,
         };
         findings_summary
             .as_deref()

@@ -7,11 +7,16 @@ import type {
   ExportStoryDialogInput,
   ExportStoryDialogOutcome,
   ImportArtifactAnalysis,
+  RssCreationOutcome,
+  RssItemRef,
+  RssPreview,
   StructuredCreationAnalysis,
 } from "../../shared/ipc-contracts/import-export";
 import {
   isExportStoryDialogOutcome,
   isImportArtifactAnalysis,
+  isImportFinding,
+  isRssPreview,
   isStructuredCreationAnalysis,
 } from "../../shared/ipc-contracts/import-export";
 import type { StoryCardDto } from "../../shared/ipc-contracts/library";
@@ -194,6 +199,95 @@ export async function acceptStructuredCreation(
       "accept_structured_creation",
       raw,
     );
+  }
+  return raw;
+}
+
+/**
+ * Error thrown when an RSS external-source command returns a payload that
+ * does not match the wire contract. A payload outside the contract NEVER
+ * renders a screen — the raw response is attached for debugging.
+ */
+export class RssCreationContractDriftError extends Error {
+  readonly raw: unknown;
+  constructor(command: string, raw: unknown) {
+    super(`${command} returned a payload that does not match the contract`);
+    this.name = "RssCreationContractDriftError";
+    this.raw = raw;
+  }
+}
+
+/**
+ * Fetch + analyze a user-provided RSS feed (phase 1, NO mutation, NO DB —
+ * the preview is pure). The ONLY networked action of the flow, on the
+ * explicit `Récupérer le flux` click. Rust owns the address validation,
+ * the bounded fetch and the bounded parse.
+ *
+ * A feed-CONTENT problem (unreadable XML, a non-RSS root, zero exploitable
+ * item) is the resolved BLOCKED verdict, never a rejection; only TRANSPORT
+ * (invalid address, unreachable source, over-cap response) rejects with a
+ * normalized `AppError`. A drifted payload rejects with
+ * [`RssCreationContractDriftError`].
+ *
+ * Components MUST NOT call `invoke` directly — go through this facade so
+ * the wire contract stays owned by `src/ipc/`.
+ */
+export async function fetchRssSourcePreview(
+  feedUrl: string,
+): Promise<RssPreview> {
+  let raw: unknown;
+  try {
+    raw = await invoke<unknown>("fetch_rss_source_preview", { feedUrl });
+  } catch (err) {
+    throw toAppError(err);
+  }
+  if (!isRssPreview(raw)) {
+    throw new RssCreationContractDriftError("fetch_rss_source_preview", raw);
+  }
+  return raw;
+}
+
+/** The validated accept outcome: the created card, or the honest
+ *  `sourceChanged` refusal (nothing was created). */
+export type RssStoryCreationOutcome = RssCreationOutcome<StoryCardDto>;
+
+function isRssStoryCreationOutcome(
+  value: unknown,
+): value is RssStoryCreationOutcome {
+  if (typeof value !== "object" || value === null) return false;
+  const c = value as Record<string, unknown>;
+  if (c.kind === "sourceChanged") {
+    return Object.keys(c).length === 1;
+  }
+  if (c.kind !== "created") return false;
+  if (!isStoryCardDto(c.story)) return false;
+  return Array.isArray(c.report) && c.report.every(isImportFinding);
+}
+
+/**
+ * Commit one previewed feed item into a canonical local draft (phase 2).
+ * Sends the feed address + the item reference back; Rust RE-FETCHES and
+ * re-parses the feed from zero (the source is the authority — the wire
+ * carries a pointer, never content). A diverged source resolves with the
+ * typed `{ kind: "sourceChanged" }` refusal (nothing created); only
+ * transport rejects with a normalized `AppError`. A drifted payload
+ * rejects with [`RssCreationContractDriftError`].
+ */
+export async function acceptRssStoryCreation(
+  feedUrl: string,
+  itemRef: RssItemRef,
+): Promise<RssStoryCreationOutcome> {
+  let raw: unknown;
+  try {
+    raw = await invoke<unknown>("accept_rss_story_creation", {
+      feedUrl,
+      itemRef,
+    });
+  } catch (err) {
+    throw toAppError(err);
+  }
+  if (!isRssStoryCreationOutcome(raw)) {
+    throw new RssCreationContractDriftError("accept_rss_story_creation", raw);
   }
   return raw;
 }

@@ -94,6 +94,14 @@ It exists to keep the same product concepts named the same way across:
 | Structured-folder report — retained media line | `Médias retenus : {basenames}` | The referenced media files that WILL be wired into the story (comma-separated basenames; the line is absent when none) | `assets`, absolute paths |
 | Structured-folder report — discarded media line | `Médias écartés : {basenames}` | The referenced media files that will NOT be wired (absent or unusable — the empty slots stay repairable in the editor); absent when none | `rejetés`, `erreurs`, absolute paths |
 | Accept the structured-folder creation (action) | `Créer l'histoire` | Unique CTA committing the analyzed folder into a canonical story — the report already says what will be discarded (no second CTA); pairs with `Abandonner` | `Importer` (reserved for `.rustory`), `Valider`, dual-CTA variants |
+| External content source (RSS) | `source externe` / `flux RSS` | A content source outside Rustory the user follows (an RSS 2.0 feed) usable as a story-creation entry point; the type is activated by the official distribution, the address is provided at creation time and never stored | `feed`, `abonnement`, `podcast` as the generic term |
+| Start a story from an external source (dialog third entry) | `Démarrer depuis une source externe (RSS)` | Secondary entry of the creation dialog introducing the RSS ingestion path; the interactive path (title → `Créer`) stays primary | a bar CTA, `Importer un flux`, `Suivre un flux` |
+| External source creation surface (title) | `Création depuis une source externe` | In-context surface hosting the feed address input, the fetch preview and the item selection | `import RSS`, `wizard`, `assistant` |
+| RSS feed address (field) | `Adresse du flux RSS` | The feed address the user provides for one fetch; `http(s)` only, never persisted (the provenance keeps the host only) | `URL` alone, `lien`, `adresse web` |
+| Fetch the RSS feed (action, networked, explicit) | `Récupérer le flux` | The ONLY networked action of the flow, on explicit click — the feed is fetched and analyzed, nothing is created. NO collision: `Récupérer / mettre à jour` stays the official-catalog action (different surface, different object) | `Télécharger`, `Rafraîchir`, `Sync`, reusing `Récupérer / mettre à jour` |
+| Accept the RSS item ingestion (action) | `Créer le brouillon` | Unique CTA committing the selected feed item into a canonical local draft; pairs with `Abandonner`. Distinct from `Créer l'histoire` (folder flow) — the RSS result is emphatically a DRAFT to reread | `Créer l'histoire` (folder flow), `Importer`, `Valider` |
+| Content-rights posture line (external sources) | `Utilise uniquement des contenus dont tu as les droits : tes contenus personnels ou des contenus libres.` | The visible, never-blocking distribution-policy posture rendered on the external-source surface | legalese, blocking consent gates |
+| Default title of an RSS ingestion (fallback) | `Histoire de {hôte}` | Title given to the created draft when the feed item carries no usable title — `{hôte}` is the feed's host (e.g. `Histoire de exemple.fr`); renamable immediately in the editor | carrying the full address, inventing a content title |
 | Story editing screen | `Éditeur d'histoire` | Dedicated screen, separate from the library, where the user resumes and edits a local story | `workspace`, `projet`, `canvas`, `editor` |
 | Editor zone — global structure | `Structure de l'histoire` | Editor zone showing the story's overall layout (ordered node list, start node, option links) and the current node, clearly identified; projected from the core, with explicit per-node actions on a full-scope story (native or `.rustory` import) | `arbre`, `outline`, `tree`, `plan`, `canvas` |
 | Editor zone — current node | `Nœud courant` | Editor zone hosting the editor for the node currently in focus (its text, metadata and media) | `current node`, `panneau`, `étape courante` |
@@ -246,6 +254,27 @@ The UI should favor these labels when they are user-visible:
 | Structured-folder creation failed (transport; the actionable text is the alert's `message` + `userAction`) | `Création impossible` |
 | Structured-folder refused — the folder's NAME cannot be carried as provenance (cause) | `Création impossible: le nom du dossier choisi ne peut pas être utilisé par Rustory.` |
 | Structured-folder refused — the folder's NAME cannot be carried as provenance (next gesture) | `Renomme le dossier (nom plus court, sans caractère spécial) puis relance l'analyse.` |
+| Start a story from an external source (dialog third entry) | `Démarrer depuis une source externe (RSS)` |
+| External source creation surface (title) | `Création depuis une source externe` |
+| RSS feed address (field label) | `Adresse du flux RSS` |
+| Fetch the RSS feed (action, networked, explicit) | `Récupérer le flux` |
+| RSS fetch in flight | `Récupération du flux…` |
+| Accept the RSS item ingestion (action) | `Créer le brouillon` |
+| Abandon an analyzed feed (no mutation) | `Abandonner` |
+| RSS creation commit in flight | `Création en cours…` |
+| RSS creation just succeeded | `Histoire créée dans ta bibliothèque` |
+| RSS transport failure (message; retryable) | `Récupération du flux impossible: la source est injoignable.` |
+| RSS transport failure (next gesture) | `Vérifie l'adresse du flux et ta connexion, puis réessaie.` |
+| RSS address refused — not a supported feed address (message) | `Récupération du flux impossible: l'adresse du flux n'est pas valide.` |
+| RSS address refused (next gesture) | `Saisis une adresse http(s) complète puis réessaie.` |
+| RSS verdict — unreadable content | `Ce contenu n'est pas un flux RSS lisible.` |
+| RSS verdict — unsupported feed format (Atom, anything non-RSS-2.0) | `Ce flux n'est pas au format RSS supporté.` |
+| RSS verdict — no exploitable item | `Ce flux ne contient aucun épisode exploitable.` |
+| RSS verdict — source changed between preview and accept | `La source a changé depuis la récupération.` |
+| RSS verdict next gesture (all four verdicts) | `Relance la récupération du flux.` |
+| RSS item references a remote enclosure (per-item note, never downloaded) | `Média distant non récupéré` |
+| Content-rights posture line (external sources) | `Utilise uniquement des contenus dont tu as les droits : tes contenus personnels ou des contenus libres.` |
+| Default title of an RSS ingestion (fallback) | `Histoire de {hôte}` |
 | Story editing screen (separate from the library) | `Éditeur d'histoire` |
 | Editor zone showing the global structure | `Structure de l'histoire` |
 | Editor zone hosting the current node | `Nœud courant` |
@@ -319,6 +348,40 @@ No new card provenance label (the existing `Importée` marker is honest — the
 content comes from outside Rustory) and no label for a settled review
 (`resolved` renders nothing — the marker's disappearance IS the feedback).
 
+### RSS ingestion copy (per-pair, frozen)
+
+One canonical FR message per `(aspect, catégorie)` pair the RSS ingestion
+flow emits (see [ui-states.md#External Source Creation Contract (RSS)](./ui-states.md)).
+The UI branches on the discriminants, never on this text. The RSS flow owns
+the wording of every pair it emits — the copy speaks of a feed, an episode
+and an ingestion (the `.rustory` copy keeps speaking of an artifact, the
+folder one of a manifest). The BLOCKING pairs ARE the feed verdicts; each
+carries the corrective gesture (`Relance la récupération du flux.`). The
+`(source, ambiguïté)` pair is the NOMINAL provenance finding, emitted for
+EVERY ingestion — it structurally guarantees the `needs_review` floor (an
+RSS story is never `recognized`). The `media` pair names the non-downloaded
+enclosure. Quality labels, report headers and per-category chips are reused
+verbatim.
+
+| Aspect | Catégorie | Message figé |
+| --- | --- | --- |
+| Envelope | reconnu | `Le flux RSS est lisible.` |
+| Envelope | blocage réel | `Ce contenu n'est pas un flux RSS lisible. Relance la récupération du flux.` |
+| FormatVersion | reconnu | `Le flux est au format RSS 2.0 supporté.` |
+| FormatVersion | blocage réel | `Ce flux n'est pas au format RSS supporté. Relance la récupération du flux.` |
+| Source | ambiguïté | `Contenu ingéré depuis une source externe (RSS). Relis le texte et complète l'histoire avant de l'utiliser.` |
+| Title | reconnu | `Le titre de l'épisode est valide.` |
+| Title | ambiguïté | `Le titre de l'épisode était absent ou a été ajusté à l'ingestion. Vérifie le titre de l'histoire dans l'éditeur.` |
+| Structure | reconnu | `Le texte de l'épisode est reconnu.` |
+| Structure | ambiguïté | `Le texte de l'épisode était absent ou a été ajusté à l'ingestion (balises HTML retirées, blancs ou longueur réduits). Relis le texte dans l'éditeur.` |
+| Structure | blocage réel | `Ce flux ne contient aucun épisode exploitable. Relance la récupération du flux.` |
+| Media | information manquante | `Le média distant référencé par la source n'a pas été récupéré. Ajoute le média manuellement dans l'éditeur.` |
+
+The `La source a changé depuis la récupération.` verdict is the ACCEPT-time
+recoverable refusal — a tagged outcome discriminant, never a persisted
+finding pair (nothing was created). The `source` aspect exists for every
+flow's defensive rendering, but only the RSS flow ever emits it.
+
 ## Copy Rules
 
 - Prefer `Créer une histoire` over `Nouveau projet`.
@@ -327,6 +390,7 @@ content comes from outside Rustory) and no label for a settled review
 - **Neutralize-vs-bifurcate criterion** for a family-named copy reachable from more than one family: when the concerned device's family is KNOWN at the emission site (a matched profile, a family prop), the copy BIFURCATES — Lunii keeps its historical wording VERBATIM, any other family reads the device-generic variant. When the family is UNKNOWABLE at the site (only a hashed identifier of a now-absent device travels — e.g. `device_changed`), the copy is NEUTRALIZED to the device-generic wording for every family. A neutralization is never justified by convenience alone.
 - Prefer `Copier dans ma bibliothèque` (from a device) over `Importer`; reserve `Importer` / `Exporter` for local file artifacts (`.rustory`, archives). The device pair is `Envoyer vers la Lunii` (library → device) / `Copier dans ma bibliothèque` (device → library).
 - `mise à jour` (device update, FR23) appears ONLY inside the `verified` summary sentence (`« <Titre> » a été mise à jour sur la Lunii.`) — never as a CTA, chip or state label. NO collision: `Récupérer / mettre à jour` stays the official-catalog action, `Remplacer` stays the node-media action. Updating an on-device story keeps `Envoyer vers la Lunii` as its single action — no confirmation modal, no `Mettre à jour` CTA, no consent flag (explicit FR23 decision: the pre-send comparison informs, the unprovable state refuses, the terminal summary names what happened).
+- `Récupérer le flux` (external-source creation) and `Récupérer / mettre à jour` (official catalog) do NOT collide: distinct surfaces (`Création depuis une source externe` vs `Catalogue officiel`), distinct objects (a user-provided feed vs the commercial catalog cache). Neither wording may replace the other.
 - Prefer `Reprendre` over `Restaurer la session` when the user continues a local story.
 - Prefer `Bloquée` with a short cause over a generic `Erreur`.
 - Prefer sober confirmations such as `Transférée et vérifiée` over celebratory success copy.

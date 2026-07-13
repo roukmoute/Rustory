@@ -37,8 +37,13 @@ pub struct AppState {
     pub pack_reader: std::sync::Arc<dyn infrastructure::device::DevicePackReader>,
     /// Source of the official catalog for the EXPLICIT fetch (story 2-6,
     /// Phase C). Behind an `Arc` + `spawn_blocking` like the other device
-    /// I/O. The only networked component; never invoked implicitly.
+    /// I/O. Networked, never invoked implicitly.
     pub catalog_source: std::sync::Arc<dyn infrastructure::device::OfficialCatalogSource>,
+    /// Source of a user-provided RSS feed for the EXPLICIT external-source
+    /// creation flow. Behind an `Arc` + `spawn_blocking` like the catalog
+    /// source (its deliberate neighbor — dedicated client, same
+    /// disciplines). Networked, never invoked implicitly.
+    pub rss_source: std::sync::Arc<dyn infrastructure::device::RssFeedSource>,
     /// Read-only assembler of the transfer-artifact descriptor used by the
     /// story-preparation flow. Same `Arc` + `spawn_blocking` discipline; the
     /// production impl reads the local canonical structure / promoted pack and
@@ -259,6 +264,9 @@ pub fn run() {
                 catalog_source: std::sync::Arc::new(
                     infrastructure::device::LuniiHttpCatalogSource::default(),
                 ),
+                rss_source: std::sync::Arc::new(
+                    infrastructure::device::HttpRssFeedSource::default(),
+                ),
                 artifact_source: std::sync::Arc::new(
                     infrastructure::filesystem::SystemTransferArtifactSource,
                 ),
@@ -276,6 +284,7 @@ pub fn run() {
         // of two same-prefix commands non-obvious.
         .invoke_handler(tauri::generate_handler![
             commands::import_export::accept_artifact_import,
+            commands::import_export::accept_rss_story_creation,
             commands::import_export::accept_structured_creation,
             commands::story::add_node_option,
             commands::story::add_story_node,
@@ -289,6 +298,7 @@ pub fn run() {
             commands::story::discard_node_draft,
             commands::transfer::discard_transfer_outcome,
             commands::import_export::export_story_with_save_dialog,
+            commands::import_export::fetch_rss_source_preview,
             commands::library::get_library_overview,
             commands::catalog::get_official_catalog_status,
             commands::story::get_story_detail,

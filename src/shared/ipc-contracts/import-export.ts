@@ -88,7 +88,8 @@ export type ImportState =
   | "resolved";
 
 /** The aspect of the analyzed input a finding refers to (`media` belongs
- *  to the structured-folder flow only). */
+ *  to the structured-folder and RSS flows, `source` to the RSS ingestion
+ *  flow only). */
 export type ImportAspect =
   | "envelope"
   | "formatVersion"
@@ -97,7 +98,8 @@ export type ImportAspect =
   | "integrity"
   | "title"
   | "timestamps"
-  | "media";
+  | "media"
+  | "source";
 
 /** The recognition category of a finding. */
 export type ImportCategory =
@@ -167,6 +169,7 @@ const IMPORT_ASPECTS: ReadonlySet<string> = new Set([
   "title",
   "timestamps",
   "media",
+  "source",
 ]);
 const IMPORT_CATEGORIES: ReadonlySet<string> = new Set([
   "recognized",
@@ -324,6 +327,158 @@ export type StructuredCreationAnalysis =
 /** Input to `accept_structured_creation` — the folder pointer, verbatim. */
 export interface AcceptStructuredCreationInput {
   folderPath: string;
+}
+
+// ===== RSS external-source creation (feed → new canonical story) =====
+//
+// Mirror of `src-tauri/src/ipc/dto/import_export.rs` (RSS side). Rust is
+// authoritative; these guards refuse a drifted wire shape so the creation
+// surface never renders against an arbitrary object.
+
+/** The stable reference of one previewed feed item, round-tripped verbatim
+ *  to `accept_rss_story_creation` and re-resolved by Rust against a FRESH
+ *  fetch (strict guid, else exact title+link). `fingerprint` is the
+ *  canonical proof of the PREVIEWED content — Rust recomputes it on the
+ *  fresh item and refuses any divergence (same guid, different text ⇒
+ *  `sourceChanged`), so a creation can never ingest content the user
+ *  never reread. */
+export type RssItemRef =
+  | { kind: "guid"; guid: string; fingerprint: string }
+  | {
+      kind: "titleLink";
+      title: string;
+      link: string | null;
+      fingerprint: string;
+    };
+
+/** One selectable item of a previewed feed. `title` may be empty (the
+ *  surface then leads with the summary); `summary` is a bounded excerpt. */
+export interface RssPreviewItem {
+  title: string;
+  summary: string;
+  hasEnclosure: boolean;
+  itemRef: RssItemRef;
+}
+
+/** The typed outcome of `fetch_rss_source_preview`. `blocked` mirrors
+ *  `state === "blocked"` (the guard refuses a divergence); a blocked
+ *  verdict carries no item. A TRANSPORT failure rejects with
+ *  `RSS_SOURCE_UNREACHABLE` instead — the content verdict is NEVER an
+ *  error. */
+export interface RssPreview {
+  sourceHost: string;
+  items: RssPreviewItem[];
+  findings: ImportFinding[];
+  state: ImportState;
+  blocked: boolean;
+}
+
+/** Tagged outcome of `accept_rss_story_creation`: the created card + its
+ *  report, or the honest recoverable refusal (`sourceChanged` — the feed
+ *  diverged since the preview; NOTHING was created). The `story` payload is
+ *  validated by the facade with the library card guard (no contract-module
+ *  cycle). */
+export type RssCreationOutcome<Story = unknown> =
+  | { kind: "created"; story: Story; report: ImportFinding[] }
+  | { kind: "sourceChanged" };
+
+export function isRssItemRef(value: unknown): value is RssItemRef {
+  if (typeof value !== "object" || value === null) return false;
+  const c = value as Record<string, unknown>;
+  // The previewed-content proof is REQUIRED on every reference.
+  if (
+    typeof c.fingerprint !== "string" ||
+    !SHA256_HEX_PATTERN.test(c.fingerprint)
+  ) {
+    return false;
+  }
+  if (c.kind === "guid") {
+    return typeof c.guid === "string" && c.guid.length > 0;
+  }
+  if (c.kind === "titleLink") {
+    return (
+      typeof c.title === "string" &&
+      (c.link === null || typeof c.link === "string")
+    );
+  }
+  return false;
+}
+
+/** Mirror of the Rust host bound (`Histoire de {hôte}` must stay a valid
+ *  canonical title without truncation). */
+const MAX_RSS_HOST_CHARS = 96;
+
+/** True iff `value` is a plausible HOST-ONLY source name: bounded, free of
+ *  URL structure (`/ \ : ? # @`), whitespace and control characters. The
+ *  backend promises "host only — never the full address" (feed query
+ *  strings can carry private tokens); this predicate refuses a drift
+ *  before the surface renders it. */
+function isHostOnly(value: string): boolean {
+  if (value.length === 0 || Array.from(value).length > MAX_RSS_HOST_CHARS) {
+    return false;
+  }
+  for (const ch of value) {
+    if ("/\\:?#@".includes(ch) || /\s/.test(ch)) return false;
+    const code = ch.codePointAt(0) ?? 0;
+    if (code < 0x20 || (code >= 0x7f && code <= 0x9f)) return false;
+  }
+  return true;
+}
+
+function isRssPreviewItem(value: unknown): value is RssPreviewItem {
+  if (typeof value !== "object" || value === null) return false;
+  const c = value as Record<string, unknown>;
+  return (
+    typeof c.title === "string" &&
+    typeof c.summary === "string" &&
+    typeof c.hasEnclosure === "boolean" &&
+    isRssItemRef(c.itemRef) &&
+    // An item with neither a title nor a summary would be unselectable —
+    // Rust never ships one (exploitability gate).
+    (c.title.length > 0 || c.summary.length > 0)
+  );
+}
+
+/**
+ * Runtime guard for an [`RssPreview`] payload. Deterministic like the
+ * folder guard: `blocked` must mirror `state === "blocked"`; a blocked
+ * verdict carries a blocking finding and ZERO item; an exploitable one
+ * floors at `needsReview` (never `recognized` — the ingestion floor) and
+ * always carries the nominal `(source, ambiguous)` finding.
+ */
+export function isRssPreview(value: unknown): value is RssPreview {
+  if (typeof value !== "object" || value === null) return false;
+  const c = value as Record<string, unknown>;
+  if (typeof c.sourceHost !== "string" || !isHostOnly(c.sourceHost)) {
+    return false;
+  }
+  if (typeof c.state !== "string" || !IMPORT_STATES.has(c.state)) return false;
+  if (typeof c.blocked !== "boolean") return false;
+  if ((c.state === "blocked") !== c.blocked) return false;
+  if (!Array.isArray(c.findings) || !c.findings.every(isImportFinding)) {
+    return false;
+  }
+  const findings = c.findings as ImportFinding[];
+  if (!Array.isArray(c.items) || !c.items.every(isRssPreviewItem)) {
+    return false;
+  }
+  const items = c.items as RssPreviewItem[];
+  if (c.blocked) {
+    if (items.length > 0) return false;
+    if (!findings.some((f) => f.category === "blocking")) return false;
+  } else {
+    if (c.state !== "needsReview") return false;
+    if (items.length === 0) return false;
+    if (findings.some((f) => f.category === "blocking")) return false;
+    if (
+      !findings.some(
+        (f) => f.aspect === "source" && f.category === "ambiguous",
+      )
+    ) {
+      return false;
+    }
+  }
+  return true;
 }
 
 /** The folder flow's OWN aspect set (no schemaVersion / integrity /

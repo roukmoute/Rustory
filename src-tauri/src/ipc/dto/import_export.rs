@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::domain::import::{
     ArtifactAnalysis, ImportState, ImportableContent, RecognitionAspect, RecognitionCategory,
-    RecognitionFinding, RecognitionQuality, StructuredFolderAnalysis,
+    RecognitionFinding, RecognitionQuality, RssItemRef, StructuredFolderAnalysis,
 };
 use crate::domain::story::normalize_title;
 
@@ -86,7 +86,7 @@ impl ImportStateDto {
 
 /// The aspect of the analyzed input a finding refers to. Mirror of the
 /// domain [`RecognitionAspect`] (`media` belongs to the structured-folder
-/// flow only).
+/// and RSS flows, `source` to the RSS ingestion flow only).
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum ImportAspectDto {
@@ -98,6 +98,7 @@ pub enum ImportAspectDto {
     Title,
     Timestamps,
     Media,
+    Source,
 }
 
 /// The recognition category of a finding. Mirror of the domain
@@ -266,6 +267,157 @@ pub struct AcceptStructuredCreationInputDto {
     pub folder_path: String,
 }
 
+// ===== RSS external-source creation (feed → new canonical story) =====
+
+/// Ceiling on one previewed item's `summary`, in Unicode scalar values —
+/// a WIRE bound (the full cleaned text can reach 65 536 chars per item ×
+/// 100 items; the preview only needs a readable excerpt). Truncation
+/// appends an ellipsis.
+pub const MAX_RSS_SUMMARY_CHARS: usize = 280;
+
+/// The stable reference of one previewed feed item, round-tripped by the
+/// frontend to `accept_rss_story_creation` and re-resolved from zero
+/// against a FRESH fetch. The selector mirrors the domain [`RssItemRef`];
+/// `fingerprint` is the canonical proof of the PREVIEWED content
+/// ([`crate::domain::import::rss_item_fingerprint`]) — the accept
+/// recomputes it on the fresh item and refuses any divergence (the wire
+/// carries a pointer + a proof, never content). `deny_unknown_fields`
+/// keeps the boundary authoritative on the way in.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
+pub enum RssItemRefDto {
+    #[serde(rename_all = "camelCase")]
+    Guid { guid: String, fingerprint: String },
+    #[serde(rename_all = "camelCase")]
+    TitleLink {
+        title: String,
+        link: Option<String>,
+        fingerprint: String,
+    },
+}
+
+impl RssItemRefDto {
+    pub fn from_domain(reference: &RssItemRef, fingerprint: String) -> Self {
+        match reference {
+            RssItemRef::Guid(guid) => Self::Guid {
+                guid: guid.clone(),
+                fingerprint,
+            },
+            RssItemRef::TitleLink { title, link } => Self::TitleLink {
+                title: title.clone(),
+                link: link.clone(),
+                fingerprint,
+            },
+        }
+    }
+
+    pub fn to_domain(&self) -> RssItemRef {
+        match self {
+            Self::Guid { guid, .. } => RssItemRef::Guid(guid.clone()),
+            Self::TitleLink { title, link, .. } => RssItemRef::TitleLink {
+                title: title.clone(),
+                link: link.clone(),
+            },
+        }
+    }
+
+    /// The previewed-content proof carried by this reference.
+    pub fn fingerprint(&self) -> &str {
+        match self {
+            Self::Guid { fingerprint, .. } => fingerprint,
+            Self::TitleLink { fingerprint, .. } => fingerprint,
+        }
+    }
+}
+
+/// One selectable item of a previewed feed: the cleaned title (possibly
+/// empty — the surface then leads with the summary), a bounded summary
+/// excerpt, the enclosure fact and the round-trip reference.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RssPreviewItemDto {
+    pub title: String,
+    pub summary: String,
+    pub has_enclosure: bool,
+    pub item_ref: RssItemRefDto,
+}
+
+/// The typed outcome of `fetch_rss_source_preview`: the source HOST (the
+/// only address fragment that ever crosses), the selectable items, the
+/// flow-level findings (RSS per-pair copy) and the derived state.
+/// `blocked` is the redundant-but-explicit branch flag — always coherent
+/// with `state` (the TS guard refuses a divergence). A TRANSPORT failure
+/// rejects with `RSS_SOURCE_UNREACHABLE` instead — the functional verdict
+/// is NEVER an error.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RssPreviewDto {
+    pub source_host: String,
+    pub items: Vec<RssPreviewItemDto>,
+    pub findings: Vec<ImportFindingDto>,
+    pub state: ImportStateDto,
+    pub blocked: bool,
+}
+
+impl RssPreviewDto {
+    /// Map a domain feed analysis + the validated host to the wire preview
+    /// (RSS per-pair copy, bounded summaries, per-item references).
+    pub fn from_analysis(
+        source_host: String,
+        analysis: &crate::domain::import::RssAnalysis,
+    ) -> Self {
+        Self {
+            source_host,
+            items: analysis
+                .items
+                .iter()
+                .map(|item| RssPreviewItemDto {
+                    title: item.title.clone(),
+                    summary: truncate_rss_summary(&item.text),
+                    has_enclosure: item.has_enclosure,
+                    item_ref: RssItemRefDto::from_domain(
+                        &crate::domain::import::rss_item_ref(item),
+                        crate::domain::import::rss_item_fingerprint(item),
+                    ),
+                })
+                .collect(),
+            findings: analysis
+                .findings
+                .iter()
+                .map(ImportFindingDto::from_rss_domain)
+                .collect(),
+            state: state_dto(analysis.state),
+            blocked: analysis.is_blocked(),
+        }
+    }
+}
+
+/// Truncate a cleaned item text to the wire summary bound, appending an
+/// ellipsis when something was cut.
+fn truncate_rss_summary(text: &str) -> String {
+    if text.chars().count() <= MAX_RSS_SUMMARY_CHARS {
+        return text.to_string();
+    }
+    let mut truncated: String = text.chars().take(MAX_RSS_SUMMARY_CHARS).collect();
+    truncated.push('…');
+    truncated
+}
+
+/// Tagged outcome of `accept_rss_story_creation`: the created card + its
+/// report, or the honest recoverable refusal (`sourceChanged` — the feed
+/// diverged since the preview; NOTHING was created). The refusal is a
+/// typed verdict, never an `AppError` (only transport rejects).
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum RssCreationOutcomeDto {
+    #[serde(rename_all = "camelCase")]
+    Created {
+        story: crate::ipc::dto::StoryCardDto,
+        report: Vec<ImportFindingDto>,
+    },
+    SourceChanged,
+}
+
 /// The persisted shape of one attention finding inside
 /// `story_local_imports.findings_summary` — `(aspect, category)` codes
 /// only, NEVER the localized message (re-derived at read time, so the
@@ -334,6 +486,7 @@ pub fn aspect_dto(aspect: RecognitionAspect) -> ImportAspectDto {
         RecognitionAspect::Title => ImportAspectDto::Title,
         RecognitionAspect::Timestamps => ImportAspectDto::Timestamps,
         RecognitionAspect::Media => ImportAspectDto::Media,
+        RecognitionAspect::Source => ImportAspectDto::Source,
     }
 }
 
@@ -368,6 +521,18 @@ impl ImportFindingDto {
             aspect,
             category,
             message: structured_folder_finding_message(aspect, category).to_string(),
+        }
+    }
+
+    /// The RSS-ingestion variant: same discriminants, the RSS per-pair FR
+    /// copy ([`rss_finding_message`]).
+    pub fn from_rss_domain(finding: &RecognitionFinding) -> Self {
+        let aspect = aspect_dto(finding.aspect);
+        let category = category_dto(finding.category);
+        Self {
+            aspect,
+            category,
+            message: rss_finding_message(aspect, category).to_string(),
         }
     }
 }
@@ -423,6 +588,54 @@ pub fn finding_message(aspect: ImportAspectDto, category: ImportCategoryDto) -> 
         (A::Media, C::Ambiguous) => {
             "Certains fichiers audio ou image référencés ne sont pas utilisables (format non reconnu, fichier trop volumineux ou nom invalide). L'histoire sera créée sans eux ; tu pourras les ajouter dans l'éditeur."
         }
+        // `source` pairs — the RSS ingestion flow owns the living copy
+        // ([`rss_finding_message`]); only its `(source, ambiguous)` pair is
+        // ever emitted. The defensive copies below keep a persisted/forged
+        // pair renderable through the shared path without a panic and
+        // without promising anything.
+        (A::Source, C::Ambiguous) => {
+            "Contenu ingéré depuis une source externe (RSS). Relis le texte et complète l'histoire avant de l'utiliser."
+        }
+        (A::Source, C::Recognized) => "La provenance de cette histoire a été enregistrée.",
+        (A::Source, C::Missing) => "La provenance de cette histoire n'a pas pu être établie.",
+        (A::Source, C::Blocking) => "La provenance de cette histoire bloque la création.",
+    }
+}
+
+/// The RSS-INGESTION per-pair FR copy (frozen in
+/// `product-language.md#RSS ingestion copy`). The RSS flow owns the wording
+/// of every pair it emits — it speaks of a feed, an episode and an
+/// ingestion; the BLOCKING pairs ARE the feed verdicts, each carrying the
+/// corrective gesture. Every other pair delegates to the shared table.
+/// Used by the RSS preview/creation DTOs AND by the durable card report
+/// when the provenance's `source_format` is `rss`.
+pub fn rss_finding_message(aspect: ImportAspectDto, category: ImportCategoryDto) -> &'static str {
+    use ImportAspectDto as A;
+    use ImportCategoryDto as C;
+    match (aspect, category) {
+        (A::Envelope, C::Recognized) => "Le flux RSS est lisible.",
+        (A::Envelope, C::Ambiguous | C::Missing | C::Blocking) => {
+            "Ce contenu n'est pas un flux RSS lisible. Relance la récupération du flux."
+        }
+        (A::FormatVersion, C::Recognized) => "Le flux est au format RSS 2.0 supporté.",
+        (A::FormatVersion, C::Ambiguous | C::Missing | C::Blocking) => {
+            "Ce flux n'est pas au format RSS supporté. Relance la récupération du flux."
+        }
+        (A::Title, C::Recognized) => "Le titre de l'épisode est valide.",
+        (A::Title, C::Ambiguous | C::Missing | C::Blocking) => {
+            "Le titre de l'épisode était absent ou a été ajusté à l'ingestion. Vérifie le titre de l'histoire dans l'éditeur."
+        }
+        (A::Structure, C::Recognized) => "Le texte de l'épisode est reconnu.",
+        (A::Structure, C::Ambiguous) => {
+            "Le texte de l'épisode était absent ou a été ajusté à l'ingestion (balises HTML retirées, blancs ou longueur réduits). Relis le texte dans l'éditeur."
+        }
+        (A::Structure, C::Missing | C::Blocking) => {
+            "Ce flux ne contient aucun épisode exploitable. Relance la récupération du flux."
+        }
+        (A::Media, C::Missing) => {
+            "Le média distant référencé par la source n'a pas été récupéré. Ajoute le média manuellement dans l'éditeur."
+        }
+        _ => finding_message(aspect, category),
     }
 }
 
@@ -508,6 +721,14 @@ pub fn folder_import_findings_from_summary(summary: &str) -> Vec<ImportFindingDt
     findings_from_summary_with(summary, structured_folder_finding_message)
 }
 
+/// The RSS variant of [`import_findings_from_summary`]: the same stored
+/// pairs, re-rendered with the RSS per-pair copy. Picked by the
+/// provenance's `source_format = 'rss'` so an ingested story's durable
+/// card report speaks of a feed and an episode.
+pub fn rss_import_findings_from_summary(summary: &str) -> Vec<ImportFindingDto> {
+    findings_from_summary_with(summary, rss_finding_message)
+}
+
 fn findings_from_summary_with(
     summary: &str,
     message: fn(ImportAspectDto, ImportCategoryDto) -> &'static str,
@@ -549,6 +770,22 @@ pub fn folder_import_report_dto(findings: &[RecognitionFinding]) -> Vec<ImportFi
     findings
         .iter()
         .map(ImportFindingDto::from_folder_domain)
+        .collect()
+}
+
+/// The RSS variant of [`import_report_dto`] — same rules, the RSS per-pair
+/// copy. In practice never empty: every ingestion carries the nominal
+/// `(source, ambiguous)` finding.
+pub fn rss_import_report_dto(findings: &[RecognitionFinding]) -> Vec<ImportFindingDto> {
+    if findings
+        .iter()
+        .all(|f| f.category == RecognitionCategory::Recognized)
+    {
+        return Vec::new();
+    }
+    findings
+        .iter()
+        .map(ImportFindingDto::from_rss_domain)
         .collect()
 }
 
@@ -809,6 +1046,7 @@ mod tests {
             Title,
             Timestamps,
             Media,
+            Source,
         ];
         let categories = [Recognized, Ambiguous, Missing, Blocking];
         for aspect in aspects {
@@ -822,6 +1060,11 @@ mod tests {
                 assert!(
                     !structured_folder_finding_message(aspect, category).is_empty(),
                     "folder {aspect:?}/{category:?} message empty"
+                );
+                // The RSS copy covers every pair too.
+                assert!(
+                    !rss_finding_message(aspect, category).is_empty(),
+                    "rss {aspect:?}/{category:?} message empty"
                 );
             }
         }
@@ -948,6 +1191,195 @@ mod tests {
     fn a_malformed_summary_degrades_to_an_empty_report() {
         assert!(import_findings_from_summary("not json").is_empty());
         assert!(import_findings_from_summary("[]").is_empty());
+    }
+
+    // ===== RSS external-source DTOs =====
+
+    #[test]
+    fn rss_item_ref_round_trips_both_variants_with_the_fingerprint() {
+        for reference in [
+            RssItemRef::Guid("g-1".into()),
+            RssItemRef::TitleLink {
+                title: "Episode".into(),
+                link: Some("https://exemple.fr/ep".into()),
+            },
+            RssItemRef::TitleLink {
+                title: "Episode".into(),
+                link: None,
+            },
+        ] {
+            let dto = RssItemRefDto::from_domain(&reference, "a".repeat(64));
+            let json = serde_json::to_value(&dto).expect("ser");
+            let back: RssItemRefDto = serde_json::from_value(json).expect("deser");
+            assert_eq!(back.to_domain(), reference);
+            assert_eq!(back.fingerprint(), "a".repeat(64));
+        }
+    }
+
+    #[test]
+    fn rss_item_ref_wire_shape_is_tagged_camel_case() {
+        let guid = serde_json::to_value(RssItemRefDto::Guid {
+            guid: "g".into(),
+            fingerprint: "f".repeat(64),
+        })
+        .expect("ser");
+        assert_eq!(
+            guid,
+            serde_json::json!({ "kind": "guid", "guid": "g", "fingerprint": "f".repeat(64) })
+        );
+        let title_link = serde_json::to_value(RssItemRefDto::TitleLink {
+            title: "T".into(),
+            link: None,
+            fingerprint: "f".repeat(64),
+        })
+        .expect("ser");
+        assert_eq!(title_link["kind"], "titleLink");
+        assert_eq!(title_link["link"], serde_json::Value::Null);
+        assert_eq!(title_link["fingerprint"], "f".repeat(64));
+    }
+
+    #[test]
+    fn rss_item_ref_rejects_unknown_fields_kinds_and_a_missing_fingerprint() {
+        assert!(serde_json::from_value::<RssItemRefDto>(serde_json::json!({
+            "kind": "guid", "guid": "g", "fingerprint": "f", "extra": 1
+        }))
+        .is_err());
+        assert!(serde_json::from_value::<RssItemRefDto>(serde_json::json!({
+            "kind": "byIndex", "index": 0
+        }))
+        .is_err());
+        // The previewed-content proof is REQUIRED on the way in.
+        assert!(serde_json::from_value::<RssItemRefDto>(serde_json::json!({
+            "kind": "guid", "guid": "g"
+        }))
+        .is_err());
+    }
+
+    fn exploitable_rss_analysis() -> crate::domain::import::RssAnalysis {
+        crate::domain::import::parse_rss(
+            "<rss version=\"2.0\"><channel><title>Flux</title>\
+             <item><title>Episode</title><description>Texte.</description><guid>g-1</guid></item>\
+             <item><description>Sans titre, avec enclosure.</description>\
+             <enclosure url=\"https://exemple.fr/e.mp3\" length=\"1\" type=\"audio/mpeg\"/></item>\
+             </channel></rss>"
+                .as_bytes(),
+        )
+    }
+
+    #[test]
+    fn rss_preview_dto_wire_shape_is_camel_case_and_coherent() {
+        let analysis = exploitable_rss_analysis();
+        let dto = RssPreviewDto::from_analysis("exemple.fr".into(), &analysis);
+        let v = serde_json::to_value(&dto).expect("ser");
+        assert_eq!(v["sourceHost"], "exemple.fr");
+        assert_eq!(v["state"], "needsReview");
+        assert_eq!(v["blocked"], false);
+        assert_eq!(v["items"][0]["title"], "Episode");
+        assert_eq!(v["items"][0]["hasEnclosure"], false);
+        assert_eq!(v["items"][0]["itemRef"]["kind"], "guid");
+        assert_eq!(v["items"][1]["hasEnclosure"], true);
+        assert_eq!(v["items"][1]["itemRef"]["kind"], "titleLink");
+        // The flow findings carry the RSS copy with the nominal source pair.
+        assert_eq!(v["findings"][2]["aspect"], "source");
+        assert_eq!(v["findings"][2]["category"], "ambiguous");
+        for snake in ["source_host", "has_enclosure", "item_ref"] {
+            assert!(v.get(snake).is_none(), "{snake} must be camelCase");
+        }
+    }
+
+    #[test]
+    fn rss_preview_dto_marks_a_blocked_verdict() {
+        let analysis = crate::domain::import::parse_rss(b"pas du xml");
+        let dto = RssPreviewDto::from_analysis("exemple.fr".into(), &analysis);
+        assert!(dto.blocked);
+        assert!(dto.items.is_empty());
+        assert_eq!(dto.state, ImportStateDto::Blocked);
+        assert_eq!(
+            dto.findings[0].message,
+            "Ce contenu n'est pas un flux RSS lisible. Relance la récupération du flux."
+        );
+    }
+
+    #[test]
+    fn rss_preview_summary_is_bounded_with_an_ellipsis() {
+        assert_eq!(truncate_rss_summary("court"), "court");
+        let long = "a".repeat(MAX_RSS_SUMMARY_CHARS + 50);
+        let truncated = truncate_rss_summary(&long);
+        assert_eq!(truncated.chars().count(), MAX_RSS_SUMMARY_CHARS + 1);
+        assert!(truncated.ends_with('…'));
+    }
+
+    #[test]
+    fn rss_creation_outcome_wire_shapes_are_tagged_camel_case() {
+        let created = RssCreationOutcomeDto::Created {
+            story: crate::ipc::dto::StoryCardDto {
+                id: "id-1".into(),
+                title: "Episode".into(),
+                import_state: Some(ImportStateDto::NeedsReview),
+                import_report: None,
+            },
+            report: vec![ImportFindingDto {
+                aspect: ImportAspectDto::Source,
+                category: ImportCategoryDto::Ambiguous,
+                message: "msg".into(),
+            }],
+        };
+        let v = serde_json::to_value(&created).expect("ser");
+        assert_eq!(v["kind"], "created");
+        assert_eq!(v["story"]["id"], "id-1");
+        assert_eq!(v["report"][0]["aspect"], "source");
+
+        let changed = serde_json::to_value(RssCreationOutcomeDto::SourceChanged).expect("ser");
+        assert_eq!(changed, serde_json::json!({ "kind": "sourceChanged" }));
+    }
+
+    #[test]
+    fn rss_copy_speaks_of_the_feed_and_owns_its_media_pair() {
+        // The RSS flow owns the wording of the pairs it emits…
+        assert_eq!(
+            rss_finding_message(ImportAspectDto::Envelope, ImportCategoryDto::Blocking),
+            "Ce contenu n'est pas un flux RSS lisible. Relance la récupération du flux."
+        );
+        assert_ne!(
+            rss_finding_message(ImportAspectDto::Envelope, ImportCategoryDto::Blocking),
+            finding_message(ImportAspectDto::Envelope, ImportCategoryDto::Blocking),
+        );
+        // …including its own `media` missing copy (the folder one speaks
+        // of folder files, the RSS one of a remote enclosure).
+        assert_eq!(
+            rss_finding_message(ImportAspectDto::Media, ImportCategoryDto::Missing),
+            "Le média distant référencé par la source n'a pas été récupéré. Ajoute le média manuellement dans l'éditeur."
+        );
+        assert_ne!(
+            rss_finding_message(ImportAspectDto::Media, ImportCategoryDto::Missing),
+            finding_message(ImportAspectDto::Media, ImportCategoryDto::Missing),
+        );
+        // The nominal source pair is the shared copy (defensive table and
+        // living table agree byte-for-byte).
+        assert_eq!(
+            rss_finding_message(ImportAspectDto::Source, ImportCategoryDto::Ambiguous),
+            finding_message(ImportAspectDto::Source, ImportCategoryDto::Ambiguous),
+        );
+    }
+
+    #[test]
+    fn rss_summary_round_trips_through_the_rss_renderer() {
+        let findings = [
+            RecognitionFinding::recognized(RecognitionAspect::Envelope),
+            RecognitionFinding::ambiguous(RecognitionAspect::Source),
+            RecognitionFinding {
+                aspect: RecognitionAspect::Media,
+                category: RecognitionCategory::Missing,
+            },
+        ];
+        let summary = serialize_findings_summary(&findings).expect("summary");
+        let report = rss_import_findings_from_summary(&summary);
+        assert_eq!(report.len(), 3);
+        assert!(report.iter().any(|f| f.aspect == ImportAspectDto::Source
+            && f.message
+                .starts_with("Contenu ingéré depuis une source externe (RSS).")));
+        assert!(report.iter().any(|f| f.aspect == ImportAspectDto::Media
+            && f.message.starts_with("Le média distant référencé")));
     }
 
     #[test]

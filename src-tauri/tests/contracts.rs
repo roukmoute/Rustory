@@ -2,6 +2,9 @@
 #[path = "contracts/import_export.rs"]
 mod import_export;
 
+#[path = "contracts/rss_creation.rs"]
+mod rss_creation;
+
 #[path = "contracts/library_overview.rs"]
 mod library_overview;
 

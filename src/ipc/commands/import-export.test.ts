@@ -9,12 +9,15 @@ import { invoke } from "@tauri-apps/api/core";
 import {
   ExportStoryContractDriftError,
   ImportArtifactContractDriftError,
+  RssCreationContractDriftError,
   StructuredCreationContractDriftError,
   acceptArtifactImport,
+  acceptRssStoryCreation,
   acceptStructuredCreation,
   analyzeArtifactForImport,
   analyzeStructuredFolderForCreation,
   exportStoryWithSaveDialog,
+  fetchRssSourcePreview,
 } from "./import-export";
 
 const STORY_ID = "0197a5d0-0000-7000-8000-000000000000";
@@ -314,5 +317,189 @@ describe("acceptStructuredCreation", () => {
     await expect(
       acceptStructuredCreation({ folderPath: "/home/user/mon-dossier" }),
     ).rejects.toEqual(rustError);
+  });
+});
+
+// ===== RSS external-source facades =====
+
+const RSS_FEED_URL = "https://exemple.fr/flux.xml";
+
+const RSS_PREVIEW_WIRE = {
+  sourceHost: "exemple.fr",
+  items: [
+    {
+      title: "Episode 1",
+      summary: "Premier texte.",
+      hasEnclosure: false,
+      itemRef: { kind: "guid", guid: "g-1", fingerprint: "a".repeat(64) },
+    },
+  ],
+  findings: [
+    {
+      aspect: "source",
+      category: "ambiguous",
+      message:
+        "Contenu ingéré depuis une source externe (RSS). Relis le texte et complète l'histoire avant de l'utiliser.",
+    },
+  ],
+  state: "needsReview",
+  blocked: false,
+};
+
+describe("fetchRssSourcePreview", () => {
+  beforeEach(() => {
+    vi.mocked(invoke).mockReset();
+  });
+
+  it("calls fetch_rss_source_preview with the feed address and returns the validated preview", async () => {
+    vi.mocked(invoke).mockResolvedValueOnce(RSS_PREVIEW_WIRE);
+    const preview = await fetchRssSourcePreview(RSS_FEED_URL);
+    expect(invoke).toHaveBeenCalledWith("fetch_rss_source_preview", {
+      feedUrl: RSS_FEED_URL,
+    });
+    expect(preview.sourceHost).toBe("exemple.fr");
+    expect(preview.items).toHaveLength(1);
+  });
+
+  it("resolves a blocked verdict (typed content problem, never a rejection)", async () => {
+    vi.mocked(invoke).mockResolvedValueOnce({
+      sourceHost: "exemple.fr",
+      items: [],
+      findings: [
+        {
+          aspect: "envelope",
+          category: "blocking",
+          message:
+            "Ce contenu n'est pas un flux RSS lisible. Relance la récupération du flux.",
+        },
+      ],
+      state: "blocked",
+      blocked: true,
+    });
+    const preview = await fetchRssSourcePreview(RSS_FEED_URL);
+    expect(preview.blocked).toBe(true);
+    expect(preview.items).toHaveLength(0);
+  });
+
+  it("normalizes a transport rejection into an AppError shape", async () => {
+    vi.mocked(invoke).mockRejectedValueOnce({
+      code: "RSS_SOURCE_UNREACHABLE",
+      message: "Récupération du flux impossible: la source est injoignable.",
+      userAction: "Vérifie l'adresse du flux et ta connexion, puis réessaie.",
+      details: { source: "network", stage: "request" },
+    });
+    const err = (await fetchRssSourcePreview(RSS_FEED_URL).then(
+      () => {
+        throw new Error("expected rejection");
+      },
+      (e: unknown) => e,
+    )) as { code: string };
+    expect(err.code).toBe("RSS_SOURCE_UNREACHABLE");
+  });
+
+  it("rejects with RssCreationContractDriftError on a shape drift", async () => {
+    const raw = { ...RSS_PREVIEW_WIRE, state: "recognized" };
+    vi.mocked(invoke).mockResolvedValueOnce(raw);
+    const err = (await fetchRssSourcePreview(RSS_FEED_URL).then(
+      () => {
+        throw new Error("expected rejection");
+      },
+      (e: unknown) => e,
+    )) as RssCreationContractDriftError;
+    expect(err).toBeInstanceOf(RssCreationContractDriftError);
+    expect(err.raw).toBe(raw);
+  });
+});
+
+describe("acceptRssStoryCreation", () => {
+  beforeEach(() => {
+    vi.mocked(invoke).mockReset();
+  });
+
+  it("calls accept_rss_story_creation with the address + item reference and returns the created card", async () => {
+    vi.mocked(invoke).mockResolvedValueOnce({
+      kind: "created",
+      story: {
+        id: "0197a5d0-0000-7000-8000-000000000000",
+        title: "Episode 1",
+        importState: "needsReview",
+        importReport: [
+          {
+            aspect: "source",
+            category: "ambiguous",
+            message:
+              "Contenu ingéré depuis une source externe (RSS). Relis le texte et complète l'histoire avant de l'utiliser.",
+          },
+        ],
+      },
+      report: [
+        {
+          aspect: "source",
+          category: "ambiguous",
+          message:
+            "Contenu ingéré depuis une source externe (RSS). Relis le texte et complète l'histoire avant de l'utiliser.",
+        },
+      ],
+    });
+    const outcome = await acceptRssStoryCreation(RSS_FEED_URL, {
+      kind: "guid",
+      guid: "g-1",
+      fingerprint: "a".repeat(64),
+    });
+    expect(invoke).toHaveBeenCalledWith("accept_rss_story_creation", {
+      feedUrl: RSS_FEED_URL,
+      itemRef: { kind: "guid", guid: "g-1", fingerprint: "a".repeat(64) },
+    });
+    expect(outcome.kind).toBe("created");
+    if (outcome.kind === "created") {
+      expect(outcome.story.title).toBe("Episode 1");
+      expect(outcome.story.importState).toBe("needsReview");
+    }
+  });
+
+  it("resolves the honest sourceChanged refusal (typed, never a rejection)", async () => {
+    vi.mocked(invoke).mockResolvedValueOnce({ kind: "sourceChanged" });
+    const outcome = await acceptRssStoryCreation(RSS_FEED_URL, {
+      kind: "titleLink",
+      title: "Episode",
+      link: null,
+      fingerprint: "a".repeat(64),
+    });
+    expect(outcome).toEqual({ kind: "sourceChanged" });
+  });
+
+  it("rejects with RssCreationContractDriftError on a drifted story payload", async () => {
+    const raw = { kind: "created", story: { id: "x" }, report: [] };
+    vi.mocked(invoke).mockResolvedValueOnce(raw);
+    const err = (await acceptRssStoryCreation(RSS_FEED_URL, {
+      kind: "guid",
+      guid: "g-1",
+      fingerprint: "a".repeat(64),
+    }).then(
+      () => {
+        throw new Error("expected rejection");
+      },
+      (e: unknown) => e,
+    )) as RssCreationContractDriftError;
+    expect(err).toBeInstanceOf(RssCreationContractDriftError);
+    expect(err.raw).toBe(raw);
+  });
+
+  it("rejects a sourceChanged refusal that leaks extra fields", async () => {
+    vi.mocked(invoke).mockResolvedValueOnce({
+      kind: "sourceChanged",
+      leaked: true,
+    });
+    const err = (await acceptRssStoryCreation(RSS_FEED_URL, {
+      kind: "guid",
+      guid: "g-1",
+      fingerprint: "a".repeat(64),
+    }).then(
+      () => {
+        throw new Error("expected rejection");
+      },
+      (e: unknown) => e,
+    )) as RssCreationContractDriftError;
+    expect(err).toBeInstanceOf(RssCreationContractDriftError);
   });
 });

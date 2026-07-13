@@ -14,6 +14,7 @@ pub mod catalog_source;
 pub mod library_reader;
 pub mod pack_reader;
 pub mod parser;
+pub mod rss_source;
 pub mod scanner;
 pub mod system;
 pub mod writer;
@@ -30,6 +31,7 @@ pub use catalog_source::{LuniiHttpCatalogSource, OfficialCatalogSource};
 pub use library_reader::{DeviceLibraryReader, SystemDeviceLibraryReader};
 pub use pack_reader::{AcquiredPack, DevicePackReader, SystemDevicePackReader};
 pub use parser::{compute_device_identifier, parse_metadata_version, MetadataParseError};
+pub use rss_source::{HttpRssFeedSource, RssFeedSource, MAX_RSS_RESPONSE_BYTES};
 pub use scanner::{CandidateFacts, DeviceCandidate, DeviceScanReport, DeviceScanner};
 pub use system::{SystemDeviceScanner, EXTRA_MOUNT_ROOTS_ENV, SYSTEM_SCANNER_DEFAULT};
 pub use writer::{
@@ -40,5 +42,5 @@ pub use writer::{
 #[cfg(test)]
 pub use mock::{
     MockDeviceLibraryReader, MockDevicePackReader, MockDevicePackWriter, MockDeviceScanner,
-    MockOfficialCatalogSource,
+    MockOfficialCatalogSource, MockRssFeedSource,
 };

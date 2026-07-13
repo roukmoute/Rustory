@@ -44,7 +44,9 @@ import {
 } from "../../features/library/components/LuniiDecisionPanel";
 import { useStoryPreparation, useStoryTransfer } from "../../features/transfer";
 import { CreateFromFolderSurface } from "../../features/import-export/components/CreateFromFolderSurface";
+import { CreateFromRssSurface } from "../../features/import-export/components/CreateFromRssSurface";
 import { ImportArtifactSurface } from "../../features/import-export/components/ImportArtifactSurface";
+import { useRssCreation } from "../../features/import-export/hooks/use-rss-creation";
 import { useStoryImport } from "../../features/import-export/hooks/use-story-import";
 import { useStructuredCreation } from "../../features/import-export/hooks/use-structured-creation";
 import type { StoryPreparationBadge } from "../../features/library/components/StoryCard";
@@ -164,6 +166,40 @@ export function LibraryRoute(): React.JSX.Element {
       invalidate();
     }
   }, [structuredCreationStatusKind, invalidate]);
+
+  // RSS external-source creation flow (feed → new canonical draft).
+  // USER-TRIGGERED from the creation dialog's third entry ("Démarrer depuis
+  // une source externe (RSS)"). The preview never mutates; the overview
+  // reloads only after a successful creation — the fresh card with its
+  // `à revoir` / `partiel` chip IS the sober success feedback; the editor
+  // is NOT auto-opened. The surface owns the address field, so the route
+  // only tracks whether it is open.
+  const rssCreation = useRssCreation();
+  const [isRssCreationOpen, setIsRssCreationOpen] = useState(false);
+  // ACTIVE covers the whole lifetime of the flow (surface open, or any
+  // non-idle machine state): the cross-flow busy exclusivity must keep a
+  // second creation/import surface from stacking on top of a live RSS
+  // review, not only during the two in-flight operations.
+  const isRssCreationActive =
+    isRssCreationOpen || rssCreation.status.kind !== "idle";
+  const rssCreationStatusKind = rssCreation.status.kind;
+  useEffect(() => {
+    if (rssCreationStatusKind === "created") {
+      invalidate();
+    }
+  }, [rssCreationStatusKind, invalidate]);
+
+  const handleRssAbandon = (): void => {
+    // A pure frontend reset: nothing was mutated. Closing the surface and
+    // resetting the machine keeps the next opening on a clean slate.
+    rssCreation.abandon();
+    setIsRssCreationOpen(false);
+  };
+
+  const handleRssDismiss = (): void => {
+    rssCreation.dismiss();
+    setIsRssCreationOpen(false);
+  };
 
   const handleCreated = (story: StoryCardDto): void => {
     // Drop the module-local SWR snapshot so the next useLibraryOverview
@@ -514,6 +550,19 @@ export function LibraryRoute(): React.JSX.Element {
         onRetry={structuredCreation.pickAndAnalyze}
         onDismiss={structuredCreation.dismiss}
       />
+      <CreateFromRssSurface
+        open={isRssCreationOpen}
+        status={rssCreation.status}
+        onFetch={(url) => {
+          void rssCreation.fetchPreview(url);
+        }}
+        onSelectItem={rssCreation.selectItem}
+        onAccept={() => {
+          void rssCreation.acceptCreation();
+        }}
+        onAbandon={handleRssAbandon}
+        onDismiss={handleRssDismiss}
+      />
       {renderCenter(
         state,
         retry,
@@ -528,7 +577,7 @@ export function LibraryRoute(): React.JSX.Element {
         handleCreateStoryRequest,
         preparationBadges,
         storyImport.pickAndAnalyze,
-        isImportBusy || isCreateFromFolderBusy,
+        isImportBusy || isCreateFromFolderBusy || isRssCreationActive,
       )}
       <DeviceStoryCollection
         state={deviceLibrary.state}
@@ -599,7 +648,15 @@ export function LibraryRoute(): React.JSX.Element {
         onCreateFromFolderRequest={() => {
           void structuredCreation.pickAndAnalyze();
         }}
-        isCreateFromFolderUnavailable={isImportBusy || isCreateFromFolderBusy}
+        isCreateFromFolderUnavailable={
+          isImportBusy || isCreateFromFolderBusy || isRssCreationActive
+        }
+        onCreateFromRssRequest={() => {
+          setIsRssCreationOpen(true);
+        }}
+        isCreateFromRssUnavailable={
+          isImportBusy || isCreateFromFolderBusy || isRssCreationActive
+        }
       />
     </>
   );

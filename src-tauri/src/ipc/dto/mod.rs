@@ -23,7 +23,8 @@ pub use import_export::{
     AcceptArtifactImportInputDto, AcceptStructuredCreationInputDto, CreatableSummaryDto,
     ExportStoryDialogInputDto, ExportStoryDialogOutcomeDto, ImportArtifactAnalysisDto,
     ImportAspectDto, ImportCategoryDto, ImportFindingDto, ImportQualityDto, ImportStateDto,
-    ImportableContentDto, StructuredCreationAnalysisDto,
+    ImportableContentDto, RssCreationOutcomeDto, RssItemRefDto, RssPreviewDto, RssPreviewItemDto,
+    StructuredCreationAnalysisDto,
 };
 pub use library::{LibraryOverviewDto, StoryCardDto};
 pub use story::{

@@ -19,6 +19,7 @@ pub enum AppErrorCode {
     TransferFailed,
     TransferOutcomeUnavailable,
     OfficialCatalogUnavailable,
+    RssSourceUnreachable,
     MediaInvalid,
     MediaProcessingFailed,
 }
@@ -213,6 +214,29 @@ impl AppError {
     ) -> Self {
         Self {
             code: AppErrorCode::OfficialCatalogUnavailable,
+            message: message.into(),
+            user_action: Some(user_action.into()),
+            details: None,
+        }
+    }
+
+    /// Constructed when the EXPLICIT RSS-source fetch fails at TRANSPORT:
+    /// an invalid address, an unreachable host, a timeout, an exhausted
+    /// budget, or an over-cap response. STRICTLY network: a LOCAL failure
+    /// of the accept (DB commit, clock, worker join) reuses the closed
+    /// `IMPORT_FAILED` taxonomy of the sibling creation flows. The stage
+    /// is carried by `details.stage` from a closed set, PII-free (never
+    /// the URL, never the host, never a raw network message). A CONTENT
+    /// problem (unreadable XML, a non-RSS feed, zero item, a diverged
+    /// source) is NEVER this code — it is a typed verdict in the DTO.
+    /// Never produced implicitly — the feed is only ever touched on a
+    /// deliberate user action.
+    pub fn rss_source_unreachable(
+        message: impl Into<String>,
+        user_action: impl Into<String>,
+    ) -> Self {
+        Self {
+            code: AppErrorCode::RssSourceUnreachable,
             message: message.into(),
             user_action: Some(user_action.into()),
             details: None,

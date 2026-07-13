@@ -1199,6 +1199,16 @@ A new `brouillon local` is created through a single modal dialog in the `library
 | Post-success flow | The module-local SWR cache for `useLibraryOverview` is invalidated, a fresh fetch is triggered, and the router navigates to `/story/:storyId/edit` with `replace: true` so the history stack stays flat. |
 | Failure recovery | On rejection, the dialog stays open, the typed title survives, the focus returns to the field, and the Rust-supplied `message` + `userAction` are rendered inside a `role="alert"` region below the field. |
 
+The dialog is the creation CHOICE: the interactive path (title → `Créer`)
+stays primary, and up to two OPTIONAL secondary entries hand over to the
+other creation flows — `Ou démarre depuis un dossier préparé hors de
+Rustory` + `Choisir un dossier…` (see `Structured Folder Creation
+Contract`) and `Démarrer depuis une source externe (RSS)` (see `External
+Source Creation Contract (RSS)`). Each secondary entry renders ONLY when
+the route wires its handler, closes the dialog first, then delegates; both
+are gated by the same cross-flow busy exclusivity (two review surfaces /
+native dialogs must never stack). No extra button lands in the library bar.
+
 ## Story Editor Shell Contract
 
 The `/story/:storyId/edit` route renders the `Story Editor Shell` — the
@@ -1646,6 +1656,151 @@ ADDS these documented sub-values to the reused set:
 - `other.cause` gains `media_promotion` (a retained media could not be
   promoted into the managed store, or its bytes changed kind since the
   re-analysis).
+
+## External Source Creation Contract (RSS)
+
+Starting a story from an **external source** (`Créer une histoire` →
+`Démarrer depuis une source externe (RSS)`) is a CREATION flow, the exact
+sibling of the structured-folder one: the user provides the address of an
+RSS feed they follow, Rustory fetches it ON EXPLICIT ACTION ONLY, and the
+accepted episode becomes an ORDINARY canonical local draft (fresh UUIDv7,
+`created_at = updated_at = now` — a birth), fully editable (`Full` scope by
+construction — the provenance lives in `story_local_imports`, which the
+edit-scope derivation never consults) and reviewable through the EXISTING
+import chip / report / resolution machinery.
+
+Scope declaration: **RSS 2.0 is the external source type activated by the
+official distribution in this version**; the general activation /
+governance of external sources (which sources are enabled, their visible
+convergence into `validate → prepare → transfer → verify`) is a SEPARATE
+capability, and the support-policy screen is another one. This flow
+persists NO source configuration, NO subscription: the feed address is
+provided at creation time and never stored (the provenance keeps the HOST
+only). An Atom or JSON feed receives an honest typed verdict (`format non
+supporté`) — no implicit partial support.
+
+Offline-first guardrail: the fetch runs ONLY on the explicit `Récupérer le
+flux` action (the exact discipline of the official-catalog refresh — no
+implicit traffic, ever). The core product flows stay 100% offline; a user
+who never opens this surface never generates a byte of RSS traffic.
+
+The flow is **two-phase, with no mutation before acceptance**:
+
+| Phase | Command | Effect |
+| --- | --- | --- |
+| Preview | `fetch_rss_source_preview` | Validates the address (Rust-authoritative), fetches the feed bounded, parses it (bounded, event-driven) and returns a typed preview DTO: the source HOST, the exploitable items (bounded list), the flow-level findings and the derived state — or a BLOCKED verdict. The preview is PURE: zero byte written, zero DB row, zero store file. |
+| Accept | `accept_rss_story_creation` | On the explicit `Créer le brouillon` action: RE-FETCHES and RE-PARSES the feed from zero (**the source is the authority** — the network equivalent of "the disk is the authority"; the frontend never re-submits content). The chosen item is resolved by STRICT `guid` when present, else by exact (`title`, `link`), THEN re-proven against the previewed-content FINGERPRINT carried by the reference (a canonical hash of title/text/guid/link/enclosure — the wire is a pointer + a PROOF): a missing/ambiguous item, a feed turned blocked, or a resolvable item whose CONTENT diverged since the preview is the honest recoverable refusal `La source a changé depuis la récupération.` with ZERO mutation — a creation can never ingest content the user never reread. Otherwise ONE `BEGIN IMMEDIATE` transaction inserts `stories` (canonical v3 minimal structure whose start node carries the cleaned item text; normalized title with the `Histoire de {hôte}` fallback) + `story_local_imports` (`source_format = 'rss'`, `source_name` = host, `artifact_checksum` = SHA-256 of the SECOND fetch's bytes — the bytes actually ingested). A transaction failure rolls back fully: nothing remains. |
+| Abandon | — (pure frontend) | `Abandonner` drops the preview. Nothing was mutated, so no command is needed. |
+
+Error taxonomy (the central discipline): **transport is an `AppError`,
+content is a typed VERDICT** — never the other way around.
+
+- Transport (`code = RSS_SOURCE_UNREACHABLE`): unreachable host, timeout,
+  budget exhausted, response over the byte cap, invalid address
+  (`details.stage` closed set: `url_invalid` / `request` / `read` /
+  `response_oversize` / `budget`). PII-free: a stable stage token — never
+  the URL, never the host in `details`, never a raw network message.
+  STRICTLY network: a LOCAL failure of the accept (DB commit, system
+  clock, worker join) reuses the closed `IMPORT_FAILED` taxonomy of the
+  sibling creation flows (`details.source` = `db_commit` /
+  `spawn_blocking_join` / `other`) — exactly like the folder flow; the
+  diagnostics follow the same boundary (`rss_source_unreachable` vs
+  `rss_creation_failed` categories).
+- Content verdicts (typed, in the DTO, NEVER an error): unreadable XML →
+  `Ce contenu n'est pas un flux RSS lisible.`; a non-RSS-2.0 root (Atom,
+  anything else) → `Ce flux n'est pas au format RSS supporté.`; zero
+  exploitable item → `Ce flux ne contient aucun épisode exploitable.`; and
+  at accept time, a diverged source → `La source a changé depuis la
+  récupération.` Every verdict carries the same next gesture: `Relance la
+  récupération du flux.`
+
+Bounds (all named, all tested): response cap 8 MiB read cap+1; parse depth
+32; at most 100 items retained (beyond: ignored, documented here); item
+text cleaned (HTML tags stripped, whitespace collapsed) and truncated at
+65 536 chars; feed address at most 2048 chars, `http`/`https` only, no
+userinfo, non-empty host; at most 5 redirects; fetch budget 30 s shared
+across the whole request. The RSS network client is DEDICATED (its own
+`reqwest` blocking client behind the `RssFeedSource` trait) — the
+official-catalog source is a NEIGHBOR, not a base class; the duplication
+of its disciplines (shared budget, cap+1 read, PII-free stages) is
+deliberate.
+
+Recognition model: the ingestion NEVER produces a `recognized` story. The
+nominal provenance finding `(source, ambiguïté)` — `Contenu ingéré depuis
+une source externe (RSS).` — is emitted for EVERY ingestion: external
+content that was not reread is never "clean", so the durable state floor
+is `needs_review` (the dedicated per-flow derivation: any `Blocking` →
+`blocked`, nothing created; else any `Missing` → `partial`; else →
+`needs_review`). The DB invariant (`recognized` ⟺ `findings_summary IS
+NULL`) holds by construction — an `rss` provenance row ALWAYS carries a
+summary. A referenced enclosure (podcast audio…) is NOT downloaded: it
+becomes the `(media, information manquante)` finding → state `partial` —
+that is the honest "qualité partielle" and a named review step. The
+existing review resolution (a sound write from the editor settles
+`needs_review` / `partial` → `resolved`) applies UNCHANGED — the
+resolution query is format-agnostic.
+
+Per-item findings vs flow findings: the PREVIEW carries the flow-level
+findings (`envelope` / `formatVersion` recognized + the nominal `source`
+ambiguity — floor state `needsReview`); the per-item facts surface in the
+item list itself (title, truncated summary, `hasEnclosure`). The findings
+PERSISTED at accept time are derived for the CHOSEN item (envelope +
+format + source + the item's title/text adjustments + its enclosure), so
+the created story's chip, report and durable state speak of what was
+actually ingested.
+
+UI state machine (owned by `use-rss-creation`, mounted in the library;
+surface `Création depuis une source externe`). The surface is OPENED by
+the creation dialog's third entry and renders NOTHING while closed; unlike
+the folder flow (whose input is a native picker), the address input lives
+IN the surface, so the open surface shows the posture line, the
+`Adresse du flux RSS` field and `Récupérer le flux` in every non-terminal
+state:
+
+| State | Rendering | Announcement |
+| --- | --- | --- |
+| closed | nothing | none |
+| `idle` (open) | the visible content-rights posture line (`Utilise uniquement des contenus dont tu as les droits : tes contenus personnels ou des contenus libres.`), the `Adresse du flux RSS` field, the `Récupérer le flux` CTA (soft-disabled while the address is empty) and `Abandonner` (closes the surface — a pure frontend reset, available in every non-terminal state) | none |
+| `fetching` | indeterminate `ProgressIndicator` labelled `Récupération du flux…` (Long Operation Rule); `Abandonner` stays reachable (the in-flight result is then ignored — the surface never resurrects) | deliberately NOT announced |
+| `review` (exploitable) | the source HOST (never the full address), the flow findings (existing category chips + messages), the BOUNDED selectable item list (title + truncated summary + the `Média distant non récupéré` note when `hasEnclosure`), then the UNIQUE CTA `Créer le brouillon` (aria-disabled until an item is selected AND while the typed address diverges from the reviewed one — the accept must never silently target the OLD source) THEN `Abandonner` in tab order. The field + `Récupérer le flux` stay available (re-fetch replaces the preview) | `aria-live="polite"` |
+| `review` (blocked verdict) | the verdict findings in a `role="alert"` block (message + gesture — nothing will be created), only `Abandonner`; the field + `Récupérer le flux` stay available to correct and retry | `role="alert"` |
+| `review` (source changed, after a refused accept) | the frozen verdict `La source a changé depuis la récupération.` + gesture in a `role="alert"` block; the stale items are DROPPED (never re-proposed); the field + `Récupérer le flux` stay available; `Abandonner` closes | `role="alert"` |
+| `creating` | indeterminate `ProgressIndicator` labelled `Création en cours…`; `Abandonner` stays reachable (the UI stops listening; an accept that already reached Rust still settles atomically — the fresh card appears on the next authoritative overview read) | deliberately NOT announced |
+| `created` | `Histoire créée dans ta bibliothèque` (success chip) + the created title + explicit `Fermer`; the library reloads (authoritative re-read); the editor is NOT auto-opened — the fresh card with its `à revoir` / `partiel` chip IS the sober success feedback. The address form is dropped; closing forgets the typed address (a feed URL can carry a private token) | `aria-live="polite"`, mounted, `aria-atomic` |
+| `failed` (transport) | the canonical `message` + `userAction` of the `AppError` in a `role="alert"` block, buttons `Réessayer` THEN `Fermer`. The `Adresse du flux RSS` field STAYS visible and editable (the gesture is "correct the address, then retry" — in-context, never close/reopen); `Réessayer` re-runs the fetch with the CURRENT field value, and the form's own fetch CTA yields to it | `role="alert"` |
+
+Entry point: the library bar keeps ONE primary CTA (`Créer une histoire`).
+The `CreateStoryDialog` gains a THIRD optional entry `Démarrer depuis une
+source externe (RSS)` (the exact pattern of the folder entry: not rendered
+when the route wires no handler, closes the dialog then delegates, gated
+by the same cross-flow busy exclusivity). The title path stays primary;
+the folder entry is untouched.
+
+Invariants (locked by tests):
+
+- **No mutation before acceptance**: the preview writes zero byte and zero
+  row; a blocked verdict creates NOTHING; `Abandonner` is a pure frontend
+  reset; a refused accept (`La source a changé`) mutates NOTHING.
+- **Re-proven accept**: the accept re-fetches and re-parses from zero;
+  the item is resolved by strict `guid` (else exact `title`+`link`) AND
+  its fresh content must match the previewed-content fingerprint; any
+  divergence refuses honestly — NEVER a creation from the stale preview
+  data, NEVER an approximate match, NEVER content the user did not
+  reread. The persisted checksum fingerprints the SECOND fetch's bytes.
+- **Atomicity**: ONE transaction for `stories` + provenance; a failure
+  rolls back fully (no media is ever downloaded, so there is nothing to
+  compensate).
+- **Floor**: an `rss` story is never `recognized`; its summary is never
+  NULL; the `(source, ambiguïté)` finding is always present.
+- **Orthogonality**: the `.rustory` import, the structured-folder creation,
+  the official catalog and every device/transfer flow are untouched; the
+  review resolution and the card chip/report are REUSED without
+  modification.
+- **PII hygiene**: the provenance, the diagnostics and every error carry
+  the HOST at most — never the full address (feed query strings can carry
+  private tokens), never the feed content.
+- Offline-first: no implicit fetch, ever; color is never the sole carrier;
+  a problem is never carried in a toast alone.
 
 ## Imported Story Edit Scope Contract
 

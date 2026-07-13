@@ -4,9 +4,12 @@ import {
   isExportStoryDialogOutcome,
   isImportArtifactAnalysis,
   isImportFinding,
+  isRssItemRef,
+  isRssPreview,
   isStructuredCreationAnalysis,
   type ExportStoryDialogOutcome,
   type ImportArtifactAnalysis,
+  type RssPreview,
   type StructuredCreationAnalysis,
 } from "./import-export";
 
@@ -500,5 +503,228 @@ describe("isStructuredCreationAnalysis", () => {
         state: "needsReview",
       }),
     ).toBe(false);
+  });
+});
+
+// ===== RSS external-source creation =====
+
+const RSS_PREVIEW_EXPLOITABLE: RssPreview = {
+  sourceHost: "exemple.fr",
+  items: [
+    {
+      title: "Episode 1",
+      summary: "Premier texte.",
+      hasEnclosure: false,
+      itemRef: { kind: "guid", guid: "g-1", fingerprint: "a".repeat(64) },
+    },
+    {
+      title: "",
+      summary: "Sans titre.",
+      hasEnclosure: true,
+      itemRef: {
+        kind: "titleLink",
+        title: "",
+        link: null,
+        fingerprint: "b".repeat(64),
+      },
+    },
+  ],
+  findings: [
+    { aspect: "envelope", category: "recognized", message: "Le flux RSS est lisible." },
+    {
+      aspect: "formatVersion",
+      category: "recognized",
+      message: "Le flux est au format RSS 2.0 supporté.",
+    },
+    {
+      aspect: "source",
+      category: "ambiguous",
+      message:
+        "Contenu ingéré depuis une source externe (RSS). Relis le texte et complète l'histoire avant de l'utiliser.",
+    },
+  ],
+  state: "needsReview",
+  blocked: false,
+};
+
+const RSS_PREVIEW_BLOCKED: RssPreview = {
+  sourceHost: "exemple.fr",
+  items: [],
+  findings: [
+    {
+      aspect: "envelope",
+      category: "blocking",
+      message: "Ce contenu n'est pas un flux RSS lisible. Relance la récupération du flux.",
+    },
+  ],
+  state: "blocked",
+  blocked: true,
+};
+
+describe("isRssItemRef", () => {
+  const FP = "a".repeat(64);
+
+  it("accepts the two documented variants (with their content proof)", () => {
+    expect(isRssItemRef({ kind: "guid", guid: "g-1", fingerprint: FP })).toBe(
+      true,
+    );
+    expect(
+      isRssItemRef({
+        kind: "titleLink",
+        title: "Episode",
+        link: null,
+        fingerprint: FP,
+      }),
+    ).toBe(true);
+    expect(
+      isRssItemRef({
+        kind: "titleLink",
+        title: "Episode",
+        link: "https://exemple.fr/ep",
+        fingerprint: FP,
+      }),
+    ).toBe(true);
+  });
+
+  it("rejects an empty guid, a foreign kind and non-objects", () => {
+    expect(isRssItemRef({ kind: "guid", guid: "", fingerprint: FP })).toBe(
+      false,
+    );
+    expect(isRssItemRef({ kind: "index", index: 0, fingerprint: FP })).toBe(
+      false,
+    );
+    expect(isRssItemRef(null)).toBe(false);
+    expect(isRssItemRef("guid")).toBe(false);
+  });
+
+  it("rejects a reference without a well-formed content proof", () => {
+    expect(isRssItemRef({ kind: "guid", guid: "g-1" })).toBe(false);
+    expect(
+      isRssItemRef({ kind: "guid", guid: "g-1", fingerprint: "court" }),
+    ).toBe(false);
+    expect(
+      isRssItemRef({
+        kind: "titleLink",
+        title: "Episode",
+        link: null,
+        fingerprint: "Z".repeat(64),
+      }),
+    ).toBe(false);
+  });
+});
+
+describe("isRssPreview", () => {
+  it("accepts an exploitable preview with the nominal source ambiguity", () => {
+    expect(isRssPreview(RSS_PREVIEW_EXPLOITABLE)).toBe(true);
+  });
+
+  it("accepts a blocked verdict with zero item", () => {
+    expect(isRssPreview(RSS_PREVIEW_BLOCKED)).toBe(true);
+  });
+
+  it("rejects a blocked flag diverging from the state", () => {
+    expect(
+      isRssPreview({ ...RSS_PREVIEW_EXPLOITABLE, blocked: true }),
+    ).toBe(false);
+    expect(isRssPreview({ ...RSS_PREVIEW_BLOCKED, blocked: false })).toBe(
+      false,
+    );
+  });
+
+  it("rejects an exploitable preview whose state is not the needsReview floor", () => {
+    expect(
+      isRssPreview({ ...RSS_PREVIEW_EXPLOITABLE, state: "recognized" }),
+    ).toBe(false);
+    expect(
+      isRssPreview({ ...RSS_PREVIEW_EXPLOITABLE, state: "partial" }),
+    ).toBe(false);
+  });
+
+  it("rejects an exploitable preview missing the nominal source finding", () => {
+    expect(
+      isRssPreview({
+        ...RSS_PREVIEW_EXPLOITABLE,
+        findings: RSS_PREVIEW_EXPLOITABLE.findings.filter(
+          (f) => f.aspect !== "source",
+        ),
+      }),
+    ).toBe(false);
+  });
+
+  it("rejects an exploitable preview with zero item", () => {
+    expect(isRssPreview({ ...RSS_PREVIEW_EXPLOITABLE, items: [] })).toBe(
+      false,
+    );
+  });
+
+  it("rejects a blocked verdict that still carries items", () => {
+    expect(
+      isRssPreview({
+        ...RSS_PREVIEW_BLOCKED,
+        items: RSS_PREVIEW_EXPLOITABLE.items,
+      }),
+    ).toBe(false);
+  });
+
+  it("rejects a blocked verdict without a blocking finding", () => {
+    expect(
+      isRssPreview({
+        ...RSS_PREVIEW_BLOCKED,
+        findings: [
+          {
+            aspect: "envelope",
+            category: "recognized",
+            message: "Le flux RSS est lisible.",
+          },
+        ],
+      }),
+    ).toBe(false);
+  });
+
+  it("rejects a sourceHost that is not host-only (PII drift guard)", () => {
+    for (const drifted of [
+      "https://exemple.fr/flux.xml",
+      "exemple.fr/chemin",
+      "exemple.fr:8000",
+      "exemple.fr?token=secret",
+      "exemple.fr#frag",
+      "user@exemple.fr",
+      "exem ple.fr",
+      "exemple.fr\u0000",
+      "h".repeat(97),
+    ]) {
+      expect(
+        isRssPreview({ ...RSS_PREVIEW_EXPLOITABLE, sourceHost: drifted }),
+      ).toBe(false);
+    }
+  });
+
+  it("rejects an empty source host and a selectable item with no text at all", () => {
+    expect(isRssPreview({ ...RSS_PREVIEW_EXPLOITABLE, sourceHost: "" })).toBe(
+      false,
+    );
+    expect(
+      isRssPreview({
+        ...RSS_PREVIEW_EXPLOITABLE,
+        items: [
+          {
+            title: "",
+            summary: "",
+            hasEnclosure: false,
+            itemRef: { kind: "guid", guid: "g", fingerprint: "a".repeat(64) },
+          },
+        ],
+      }),
+    ).toBe(false);
+  });
+
+  it("accepts the source aspect in the closed finding set", () => {
+    expect(
+      isImportFinding({
+        aspect: "source",
+        category: "ambiguous",
+        message: "Contenu ingéré depuis une source externe (RSS).",
+      }),
+    ).toBe(true);
   });
 });

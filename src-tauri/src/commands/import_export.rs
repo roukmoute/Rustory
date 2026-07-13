@@ -1,21 +1,31 @@
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use tauri::{async_runtime, AppHandle, Manager, State};
 use tauri_plugin_dialog::{DialogExt, FilePath};
 
 use crate::application::import_export::{
-    self, import, structured_creation, ExportStoryInput, ImportAnalysis,
+    self, import, rss_creation, structured_creation, ExportStoryInput, ImportAnalysis,
+    RssAcceptPhase, RssCreationOutcome,
 };
 use crate::application::story::get_story_detail;
 use crate::commands::shared::validate_story_id;
 use crate::domain::export::RUSTORY_ARTIFACT_EXTENSION;
+use crate::domain::import::feed_url_host;
 use crate::domain::shared::AppError;
+use crate::infrastructure::diagnostics::import_log;
+use crate::ipc::dto::import_export::state_db_tag;
 use crate::ipc::dto::{
     AcceptArtifactImportInputDto, AcceptStructuredCreationInputDto, ExportStoryDialogInputDto,
-    ExportStoryDialogOutcomeDto, ImportArtifactAnalysisDto, StoryCardDto,
-    StructuredCreationAnalysisDto,
+    ExportStoryDialogOutcomeDto, ImportArtifactAnalysisDto, RssCreationOutcomeDto, RssItemRefDto,
+    RssPreviewDto, StoryCardDto, StructuredCreationAnalysisDto,
 };
 use crate::AppState;
+
+/// Wall-clock budget for one feed fetch (preview OR the accept's
+/// re-fetch), connection to last body byte. Short compared to the catalog
+/// budget: ONE bounded document, no cover downloads.
+const RSS_FETCH_BUDGET: Duration = Duration::from_secs(30);
 
 const EXPORT_DIALOG_FILTER_NAME: &str = "Artefact Rustory";
 const MAX_DESTINATION_PATH_LEN: usize = 4096;
@@ -495,6 +505,173 @@ pub async fn accept_structured_creation(
     .map_err(|_| structured_creation::spawn_blocking_join_error())?
 }
 
+/// Fetch + analyze a user-provided RSS feed (phase 1, NO mutation, NO DB).
+///
+/// The ONLY networked action of the external-source flow, on the explicit
+/// `Récupérer le flux` click (offline-first guardrail — the exact
+/// discipline of `refresh_official_catalog`). Runs the bounded fetch +
+/// parse on a `spawn_blocking` worker; the DB is NEVER touched (the
+/// preview is pure). Only TRANSPORT failures (invalid address,
+/// unreachable source, over-cap response) reject with
+/// `RSS_SOURCE_UNREACHABLE`; every feed-CONTENT problem (unreadable XML,
+/// a non-RSS root, zero exploitable item) is the typed verdict inside the
+/// resolved DTO.
+#[tauri::command]
+pub async fn fetch_rss_source_preview(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    feed_url: String,
+) -> Result<RssPreviewDto, AppError> {
+    let source = state.rss_source.clone();
+    // Best-effort diagnostics carry the HOST at most — resolved up-front,
+    // before the URL moves into the worker.
+    let host_for_log = feed_url_host(&feed_url);
+    let outcome = async_runtime::spawn_blocking(move || {
+        rss_creation::preview_rss_source(source.as_ref(), &feed_url, RSS_FETCH_BUDGET)
+    })
+    .await
+    .map_err(|_| rss_creation::spawn_blocking_join_error())?;
+
+    match &outcome {
+        Ok(preview) => {
+            let _ = import_log::record_event(
+                &app,
+                import_log::Event::RssPreviewSettled {
+                    host: preview.source_host.clone(),
+                    state: rss_verdict_tag(&preview.analysis),
+                    item_count: preview.analysis.items.len(),
+                },
+            );
+        }
+        Err(err) => record_rss_failure(&app, host_for_log, err),
+    }
+
+    let preview = outcome?;
+    Ok(RssPreviewDto::from_analysis(
+        preview.source_host,
+        &preview.analysis,
+    ))
+}
+
+/// Commit one previewed feed item into a canonical local draft (phase 2).
+///
+/// RE-fetches and re-parses the feed from zero on a blocking worker (the
+/// source is the authority; the wire reference is a pointer, never
+/// content), WITHOUT the DB lock — the lock is taken only for the single
+/// atomic transaction, INSIDE the worker so no `MutexGuard` ever lives
+/// across an `await`. A diverged source resolves with the typed
+/// `sourceChanged` refusal (nothing created); only transport rejects.
+#[tauri::command]
+pub async fn accept_rss_story_creation(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    feed_url: String,
+    item_ref: RssItemRefDto,
+) -> Result<RssCreationOutcomeDto, AppError> {
+    let source = state.rss_source.clone();
+    let db = state.db.clone();
+    let host_for_log = feed_url_host(&feed_url);
+    let outcome = async_runtime::spawn_blocking(move || -> Result<RssCreationOutcome, AppError> {
+        let reference = item_ref.to_domain();
+        let expected_fingerprint = item_ref.fingerprint().to_string();
+        match rss_creation::prepare_rss_story_creation(
+            source.as_ref(),
+            &feed_url,
+            &reference,
+            &expected_fingerprint,
+            RSS_FETCH_BUDGET,
+        )? {
+            RssAcceptPhase::SourceChanged => Ok(RssCreationOutcome::SourceChanged),
+            RssAcceptPhase::Prepared(prepared) => {
+                let mut guard = db.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                rss_creation::commit_rss_story_creation(&mut guard, *prepared)
+                    .map(|story| RssCreationOutcome::Created { story })
+            }
+        }
+    })
+    .await
+    .map_err(|_| rss_creation::spawn_blocking_join_error())?;
+
+    match &outcome {
+        Ok(RssCreationOutcome::Created { story }) => {
+            let _ = import_log::record_event(
+                &app,
+                import_log::Event::RssCreationSettled {
+                    host: host_for_log.clone().unwrap_or_default(),
+                    import_state: story
+                        .import_state
+                        .map(|state| state.wire_tag())
+                        .unwrap_or("unknown"),
+                },
+            );
+        }
+        Ok(RssCreationOutcome::SourceChanged) => {
+            let _ = import_log::record_event(
+                &app,
+                import_log::Event::RssSourceChanged {
+                    host: host_for_log.clone().unwrap_or_default(),
+                },
+            );
+        }
+        Err(err) => record_rss_failure(&app, host_for_log.clone(), err),
+    }
+
+    Ok(match outcome? {
+        RssCreationOutcome::Created { story } => RssCreationOutcomeDto::Created {
+            report: story.import_report.clone().unwrap_or_default(),
+            story,
+        },
+        RssCreationOutcome::SourceChanged => RssCreationOutcomeDto::SourceChanged,
+    })
+}
+
+/// The diagnostic verdict tag of a feed analysis: the durable-state tag
+/// for an exploitable feed, the literal `blocked` for a typed verdict
+/// (`state_db_tag` deliberately never emits it — it is not persistable).
+fn rss_verdict_tag(analysis: &crate::domain::import::RssAnalysis) -> &'static str {
+    if analysis.is_blocked() {
+        "blocked"
+    } else {
+        state_db_tag(analysis.state)
+    }
+}
+
+/// Best-effort failure trace (host at most). The event category follows
+/// the ERROR CODE so the closed diagnostic categories stay honest: only a
+/// real transport failure (`RSS_SOURCE_UNREACHABLE`) lands under
+/// `rss_source_unreachable`; a local failure (DB commit, clock, worker
+/// join — `IMPORT_FAILED`…) is an `rss_creation_failed` line.
+fn record_rss_failure(app: &AppHandle, host: Option<String>, err: &AppError) {
+    let _ = import_log::record_event(app, rss_failure_event(host.unwrap_or_default(), err));
+}
+
+/// The (pure, unit-tested) category dispatch of a failure trace.
+fn rss_failure_event(host: String, err: &AppError) -> import_log::Event {
+    fn detail(err: &AppError, key: &str) -> String {
+        err.details
+            .as_ref()
+            .and_then(|details| details.get(key))
+            .and_then(|value| value.as_str())
+            .unwrap_or("unknown")
+            .to_string()
+    }
+    if err.code == crate::domain::shared::AppErrorCode::RssSourceUnreachable {
+        import_log::Event::RssSourceUnreachable {
+            host,
+            stage: detail(err, "stage"),
+        }
+    } else {
+        import_log::Event::RssCreationFailed {
+            host,
+            code: serde_json::to_value(&err.code)
+                .ok()
+                .and_then(|value| value.as_str().map(str::to_string))
+                .unwrap_or_else(|| "UNKNOWN".to_string()),
+            source: detail(err, "source"),
+        }
+    }
+}
+
 /// Read an artifact file with a HARD upper bound, refusing non-regular files.
 ///
 /// The file TYPE is gated BEFORE opening: `std::fs::metadata` (which follows
@@ -544,6 +721,29 @@ fn read_artifact_bounded(path: &Path) -> Result<Vec<u8>, AppError> {
 mod tests {
     use super::*;
     use crate::domain::shared::AppErrorCode;
+
+    #[test]
+    fn rss_failure_event_dispatches_on_the_error_code() {
+        // A REAL transport failure lands under `rss_source_unreachable`…
+        let transport = crate::infrastructure::device::rss_source::fetch_error("request");
+        let event = rss_failure_event("exemple.fr".into(), &transport);
+        let v = serde_json::to_value(&event).expect("ser");
+        assert_eq!(v["category"], "rss_source_unreachable");
+        assert_eq!(v["host"], "exemple.fr");
+        assert_eq!(v["stage"], "request");
+
+        // …while a LOCAL accept failure (DB commit, clock, join —
+        // IMPORT_FAILED) is an `rss_creation_failed` line: the closed
+        // diagnostic categories never count a SQLite/clock failure as a
+        // network problem.
+        let local = AppError::import_failed("Création impossible.", "Réessaie.")
+            .with_details(serde_json::json!({ "source": "db_commit", "stage": "commit" }));
+        let event = rss_failure_event("exemple.fr".into(), &local);
+        let v = serde_json::to_value(&event).expect("ser");
+        assert_eq!(v["category"], "rss_creation_failed");
+        assert_eq!(v["code"], "IMPORT_FAILED");
+        assert_eq!(v["source"], "db_commit");
+    }
 
     fn assert_invalid_path(err: &AppError, cause: &str) {
         assert_eq!(err.code, AppErrorCode::ExportDestinationUnavailable);
