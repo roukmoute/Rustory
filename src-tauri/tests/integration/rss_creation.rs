@@ -13,7 +13,9 @@ use rustory_lib::application::import_export::{
     accept_rss_story_creation, preview_rss_source, RssCreationOutcome,
 };
 use rustory_lib::application::story::{node, scope};
-use rustory_lib::domain::import::{parse_rss, rss_item_fingerprint, ImportState, RssItemRef};
+use rustory_lib::domain::import::{
+    official_content_sources, parse_rss, rss_item_fingerprint, ImportState, RssItemRef,
+};
 use rustory_lib::domain::shared::{AppError, AppErrorCode};
 use rustory_lib::infrastructure::db::{self, DbHandle};
 use rustory_lib::infrastructure::device::{
@@ -30,18 +32,20 @@ type ScriptedFetch = Result<Vec<u8>, AppError>;
 /// Scripted feed source for the integration crate (the lib's recorder mock
 /// is `cfg(test)`-gated): pops the next programmed response (FIFO) and
 /// records every requested URL — the proof of the accept's re-fetch.
+/// `pub(crate)` so the content-source convergence journey reuses the SAME
+/// recorder instead of growing a second harness.
 #[derive(Clone, Default)]
-struct ScriptedRssSource {
+pub(crate) struct ScriptedRssSource {
     queue: Arc<Mutex<Vec<ScriptedFetch>>>,
     requests: Arc<Mutex<Vec<String>>>,
 }
 
 impl ScriptedRssSource {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
-    fn enqueue_body(&self, body: impl Into<Vec<u8>>) {
+    pub(crate) fn enqueue_body(&self, body: impl Into<Vec<u8>>) {
         self.queue
             .lock()
             .unwrap_or_else(|p| p.into_inner())
@@ -55,7 +59,7 @@ impl ScriptedRssSource {
             .push(Err(err));
     }
 
-    fn request_count(&self) -> usize {
+    pub(crate) fn request_count(&self) -> usize {
         self.requests
             .lock()
             .unwrap_or_else(|p| p.into_inner())
@@ -146,7 +150,8 @@ fn journey_1_preview_is_pure_then_the_accept_lands_a_reviewable_draft() {
     source.enqueue_body(nominal_feed());
 
     // Phase 1 — the preview parses the feed and mutates NOTHING.
-    let preview = preview_rss_source(&source, FEED_URL, BUDGET).expect("preview");
+    let preview =
+        preview_rss_source(official_content_sources(), &source, FEED_URL, BUDGET).expect("preview");
     assert_eq!(preview.source_host, "exemple.fr");
     assert_eq!(preview.analysis.items.len(), 2);
     assert_eq!(preview.analysis.state, ImportState::NeedsReview);
@@ -157,6 +162,7 @@ fn journey_1_preview_is_pure_then_the_accept_lands_a_reviewable_draft() {
     // + its provenance atomically.
     let outcome = accept_rss_story_creation(
         &mut db,
+        official_content_sources(),
         &source,
         FEED_URL,
         &RssItemRef::Guid("g-1".into()),
@@ -246,6 +252,7 @@ fn an_enclosure_item_lands_partial_with_the_missing_media_finding() {
     source.enqueue_body(body.clone());
     let outcome = accept_rss_story_creation(
         &mut db,
+        official_content_sources(),
         &source,
         FEED_URL,
         &RssItemRef::Guid("g-p".into()),
@@ -272,12 +279,14 @@ fn transport_failures_reject_and_create_nothing_on_both_phases() {
     let source = ScriptedRssSource::new();
     // Preview transport failure.
     source.enqueue_failure(transport_error("request"));
-    let err = preview_rss_source(&source, FEED_URL, BUDGET).expect_err("preview transport");
+    let err = preview_rss_source(official_content_sources(), &source, FEED_URL, BUDGET)
+        .expect_err("preview transport");
     assert_eq!(err.code, AppErrorCode::RssSourceUnreachable);
     // Accept transport failure (including the oversize refusal shape).
     source.enqueue_failure(transport_error("response_oversize"));
     let err = accept_rss_story_creation(
         &mut db,
+        official_content_sources(),
         &source,
         FEED_URL,
         &RssItemRef::Guid("g-1".into()),
@@ -312,13 +321,14 @@ fn blocked_feeds_are_typed_verdicts_and_create_nothing() {
         ),
     ] {
         source.enqueue_body(body.clone());
-        let preview = preview_rss_source(&source, FEED_URL, BUDGET).expect("typed verdict");
+        let preview = preview_rss_source(official_content_sources(), &source, FEED_URL, BUDGET).expect("typed verdict");
         assert!(preview.analysis.is_blocked(), "{expect_blocked_aspect}");
 
         // The SAME feed at accept time is the honest recoverable refusal.
         source.enqueue_body(body);
         let outcome = accept_rss_story_creation(
             &mut db,
+            official_content_sources(),
             &source,
             FEED_URL,
             &RssItemRef::Guid("g-1".into()),
@@ -338,7 +348,8 @@ fn a_source_that_changed_between_preview_and_accept_refuses_honestly() {
     let source = ScriptedRssSource::new();
     // The preview serves an item…
     source.enqueue_body(nominal_feed());
-    let preview = preview_rss_source(&source, FEED_URL, BUDGET).expect("preview");
+    let preview =
+        preview_rss_source(official_content_sources(), &source, FEED_URL, BUDGET).expect("preview");
     assert_eq!(preview.analysis.items.len(), 2);
     // …the accept re-fetches a DIFFERENT feed where the item is gone.
     source.enqueue_body(feed_xml(
@@ -346,6 +357,7 @@ fn a_source_that_changed_between_preview_and_accept_refuses_honestly() {
     ));
     let outcome = accept_rss_story_creation(
         &mut db,
+        official_content_sources(),
         &source,
         FEED_URL,
         &RssItemRef::Guid("g-1".into()),
@@ -368,13 +380,15 @@ fn a_resolvable_item_whose_content_diverged_refuses_honestly() {
     let source = ScriptedRssSource::new();
     let previewed = nominal_feed();
     source.enqueue_body(previewed.clone());
-    let preview = preview_rss_source(&source, FEED_URL, BUDGET).expect("preview");
+    let preview =
+        preview_rss_source(official_content_sources(), &source, FEED_URL, BUDGET).expect("preview");
     assert_eq!(preview.analysis.items.len(), 2);
     source.enqueue_body(feed_xml(
         "<item><title>Episode 1</title><description>Texte RÉÉCRIT depuis la preview.</description><guid>g-1</guid></item>",
     ));
     let outcome = accept_rss_story_creation(
         &mut db,
+        official_content_sources(),
         &source,
         FEED_URL,
         &RssItemRef::Guid("g-1".into()),
@@ -397,6 +411,7 @@ fn the_created_card_surfaces_on_the_overview_projection_with_the_rss_report() {
     source.enqueue_body(nominal_feed());
     let outcome = accept_rss_story_creation(
         &mut db,
+        official_content_sources(),
         &source,
         FEED_URL,
         &RssItemRef::Guid("g-2".into()),

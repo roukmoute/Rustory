@@ -5,6 +5,9 @@ mod import_export;
 #[path = "contracts/rss_creation.rs"]
 mod rss_creation;
 
+#[path = "contracts/content_source_policy.rs"]
+mod content_source_policy;
+
 #[path = "contracts/library_overview.rs"]
 mod library_overview;
 

@@ -306,6 +306,7 @@ pub fn run() {
             commands::device::import_device_story,
             commands::story::move_story_node,
             commands::device::read_connected_lunii,
+            commands::import_export::read_content_source_policy,
             commands::device::read_device_library,
             commands::story::read_node_media,
             commands::catalog::read_pack_cover,

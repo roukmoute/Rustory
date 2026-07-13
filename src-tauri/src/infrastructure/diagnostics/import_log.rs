@@ -54,6 +54,14 @@ pub enum Event {
         code: String,
         source: String,
     },
+    /// A creation flow was refused by the content-source POLICY: the
+    /// requested kind is not enabled by the distribution
+    /// (`CONTENT_SOURCE_UNAVAILABLE`). The KIND wire tag only — the
+    /// refusal precedes any network dispatch, so no host exists yet (and
+    /// the PII discipline forbids the address anyway). NEVER counted as
+    /// [`Event::RssSourceUnreachable`] (network) nor
+    /// [`Event::RssCreationFailed`] (local).
+    ContentSourceBlocked { kind: String },
 }
 
 /// Append a single event to the import log. Production entry point —
@@ -137,6 +145,21 @@ mod tests {
         assert!(lines[0].contains("\"host\":\"exemple.fr\""));
         assert!(lines[1].contains("\"category\":\"rss_source_unreachable\""));
         // Host only — never a scheme/path fragment of the full address.
+        assert!(!content.contains("http"));
+    }
+
+    #[test]
+    fn content_source_blocked_serializes_the_kind_and_nothing_else() {
+        let dir = TempDir::new().expect("tempdir");
+        let log = dir.path().join("import.jsonl");
+        record_event_at_path(&log, Event::ContentSourceBlocked { kind: "rss".into() })
+            .expect("write");
+        let content = std::fs::read_to_string(&log).expect("read");
+        assert!(content.contains("\"category\":\"content_source_blocked\""));
+        assert!(content.contains("\"kind\":\"rss\""));
+        // A policy refusal precedes any network dispatch: no host, no
+        // address fragment may ever appear on the line.
+        assert!(!content.contains("host"));
         assert!(!content.contains("http"));
     }
 }

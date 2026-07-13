@@ -140,6 +140,9 @@ Preferred patterns:
 - `Préparation indisponible: aucun appareil connecté`
 - `Préparation indisponible: profil non supporté`
 - `Préparation indisponible: corrige les blocages d'abord`
+- `Source indisponible: non activée dans la distribution officielle` — a creation-dialog content-source entry whose kind the current distribution does not activate (see `Content Source Activation Contract`); the reason is Rust-authoritative (carried by the policy DTO), keyboard-reachable
+- `Source indisponible: bloquée par la politique de distribution` — same rendering for a kind deliberately blocked by the distribution policy; no line of the current matrix carries this state, but the copy is frozen and tested
+- `Sources externes indisponibles pour l'instant.` — the fail-closed reason when the policy read itself failed (or no policy was handed to the dialog): every external-source entry renders disabled, never active-by-default
 
 For a device-pack story (`titleOnly` edit scope) the content zones render the
 named pack states INSTEAD of the controls (see `Imported Story Edit Scope
@@ -1209,6 +1212,22 @@ the route wires its handler, closes the dialog first, then delegates; both
 are gated by the same cross-flow busy exclusivity (two review surfaces /
 native dialogs must never stack). No extra button lands in the library bar.
 
+The CONTENT-SOURCE section of the dialog (the RSS entry plus the known
+non-activated kinds) is additionally DRIVEN by the distribution policy
+(see `Content Source Activation Contract`): the route reads
+`read_content_source_policy` when the dialog opens (a pure, point-in-time
+read — no cache, no authoritative frontend state) and hands the result to
+the dialog. An `enabled` kind renders its active entry plus the frozen
+entry-level activation marker (`Activée par la distribution officielle`);
+a non-enabled kind renders VISIBLE but DISABLED (`aria-disabled`, the
+reason keyboard-reachable) with the Rust-carried frozen reason (the
+`Disabled Actions and Reasons` pattern); a missing or failed policy read
+renders EVERY external-source entry disabled with the fail-closed reason
+`Sources externes indisponibles pour l'instant.` — never
+active-by-default. The title path and the structured-folder entry are
+NEVER policy-gated: they are local flows, not "additional content
+sources", and a policy read failure must never block them.
+
 ## Story Editor Shell Contract
 
 The `/story/:storyId/edit` route renders the `Story Editor Shell` — the
@@ -1657,6 +1676,110 @@ ADDS these documented sub-values to the reused set:
   promoted into the managed store, or its bytes changed kind since the
   re-analysis).
 
+## Content Source Activation Contract
+
+Starting a story from an ADDITIONAL content source (an RSS feed today) is
+governed by the OFFICIAL CONTENT SOURCE REGISTRY: a distribution-owned
+matrix decided in Rust, line by line (the exact pattern of the device
+support matrix — activated line by line, never wholesale), that says which
+source kinds this distribution activates. Activating a source is a
+DISTRIBUTION decision, never a user setting: no table, no migration, no
+settings surface, no persistence — an alternative distribution edits the
+matrix itself, and the visible "default configuration" required by the
+distribution policy IS this code plus its frozen, tested copies.
+
+Closed source kinds (wire tags): `rss` / `atom` / `jsonFeed`, with the
+frozen labels `Flux RSS` / `Flux Atom` / `Flux JSON Feed`. Closed
+activation states (wire tags):
+
+| Activation (wire) | Product wording | Meaning |
+| --- | --- | --- |
+| `enabled` | `activée par la distribution officielle` | The kind may be used to create a story; its creation entry is active and carries the frozen entry-level activation marker |
+| `notActivated` | `non activée dans la distribution actuelle` | The kind is KNOWN but not activated by this distribution (not implemented / not validated by the support policy); its creation entry renders visible but DISABLED with the frozen short reason |
+| `blockedByPolicy` | `bloquée par la politique de distribution` | The kind is deliberately blocked (protected-content-oriented flows are never activated by default); same disabled rendering with its own frozen reason. NO line of the CURRENT matrix carries this state — the variant, its copies and its mappings exist and are tested so that the day a blocked source appears is a re-scope, never an invention |
+
+Current official matrix (frozen by tests, one test per line): `rss` →
+`enabled` (its ingestion mechanism is shipped); `atom` → `notActivated`;
+`jsonFeed` → `notActivated` (both are known kinds whose ingestion is not
+implemented and whose activation the support policy has not validated). A
+kind absent from the matrix is fail-closed `notActivated` — never a panic,
+never enabled-by-default.
+
+Where the policy is decided, enforced and surfaced:
+
+- **Rust alone decides.** The registry lives in the pure domain; the
+  `read_content_source_policy` command serializes it (kind, frozen label,
+  activation, frozen full reason for the non-enabled lines — absent on an
+  enabled line) as a PURE, synchronous read: zero network, zero DB, zero
+  lock. The frontend NEVER hardcodes the source list, the labels or the
+  reasons: it renders what Rust declares.
+- **The application facades refuse BEFORE any I/O.** Both RSS facades
+  (preview AND accept) consult the matrix they receive as a parameter and
+  refuse a non-enabled kind with the dedicated
+  `CONTENT_SOURCE_UNAVAILABLE` error BEFORE the address validation and
+  BEFORE any network dispatch — zero fetch on a policy refusal, proven by
+  the recording mock. The message + gesture are frozen
+  (`product-language.md`). Fail-closed everywhere: a kind missing from the
+  received matrix refuses exactly like a `notActivated` one.
+- **The creation dialog renders the policy.** See `Story Creation
+  Contract`: the content-source entries are DRIVEN by the read policy —
+  `enabled` → active entry with the frozen activation marker;
+  `notActivated` / `blockedByPolicy` → visible but disabled with the
+  frozen reason (the `Disabled Actions and Reasons` pattern); policy read
+  failed or absent → every external-source entry disabled with the
+  fail-closed reason (`Sources externes indisponibles pour l'instant.`) —
+  never active-by-default, never blocking the primary title path.
+- **The RSS surface keeps the activation visible.** See `External Source
+  Creation Contract (RSS)`: the frozen mention `Source activée par la
+  distribution officielle.` renders from the surface's opening, DISTINCT
+  from (and next to) the content-rights posture line — the posture speaks
+  of the CONTENT the user feeds in, the mention speaks of the SOURCE KIND
+  the distribution activates; the two coexist. A
+  `CONTENT_SOURCE_UNAVAILABLE` refusal renders the dedicated calm
+  `unavailable` surface state (defence in depth — nominally unreachable,
+  since the dialog never activates a non-enabled source).
+
+Three sealed regimes — never merged, each with its own code, state and
+vocabulary (`indisponible` ≠ `échoué`, the Product Glossary distinction):
+
+| Regime | Carrier | Surface state | Gesture |
+| --- | --- | --- | --- |
+| POLICY refusal (requested source kind not enabled) | `AppError` code `CONTENT_SOURCE_UNAVAILABLE` | `unavailable` — calm (`role="status"`), frozen message + gesture, NO `Réessayer` (a retry never changes a distribution policy) | close / pick an enabled source |
+| TRANSPORT failure (network) | `AppError` code `RSS_SOURCE_UNREACHABLE` | `failed` — `role="alert"`, the address field stays editable, `Réessayer` | correct the address, then retry |
+| CONTENT verdict (unreadable / non-RSS / empty / diverged) | typed DTO verdict, never an error | `review` (blocked verdict) | `Relance la récupération du flux.` |
+
+Never requalify across regimes: an Atom URL pasted into the RSS surface
+stays the FORMAT verdict `Ce flux n'est pas au format RSS supporté.` (the
+user used the RSS source — an ENABLED kind — on non-RSS content); the
+policy refusal concerns the requested source KIND only, never the fetched
+bytes, never the network.
+
+Convergence (the governance proof): a story created from an enabled source
+is an ORDINARY canonical story — it enters the EXISTING `Story Validation
+/ Preflight Contract`, `Story Preparation Contract`, `Story Transfer
+Contract` and `Story Verification Contract` with NO new state, no special
+path, no duplicated command, and receives EXACTLY the verdicts of its
+native twin at every stage. In the CURRENT distribution a locally-born
+story (title path, structured folder and external source alike) carries no
+device-format pack, so the shared transfer gate refuses it honestly
+(`NotTransferable`, zero device byte — see `Disabled Actions and Reasons`:
+`Envoi indisponible: histoire native non transférable (pas de pack
+appareil)`); the native-story writer is a deferred capability tracked in
+the deferred work, NOT a special path of this flow. An end-to-end
+integration test keeps the claim falsifiable on real I/O: the REAL
+creation, validation, preparation and transfer facades run against a
+writable mount; the ingested story and a byte-identical native twin must
+stay indistinguishable stage by stage (the honest refusal included, the
+device bytes proven untouched), while an imported-pack witness driven
+through the SAME transfer facade reaches the VERIFIED terminal — proving
+the shared pipeline runs to verification whenever a pack exists, with no
+source-specific branch anywhere.
+
+Diagnostics: a policy refusal appends the dedicated closed category
+`content_source_blocked` (the KIND only — never a URL, never a host) to
+`import.jsonl`; it is NEVER counted as `rss_source_unreachable` (network)
+nor `rss_creation_failed` (local).
+
 ## External Source Creation Contract (RSS)
 
 Starting a story from an **external source** (`Créer une histoire` →
@@ -1669,15 +1792,16 @@ construction — the provenance lives in `story_local_imports`, which the
 edit-scope derivation never consults) and reviewable through the EXISTING
 import chip / report / resolution machinery.
 
-Scope declaration: **RSS 2.0 is the external source type activated by the
-official distribution in this version**; the general activation /
-governance of external sources (which sources are enabled, their visible
-convergence into `validate → prepare → transfer → verify`) is a SEPARATE
-capability, and the support-policy screen is another one. This flow
-persists NO source configuration, NO subscription: the feed address is
-provided at creation time and never stored (the provenance keeps the HOST
-only). An Atom or JSON feed receives an honest typed verdict (`format non
-supporté`) — no implicit partial support.
+Scope declaration: RSS 2.0 is a **content source kind governed by the
+`Content Source Activation Contract`** — the distribution-owned registry
+whose current official matrix enables `rss` and leaves `atom` / `jsonFeed`
+not activated; the support-policy screen stays its own capability. This
+flow persists NO source configuration, NO subscription: the feed address
+is provided at creation time and never stored (the provenance keeps the
+HOST only). An Atom or JSON feed pasted into this surface receives an
+honest typed verdict (`format non supporté`) — no implicit partial
+support, and NEVER a policy requalification (the policy governs the
+requested source KIND, not the fetched bytes).
 
 Offline-first guardrail: the fetch runs ONLY on the explicit `Récupérer le
 flux` action (the exact discipline of the official-catalog refresh — no
@@ -1750,12 +1874,20 @@ the created story's chip, report and durable state speak of what was
 actually ingested.
 
 UI state machine (owned by `use-rss-creation`, mounted in the library;
-surface `Création depuis une source externe`). The surface is OPENED by
-the creation dialog's third entry and renders NOTHING while closed; unlike
-the folder flow (whose input is a native picker), the address input lives
-IN the surface, so the open surface shows the posture line, the
+surface `Création depuis une source externe`; seven states — `idle →
+fetching → review → creating → created → failed | unavailable`). The
+surface is OPENED by the creation dialog's third entry and renders NOTHING
+while closed; unlike the folder flow (whose input is a native picker), the
+address input lives IN the surface, so the open surface shows the frozen
+activation mention (`Source activée par la distribution officielle.` —
+see `Content Source Activation Contract`; it coexists with the posture
+line, distinct lines, both visible), the posture line, the
 `Adresse du flux RSS` field and `Récupérer le flux` in every non-terminal
-state:
+state — with ONE deliberate exception: the `unavailable` policy refusal
+renders NONE of these (no activation mention — it would contradict the
+refusal —, no posture line, no address field, no fetch CTA; only the calm
+status block and `Abandonner`, because no retry gesture exists against a
+distribution decision):
 
 | State | Rendering | Announcement |
 | --- | --- | --- |
@@ -1766,8 +1898,9 @@ state:
 | `review` (blocked verdict) | the verdict findings in a `role="alert"` block (message + gesture — nothing will be created), only `Abandonner`; the field + `Récupérer le flux` stay available to correct and retry | `role="alert"` |
 | `review` (source changed, after a refused accept) | the frozen verdict `La source a changé depuis la récupération.` + gesture in a `role="alert"` block; the stale items are DROPPED (never re-proposed); the field + `Récupérer le flux` stay available; `Abandonner` closes | `role="alert"` |
 | `creating` | indeterminate `ProgressIndicator` labelled `Création en cours…`; `Abandonner` stays reachable (the UI stops listening; an accept that already reached Rust still settles atomically — the fresh card appears on the next authoritative overview read) | deliberately NOT announced |
-| `created` | `Histoire créée dans ta bibliothèque` (success chip) + the created title + explicit `Fermer`; the library reloads (authoritative re-read); the editor is NOT auto-opened — the fresh card with its `à revoir` / `partiel` chip IS the sober success feedback. The address form is dropped; closing forgets the typed address (a feed URL can carry a private token) | `aria-live="polite"`, mounted, `aria-atomic` |
+| `created` | `Histoire créée dans ta bibliothèque` (success chip) + the created title + explicit `Fermer`; the library reloads (authoritative re-read); the editor is NOT auto-opened — the fresh card with its `à revoir` / `partiel` chip IS the sober success feedback. The address form is dropped (the activation mention, a surface-level line, STAYS rendered); closing forgets the typed address (a feed URL can carry a private token) | `aria-live="polite"`, mounted, `aria-atomic` |
 | `failed` (transport) | the canonical `message` + `userAction` of the `AppError` in a `role="alert"` block, buttons `Réessayer` THEN `Fermer`. The `Adresse du flux RSS` field STAYS visible and editable (the gesture is "correct the address, then retry" — in-context, never close/reopen); `Réessayer` re-runs the fetch with the CURRENT field value, and the form's own fetch CTA yields to it | `role="alert"` |
+| `unavailable` (policy refusal — defence in depth, nominally unreachable) | the frozen `message` + `userAction` of the `CONTENT_SOURCE_UNAVAILABLE` refusal (`Cette source de contenu n'est pas activée dans la distribution officielle.` + `Utilise une source activée ou consulte le profil de support de ta version.`) in a CALM `role="status"` block (never `role="alert"` — a distribution policy is not a breakage), NO `Réessayer` (a retry cannot change the policy; retry actions are no-ops in this state), only `Abandonner` (the gesture: close, then pick an enabled source); the deliberate exception to the always-visible surface elements — NO activation mention, NO posture line, NO address field, NO fetch CTA; never confused with `failed` (which keeps the field + `Réessayer`) | `aria-live="polite"` — routed through the PERSISTENT live region (mounted before the transition, like `created`; the visual `role="status"` block mounts already filled, which screen readers do not reliably vocalize) |
 
 Entry point: the library bar keeps ONE primary CTA (`Créer une histoire`).
 The `CreateStoryDialog` gains a THIRD optional entry `Démarrer depuis une

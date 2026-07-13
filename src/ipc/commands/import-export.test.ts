@@ -7,6 +7,7 @@ vi.mock("@tauri-apps/api/core", () => ({
 import { invoke } from "@tauri-apps/api/core";
 
 import {
+  ContentSourcePolicyContractDriftError,
   ExportStoryContractDriftError,
   ImportArtifactContractDriftError,
   RssCreationContractDriftError,
@@ -18,6 +19,7 @@ import {
   analyzeStructuredFolderForCreation,
   exportStoryWithSaveDialog,
   fetchRssSourcePreview,
+  readContentSourcePolicy,
 } from "./import-export";
 
 const STORY_ID = "0197a5d0-0000-7000-8000-000000000000";
@@ -501,5 +503,70 @@ describe("acceptRssStoryCreation", () => {
       (e: unknown) => e,
     )) as RssCreationContractDriftError;
     expect(err).toBeInstanceOf(RssCreationContractDriftError);
+  });
+});
+
+describe("readContentSourcePolicy", () => {
+  beforeEach(() => {
+    vi.mocked(invoke).mockReset();
+  });
+
+  const OFFICIAL_POLICY = {
+    sources: [
+      { kind: "rss", label: "Flux RSS", activation: "enabled" },
+      {
+        kind: "atom",
+        label: "Flux Atom",
+        activation: "notActivated",
+        reason:
+          "Source indisponible: non activée dans la distribution officielle",
+      },
+      {
+        kind: "jsonFeed",
+        label: "Flux JSON Feed",
+        activation: "notActivated",
+        reason:
+          "Source indisponible: non activée dans la distribution officielle",
+      },
+    ],
+  };
+
+  it("resolves the validated policy from the pure read", async () => {
+    vi.mocked(invoke).mockResolvedValueOnce(OFFICIAL_POLICY);
+    const policy = await readContentSourcePolicy();
+    expect(invoke).toHaveBeenCalledWith("read_content_source_policy");
+    expect(policy.sources).toHaveLength(3);
+    expect(policy.sources[0]).toEqual({
+      kind: "rss",
+      label: "Flux RSS",
+      activation: "enabled",
+    });
+    expect(policy.sources[1].reason).toBe(
+      "Source indisponible: non activée dans la distribution officielle",
+    );
+  });
+
+  it("rejects with ContentSourcePolicyContractDriftError on a drifted payload", async () => {
+    const raw = { sources: [{ kind: "torrent", activation: "enabled" }] };
+    vi.mocked(invoke).mockResolvedValueOnce(raw);
+    const err = (await readContentSourcePolicy().then(
+      () => {
+        throw new Error("expected rejection");
+      },
+      (e: unknown) => e,
+    )) as ContentSourcePolicyContractDriftError;
+    expect(err).toBeInstanceOf(ContentSourcePolicyContractDriftError);
+    expect(err.raw).toBe(raw);
+  });
+
+  it("normalizes an IPC rejection into an AppError (fail-closed upstream)", async () => {
+    vi.mocked(invoke).mockRejectedValueOnce(new Error("ipc down"));
+    const err = (await readContentSourcePolicy().then(
+      () => {
+        throw new Error("expected rejection");
+      },
+      (e: unknown) => e,
+    )) as { code: string };
+    expect(err.code).toBe("UNKNOWN");
   });
 });

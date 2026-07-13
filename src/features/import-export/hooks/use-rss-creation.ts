@@ -31,7 +31,14 @@ export type RssCreationStatus =
     }
   | { kind: "creating" }
   | { kind: "created"; story: StoryCardDto }
-  | { kind: "failed"; error: AppError };
+  | { kind: "failed"; error: AppError }
+  /** The content-source POLICY refused the flow
+   *  (`CONTENT_SOURCE_UNAVAILABLE` — defence in depth, nominally
+   *  unreachable since the dialog never activates a non-enabled source).
+   *  A calm state, never confused with the transport `failed`: no retry
+   *  gesture exists (a retry cannot change a distribution policy) — the
+   *  only way out is `abandon`. */
+  | { kind: "unavailable"; error: AppError };
 
 export interface UseRssCreation {
   status: RssCreationStatus;
@@ -53,6 +60,19 @@ export interface UseRssCreation {
   abandon(): void;
   /** Dismiss a terminal status (`created` / `failed`) back to idle. */
   dismiss(): void;
+}
+
+/** Map a failed IPC call to its surface state: the policy refusal
+ *  (`CONTENT_SOURCE_UNAVAILABLE`) lands on the dedicated calm
+ *  `unavailable` state; every other failure stays the transport `failed`
+ *  (which keeps the field + `Réessayer`). Three sealed regimes — a policy
+ *  refusal is never rendered as a breakage. */
+function statusFromRssError(err: unknown): RssCreationStatus {
+  const error = toAppError(err);
+  if (error.code === "CONTENT_SOURCE_UNAVAILABLE") {
+    return { kind: "unavailable", error };
+  }
+  return { kind: "failed", error };
 }
 
 /**
@@ -96,6 +116,10 @@ export function useRssCreation(): UseRssCreation {
 
   const fetchPreview = useCallback(async (url: string): Promise<void> => {
     if (inFlightGenerationRef.current === generationRef.current) return;
+    // A policy refusal is a dead end for THIS surface: no retry can change
+    // a distribution decision, so the fetch action is a no-op there (the
+    // only way out is `abandon`).
+    if (statusRef.current.kind === "unavailable") return;
     const generation = generationRef.current;
     inFlightGenerationRef.current = generation;
     try {
@@ -107,7 +131,7 @@ export function useRssCreation(): UseRssCreation {
         if (!mountedRef.current || generationRef.current !== generation) {
           return;
         }
-        setStatus({ kind: "failed", error: toAppError(err) });
+        setStatus(statusFromRssError(err));
         return;
       }
       if (!mountedRef.current || generationRef.current !== generation) return;
@@ -136,6 +160,8 @@ export function useRssCreation(): UseRssCreation {
   const acceptCreation = useCallback(async (): Promise<void> => {
     if (inFlightGenerationRef.current === generationRef.current) return;
     const current = statusRef.current;
+    // `unavailable` is covered by the review-only gate below; the accept
+    // is a no-op there like every other retry-shaped action.
     if (current.kind !== "review") return;
     // A blocked or diverged review has nothing to create; the CTA needs a
     // selected item.
@@ -177,7 +203,7 @@ export function useRssCreation(): UseRssCreation {
         if (!mountedRef.current || generationRef.current !== generation) {
           return;
         }
-        setStatus({ kind: "failed", error: toAppError(err) });
+        setStatus(statusFromRssError(err));
       }
     } finally {
       if (inFlightGenerationRef.current === generation) {
@@ -191,7 +217,8 @@ export function useRssCreation(): UseRssCreation {
     // a long state the in-flight result is ignored via the generation
     // token (an accept that already reached Rust still settles atomically
     // there; the fresh card then appears on the next authoritative
-    // overview read — never a resurrected surface).
+    // overview read — never a resurrected surface). `unavailable` exits
+    // through here too: closing IS the policy refusal's only gesture.
     const kind = statusRef.current.kind;
     if (kind !== "created" && kind !== "failed") {
       generationRef.current += 1;

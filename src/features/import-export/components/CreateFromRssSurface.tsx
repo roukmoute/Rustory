@@ -71,8 +71,11 @@ export function CreateFromRssSurface({
   const canFetch = feedUrl.trim().length > 0 && !isBusy;
   // The field stays visible on a transport failure too (the gesture is
   // "correct the address, then retry" — in-context, never close/reopen);
-  // only the success terminal drops the form.
-  const showAddressForm = status.kind !== "created";
+  // the success terminal drops the form, and so does the policy refusal
+  // (`unavailable`): no retry can change a distribution decision, so
+  // keeping the field would promise a gesture that does not exist.
+  const showAddressForm =
+    status.kind !== "created" && status.kind !== "unavailable";
   // The failed block owns the retry gesture — the form's own fetch CTA
   // would be a duplicate there.
   const showFetchCta = status.kind !== "failed";
@@ -83,14 +86,34 @@ export function CreateFromRssSurface({
       aria-label="Création depuis une source externe"
     >
       {/* Polite region mounted while the surface is shown so AT picks up
-          the success announcement atomically. */}
+          the terminal announcements atomically: the success chip AND the
+          policy refusal route through THIS persistent region (a live
+          region inserted into the DOM already filled — like the visual
+          `role="status"` block below — is not reliably announced; only
+          CHANGES of an existing region are). */}
       <div
         className="create-from-rss__live"
         aria-live="polite"
         aria-atomic="true"
       >
-        {status.kind === "created" ? "Histoire créée dans ta bibliothèque" : ""}
+        {status.kind === "created"
+          ? "Histoire créée dans ta bibliothèque"
+          : status.kind === "unavailable"
+            ? status.error.message
+            : ""}
       </div>
+
+      {status.kind !== "unavailable" ? (
+        // The frozen activation mention (Content Source Activation
+        // Contract), visible from the surface's opening — DISTINCT from
+        // the content-rights posture line below (the mention speaks of the
+        // SOURCE KIND the distribution activates, the posture of the
+        // CONTENT the user feeds in; both coexist). Deliberately NOT
+        // rendered on the policy refusal: the mention would contradict it.
+        <p className="create-from-rss__activation">
+          Source activée par la distribution officielle.
+        </p>
+      ) : null}
 
       {showAddressForm ? (
         <>
@@ -207,6 +230,37 @@ export function CreateFromRssSurface({
             </Button>
             <Button variant="quiet" onClick={onDismiss}>
               Fermer
+            </Button>
+          </div>
+        </div>
+      ) : null}
+
+      {status.kind === "unavailable" ? (
+        // The POLICY refusal (defence in depth): a CALM status region —
+        // never `role="alert"`, a distribution decision is not a breakage
+        // — with the frozen Rust message + gesture and NO `Réessayer` (a
+        // retry cannot change the policy; the way out is `Abandonner`).
+        // Never confused with the transport `failed` block above, which
+        // keeps the field and the retry. This block is the VISUAL face
+        // only: the audible announcement travels through the persistent
+        // live region above (this block mounts already filled, which
+        // screen readers do not reliably vocalize).
+        <div
+          className="create-from-rss__unavailable"
+          role="status"
+          aria-live="polite"
+        >
+          <p className="create-from-rss__unavailable-message">
+            {status.error.message}
+          </p>
+          {status.error.userAction ? (
+            <p className="create-from-rss__unavailable-action">
+              {status.error.userAction}
+            </p>
+          ) : null}
+          <div className="create-from-rss__actions">
+            <Button variant="quiet" onClick={onAbandon}>
+              Abandonner
             </Button>
           </div>
         </div>

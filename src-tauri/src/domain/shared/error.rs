@@ -20,6 +20,7 @@ pub enum AppErrorCode {
     TransferOutcomeUnavailable,
     OfficialCatalogUnavailable,
     RssSourceUnreachable,
+    ContentSourceUnavailable,
     MediaInvalid,
     MediaProcessingFailed,
 }
@@ -240,6 +241,31 @@ impl AppError {
             message: message.into(),
             user_action: Some(user_action.into()),
             details: None,
+        }
+    }
+
+    /// Constructed when a story-creation flow is asked to use a content
+    /// source KIND the distribution does not activate — an AUTHORIZATION /
+    /// POLICY refusal, decided by the official content-source registry
+    /// BEFORE any I/O. NEVER used for a network problem (that is
+    /// `RSS_SOURCE_UNREACHABLE`) nor for a content verdict (typed DTO).
+    /// A retry cannot change a distribution policy, so the frozen gesture
+    /// deliberately offers none. PII discipline BY TYPE: the constructor
+    /// only accepts the closed [`ContentSourceKind`] and derives the wire
+    /// tag itself, so `details.kind` (and the diagnostics line downstream)
+    /// can never carry a URL, a host or any open string.
+    pub fn content_source_unavailable(kind: crate::domain::import::ContentSourceKind) -> Self {
+        Self {
+            code: AppErrorCode::ContentSourceUnavailable,
+            message: "Cette source de contenu n'est pas activée dans la distribution officielle."
+                .into(),
+            user_action: Some(
+                "Utilise une source activée ou consulte le profil de support de ta version.".into(),
+            ),
+            details: Some(serde_json::json!({
+                "source": "content_source_policy",
+                "kind": kind.wire_tag(),
+            })),
         }
     }
 
@@ -544,6 +570,25 @@ mod tests {
         assert_eq!(v["code"], "OFFICIAL_CATALOG_UNAVAILABLE");
         assert_eq!(v["details"]["source"], "network");
         assert_eq!(v["details"]["stage"], "fetch");
+    }
+
+    #[test]
+    fn content_source_unavailable_serializes_with_stable_code_and_frozen_copy() {
+        let err =
+            AppError::content_source_unavailable(crate::domain::import::ContentSourceKind::Rss);
+        let v = serde_json::to_value(&err).expect("serialize");
+        assert_eq!(v["code"], "CONTENT_SOURCE_UNAVAILABLE");
+        assert_eq!(
+            v["message"],
+            "Cette source de contenu n'est pas activée dans la distribution officielle."
+        );
+        assert_eq!(
+            v["userAction"],
+            "Utilise une source activée ou consulte le profil de support de ta version."
+        );
+        assert_eq!(v["details"]["source"], "content_source_policy");
+        assert_eq!(v["details"]["kind"], "rss");
+        assert!(v.get("user_action").is_none(), "snake_case must not leak");
     }
 
     #[test]

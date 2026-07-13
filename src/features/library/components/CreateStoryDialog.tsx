@@ -3,6 +3,7 @@ import { useEffect, useId, useMemo, useRef, useState } from "react";
 
 import { createStory } from "../../../ipc/commands/story";
 import { toAppError, type AppError } from "../../../shared/errors/app-error";
+import type { ContentSourcePolicy } from "../../../shared/ipc-contracts/import-export";
 import type { StoryCardDto } from "../../../shared/ipc-contracts/library";
 import { Button, Dialog, Field, ProgressIndicator } from "../../../shared/ui";
 import {
@@ -32,11 +33,30 @@ export interface CreateStoryDialogProps {
   isCreateFromFolderUnavailable?: boolean;
   /** Start the external-source creation path (`Démarrer depuis une source
    *  externe (RSS)`): closes this dialog and hands over to the RSS flow.
-   *  Optional — when absent, the third entry is not rendered. */
+   *  Optional — when absent, the content-source section is not rendered. */
   onCreateFromRssRequest?: () => void;
   /** Same cross-flow exclusivity for the RSS entry. */
   isCreateFromRssUnavailable?: boolean;
+  /** The distribution's content-source policy, read by the route when the
+   *  dialog opens (`read_content_source_policy` — Rust alone decides; the
+   *  dialog renders what it declares, never a hardcoded list). `null` /
+   *  absent = the read failed or has not landed: FAIL-CLOSED — every
+   *  external-source entry renders disabled with the frozen reason, never
+   *  active-by-default. The title path and the folder entry are NEVER
+   *  policy-gated. */
+  contentSourcePolicy?: ContentSourcePolicy | null;
 }
+
+/** The frozen entry-level activation marker (`product-language.md`) —
+ *  same copy family as the surface mention, distinct literal (no final
+ *  period). */
+const ACTIVATION_MARKER = "Activée par la distribution officielle";
+
+/** The frozen fail-closed reason when the policy read failed or has not
+ *  landed — the only content-source copy rendered WITHOUT a successful
+ *  policy read (the activation marker above is a frontend literal too,
+ *  but it only accompanies a successfully read `enabled` line). */
+const POLICY_FAIL_CLOSED_REASON = "Sources externes indisponibles pour l'instant.";
 
 /**
  * Modal used to collect the minimal input required to create a new local
@@ -55,6 +75,7 @@ export function CreateStoryDialog({
   isCreateFromFolderUnavailable = false,
   onCreateFromRssRequest,
   isCreateFromRssUnavailable = false,
+  contentSourcePolicy = null,
 }: CreateStoryDialogProps): React.JSX.Element {
   const descriptionId = useId();
   const titleFieldId = useId();
@@ -62,6 +83,7 @@ export function CreateStoryDialog({
   const counterId = useId();
   const serverErrorId = useId();
   const progressId = useId();
+  const sourcesId = useId();
   const fieldRef = useRef<HTMLInputElement | null>(null);
 
   const [title, setTitle] = useState<string>("");
@@ -277,16 +299,91 @@ export function CreateStoryDialog({
         </div>
       ) : null}
       {onCreateFromRssRequest ? (
-        <div className="create-story-dialog__rss-entry">
-          <Button
-            variant="quiet"
-            onClick={handleCreateFromRss}
-            aria-disabled={
-              isSubmitting || isCreateFromRssUnavailable || undefined
-            }
-          >
-            Démarrer depuis une source externe (RSS)
-          </Button>
+        <div
+          className="create-story-dialog__sources"
+          role="group"
+          aria-label="Sources de contenu"
+        >
+          {contentSourcePolicy !== null &&
+          contentSourcePolicy.sources.some((s) => s.kind === "rss") ? (
+            contentSourcePolicy.sources.map((entry) => {
+              const isRssEntry = entry.kind === "rss";
+              const isActionable = isRssEntry && entry.activation === "enabled";
+              const subTextId = `${sourcesId}-${entry.kind}`;
+              return (
+                <div key={entry.kind} className="create-story-dialog__source">
+                  {isActionable ? (
+                    <>
+                      <Button
+                        variant="quiet"
+                        onClick={handleCreateFromRss}
+                        aria-disabled={
+                          isSubmitting || isCreateFromRssUnavailable || undefined
+                        }
+                        aria-describedby={subTextId}
+                      >
+                        Démarrer depuis une source externe (RSS)
+                      </Button>
+                      <p id={subTextId} className="create-story-dialog__source-note">
+                        <span className="create-story-dialog__source-label">
+                          {entry.label}
+                        </span>
+                        <span className="create-story-dialog__source-marker">
+                          {ACTIVATION_MARKER}
+                        </span>
+                      </p>
+                    </>
+                  ) : (
+                    <>
+                      {/* A non-enabled kind (or a non-RSS kind — no
+                          ingestion flow exists for it) renders VISIBLE but
+                          DISABLED, its Rust-carried reason reachable from
+                          the keyboard (Disabled Actions pattern). The
+                          reason-less fallback (an enabled non-RSS kind —
+                          refused upstream by the policy guard) stays
+                          honest: the fail-closed reason, NEVER the
+                          activation marker on a disabled entry. */}
+                      <Button
+                        variant="quiet"
+                        aria-disabled="true"
+                        aria-describedby={subTextId}
+                      >
+                        {isRssEntry
+                          ? "Démarrer depuis une source externe (RSS)"
+                          : entry.label}
+                      </Button>
+                      <p
+                        id={subTextId}
+                        className="create-story-dialog__source-reason"
+                      >
+                        {entry.reason ?? POLICY_FAIL_CLOSED_REASON}
+                      </p>
+                    </>
+                  )}
+                </div>
+              );
+            })
+          ) : (
+            <div className="create-story-dialog__source">
+              {/* FAIL-CLOSED: no readable policy (absent, failed read, or a
+                  policy without the rss line) — the external-source entry
+                  renders disabled with the frozen frontend-owned reason,
+                  never active-by-default. The title path above is intact. */}
+              <Button
+                variant="quiet"
+                aria-disabled="true"
+                aria-describedby={`${sourcesId}-fail-closed`}
+              >
+                Démarrer depuis une source externe (RSS)
+              </Button>
+              <p
+                id={`${sourcesId}-fail-closed`}
+                className="create-story-dialog__source-reason"
+              >
+                {POLICY_FAIL_CLOSED_REASON}
+              </p>
+            </div>
+          )}
         </div>
       ) : null}
     </Dialog>

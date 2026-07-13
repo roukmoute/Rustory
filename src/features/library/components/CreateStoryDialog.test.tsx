@@ -17,6 +17,27 @@ vi.mock("../../../ipc/commands/story", () => ({
 import { createStory } from "../../../ipc/commands/story";
 
 import { CreateStoryDialog } from "./CreateStoryDialog";
+import type { ContentSourcePolicy } from "../../../shared/ipc-contracts/import-export";
+
+/** The current official policy, exactly as `read_content_source_policy`
+ *  serializes it (rss enabled; atom / jsonFeed known but not activated). */
+const RSS_ENABLED_POLICY: ContentSourcePolicy = {
+  sources: [
+    { kind: "rss", label: "Flux RSS", activation: "enabled" },
+    {
+      kind: "atom",
+      label: "Flux Atom",
+      activation: "notActivated",
+      reason: "Source indisponible: non activée dans la distribution officielle",
+    },
+    {
+      kind: "jsonFeed",
+      label: "Flux JSON Feed",
+      activation: "notActivated",
+      reason: "Source indisponible: non activée dans la distribution officielle",
+    },
+  ],
+};
 
 // happy-dom's HTMLDialogElement is a stub — mirror the spy pattern used in
 // Dialog.test.tsx so this file never relies on a real modal lifecycle.
@@ -321,10 +342,14 @@ describe("<CreateStoryDialog />", () => {
     ).not.toBeInTheDocument();
   });
 
+  // RE-SCOPED with the content-source policy: the entry is ACTIVE only
+  // when the read policy enables `rss` (fail-closed without one), so
+  // every "active entry" journey now hands the enabled policy in.
   it("renders the third RSS entry without touching the title and folder paths", () => {
     renderDialog({
       onCreateFromFolderRequest: vi.fn(),
       onCreateFromRssRequest: vi.fn(),
+      contentSourcePolicy: RSS_ENABLED_POLICY,
     });
     // The interactive path is INTACT: field + primary CTA still there.
     expect(screen.getByLabelText(/^titre$/i)).toBeInTheDocument();
@@ -344,7 +369,10 @@ describe("<CreateStoryDialog />", () => {
   it("Démarrer depuis une source externe (RSS) closes the dialog THEN hands over, without any interactive IPC", async () => {
     const user = userEvent.setup();
     const onCreateFromRssRequest = vi.fn();
-    const { onClose } = renderDialog({ onCreateFromRssRequest });
+    const { onClose } = renderDialog({
+      onCreateFromRssRequest,
+      contentSourcePolicy: RSS_ENABLED_POLICY,
+    });
     await user.click(
       screen.getByRole("button", {
         name: "Démarrer depuis une source externe (RSS)",
@@ -366,6 +394,7 @@ describe("<CreateStoryDialog />", () => {
     const { onClose } = renderDialog({
       onCreateFromRssRequest,
       isCreateFromRssUnavailable: true,
+      contentSourcePolicy: RSS_ENABLED_POLICY,
     });
     const rssButton = screen.getByRole("button", {
       name: "Démarrer depuis une source externe (RSS)",
@@ -374,5 +403,167 @@ describe("<CreateStoryDialog />", () => {
     await user.click(rssButton);
     expect(onCreateFromRssRequest).not.toHaveBeenCalled();
     expect(onClose).not.toHaveBeenCalled();
+  });
+
+  // ===== Content-source section (policy-driven) =====
+
+  it("renders the enabled RSS entry with its label and the frozen activation marker", () => {
+    renderDialog({
+      onCreateFromRssRequest: vi.fn(),
+      contentSourcePolicy: RSS_ENABLED_POLICY,
+    });
+    const rssButton = screen.getByRole("button", {
+      name: "Démarrer depuis une source externe (RSS)",
+    });
+    expect(rssButton).not.toHaveAttribute("aria-disabled");
+    // The kind label and the frozen entry-level marker, VERBATIM.
+    expect(screen.getByText("Flux RSS")).toBeInTheDocument();
+    expect(
+      screen.getByText("Activée par la distribution officielle"),
+    ).toBeInTheDocument();
+  });
+
+  it("renders the non-activated kinds visible but disabled with their Rust-carried reason, keyboard-reachable", () => {
+    renderDialog({
+      onCreateFromRssRequest: vi.fn(),
+      contentSourcePolicy: RSS_ENABLED_POLICY,
+    });
+    for (const label of ["Flux Atom", "Flux JSON Feed"]) {
+      const entry = screen.getByRole("button", { name: label });
+      expect(entry).toHaveAttribute("aria-disabled", "true");
+      // The reason is reachable from the entry (aria-describedby → the
+      // frozen Rust-carried copy).
+      const describedBy = entry.getAttribute("aria-describedby");
+      expect(describedBy).toBeTruthy();
+      const reason = document.getElementById(describedBy as string);
+      expect(reason).toHaveTextContent(
+        "Source indisponible: non activée dans la distribution officielle",
+      );
+    }
+  });
+
+  it("renders an enabled non-RSS kind (unguarded prop) disabled with the fail-closed reason, never the marker", () => {
+    // The IPC guard refuses such a policy upstream; the component still
+    // renders honestly if handed one directly: a disabled entry is never
+    // "justified" by the activation marker.
+    renderDialog({
+      onCreateFromRssRequest: vi.fn(),
+      contentSourcePolicy: {
+        sources: [
+          { kind: "rss", label: "Flux RSS", activation: "enabled" },
+          { kind: "atom", label: "Flux Atom", activation: "enabled" },
+        ],
+      },
+    });
+    const entry = screen.getByRole("button", { name: "Flux Atom" });
+    expect(entry).toHaveAttribute("aria-disabled", "true");
+    const describedBy = entry.getAttribute("aria-describedby");
+    const subText = document.getElementById(describedBy as string);
+    expect(subText).toHaveTextContent(
+      "Sources externes indisponibles pour l'instant.",
+    );
+    expect(subText).not.toHaveTextContent(
+      "Activée par la distribution officielle",
+    );
+  });
+
+  it("renders a blocked-by-policy kind with its own frozen reason", () => {
+    renderDialog({
+      onCreateFromRssRequest: vi.fn(),
+      contentSourcePolicy: {
+        sources: [
+          { kind: "rss", label: "Flux RSS", activation: "enabled" },
+          {
+            kind: "atom",
+            label: "Flux Atom",
+            activation: "blockedByPolicy",
+            reason:
+              "Source indisponible: bloquée par la politique de distribution",
+          },
+        ],
+      },
+    });
+    const entry = screen.getByRole("button", { name: "Flux Atom" });
+    expect(entry).toHaveAttribute("aria-disabled", "true");
+    expect(
+      screen.getByText(
+        "Source indisponible: bloquée par la politique de distribution",
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("renders the RSS entry disabled with the Rust reason when the policy does not enable it", async () => {
+    const user = userEvent.setup();
+    const onCreateFromRssRequest = vi.fn();
+    renderDialog({
+      onCreateFromRssRequest,
+      contentSourcePolicy: {
+        sources: [
+          {
+            kind: "rss",
+            label: "Flux RSS",
+            activation: "notActivated",
+            reason:
+              "Source indisponible: non activée dans la distribution officielle",
+          },
+        ],
+      },
+    });
+    const rssButton = screen.getByRole("button", {
+      name: "Démarrer depuis une source externe (RSS)",
+    });
+    expect(rssButton).toHaveAttribute("aria-disabled", "true");
+    await user.click(rssButton);
+    expect(onCreateFromRssRequest).not.toHaveBeenCalled();
+    expect(
+      screen.getByText(
+        "Source indisponible: non activée dans la distribution officielle",
+      ),
+    ).toBeInTheDocument();
+  });
+
+  // The previous behavior (callback prop alone ⇒ active entry) is
+  // RE-SCOPED, never dropped: without a readable policy the entry renders
+  // FAIL-CLOSED.
+  it("renders the RSS entry disabled fail-closed when the callback is wired but no policy was read", async () => {
+    const user = userEvent.setup();
+    const onCreateFromRssRequest = vi.fn();
+    const { onClose } = renderDialog({ onCreateFromRssRequest });
+    const rssButton = screen.getByRole("button", {
+      name: "Démarrer depuis une source externe (RSS)",
+    });
+    expect(rssButton).toHaveAttribute("aria-disabled", "true");
+    await user.click(rssButton);
+    expect(onCreateFromRssRequest).not.toHaveBeenCalled();
+    expect(onClose).not.toHaveBeenCalled();
+    expect(
+      screen.getByText("Sources externes indisponibles pour l'instant."),
+    ).toBeInTheDocument();
+    // The primary title path is NEVER blocked by a policy failure.
+    expect(screen.getByLabelText(/^titre$/i)).toBeInTheDocument();
+  });
+
+  it("renders the fail-closed entry when the read policy carries no rss line", () => {
+    renderDialog({
+      onCreateFromRssRequest: vi.fn(),
+      contentSourcePolicy: {
+        sources: [
+          {
+            kind: "atom",
+            label: "Flux Atom",
+            activation: "notActivated",
+            reason:
+              "Source indisponible: non activée dans la distribution officielle",
+          },
+        ],
+      },
+    });
+    const rssButton = screen.getByRole("button", {
+      name: "Démarrer depuis une source externe (RSS)",
+    });
+    expect(rssButton).toHaveAttribute("aria-disabled", "true");
+    expect(
+      screen.getByText("Sources externes indisponibles pour l'instant."),
+    ).toBeInTheDocument();
   });
 });

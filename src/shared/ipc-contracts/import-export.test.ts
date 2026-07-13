@@ -1,12 +1,15 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  isContentSourceEntry,
+  isContentSourcePolicy,
   isExportStoryDialogOutcome,
   isImportArtifactAnalysis,
   isImportFinding,
   isRssItemRef,
   isRssPreview,
   isStructuredCreationAnalysis,
+  type ContentSourcePolicy,
   type ExportStoryDialogOutcome,
   type ImportArtifactAnalysis,
   type RssPreview,
@@ -726,5 +729,185 @@ describe("isRssPreview", () => {
         message: "Contenu ingéré depuis une source externe (RSS).",
       }),
     ).toBe(true);
+  });
+});
+
+// ===== Content-source activation policy =====
+
+const OFFICIAL_POLICY: ContentSourcePolicy = {
+  sources: [
+    { kind: "rss", label: "Flux RSS", activation: "enabled" },
+    {
+      kind: "atom",
+      label: "Flux Atom",
+      activation: "notActivated",
+      reason: "Source indisponible: non activée dans la distribution officielle",
+    },
+    {
+      kind: "jsonFeed",
+      label: "Flux JSON Feed",
+      activation: "notActivated",
+      reason: "Source indisponible: non activée dans la distribution officielle",
+    },
+  ],
+};
+
+describe("isContentSourceEntry", () => {
+  it("accepts an enabled line without a reason", () => {
+    expect(isContentSourceEntry(OFFICIAL_POLICY.sources[0])).toBe(true);
+  });
+
+  it("accepts a non-enabled line with its frozen reason", () => {
+    expect(isContentSourceEntry(OFFICIAL_POLICY.sources[1])).toBe(true);
+    expect(
+      isContentSourceEntry({
+        kind: "atom",
+        label: "Flux Atom",
+        activation: "blockedByPolicy",
+        reason: "Source indisponible: bloquée par la politique de distribution",
+      }),
+    ).toBe(true);
+  });
+
+  it("refuses a reason on an enabled line (the marker replaces it)", () => {
+    expect(
+      isContentSourceEntry({
+        kind: "rss",
+        label: "Flux RSS",
+        activation: "enabled",
+        reason: "surnuméraire",
+      }),
+    ).toBe(false);
+  });
+
+  it("requires a non-empty reason on a non-enabled line", () => {
+    expect(
+      isContentSourceEntry({
+        kind: "atom",
+        label: "Flux Atom",
+        activation: "notActivated",
+      }),
+    ).toBe(false);
+    expect(
+      isContentSourceEntry({
+        kind: "atom",
+        label: "Flux Atom",
+        activation: "notActivated",
+        reason: "",
+      }),
+    ).toBe(false);
+  });
+
+  it("refuses an unknown kind, an unknown activation and an empty label", () => {
+    expect(
+      isContentSourceEntry({
+        kind: "torrent",
+        label: "Torrent",
+        activation: "enabled",
+      }),
+    ).toBe(false);
+    expect(
+      isContentSourceEntry({
+        kind: "rss",
+        label: "Flux RSS",
+        activation: "maybe",
+      }),
+    ).toBe(false);
+    expect(
+      isContentSourceEntry({ kind: "rss", label: "", activation: "enabled" }),
+    ).toBe(false);
+  });
+});
+
+describe("isContentSourcePolicy", () => {
+  it("accepts the current official policy shape", () => {
+    expect(isContentSourcePolicy(OFFICIAL_POLICY)).toBe(true);
+  });
+
+  it("refuses an empty or missing source list (fail-closed drift)", () => {
+    expect(isContentSourcePolicy({ sources: [] })).toBe(false);
+    expect(isContentSourcePolicy({})).toBe(false);
+    expect(isContentSourcePolicy(null)).toBe(false);
+    expect(isContentSourcePolicy("policy")).toBe(false);
+  });
+
+  it("refuses a duplicated kind (a malformed policy never renders)", () => {
+    expect(
+      isContentSourcePolicy({
+        sources: [OFFICIAL_POLICY.sources[0], OFFICIAL_POLICY.sources[0]],
+      }),
+    ).toBe(false);
+  });
+
+  it("refuses a policy carrying one drifted line", () => {
+    expect(
+      isContentSourcePolicy({
+        sources: [
+          OFFICIAL_POLICY.sources[0],
+          { kind: "atom", label: "Flux Atom", activation: "notActivated" },
+        ],
+      }),
+    ).toBe(false);
+  });
+
+  it("refuses a drifted label or a drifted reason (frozen couples only)", () => {
+    expect(
+      isContentSourceEntry({ kind: "rss", label: "RSS", activation: "enabled" }),
+    ).toBe(false);
+    expect(
+      isContentSourceEntry({
+        kind: "atom",
+        label: "Flux Atom",
+        activation: "notActivated",
+        reason: "indisponible",
+      }),
+    ).toBe(false);
+    // A reason swapped between the two non-enabled states is a drift too.
+    expect(
+      isContentSourceEntry({
+        kind: "atom",
+        label: "Flux Atom",
+        activation: "blockedByPolicy",
+        reason:
+          "Source indisponible: non activée dans la distribution officielle",
+      }),
+    ).toBe(false);
+  });
+
+  it("refuses an enabled line on a kind without an ingestion flow in this build", () => {
+    // Only rss is actionable today: a policy enabling atom / jsonFeed is
+    // ahead of the frontend and must fail closed (an explicit re-scope
+    // ships the ingestion flow AND relaxes this guard together).
+    expect(
+      isContentSourceEntry({
+        kind: "atom",
+        label: "Flux Atom",
+        activation: "enabled",
+      }),
+    ).toBe(false);
+    expect(
+      isContentSourcePolicy({
+        sources: [
+          OFFICIAL_POLICY.sources[0],
+          { kind: "atom", label: "Flux Atom", activation: "enabled" },
+          OFFICIAL_POLICY.sources[2],
+        ],
+      }),
+    ).toBe(false);
+  });
+
+  it("refuses a partial policy — every known kind must stay visible", () => {
+    // The exact drift named by the contract: a lone enabled rss line would
+    // silently drop Atom / JSON Feed from the dialog.
+    expect(
+      isContentSourcePolicy({
+        sources: [{ kind: "rss", label: "Flux RSS", activation: "enabled" }],
+      }),
+    ).toBe(false);
+    expect(
+      isContentSourcePolicy({
+        sources: [OFFICIAL_POLICY.sources[0], OFFICIAL_POLICY.sources[1]],
+      }),
+    ).toBe(false);
   });
 });

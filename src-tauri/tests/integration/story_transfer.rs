@@ -90,7 +90,9 @@ impl CapturingEmitter {
 }
 
 /// Write a complete plausible pack (declared subset) into `pack_dir`.
-fn write_pack(pack_dir: &Path) {
+/// `pub(crate)` so sibling integration modules (the content-source
+/// convergence journey) reuse the SAME fixture instead of a drifting copy.
+pub(crate) fn write_pack(pack_dir: &Path) {
     std::fs::create_dir_all(pack_dir).expect("mkdir pack");
     std::fs::write(pack_dir.join("ni"), vec![0x4E; 512]).expect("ni");
     std::fs::write(pack_dir.join("li"), vec![0x4C; 256]).expect("li");
@@ -103,7 +105,8 @@ fn write_pack(pack_dir: &Path) {
 }
 
 /// Mount with one pack present (markers + `.pi` + `.content/<SHORT_ID>`).
-fn build_mount_with_pack(
+/// `pub(crate)` for the same sibling reuse as [`write_pack`].
+pub(crate) fn build_mount_with_pack(
     metadata_version: u8,
     pack_uuid: [u8; 16],
 ) -> (TempDir, PathBuf, String, String) {

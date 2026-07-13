@@ -42,6 +42,9 @@ mod structured_folder_creation;
 #[path = "integration/rss_creation.rs"]
 mod rss_creation;
 
+#[path = "integration/content_source_convergence.rs"]
+mod content_source_convergence;
+
 #[path = "integration/story_edit_scope.rs"]
 mod story_edit_scope;
 

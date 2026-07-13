@@ -424,7 +424,142 @@ describe("CreateFromRssSurface", () => {
     expect(handlers.onAbandon).toHaveBeenCalledTimes(2);
   });
 
-  it("mounts a polite atomic live region announcing the success only", () => {
+  // ===== Content-source activation mention + policy refusal =====
+
+  const UNAVAILABLE: RssCreationStatus = {
+    kind: "unavailable",
+    error: {
+      code: "CONTENT_SOURCE_UNAVAILABLE",
+      message:
+        "Cette source de contenu n'est pas activée dans la distribution officielle.",
+      userAction:
+        "Utilise une source activée ou consulte le profil de support de ta version.",
+      details: { source: "content_source_policy", kind: "rss" },
+    },
+  };
+
+  it("renders the frozen activation mention from the opening, next to the posture line (both visible)", () => {
+    render(
+      <CreateFromRssSurface
+        open
+        status={{ kind: "idle" }}
+        {...noopHandlers()}
+      />,
+    );
+    // The mention and the posture COEXIST as distinct lines — VERBATIM.
+    expect(
+      screen.getByText("Source activée par la distribution officielle."),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "Utilise uniquement des contenus dont tu as les droits : tes contenus personnels ou des contenus libres.",
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("keeps the activation mention through review, failed and created (surface-level, not state-level)", () => {
+    const { rerender } = render(
+      <CreateFromRssSurface open status={REVIEW} {...noopHandlers()} />,
+    );
+    expect(
+      screen.getByText("Source activée par la distribution officielle."),
+    ).toBeInTheDocument();
+    rerender(
+      <CreateFromRssSurface
+        open
+        status={{
+          kind: "failed",
+          error: {
+            code: "RSS_SOURCE_UNREACHABLE",
+            message:
+              "Récupération du flux impossible: la source est injoignable.",
+            userAction:
+              "Vérifie l'adresse du flux et ta connexion, puis réessaie.",
+            details: null,
+          },
+        }}
+        {...noopHandlers()}
+      />,
+    );
+    expect(
+      screen.getByText("Source activée par la distribution officielle."),
+    ).toBeInTheDocument();
+    // The success terminal drops the address form but keeps the mention
+    // (a surface-level line, not a form-level one).
+    rerender(
+      <CreateFromRssSurface
+        open
+        status={{
+          kind: "created",
+          story: { id: "s-1", title: "Episode 1" },
+        }}
+        {...noopHandlers()}
+      />,
+    );
+    expect(
+      screen.getByText("Source activée par la distribution officielle."),
+    ).toBeInTheDocument();
+    expect(screen.queryByLabelText("Adresse du flux RSS")).not.toBeInTheDocument();
+  });
+
+  it("renders the policy refusal as a CALM status region with the frozen copy and NO retry", async () => {
+    const user = userEvent.setup();
+    const handlers = noopHandlers();
+    render(<CreateFromRssSurface open status={UNAVAILABLE} {...handlers} />);
+    // A calm region — role="status", never an alert (a distribution
+    // decision is not a breakage).
+    const region = screen.getByRole("status");
+    expect(region).toHaveTextContent(
+      "Cette source de contenu n'est pas activée dans la distribution officielle.",
+    );
+    expect(region).toHaveTextContent(
+      "Utilise une source activée ou consulte le profil de support de ta version.",
+    );
+    // NO retry gesture (a retry cannot change the policy), no address
+    // field, no fetch CTA — the way out is Abandonner.
+    expect(
+      screen.queryByRole("button", { name: "Réessayer" }),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Adresse du flux RSS")).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Récupérer le flux" }),
+    ).not.toBeInTheDocument();
+    // The activation mention would contradict the refusal: not rendered.
+    expect(
+      screen.queryByText("Source activée par la distribution officielle."),
+    ).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Abandonner" }));
+    expect(handlers.onAbandon).toHaveBeenCalledTimes(1);
+  });
+
+  it("announces the policy refusal through the persistent live region (mounted BEFORE the transition)", () => {
+    const { container, rerender } = render(
+      <CreateFromRssSurface open status={REVIEW} {...noopHandlers()} />,
+    );
+    // The persistent polite region exists BEFORE the transition (a live
+    // region inserted already filled is not reliably announced — only
+    // changes of an existing one are), and is empty during review.
+    const live = container.querySelector('[aria-live="polite"][aria-atomic="true"]');
+    expect(live).not.toBeNull();
+    expect(live).toHaveTextContent("");
+    rerender(
+      <CreateFromRssSurface open status={UNAVAILABLE} {...noopHandlers()} />,
+    );
+    expect(
+      container.querySelector('[aria-live="polite"][aria-atomic="true"]'),
+    ).toHaveTextContent(
+      "Cette source de contenu n'est pas activée dans la distribution officielle.",
+    );
+  });
+
+  it("never renders the policy refusal as an alert (distinct from the transport failed state)", () => {
+    render(
+      <CreateFromRssSurface open status={UNAVAILABLE} {...noopHandlers()} />,
+    );
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("mounts a polite atomic live region, empty until a terminal announcement", () => {
     const { container, rerender } = render(
       <CreateFromRssSurface open status={REVIEW} {...noopHandlers()} />,
     );

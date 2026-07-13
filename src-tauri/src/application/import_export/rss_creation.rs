@@ -28,8 +28,9 @@ use std::time::Duration;
 
 use crate::application::story::now_iso_ms;
 use crate::domain::import::{
-    feed_url_host, parse_rss, resolve_rss_item, rss_import_state, rss_item_findings,
-    rss_item_fingerprint, RssAnalysis, RssItemRef, RSS_FALLBACK_TITLE_PREFIX,
+    content_source_activation, feed_url_host, parse_rss, resolve_rss_item, rss_import_state,
+    rss_item_findings, rss_item_fingerprint, ContentSourceActivation, ContentSourceKind,
+    ContentSourceLine, RssAnalysis, RssItemRef, RSS_FALLBACK_TITLE_PREFIX,
     RSS_SOURCE_FORMAT_VERSION,
 };
 use crate::domain::shared::AppError;
@@ -54,14 +55,35 @@ pub struct RssPreviewOutcome {
     pub analysis: RssAnalysis,
 }
 
+/// The content-source policy gate, consulted by BOTH facades (preview AND
+/// accept) BEFORE the address validation and BEFORE any network dispatch:
+/// a policy refusal never produces a byte of traffic (the recording mock
+/// proves zero fetch). The matrix travels as a parameter — the commands
+/// hand `official_content_sources()`, tests inject custom distributions —
+/// so the policy stays consulted in one place per flow. Fail-closed: a
+/// kind missing from the received matrix refuses exactly like a
+/// `NotActivated` one (the gate never enables by default).
+fn ensure_rss_source_enabled(sources: &[ContentSourceLine]) -> Result<(), AppError> {
+    match content_source_activation(sources, ContentSourceKind::Rss) {
+        ContentSourceActivation::Enabled => Ok(()),
+        ContentSourceActivation::NotActivated | ContentSourceActivation::BlockedByPolicy => {
+            Err(AppError::content_source_unavailable(ContentSourceKind::Rss))
+        }
+    }
+}
+
 /// Phase 1 — fetch + parse with ZERO mutation. Only TRANSPORT failures
 /// (invalid address, unreachable source, over-cap response) reject; every
-/// feed-CONTENT problem is a typed verdict inside the analysis.
+/// feed-CONTENT problem is a typed verdict inside the analysis. The
+/// content-source policy is consulted FIRST: a non-enabled `rss` line in
+/// `sources` refuses with `CONTENT_SOURCE_UNAVAILABLE` before any I/O.
 pub fn preview_rss_source(
+    sources: &[ContentSourceLine],
     source: &dyn RssFeedSource,
     url: &str,
     budget: Duration,
 ) -> Result<RssPreviewOutcome, AppError> {
+    ensure_rss_source_enabled(sources)?;
     let source_host = feed_url_host(url).ok_or_else(invalid_feed_url_error)?;
     let bytes = source.fetch(url, budget)?;
     let feed_checksum = content_checksum_bytes(&bytes);
@@ -112,14 +134,18 @@ pub enum RssAcceptPhase {
 /// the canonical proof of the PREVIEWED item: the fresh item must match
 /// it EXACTLY — a resolvable reference (same guid) whose content diverged
 /// is the honest `SourceChanged` refusal, never a creation from content
-/// the user never reread.
+/// the user never reread. The accept re-proves EVERYTHING, the policy
+/// included: the gate runs FIRST, so a direct command call can never
+/// bypass the distribution's content-source matrix.
 pub fn prepare_rss_story_creation(
+    sources: &[ContentSourceLine],
     source: &dyn RssFeedSource,
     url: &str,
     item_ref: &RssItemRef,
     expected_fingerprint: &str,
     budget: Duration,
 ) -> Result<RssAcceptPhase, AppError> {
+    ensure_rss_source_enabled(sources)?;
     let source_host = feed_url_host(url).ok_or_else(invalid_feed_url_error)?;
     // RE-fetch + re-parse from zero: the reference is a pointer, never an
     // authority; the checksum persisted below fingerprints THESE bytes.
@@ -268,13 +294,15 @@ pub fn commit_rss_story_creation(
 /// for [`commit_rss_story_creation`].
 pub fn accept_rss_story_creation(
     db: &mut DbHandle,
+    sources: &[ContentSourceLine],
     source: &dyn RssFeedSource,
     url: &str,
     item_ref: &RssItemRef,
     expected_fingerprint: &str,
     budget: Duration,
 ) -> Result<RssCreationOutcome, AppError> {
-    match prepare_rss_story_creation(source, url, item_ref, expected_fingerprint, budget)? {
+    match prepare_rss_story_creation(sources, source, url, item_ref, expected_fingerprint, budget)?
+    {
         RssAcceptPhase::SourceChanged => Ok(RssCreationOutcome::SourceChanged),
         RssAcceptPhase::Prepared(prepared) => commit_rss_story_creation(db, *prepared)
             .map(|story| RssCreationOutcome::Created { story }),
@@ -343,7 +371,7 @@ fn db_commit_error(err: &rusqlite::Error, stage: &'static str) -> AppError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::import::{rss_item_ref, ImportState};
+    use crate::domain::import::{official_content_sources, rss_item_ref, ImportState};
     use crate::domain::shared::AppErrorCode;
     use crate::infrastructure::db;
     use crate::infrastructure::device::MockRssFeedSource;
@@ -383,13 +411,109 @@ mod tests {
         rss_item_fingerprint(item)
     }
 
+    /// A custom distribution whose `rss` line is NOT enabled — the
+    /// injected matrix that proves the refusal paths.
+    fn rss_disabled_matrix() -> [ContentSourceLine; 1] {
+        [ContentSourceLine {
+            kind: ContentSourceKind::Rss,
+            activation: ContentSourceActivation::NotActivated,
+        }]
+    }
+
+    fn assert_policy_refusal(err: &AppError) {
+        assert_eq!(err.code, AppErrorCode::ContentSourceUnavailable);
+        let v = serde_json::to_value(err).expect("ser");
+        assert_eq!(v["details"]["source"], "content_source_policy");
+        assert_eq!(v["details"]["kind"], "rss");
+    }
+
+    // ===== the content-source policy gate (before ANY I/O) =====
+
+    #[test]
+    fn preview_refuses_a_not_enabled_source_before_any_dispatch() {
+        let source = MockRssFeedSource::new();
+        let err = preview_rss_source(&rss_disabled_matrix(), &source, FEED_URL, BUDGET)
+            .expect_err("policy must refuse");
+        assert_policy_refusal(&err);
+        assert_eq!(source.fetch_count(), 0, "zero network dispatch");
+    }
+
+    #[test]
+    fn preview_policy_gate_runs_before_the_address_validation() {
+        // An INVALID address with a disabled source: the refusal is the
+        // POLICY one, never `url_invalid` — the gate sits upstream of the
+        // whole flow, address validation included.
+        let source = MockRssFeedSource::new();
+        let err = preview_rss_source(
+            &rss_disabled_matrix(),
+            &source,
+            "ftp://exemple.fr/flux.xml",
+            BUDGET,
+        )
+        .expect_err("policy must refuse first");
+        assert_policy_refusal(&err);
+        assert_eq!(source.fetch_count(), 0);
+    }
+
+    #[test]
+    fn preview_fails_closed_on_an_empty_matrix() {
+        let source = MockRssFeedSource::new();
+        let err = preview_rss_source(&[], &source, FEED_URL, BUDGET)
+            .expect_err("an absent line refuses like a not-activated one");
+        assert_policy_refusal(&err);
+        assert_eq!(source.fetch_count(), 0);
+    }
+
+    #[test]
+    fn accept_refuses_a_not_enabled_source_with_zero_dispatch_and_zero_mutation() {
+        let mut db = fresh_db();
+        let source = MockRssFeedSource::new();
+        let err = accept_rss_story_creation(
+            &mut db,
+            &rss_disabled_matrix(),
+            &source,
+            FEED_URL,
+            &RssItemRef::Guid("g-1".into()),
+            &"0".repeat(64),
+            BUDGET,
+        )
+        .expect_err("policy must refuse");
+        assert_policy_refusal(&err);
+        assert_eq!(source.fetch_count(), 0, "zero network dispatch");
+        assert_eq!(count_stories(&db), 0, "nothing is created");
+    }
+
+    #[test]
+    fn accept_refuses_a_blocked_by_policy_source_identically() {
+        let mut db = fresh_db();
+        let source = MockRssFeedSource::new();
+        let blocked = [ContentSourceLine {
+            kind: ContentSourceKind::Rss,
+            activation: ContentSourceActivation::BlockedByPolicy,
+        }];
+        let err = accept_rss_story_creation(
+            &mut db,
+            &blocked,
+            &source,
+            FEED_URL,
+            &RssItemRef::Guid("g-1".into()),
+            &"0".repeat(64),
+            BUDGET,
+        )
+        .expect_err("policy must refuse");
+        assert_policy_refusal(&err);
+        assert_eq!(source.fetch_count(), 0);
+        assert_eq!(count_stories(&db), 0);
+    }
+
     // ===== preview =====
 
     #[test]
     fn preview_returns_host_checksum_and_analysis_with_zero_db_access() {
         let source = MockRssFeedSource::new();
         source.enqueue_body(nominal_feed());
-        let outcome = preview_rss_source(&source, FEED_URL, BUDGET).expect("preview");
+        let outcome = preview_rss_source(official_content_sources(), &source, FEED_URL, BUDGET)
+            .expect("preview");
         assert_eq!(outcome.source_host, "exemple.fr");
         assert_eq!(outcome.feed_checksum.len(), 64);
         assert_eq!(outcome.analysis.items.len(), 2);
@@ -402,8 +526,13 @@ mod tests {
     #[test]
     fn preview_refuses_an_invalid_address_without_any_dispatch() {
         let source = MockRssFeedSource::new();
-        let err = preview_rss_source(&source, "ftp://exemple.fr/flux.xml", BUDGET)
-            .expect_err("must refuse");
+        let err = preview_rss_source(
+            official_content_sources(),
+            &source,
+            "ftp://exemple.fr/flux.xml",
+            BUDGET,
+        )
+        .expect_err("must refuse");
         assert_eq!(err.code, AppErrorCode::RssSourceUnreachable);
         let v = serde_json::to_value(&err).expect("ser");
         assert_eq!(v["details"]["stage"], "url_invalid");
@@ -416,7 +545,8 @@ mod tests {
         source.enqueue_failure(crate::infrastructure::device::rss_source::fetch_error(
             "request",
         ));
-        let err = preview_rss_source(&source, FEED_URL, BUDGET).expect_err("transport");
+        let err = preview_rss_source(official_content_sources(), &source, FEED_URL, BUDGET)
+            .expect_err("transport");
         assert_eq!(err.code, AppErrorCode::RssSourceUnreachable);
     }
 
@@ -424,7 +554,8 @@ mod tests {
     fn preview_maps_a_blocked_feed_to_the_typed_verdict_never_an_error() {
         let source = MockRssFeedSource::new();
         source.enqueue_body("pas du xml");
-        let outcome = preview_rss_source(&source, FEED_URL, BUDGET).expect("verdict, not error");
+        let outcome = preview_rss_source(official_content_sources(), &source, FEED_URL, BUDGET)
+            .expect("verdict, not error");
         assert!(outcome.analysis.is_blocked());
     }
 
@@ -438,6 +569,7 @@ mod tests {
         let fingerprint = fingerprint_in(&nominal_feed(), "g-2");
         let outcome = accept_rss_story_creation(
             &mut db,
+            official_content_sources(),
             &source,
             FEED_URL,
             &RssItemRef::Guid("g-2".into()),
@@ -492,7 +624,8 @@ mod tests {
         );
         source.enqueue_body(first.clone());
         source.enqueue_body(second.clone());
-        let preview = preview_rss_source(&source, FEED_URL, BUDGET).expect("preview");
+        let preview = preview_rss_source(official_content_sources(), &source, FEED_URL, BUDGET)
+            .expect("preview");
         let previewed = preview
             .analysis
             .items
@@ -505,6 +638,7 @@ mod tests {
         let fingerprint = rss_item_fingerprint(previewed);
         let outcome = accept_rss_story_creation(
             &mut db,
+            official_content_sources(),
             &source,
             FEED_URL,
             &RssItemRef::Guid("g-2".into()),
@@ -535,6 +669,7 @@ mod tests {
         source.enqueue_body(nominal_feed());
         let outcome = accept_rss_story_creation(
             &mut db,
+            official_content_sources(),
             &source,
             FEED_URL,
             &RssItemRef::Guid("disparu".into()),
@@ -567,9 +702,16 @@ mod tests {
             .expect("guid-less item");
         let reference = rss_item_ref(guid_less);
         let fingerprint = rss_item_fingerprint(guid_less);
-        let outcome =
-            accept_rss_story_creation(&mut db, &source, FEED_URL, &reference, &fingerprint, BUDGET)
-                .expect("accept");
+        let outcome = accept_rss_story_creation(
+            &mut db,
+            official_content_sources(),
+            &source,
+            FEED_URL,
+            &reference,
+            &fingerprint,
+            BUDGET,
+        )
+        .expect("accept");
         let RssCreationOutcome::Created { story } = outcome else {
             panic!("expected a creation, not a refusal");
         };
@@ -600,6 +742,7 @@ mod tests {
         let previewed_fingerprint = fingerprint_in(&previewed_body, "g-1");
         let outcome = accept_rss_story_creation(
             &mut db,
+            official_content_sources(),
             &source,
             FEED_URL,
             &RssItemRef::Guid("g-1".into()),
@@ -618,6 +761,7 @@ mod tests {
         source.enqueue_body("<feed>atom désormais</feed>");
         let outcome = accept_rss_story_creation(
             &mut db,
+            official_content_sources(),
             &source,
             FEED_URL,
             &RssItemRef::Guid("g-1".into()),
@@ -638,6 +782,7 @@ mod tests {
         ));
         let err = accept_rss_story_creation(
             &mut db,
+            official_content_sources(),
             &source,
             FEED_URL,
             &RssItemRef::Guid("g-1".into()),
@@ -661,6 +806,7 @@ mod tests {
         let fingerprint = fingerprint_in(&body, "g-a");
         let outcome = accept_rss_story_creation(
             &mut db,
+            official_content_sources(),
             &source,
             FEED_URL,
             &RssItemRef::Guid("g-a".into()),
@@ -698,6 +844,7 @@ mod tests {
         let fingerprint = fingerprint_in(&body, "g-n");
         let outcome = accept_rss_story_creation(
             &mut db,
+            official_content_sources(),
             &source,
             FEED_URL,
             &RssItemRef::Guid("g-n".into()),
@@ -729,6 +876,7 @@ mod tests {
         let fingerprint = fingerprint_in(&nominal_feed(), "g-1");
         let outcome = accept_rss_story_creation(
             &mut db,
+            official_content_sources(),
             &source,
             FEED_URL,
             &RssItemRef::Guid("g-1".into()),
@@ -760,6 +908,7 @@ mod tests {
         let source = MockRssFeedSource::new();
         let err = accept_rss_story_creation(
             &mut db,
+            official_content_sources(),
             &source,
             "file:///etc/passwd",
             &RssItemRef::Guid("g".into()),

@@ -473,6 +473,81 @@ describe("useRssCreation", () => {
     }
   });
 
+  // ===== The content-source policy refusal (`unavailable`) =====
+
+  const POLICY_ERROR = {
+    code: "CONTENT_SOURCE_UNAVAILABLE",
+    message:
+      "Cette source de contenu n'est pas activée dans la distribution officielle.",
+    userAction:
+      "Utilise une source activée ou consulte le profil de support de ta version.",
+    details: { source: "content_source_policy", kind: "rss" },
+  };
+
+  it("fetchPreview lands on the calm unavailable state for a policy refusal (never failed)", async () => {
+    vi.mocked(fetchRssSourcePreview).mockRejectedValueOnce(POLICY_ERROR);
+    const { result } = renderHook(() => useRssCreation());
+    await act(async () => {
+      await result.current.fetchPreview(FEED_URL);
+    });
+    expect(result.current.status).toEqual({
+      kind: "unavailable",
+      error: POLICY_ERROR,
+    });
+  });
+
+  it("acceptCreation lands on unavailable for a policy refusal (defence in depth)", async () => {
+    vi.mocked(fetchRssSourcePreview).mockResolvedValueOnce(RSS_PREVIEW);
+    vi.mocked(acceptRssStoryCreation).mockRejectedValueOnce(POLICY_ERROR);
+    const { result } = renderHook(() => useRssCreation());
+    await act(async () => {
+      await result.current.fetchPreview(FEED_URL);
+    });
+    act(() => {
+      result.current.selectItem(RSS_PREVIEW.items[0].itemRef);
+    });
+    await act(async () => {
+      await result.current.acceptCreation();
+    });
+    expect(result.current.status.kind).toBe("unavailable");
+    expect(invalidateLibraryOverviewCache).not.toHaveBeenCalled();
+  });
+
+  it("retry-shaped actions are no-ops in unavailable (a retry cannot change a policy)", async () => {
+    vi.mocked(fetchRssSourcePreview).mockRejectedValueOnce(POLICY_ERROR);
+    const { result } = renderHook(() => useRssCreation());
+    await act(async () => {
+      await result.current.fetchPreview(FEED_URL);
+    });
+    expect(result.current.status.kind).toBe("unavailable");
+    vi.mocked(fetchRssSourcePreview).mockClear();
+    await act(async () => {
+      await result.current.fetchPreview(FEED_URL);
+      await result.current.acceptCreation();
+    });
+    expect(fetchRssSourcePreview).not.toHaveBeenCalled();
+    expect(acceptRssStoryCreation).not.toHaveBeenCalled();
+    expect(result.current.status.kind).toBe("unavailable");
+  });
+
+  it("abandon exits unavailable back to idle (the refusal's only gesture)", async () => {
+    vi.mocked(fetchRssSourcePreview).mockRejectedValueOnce(POLICY_ERROR);
+    const { result } = renderHook(() => useRssCreation());
+    await act(async () => {
+      await result.current.fetchPreview(FEED_URL);
+    });
+    act(() => {
+      result.current.abandon();
+    });
+    expect(result.current.status).toEqual({ kind: "idle" });
+    // The flow restarts cleanly after the abandon.
+    vi.mocked(fetchRssSourcePreview).mockResolvedValueOnce(RSS_PREVIEW);
+    await act(async () => {
+      await result.current.fetchPreview(FEED_URL);
+    });
+    expect(result.current.status.kind).toBe("review");
+  });
+
   it("survives StrictMode double-invocation", async () => {
     vi.mocked(fetchRssSourcePreview).mockResolvedValue(RSS_PREVIEW);
     const { result } = renderHook(() => useRssCreation(), {

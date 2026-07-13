@@ -1,8 +1,9 @@
 use serde::{Deserialize, Serialize};
 
 use crate::domain::import::{
-    ArtifactAnalysis, ImportState, ImportableContent, RecognitionAspect, RecognitionCategory,
-    RecognitionFinding, RecognitionQuality, RssItemRef, StructuredFolderAnalysis,
+    ArtifactAnalysis, ContentSourceActivation, ContentSourceKind, ContentSourceLine, ImportState,
+    ImportableContent, RecognitionAspect, RecognitionCategory, RecognitionFinding,
+    RecognitionQuality, RssItemRef, StructuredFolderAnalysis,
 };
 use crate::domain::story::normalize_title;
 
@@ -416,6 +417,76 @@ pub enum RssCreationOutcomeDto {
         report: Vec<ImportFindingDto>,
     },
     SourceChanged,
+}
+
+/// The frozen user-facing label of a content-source kind
+/// (`product-language.md`). Exhaustive match — adding a kind without
+/// deciding its label is a compile error (the DTO tripwire pattern).
+pub fn content_source_label(kind: ContentSourceKind) -> &'static str {
+    match kind {
+        ContentSourceKind::Rss => "Flux RSS",
+        ContentSourceKind::Atom => "Flux Atom",
+        ContentSourceKind::JsonFeed => "Flux JSON Feed",
+    }
+}
+
+/// The frozen disabled-entry reason of an activation state — `None` for
+/// an enabled line (an active entry carries the activation marker, not a
+/// reason). Exhaustive match (tripwire): a new activation state cannot
+/// ship without deciding its reason copy.
+pub fn content_source_reason(activation: ContentSourceActivation) -> Option<&'static str> {
+    match activation {
+        ContentSourceActivation::Enabled => None,
+        ContentSourceActivation::NotActivated => {
+            Some("Source indisponible: non activée dans la distribution officielle")
+        }
+        ContentSourceActivation::BlockedByPolicy => {
+            Some("Source indisponible: bloquée par la politique de distribution")
+        }
+    }
+}
+
+/// One serialized line of the content-source policy: the closed wire tags
+/// (`kind`, `activation`), the frozen label and — on a non-enabled line
+/// only — the frozen disabled-entry reason (`reason` is OMITTED on an
+/// enabled line, and the TS guard refuses any incoherence). Every copy is
+/// Rust-authoritative: the frontend renders these strings verbatim and
+/// never recomposes them.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ContentSourceDto {
+    pub kind: &'static str,
+    pub label: &'static str,
+    pub activation: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<&'static str>,
+}
+
+/// The serialized content-source policy: every line of the received
+/// matrix, in its stable order (`read_content_source_policy` hands the
+/// official matrix; tests may serialize custom ones).
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ContentSourcePolicyDto {
+    pub sources: Vec<ContentSourceDto>,
+}
+
+impl ContentSourcePolicyDto {
+    /// Map a content-source matrix to its wire policy (tags, frozen
+    /// labels, frozen reasons).
+    pub fn from_lines(lines: &[ContentSourceLine]) -> Self {
+        Self {
+            sources: lines
+                .iter()
+                .map(|line| ContentSourceDto {
+                    kind: line.kind.wire_tag(),
+                    label: content_source_label(line.kind),
+                    activation: line.activation.wire_tag(),
+                    reason: content_source_reason(line.activation),
+                })
+                .collect(),
+        }
+    }
 }
 
 /// The persisted shape of one attention finding inside

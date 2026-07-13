@@ -23,6 +23,12 @@
   border: 0;
 }
 
+.create-from-rss__activation {
+  margin: 0;
+  font-size: var(--font-size-meta);
+  color: var(--color-text-secondary);
+}
+
 .create-from-rss__posture {
   margin: 0;
   font-size: var(--font-size-meta);
@@ -146,6 +152,26 @@
 }
 
 .create-from-rss__alert-action {
+  margin: var(--space-1) 0 0;
+  color: var(--color-text-secondary);
+}
+
+/* The policy refusal is a CALM region — neutral surface, no warning tint:
+ * a distribution decision is not a breakage (never the alert styling). */
+.create-from-rss__unavailable {
+  padding: var(--space-3);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border, #e5e7eb);
+  border-radius: 0.5rem;
+}
+
+.create-from-rss__unavailable-message {
+  margin: 0;
+  font-weight: var(--font-weight-semibold);
+  color: var(--color-text-primary);
+}
+
+.create-from-rss__unavailable-action {
   margin: var(--space-1) 0 0;
   color: var(--color-text-secondary);
 }

@@ -4,6 +4,7 @@ import { toAppError } from "../../shared/errors/app-error";
 import type {
   AcceptArtifactImportInput,
   AcceptStructuredCreationInput,
+  ContentSourcePolicy,
   ExportStoryDialogInput,
   ExportStoryDialogOutcome,
   ImportArtifactAnalysis,
@@ -13,6 +14,7 @@ import type {
   StructuredCreationAnalysis,
 } from "../../shared/ipc-contracts/import-export";
 import {
+  isContentSourcePolicy,
   isExportStoryDialogOutcome,
   isImportArtifactAnalysis,
   isImportFinding,
@@ -288,6 +290,49 @@ export async function acceptRssStoryCreation(
   }
   if (!isRssStoryCreationOutcome(raw)) {
     throw new RssCreationContractDriftError("accept_rss_story_creation", raw);
+  }
+  return raw;
+}
+
+/**
+ * Error thrown when `read_content_source_policy` returns a payload that
+ * does not match the wire contract. A payload outside the contract NEVER
+ * renders a screen — the raw response is attached for debugging.
+ */
+export class ContentSourcePolicyContractDriftError extends Error {
+  readonly raw: unknown;
+  constructor(raw: unknown) {
+    super(
+      "read_content_source_policy returned a payload that does not match the contract",
+    );
+    this.name = "ContentSourcePolicyContractDriftError";
+    this.raw = raw;
+  }
+}
+
+/**
+ * Read the official content-source policy: WHICH additional creation
+ * sources this distribution activates, with their frozen labels and
+ * disabled-entry reasons (`Content Source Activation Contract`). A PURE
+ * read on the Rust side — zero network, zero DB, zero lock.
+ *
+ * The caller treats ANY failure (rejection, drifted payload) as a failed
+ * policy read and falls back to the fail-closed rendering (every
+ * external-source entry disabled with the frozen reason) — never
+ * active-by-default, never blocking the primary title path.
+ *
+ * Components MUST NOT call `invoke` directly — go through this facade so
+ * the wire contract stays owned by `src/ipc/`.
+ */
+export async function readContentSourcePolicy(): Promise<ContentSourcePolicy> {
+  let raw: unknown;
+  try {
+    raw = await invoke<unknown>("read_content_source_policy");
+  } catch (err) {
+    throw toAppError(err);
+  }
+  if (!isContentSourcePolicy(raw)) {
+    throw new ContentSourcePolicyContractDriftError(raw);
   }
   return raw;
 }

@@ -27,6 +27,27 @@ const mockAnalyzeFolder = vi.fn();
 const mockAnalyzeArtifact = vi.fn();
 const mockFetchRssPreview = vi.fn();
 const mockAcceptRssCreation = vi.fn();
+const mockReadContentSourcePolicy = vi.fn();
+
+/** The current official content-source policy, exactly as
+ *  `read_content_source_policy` serializes it. */
+const OFFICIAL_CONTENT_SOURCE_POLICY = {
+  sources: [
+    { kind: "rss", label: "Flux RSS", activation: "enabled" },
+    {
+      kind: "atom",
+      label: "Flux Atom",
+      activation: "notActivated",
+      reason: "Source indisponible: non activée dans la distribution officielle",
+    },
+    {
+      kind: "jsonFeed",
+      label: "Flux JSON Feed",
+      activation: "notActivated",
+      reason: "Source indisponible: non activée dans la distribution officielle",
+    },
+  ],
+};
 
 vi.mock("../../ipc/commands/library", () => ({
   getLibraryOverview: () => ({
@@ -146,6 +167,7 @@ vi.mock("../../ipc/commands/import-export", async () => {
     fetchRssSourcePreview: (url: string) => mockFetchRssPreview(url),
     acceptRssStoryCreation: (url: string, ref: unknown) =>
       mockAcceptRssCreation(url, ref),
+    readContentSourcePolicy: () => mockReadContentSourcePolicy(),
   };
 });
 
@@ -248,6 +270,13 @@ describe("<LibraryRoute />", () => {
     mockFetchRssPreview.mockImplementation(() => new Promise(() => {}));
     mockAcceptRssCreation.mockReset();
     mockAcceptRssCreation.mockImplementation(() => new Promise(() => {}));
+    // Default: the policy read resolves with the official distribution
+    // (rss enabled) so the dialog's RSS entry is actionable. Tests that
+    // exercise the fail-closed path override with a rejection.
+    mockReadContentSourcePolicy.mockReset();
+    mockReadContentSourcePolicy.mockResolvedValue(
+      OFFICIAL_CONTENT_SOURCE_POLICY,
+    );
     // The hooks keep module-local stale-while-revalidate caches; reset
     // them between tests so no stray snapshot bleeds across cases.
     invalidateLibraryOverviewCache();
@@ -936,6 +965,140 @@ describe("<LibraryRoute />", () => {
     await screen.findByRole("button", { name: /episode 1/i });
     expect(await screen.findByText("à revoir")).toBeInTheDocument();
     expect(screen.getByText("Importée")).toBeInTheDocument();
+  });
+
+  it("reads the content-source policy at every dialog opening and renders the policy-driven sources section", async () => {
+    const user = userEvent.setup();
+    mockGet.mockResolvedValueOnce({
+      stories: [{ id: "s1", title: "Le soleil" }],
+    });
+    renderLibrary();
+
+    await screen.findByRole("button", { name: /le soleil/i });
+    await user.click(
+      screen.getByRole("button", { name: /créer une histoire/i }),
+    );
+    // One point-in-time read per opening — no cache.
+    expect(mockReadContentSourcePolicy).toHaveBeenCalledTimes(1);
+    const dialog = await screen.findByRole("dialog", {
+      name: /créer une histoire/i,
+    });
+    // The enabled RSS entry with its label + frozen activation marker.
+    const rssButton = within(dialog).getByRole("button", {
+      name: "Démarrer depuis une source externe (RSS)",
+    });
+    await waitFor(() => expect(rssButton).not.toHaveAttribute("aria-disabled"));
+    expect(within(dialog).getByText("Flux RSS")).toBeInTheDocument();
+    expect(
+      within(dialog).getByText("Activée par la distribution officielle"),
+    ).toBeInTheDocument();
+    // The known non-activated kinds render VISIBLE but DISABLED with the
+    // Rust-carried reason.
+    for (const label of ["Flux Atom", "Flux JSON Feed"]) {
+      expect(within(dialog).getByRole("button", { name: label })).toHaveAttribute(
+        "aria-disabled",
+        "true",
+      );
+    }
+    expect(
+      within(dialog).getAllByText(
+        "Source indisponible: non activée dans la distribution officielle",
+      ),
+    ).toHaveLength(2);
+
+    // Close, reopen: the policy is read ANEW (point-in-time, no cache).
+    await user.click(within(dialog).getByRole("button", { name: "Annuler" }));
+    await user.click(
+      screen.getByRole("button", { name: /créer une histoire/i }),
+    );
+    expect(mockReadContentSourcePolicy).toHaveBeenCalledTimes(2);
+  });
+
+  it("ignores an out-of-order policy resolution from a previous opening (opening token)", async () => {
+    const user = userEvent.setup();
+    mockGet.mockResolvedValueOnce({
+      stories: [{ id: "s1", title: "Le soleil" }],
+    });
+    // FIRST opening: a slow read we resolve LATER, out of order.
+    let resolveFirst: (value: unknown) => void = () => {};
+    mockReadContentSourcePolicy.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveFirst = resolve;
+        }),
+    );
+    // SECOND opening: the read fails → the CURRENT opening must stay
+    // fail-closed even after the first read finally lands.
+    renderLibrary();
+
+    await screen.findByRole("button", { name: /le soleil/i });
+    await user.click(
+      screen.getByRole("button", { name: /créer une histoire/i }),
+    );
+    let dialog = await screen.findByRole("dialog", {
+      name: /créer une histoire/i,
+    });
+    // Close the first opening while its read is still in flight.
+    await user.click(within(dialog).getByRole("button", { name: "Annuler" }));
+
+    mockReadContentSourcePolicy.mockRejectedValueOnce(
+      new Error("lecture en échec"),
+    );
+    await user.click(
+      screen.getByRole("button", { name: /créer une histoire/i }),
+    );
+    dialog = await screen.findByRole("dialog", {
+      name: /créer une histoire/i,
+    });
+
+    // The STALE first read now resolves with the enabled policy — it
+    // belongs to a closed opening and must NOT reactivate the entry.
+    resolveFirst(OFFICIAL_CONTENT_SOURCE_POLICY);
+    await waitFor(() => {
+      expect(
+        within(dialog).getByRole("button", {
+          name: "Démarrer depuis une source externe (RSS)",
+        }),
+      ).toHaveAttribute("aria-disabled", "true");
+    });
+    expect(
+      within(dialog).getByText("Sources externes indisponibles pour l'instant."),
+    ).toBeInTheDocument();
+  });
+
+  it("renders the external-source entries fail-closed when the policy read fails, without blocking the title path", async () => {
+    const user = userEvent.setup();
+    mockGet.mockResolvedValueOnce({
+      stories: [{ id: "s1", title: "Le soleil" }],
+    });
+    mockReadContentSourcePolicy.mockRejectedValue(
+      new Error("ipc indisponible"),
+    );
+    renderLibrary();
+
+    await screen.findByRole("button", { name: /le soleil/i });
+    await user.click(
+      screen.getByRole("button", { name: /créer une histoire/i }),
+    );
+    const dialog = await screen.findByRole("dialog", {
+      name: /créer une histoire/i,
+    });
+    // FAIL-CLOSED: the RSS entry renders disabled with the frozen reason —
+    // never active-by-default.
+    const rssButton = within(dialog).getByRole("button", {
+      name: "Démarrer depuis une source externe (RSS)",
+    });
+    expect(rssButton).toHaveAttribute("aria-disabled", "true");
+    await user.click(rssButton);
+    expect(screen.queryByLabelText("Adresse du flux RSS")).not.toBeInTheDocument();
+    expect(
+      within(dialog).getByText("Sources externes indisponibles pour l'instant."),
+    ).toBeInTheDocument();
+    // The primary title path is NEVER blocked by a policy failure.
+    expect(within(dialog).getByLabelText(/^titre$/i)).toBeInTheDocument();
+    expect(
+      within(dialog).getByRole("button", { name: /^créer$/i }),
+    ).toBeInTheDocument();
   });
 
   it("Choisir un dossier… in the Créer dialog closes it and surfaces the folder report in-context", async () => {

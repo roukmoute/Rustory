@@ -481,6 +481,123 @@ export function isRssPreview(value: unknown): value is RssPreview {
   return true;
 }
 
+// ===== Content-source activation policy (distribution governance) =====
+//
+// Mirror of `src-tauri/src/ipc/dto/import_export.rs` (policy side). Rust
+// alone decides the policy (`Content Source Activation Contract`): the
+// frontend renders what it declares and never hardcodes the source list,
+// the labels or the reasons. These guards refuse a drifted wire shape so
+// the creation dialog never renders against an arbitrary object.
+
+/** Closed set of content-source kinds this product speaks about. */
+export type ContentSourceKind = "rss" | "atom" | "jsonFeed";
+
+/** Closed set of activation states a distribution can assign to a kind. */
+export type ContentSourceActivation =
+  | "enabled"
+  | "notActivated"
+  | "blockedByPolicy";
+
+/** One line of the read policy: the closed tags, the frozen label, and —
+ *  on a non-enabled line ONLY — the frozen disabled-entry reason. */
+export interface ContentSourceEntry {
+  kind: ContentSourceKind;
+  label: string;
+  activation: ContentSourceActivation;
+  /** Present IFF the line is not enabled (the guard refuses incoherence);
+   *  an enabled entry carries the activation marker instead. */
+  reason?: string;
+}
+
+/** The read content-source policy: every line of the distribution's
+ *  matrix, in its stable order. */
+export interface ContentSourcePolicy {
+  sources: ContentSourceEntry[];
+}
+
+/** The frozen kind → label couples, exactly as Rust serializes them.
+ *  VALIDATION literals only (the rendering keeps using the Rust-carried
+ *  values): the guard's job is to refuse a drifted copy before it is
+ *  ever rendered as authoritative. */
+const CONTENT_SOURCE_LABELS: Readonly<Record<ContentSourceKind, string>> = {
+  rss: "Flux RSS",
+  atom: "Flux Atom",
+  jsonFeed: "Flux JSON Feed",
+};
+
+/** The frozen activation → reason couples for the non-enabled lines
+ *  (an enabled line carries NO reason — the marker replaces it). */
+const CONTENT_SOURCE_REASONS: Readonly<
+  Record<Exclude<ContentSourceActivation, "enabled">, string>
+> = {
+  notActivated:
+    "Source indisponible: non activée dans la distribution officielle",
+  blockedByPolicy:
+    "Source indisponible: bloquée par la politique de distribution",
+};
+
+function isContentSourceKind(value: unknown): value is ContentSourceKind {
+  return typeof value === "string" && value in CONTENT_SOURCE_LABELS;
+}
+
+export function isContentSourceEntry(
+  value: unknown,
+): value is ContentSourceEntry {
+  if (typeof value !== "object" || value === null) return false;
+  const c = value as Record<string, unknown>;
+  if (!isContentSourceKind(c.kind)) return false;
+  // The label is the FROZEN couple of the kind — an arbitrary label is a
+  // drift, never a copy to render as authoritative.
+  if (c.label !== CONTENT_SOURCE_LABELS[c.kind]) return false;
+  if (c.activation === "enabled") {
+    // Only `rss` has an ingestion flow in THIS build: a policy enabling
+    // any other kind is ahead of the frontend and MUST fail closed (the
+    // dialog would otherwise render a disabled entry "justified" by the
+    // activation marker). Activating another kind is an explicit
+    // re-scope of this guard, alongside its ingestion flow.
+    if (c.kind !== "rss") return false;
+    // An enabled line carries NO reason (the marker replaces it) — the
+    // mirror of the Rust `Option` + `skip_serializing_if`.
+    return c.reason === undefined;
+  }
+  if (c.activation !== "notActivated" && c.activation !== "blockedByPolicy") {
+    return false;
+  }
+  // A non-enabled line carries EXACTLY its frozen reason.
+  return c.reason === CONTENT_SOURCE_REASONS[c.activation];
+}
+
+/**
+ * Runtime guard for a [`ContentSourcePolicy`] payload: EXACTLY one line
+ * per known kind (`rss` / `atom` / `jsonFeed`), each carrying its frozen
+ * label and — when not enabled — its frozen reason. A partial policy
+ * (a known kind missing) is a drift too: the contract promises that the
+ * non-activated kinds stay VISIBLE with their reason, so their silent
+ * disappearance must never render. A refused payload surfaces as a drift
+ * error, which the dialog treats as a failed policy read — fail-closed,
+ * never active-by-default. A distribution wanting another set is an
+ * explicit re-scope of this guard, not a silent acceptance.
+ */
+export function isContentSourcePolicy(
+  value: unknown,
+): value is ContentSourcePolicy {
+  if (typeof value !== "object" || value === null) return false;
+  const c = value as Record<string, unknown>;
+  if (!Array.isArray(c.sources)) return false;
+  if (!c.sources.every(isContentSourceEntry)) return false;
+  const kinds = new Set<string>();
+  for (const entry of c.sources as ContentSourceEntry[]) {
+    // A duplicated kind is a malformed policy, not a surface to render.
+    if (kinds.has(entry.kind)) return false;
+    kinds.add(entry.kind);
+  }
+  // Exactly the current closed set — nothing missing, nothing extra.
+  return (
+    kinds.size === Object.keys(CONTENT_SOURCE_LABELS).length &&
+    Object.keys(CONTENT_SOURCE_LABELS).every((kind) => kinds.has(kind))
+  );
+}
+
 /** The folder flow's OWN aspect set (no schemaVersion / integrity /
  *  timestamps — an author manifest has none). */
 const FOLDER_ASPECTS: ReadonlySet<string> = new Set([

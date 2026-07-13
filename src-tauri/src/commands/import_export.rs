@@ -11,10 +11,11 @@ use crate::application::import_export::{
 use crate::application::story::get_story_detail;
 use crate::commands::shared::validate_story_id;
 use crate::domain::export::RUSTORY_ARTIFACT_EXTENSION;
-use crate::domain::import::feed_url_host;
+use crate::domain::import::{feed_url_host, official_content_sources};
 use crate::domain::shared::AppError;
 use crate::infrastructure::diagnostics::import_log;
 use crate::ipc::dto::import_export::state_db_tag;
+use crate::ipc::dto::import_export::ContentSourcePolicyDto;
 use crate::ipc::dto::{
     AcceptArtifactImportInputDto, AcceptStructuredCreationInputDto, ExportStoryDialogInputDto,
     ExportStoryDialogOutcomeDto, ImportArtifactAnalysisDto, RssCreationOutcomeDto, RssItemRefDto,
@@ -523,11 +524,18 @@ pub async fn fetch_rss_source_preview(
     feed_url: String,
 ) -> Result<RssPreviewDto, AppError> {
     let source = state.rss_source.clone();
-    // Best-effort diagnostics carry the HOST at most — resolved up-front,
-    // before the URL moves into the worker.
-    let host_for_log = feed_url_host(&feed_url);
+    // The raw address is CLONED (never parsed) before moving into the
+    // worker: the policy gate must run before ANY address analysis, so
+    // the diagnostics host is derived only AFTER the outcome settles —
+    // and never at all on a policy refusal.
+    let feed_url_for_log = feed_url.clone();
     let outcome = async_runtime::spawn_blocking(move || {
-        rss_creation::preview_rss_source(source.as_ref(), &feed_url, RSS_FETCH_BUDGET)
+        rss_creation::preview_rss_source(
+            official_content_sources(),
+            source.as_ref(),
+            &feed_url,
+            RSS_FETCH_BUDGET,
+        )
     })
     .await
     .map_err(|_| rss_creation::spawn_blocking_join_error())?;
@@ -543,7 +551,7 @@ pub async fn fetch_rss_source_preview(
                 },
             );
         }
-        Err(err) => record_rss_failure(&app, host_for_log, err),
+        Err(err) => record_rss_failure(&app, &feed_url_for_log, err),
     }
 
     let preview = outcome?;
@@ -570,11 +578,15 @@ pub async fn accept_rss_story_creation(
 ) -> Result<RssCreationOutcomeDto, AppError> {
     let source = state.rss_source.clone();
     let db = state.db.clone();
-    let host_for_log = feed_url_host(&feed_url);
+    // Cloned raw, parsed only AFTER the outcome (see the preview command):
+    // a policy refusal must reject before ANY address analysis, boundary
+    // included.
+    let feed_url_for_log = feed_url.clone();
     let outcome = async_runtime::spawn_blocking(move || -> Result<RssCreationOutcome, AppError> {
         let reference = item_ref.to_domain();
         let expected_fingerprint = item_ref.fingerprint().to_string();
         match rss_creation::prepare_rss_story_creation(
+            official_content_sources(),
             source.as_ref(),
             &feed_url,
             &reference,
@@ -594,10 +606,12 @@ pub async fn accept_rss_story_creation(
 
     match &outcome {
         Ok(RssCreationOutcome::Created { story }) => {
+            // A settled creation already passed the policy + address
+            // gates; deriving the host here cannot precede them.
             let _ = import_log::record_event(
                 &app,
                 import_log::Event::RssCreationSettled {
-                    host: host_for_log.clone().unwrap_or_default(),
+                    host: feed_url_host(&feed_url_for_log).unwrap_or_default(),
                     import_state: story
                         .import_state
                         .map(|state| state.wire_tag())
@@ -609,11 +623,11 @@ pub async fn accept_rss_story_creation(
             let _ = import_log::record_event(
                 &app,
                 import_log::Event::RssSourceChanged {
-                    host: host_for_log.clone().unwrap_or_default(),
+                    host: feed_url_host(&feed_url_for_log).unwrap_or_default(),
                 },
             );
         }
-        Err(err) => record_rss_failure(&app, host_for_log.clone(), err),
+        Err(err) => record_rss_failure(&app, &feed_url_for_log, err),
     }
 
     Ok(match outcome? {
@@ -623,6 +637,18 @@ pub async fn accept_rss_story_creation(
         },
         RssCreationOutcome::SourceChanged => RssCreationOutcomeDto::SourceChanged,
     })
+}
+
+/// Read the official content-source policy: WHICH additional creation
+/// sources this distribution activates, with their frozen labels and
+/// disabled-entry reasons (`Content Source Activation Contract`). A PURE,
+/// synchronous read of the domain matrix — zero network, zero DB, zero
+/// lock: the frontend renders what Rust declares and never hardcodes the
+/// source list. Infallible by construction (the matrix is a build-time
+/// constant), hence no `Result`.
+#[tauri::command]
+pub fn read_content_source_policy() -> ContentSourcePolicyDto {
+    ContentSourcePolicyDto::from_lines(official_content_sources())
 }
 
 /// The diagnostic verdict tag of a feed analysis: the durable-state tag
@@ -640,9 +666,26 @@ fn rss_verdict_tag(analysis: &crate::domain::import::RssAnalysis) -> &'static st
 /// the ERROR CODE so the closed diagnostic categories stay honest: only a
 /// real transport failure (`RSS_SOURCE_UNREACHABLE`) lands under
 /// `rss_source_unreachable`; a local failure (DB commit, clock, worker
-/// join — `IMPORT_FAILED`…) is an `rss_creation_failed` line.
-fn record_rss_failure(app: &AppHandle, host: Option<String>, err: &AppError) {
-    let _ = import_log::record_event(app, rss_failure_event(host.unwrap_or_default(), err));
+/// join — `IMPORT_FAILED`…) is an `rss_creation_failed` line. The raw
+/// address travels UNPARSED to this point: [`rss_failure_log_host`]
+/// derives the host only when the failure category carries one.
+fn record_rss_failure(app: &AppHandle, feed_url: &str, err: &AppError) {
+    let _ = import_log::record_event(
+        app,
+        rss_failure_event(rss_failure_log_host(feed_url, err), err),
+    );
+}
+
+/// The (pure, unit-tested) host derivation of a failure trace: a POLICY
+/// refusal never reads the address — its event carries the KIND alone, so
+/// the URL is not even parsed (the boundary mirror of "the gate runs
+/// before the address validation"). Every other failure derives the host
+/// best-effort.
+fn rss_failure_log_host(feed_url: &str, err: &AppError) -> String {
+    if err.code == crate::domain::shared::AppErrorCode::ContentSourceUnavailable {
+        return String::new();
+    }
+    feed_url_host(feed_url).unwrap_or_default()
 }
 
 /// The (pure, unit-tested) category dispatch of a failure trace.
@@ -659,6 +702,13 @@ fn rss_failure_event(host: String, err: &AppError) -> import_log::Event {
         import_log::Event::RssSourceUnreachable {
             host,
             stage: detail(err, "stage"),
+        }
+    } else if err.code == crate::domain::shared::AppErrorCode::ContentSourceUnavailable {
+        // A POLICY refusal: kind only, and the host is deliberately
+        // dropped — the refusal precedes any network dispatch, and a
+        // distribution decision is neither a network nor a local failure.
+        import_log::Event::ContentSourceBlocked {
+            kind: detail(err, "kind"),
         }
     } else {
         import_log::Event::RssCreationFailed {
@@ -743,6 +793,38 @@ mod tests {
         assert_eq!(v["category"], "rss_creation_failed");
         assert_eq!(v["code"], "IMPORT_FAILED");
         assert_eq!(v["source"], "db_commit");
+
+        // …and a POLICY refusal is `content_source_blocked` — kind only,
+        // the host is dropped (the refusal precedes any dispatch): never
+        // a network line, never a local-failure line.
+        let policy =
+            AppError::content_source_unavailable(crate::domain::import::ContentSourceKind::Rss);
+        let event = rss_failure_event("exemple.fr".into(), &policy);
+        let v = serde_json::to_value(&event).expect("ser");
+        assert_eq!(v["category"], "content_source_blocked");
+        assert_eq!(v["kind"], "rss");
+        assert!(v.get("host").is_none(), "no host on a policy refusal");
+    }
+
+    #[test]
+    fn rss_failure_log_host_never_reads_the_address_on_a_policy_refusal() {
+        // A perfectly parseable address + a policy refusal → the host is
+        // EMPTY: the address was not consulted (the boundary mirror of
+        // "the gate runs before the address validation").
+        let policy =
+            AppError::content_source_unavailable(crate::domain::import::ContentSourceKind::Rss);
+        assert_eq!(
+            rss_failure_log_host("https://exemple.fr/flux.xml", &policy),
+            ""
+        );
+
+        // Every other failure derives the host best-effort.
+        let transport = crate::infrastructure::device::rss_source::fetch_error("request");
+        assert_eq!(
+            rss_failure_log_host("https://exemple.fr/flux.xml", &transport),
+            "exemple.fr"
+        );
+        assert_eq!(rss_failure_log_host("pas une adresse", &transport), "");
     }
 
     fn assert_invalid_path(err: &AppError, cause: &str) {

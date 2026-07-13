@@ -46,6 +46,7 @@ import { useStoryPreparation, useStoryTransfer } from "../../features/transfer";
 import { CreateFromFolderSurface } from "../../features/import-export/components/CreateFromFolderSurface";
 import { CreateFromRssSurface } from "../../features/import-export/components/CreateFromRssSurface";
 import { ImportArtifactSurface } from "../../features/import-export/components/ImportArtifactSurface";
+import { readContentSourcePolicy } from "../../ipc/commands/import-export";
 import { useRssCreation } from "../../features/import-export/hooks/use-rss-creation";
 import { useStoryImport } from "../../features/import-export/hooks/use-story-import";
 import { useStructuredCreation } from "../../features/import-export/hooks/use-structured-creation";
@@ -62,6 +63,7 @@ import type {
   SupportedOperationsDto,
 } from "../../shared/ipc-contracts/device";
 import type { DeviceStoryDto } from "../../shared/ipc-contracts/device-library";
+import type { ContentSourcePolicy } from "../../shared/ipc-contracts/import-export";
 import type { StoryCardDto } from "../../shared/ipc-contracts/library";
 import { LibraryLayout } from "../../shell/layout/LibraryLayout";
 import { useLibraryShell } from "../../shell/state/library-shell-store";
@@ -80,6 +82,17 @@ export function LibraryRoute(): React.JSX.Element {
   const navigate = useNavigate();
 
   const [isCreateOpen, setIsCreateOpen] = useState<boolean>(false);
+  // The distribution's content-source policy, read ANEW at every dialog
+  // opening (a point-in-time read — no cache, no authoritative frontend
+  // state; Rust alone decides). `null` = not read / read failed: the
+  // dialog renders its external-source entries FAIL-CLOSED.
+  const [contentSourcePolicy, setContentSourcePolicy] =
+    useState<ContentSourcePolicy | null>(null);
+  // Opening token: only the read issued by the LATEST opening may apply
+  // its result. A slow read from a previous (possibly closed) opening
+  // that settles out of order must never overwrite the current opening's
+  // state — the point-in-time contract would silently break.
+  const policyReadTokenRef = useRef(0);
 
   const overview = state.kind === "ready" ? state.overview : null;
 
@@ -133,6 +146,26 @@ export function LibraryRoute(): React.JSX.Element {
 
   const handleCreateStoryRequest = (): void => {
     setIsCreateOpen(true);
+    // Read the policy for THIS opening. The dialog opens immediately and
+    // renders fail-closed until the read lands — a policy failure must
+    // never block the primary title path. The token pins the result to
+    // this opening: a stale resolution (an earlier opening's read landing
+    // late) is ignored instead of overwriting the current state.
+    setContentSourcePolicy(null);
+    policyReadTokenRef.current += 1;
+    const readToken = policyReadTokenRef.current;
+    void readContentSourcePolicy().then(
+      (policy) => {
+        if (policyReadTokenRef.current === readToken) {
+          setContentSourcePolicy(policy);
+        }
+      },
+      () => {
+        if (policyReadTokenRef.current === readToken) {
+          setContentSourcePolicy(null);
+        }
+      },
+    );
   };
 
   // Local-artifact import flow (file → library). USER-TRIGGERED via the
@@ -657,6 +690,7 @@ export function LibraryRoute(): React.JSX.Element {
         isCreateFromRssUnavailable={
           isImportBusy || isCreateFromFolderBusy || isRssCreationActive
         }
+        contentSourcePolicy={contentSourcePolicy}
       />
     </>
   );

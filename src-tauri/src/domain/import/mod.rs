@@ -3,6 +3,7 @@
 //! `domain::export` — pure, framework-free, zero I/O.
 
 pub mod artifact;
+pub mod content_source;
 pub mod recognition;
 pub mod rss;
 pub mod structured_folder;
@@ -10,6 +11,10 @@ pub mod structured_folder;
 pub use artifact::{
     analyze_components, analyze_rustory_artifact, is_artifact_checksum,
     is_supported_artifact_source_name, ArtifactAnalysis, CanonicalContent, ImportableContent,
+};
+pub use content_source::{
+    content_source_activation, official_content_sources, ContentSourceActivation,
+    ContentSourceKind, ContentSourceLine, ALL_CONTENT_SOURCE_ACTIVATIONS, ALL_CONTENT_SOURCE_KINDS,
 };
 pub use recognition::{
     folder_import_state, import_state, recognition_quality, ImportState, RecognitionAspect,
