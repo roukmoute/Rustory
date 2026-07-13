@@ -164,12 +164,14 @@ pub fn classify_lunii(
 /// - `hashed_id`: opaque digest of `.mdf` + volume serial. Never the raw
 ///   payload.
 ///
-/// A conforming FLAM is SUPPORTED-recognized with the conservative
-/// `Gen1` cohort, NO metadata version (the `.mdf` structure is not
-/// publicly documented — no version byte is invented) and ZERO
-/// activated capability ([`SupportedOperations::ALL_FALSE`]): the
-/// support matrix keeps every operation ❌ for FLAM Gen1, and the
-/// capability gate inherits the refusal everywhere by construction.
+/// A conforming FLAM is SUPPORTED with the conservative `Gen1` cohort,
+/// NO metadata version (the `.mdf` structure is not publicly documented
+/// — no version byte is invented) and the READ-side capabilities of the
+/// support matrix activated: library inventory, story inspection and
+/// story import are `true`, while `write_story` stays `false` until the
+/// update flow proves a device write end to end. The capability gate
+/// inherits both the authorizations and the write refusal everywhere by
+/// construction (one matrix line = one gate behavior).
 pub fn classify_flam(
     mdf_payload: &[u8],
     has_str_dir: bool,
@@ -196,7 +198,15 @@ pub fn classify_flam(
         firmware_cohort: FirmwareCohort::Flam(FlamFirmwareCohort::Gen1),
         metadata_format_version: None,
         device_identifier: hashed_id.to_string(),
-        supported_operations: SupportedOperations::ALL_FALSE,
+        // The FLAM Gen1 matrix line (device-support-profile.md): read
+        // capabilities ✅✅✅, write ❌ — activated line by line, never
+        // wholesale.
+        supported_operations: SupportedOperations {
+            read_library: true,
+            inspect_story: true,
+            import_story: true,
+            write_story: false,
+        },
     })
 }
 
@@ -507,35 +517,38 @@ mod tests {
         assert_eq!(p.device_identifier, "flam_id");
     }
 
-    // One matrix line = one test: every cell of the FLAM Gen1 line is
-    // ❌ (device-support-profile.md MVP matrix), asserted per operation.
+    // One matrix line = one test: every cell of the FLAM Gen1 line
+    // (device-support-profile.md MVP matrix: read ✅ / inspect ✅ /
+    // import ✅ / write ❌), asserted per operation.
 
     #[test]
-    fn flam_gen1_profile_denies_read_library() {
+    fn flam_gen1_profile_allows_read_library() {
         let p = supported_profile(classify_flam(b"MDF", true, true, "id"));
-        assert!(!p
+        assert!(p
             .supported_operations
             .allows(SupportedOperation::ReadLibrary));
     }
 
     #[test]
-    fn flam_gen1_profile_denies_inspect_story() {
+    fn flam_gen1_profile_allows_inspect_story() {
         let p = supported_profile(classify_flam(b"MDF", true, true, "id"));
-        assert!(!p
+        assert!(p
             .supported_operations
             .allows(SupportedOperation::InspectStory));
     }
 
     #[test]
-    fn flam_gen1_profile_denies_import_story() {
+    fn flam_gen1_profile_allows_import_story() {
         let p = supported_profile(classify_flam(b"MDF", true, true, "id"));
-        assert!(!p
+        assert!(p
             .supported_operations
             .allows(SupportedOperation::ImportStory));
     }
 
     #[test]
     fn flam_gen1_profile_denies_write_story() {
+        // The write lock is NEVER weakened: the FLAM write stays ❌
+        // until the update flow proves it end to end.
         let p = supported_profile(classify_flam(b"MDF", true, true, "id"));
         assert!(!p
             .supported_operations

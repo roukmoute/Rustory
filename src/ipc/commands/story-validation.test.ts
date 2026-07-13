@@ -7,7 +7,7 @@ vi.mock("@tauri-apps/api/core", () => ({
 import { invoke } from "@tauri-apps/api/core";
 
 import {
-  READ_STORY_VALIDATION_TIMEOUT_ERROR,
+  readStoryValidationTimeoutError,
   READ_STORY_VALIDATION_TIMEOUT_MS,
   ReadStoryValidationContractDriftError,
   readStoryValidation,
@@ -100,7 +100,7 @@ describe("readStoryValidation", () => {
     const handle = readStoryValidation(INPUT, 50);
     const observed = handle.promise.catch((e) => e);
     await vi.advanceTimersByTimeAsync(60);
-    expect(await observed).toBe(READ_STORY_VALIDATION_TIMEOUT_ERROR);
+    expect(await observed).toEqual(readStoryValidationTimeoutError());
   });
 
   it("does not reject after cancel() even if the budget elapses", async () => {

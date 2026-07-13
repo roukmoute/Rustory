@@ -29,7 +29,7 @@ use rusqlite::OptionalExtension;
 
 use crate::application::story::now_iso_ms;
 use crate::domain::device::pack::imported_story_title;
-use crate::domain::device::{DeviceStoryEntry, SupportedOperation};
+use crate::domain::device::{DeviceFamily, DeviceStoryEntry, FirmwareCohort, SupportedOperation};
 use crate::domain::shared::AppError;
 use crate::domain::story::{
     canonical_structure_json, content_checksum, map_error, normalize_title, validate_title,
@@ -54,7 +54,9 @@ pub struct ImportDeviceStoryRequest {
 
 /// Result of a successful import, echoed to the UI so the success
 /// surface can name the created draft without a second read. The byte /
-/// file counts feed the diagnostic event.
+/// file counts feed the diagnostic event, and so do `family` /
+/// `firmware_cohort` (from the re-scanned profile — they NEVER cross
+/// the wire, the outcome DTO stays family-neutral).
 #[derive(Debug, Clone)]
 pub struct ImportedDeviceStory {
     pub story: StoryCardDto,
@@ -62,6 +64,8 @@ pub struct ImportedDeviceStory {
     pub imported_at: String,
     pub pack_file_count: u32,
     pub pack_total_bytes: u64,
+    pub family: DeviceFamily,
+    pub firmware_cohort: FirmwareCohort,
 }
 
 /// Run the full import sequence. Synchronous by design: the command
@@ -114,8 +118,10 @@ pub fn import_device_story(
     check_operation_allowed(&profile, SupportedOperation::ImportStory)?;
 
     // 3. Pack re-verification against the live index (visible AND
-    //    hidden — a `Masquée` story is importable).
-    let library = library_reader.read_library(&mount_path, remaining(started))?;
+    //    hidden — a `Masquée` story is importable). The family comes
+    //    from the re-scanned profile: the reader dispatches its family
+    //    adapter on it, never on a mount re-sniff.
+    let library = library_reader.read_library(&mount_path, profile.family, remaining(started))?;
     let entry: &DeviceStoryEntry = library
         .entries
         .iter()
@@ -125,14 +131,31 @@ pub fn import_device_story(
         return Err(pack_missing_error());
     }
     let short_id = entry.short_id.clone();
+    // The family's own pack reference: the `.content` SHORT_ID for a
+    // Lunii (VERBATIM, the historical behavior), the story-folder UUID
+    // for a FLAM. The SELECTED entry's visibility travels with it: the
+    // index is authoritative, so a hidden FLAM entry acquires from
+    // `str.hidden/<uuid>/` ONLY — a same-UUID folder on the visible
+    // root can never be copied in its place.
+    let pack_ref = match profile.family {
+        DeviceFamily::Lunii => entry.short_id.clone(),
+        DeviceFamily::Flam => entry.uuid.clone(),
+    };
+    let entry_hidden = entry.hidden;
 
     // 4. Bounded acquisition into a staging tempdir. Any failure from
     //    here drops the TempDir, which removes the partial copy.
     let (imports_dir, _staging_root) = ensure_import_store(app_data_dir)?;
     let staging = tempfile::tempdir_in(resolve_imports_staging_dir(app_data_dir))
         .map_err(|err| staging_create_error(&err))?;
-    let acquired =
-        pack_reader.acquire_pack(&mount_path, &short_id, staging.path(), remaining(started))?;
+    let acquired = pack_reader.acquire_pack(
+        &mount_path,
+        profile.family,
+        &pack_ref,
+        entry_hidden,
+        staging.path(),
+        remaining(started),
+    )?;
 
     // 5. Atomic promotion. `imports/.staging` lives inside `imports/`,
     //    so the rename never crosses a filesystem boundary.
@@ -160,6 +183,8 @@ pub fn import_device_story(
         let mut db = db.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         commit_imported_story(
             &mut db,
+            profile.family,
+            profile.firmware_cohort,
             &story_id,
             &short_id,
             &request.pack_uuid,
@@ -224,11 +249,17 @@ fn find_existing_import(db: &DbHandle, pack_uuid: &str) -> Result<Option<String>
 }
 
 /// Insert the canonical `stories` row + the `story_imports` provenance
-/// row in one `BEGIN IMMEDIATE` transaction. Factored out so the
-/// UNIQUE-race branch (two imports of the same pack racing past the
+/// row in one `BEGIN IMMEDIATE` transaction — structurally UNCHANGED by
+/// the family extension: the provenance schema absorbs the FLAM story
+/// UUID verbatim (`pack_uuid` is the content identity for BOTH
+/// families), only the default title is family-correct. Factored out so
+/// the UNIQUE-race branch (two imports of the same pack racing past the
 /// duplicate guard) is directly testable.
+#[allow(clippy::too_many_arguments)]
 fn commit_imported_story(
     db: &mut DbHandle,
+    family: DeviceFamily,
+    firmware_cohort: FirmwareCohort,
     story_id: &str,
     short_id: &str,
     pack_uuid: &str,
@@ -237,7 +268,7 @@ fn commit_imported_story(
 ) -> Result<ImportedDeviceStory, AppError> {
     // The default title is re-validated authoritatively, exactly like a
     // user-typed one — a generator drift must fail here, not at a CHECK.
-    let title = normalize_title(&imported_story_title(short_id));
+    let title = normalize_title(&imported_story_title(family, short_id));
     validate_title(&title).map_err(map_error)?;
 
     let structure = CanonicalStructure::minimal();
@@ -265,8 +296,8 @@ fn commit_imported_story(
     .map_err(|err| db_commit_error(&err, "insert_story"))?;
 
     tx.execute(
-        "INSERT INTO story_imports (story_id, pack_uuid, source_device_identifier, imported_at, pack_file_count, pack_total_bytes, pack_checksum) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        "INSERT INTO story_imports (story_id, pack_uuid, source_device_identifier, imported_at, pack_file_count, pack_total_bytes, pack_checksum, source_family) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
         rusqlite::params![
             story_id,
             pack_uuid,
@@ -275,6 +306,7 @@ fn commit_imported_story(
             acquired.manifest.files.len() as u32,
             acquired.manifest.total_bytes,
             &acquired.checksum,
+            family.diagnostic_tag(),
         ],
     )
     .map_err(|err| {
@@ -299,6 +331,8 @@ fn commit_imported_story(
         imported_at: now_iso,
         pack_file_count: acquired.manifest.files.len() as u32,
         pack_total_bytes: acquired.manifest.total_bytes,
+        family,
+        firmware_cohort,
     })
 }
 
@@ -404,9 +438,12 @@ fn already_imported_error() -> AppError {
 }
 
 fn device_changed_error(cause: &'static str) -> AppError {
+    // Device-generic next gesture: the REQUESTED device's family is
+    // unknowable here (only its hashed identifier travels), and the copy
+    // is reachable from a FLAM panel too (Change Control).
     AppError::import_failed(
         "Copie impossible: l'appareil connecté a changé.",
-        "Rebranche la Lunii souhaitée puis réessaie la copie.",
+        "Rebranche l'appareil souhaité puis réessaie la copie.",
     )
     .with_details(serde_json::json!({
         "source": "device_changed",
@@ -671,6 +708,53 @@ mod tests {
             .expect("listed row");
         assert_eq!(listed_id, outcome.story.id);
         assert_eq!(listed_title, outcome.story.title);
+        drop(db);
+
+        // Dispatch facts: the adapters received the re-scanned profile's
+        // family, the Lunii pack_ref is the SHORT_ID verbatim, and the
+        // visibility is the selected entry's.
+        assert_eq!(h.library.last_family(), Some(DeviceFamily::Lunii));
+        assert_eq!(
+            h.packs.last_request(),
+            Some((DeviceFamily::Lunii, SHORT_ID.to_string(), false))
+        );
+    }
+
+    #[test]
+    fn imports_a_flam_story_dispatching_family_uuid_and_hidden_to_the_adapters() {
+        // Same service pipeline, FLAM dispatch facts: the family reaches
+        // both adapters, the pack_ref is the story UUID (never the
+        // SHORT_ID) and the SELECTED entry's visibility travels with it.
+        let h = Harness::new();
+        h.scanner.enqueue_supported_flam();
+        h.library.enqueue(Ok(library_entry(true, true))); // hidden entry
+        h.packs.enqueue_success();
+
+        let flam_identifier = compute_device_identifier(b"MOCK_MDF", Some("FLAM_SERIAL"));
+        let outcome = h
+            .run(&ImportDeviceStoryRequest {
+                device_identifier: flam_identifier,
+                pack_uuid: PACK_UUID.into(),
+            })
+            .expect("FLAM import");
+        assert_eq!(outcome.story.title, "Histoire de mon FLAM (FAC5562D)");
+        assert_eq!(h.library.last_family(), Some(DeviceFamily::Flam));
+        assert_eq!(
+            h.packs.last_request(),
+            Some((DeviceFamily::Flam, PACK_UUID.to_string(), true))
+        );
+
+        // The provenance records the FLAM family durably.
+        let db = h.db.lock().expect("lock");
+        let family: String = db
+            .conn()
+            .query_row(
+                "SELECT source_family FROM story_imports WHERE story_id = ?1",
+                rusqlite::params![&outcome.story.id],
+                |row| row.get(0),
+            )
+            .expect("provenance family");
+        assert_eq!(family, "flam");
     }
 
     #[test]
@@ -848,6 +932,14 @@ mod tests {
         assert_eq!(h.story_rows(), 0, "stories insert must be rolled back");
     }
 
+    fn lunii_origine_cohort() -> FirmwareCohort {
+        FirmwareCohort::Lunii(crate::domain::device::LuniiFirmwareCohort::OrigineV1)
+    }
+
+    fn flam_gen1_cohort() -> FirmwareCohort {
+        FirmwareCohort::Flam(crate::domain::device::FlamFirmwareCohort::Gen1)
+    }
+
     #[test]
     fn unique_race_on_commit_maps_to_already_imported() {
         let h = Harness::new();
@@ -858,14 +950,31 @@ mod tests {
         };
         {
             let mut db = h.db.lock().expect("lock");
-            commit_imported_story(&mut db, "story-1", SHORT_ID, PACK_UUID, "id-1", &acquired)
-                .expect("first commit");
+            commit_imported_story(
+                &mut db,
+                DeviceFamily::Lunii,
+                lunii_origine_cohort(),
+                "story-1",
+                SHORT_ID,
+                PACK_UUID,
+                "id-1",
+                &acquired,
+            )
+            .expect("first commit");
             // Second commit with the SAME pack_uuid models the race where
             // both imports passed the duplicate guard before either
             // committed. The UNIQUE index must close it fail-closed.
-            let err =
-                commit_imported_story(&mut db, "story-2", SHORT_ID, PACK_UUID, "id-1", &acquired)
-                    .expect_err("unique race must fail");
+            let err = commit_imported_story(
+                &mut db,
+                DeviceFamily::Lunii,
+                lunii_origine_cohort(),
+                "story-2",
+                SHORT_ID,
+                PACK_UUID,
+                "id-1",
+                &acquired,
+            )
+            .expect_err("unique race must fail");
             let v = serde_json::to_value(&err).expect("ser");
             assert_eq!(v["details"]["source"], "already_imported");
         }
@@ -875,6 +984,74 @@ mod tests {
             "the racing stories row must be rolled back"
         );
         assert_eq!(h.import_rows(), 1);
+    }
+
+    #[test]
+    fn flam_import_dedup_is_inherited_including_across_devices() {
+        // The FLAM story UUID enters `story_imports.pack_uuid` VERBATIM
+        // (no migration): re-importing the same UUID — even claimed from
+        // ANOTHER device — refuses with the inherited `already_imported`
+        // (the UUID is the content identity, the Lunii semantics).
+        let h = Harness::new();
+        let acquired = AcquiredPack {
+            manifest: MockDevicePackReader::staged_manifest(),
+            checksum: "ef".repeat(32),
+        };
+        {
+            let mut db = h.db.lock().expect("lock");
+            commit_imported_story(
+                &mut db,
+                DeviceFamily::Flam,
+                flam_gen1_cohort(),
+                "story-flam-1",
+                SHORT_ID,
+                PACK_UUID,
+                "flam-device-1",
+                &acquired,
+            )
+            .expect("first FLAM commit");
+            let err = commit_imported_story(
+                &mut db,
+                DeviceFamily::Flam,
+                flam_gen1_cohort(),
+                "story-flam-2",
+                SHORT_ID,
+                PACK_UUID,
+                "flam-device-2", // ANOTHER device, same content UUID
+                &acquired,
+            )
+            .expect_err("same UUID from another device must dedup");
+            let v = serde_json::to_value(&err).expect("ser");
+            assert_eq!(v["details"]["source"], "already_imported");
+        }
+        assert_eq!(h.story_rows(), 1);
+        assert_eq!(h.import_rows(), 1);
+    }
+
+    #[test]
+    fn flam_commit_titles_the_draft_with_the_family_correct_default() {
+        let h = Harness::new();
+        let acquired = AcquiredPack {
+            manifest: MockDevicePackReader::staged_manifest(),
+            checksum: "aa".repeat(32),
+        };
+        let outcome = {
+            let mut db = h.db.lock().expect("lock");
+            commit_imported_story(
+                &mut db,
+                DeviceFamily::Flam,
+                flam_gen1_cohort(),
+                "story-flam",
+                SHORT_ID,
+                PACK_UUID,
+                "flam-device-id",
+                &acquired,
+            )
+            .expect("FLAM commit")
+        };
+        assert_eq!(outcome.story.title, "Histoire de mon FLAM (FAC5562D)");
+        assert_eq!(outcome.family, DeviceFamily::Flam);
+        assert_eq!(outcome.firmware_cohort.diagnostic_tag(), "flam_gen1");
     }
 
     #[test]
@@ -892,6 +1069,8 @@ mod tests {
             let mut db = h.db.lock().expect("lock");
             commit_imported_story(
                 &mut db,
+                DeviceFamily::Lunii,
+                lunii_origine_cohort(),
                 "story-bad",
                 SHORT_ID,
                 PACK_UUID,

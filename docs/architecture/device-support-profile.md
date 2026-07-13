@@ -20,15 +20,20 @@ behavior is a bug.
 | Lunii | Origine v1 (fw 1.x / 2.x) | v3 | ✅ | ✅ | ✅ | ✅ (round-trip d'une histoire importée) |
 | Lunii | Mid-Gen v2 (fw 3.0 – 3.1) | v6 | ✅ | ✅ | ✅ | ✅ (round-trip d'une histoire importée) |
 | Lunii | V3 (fw 3.2.x +) | v7 | ✅ | ✅ | ❌ (RE actif — corruption risk) | ❌ (RE actif — même rationale que l'import) |
-| FLAM | Gen1 (flam_gen1) | — | ❌ | ❌ | ❌ | ❌ |
+| FLAM | Gen1 (flam_gen1) | — | ✅ | ✅ | ✅ | ❌ (écriture non prouvée — activée par le flux de mise à jour) |
 
-FLAM Gen1 is a **recognized** profile with **zero activated capability**:
-recognition proves the device is officially known (the panel renders
-`Appareil reconnu — FLAM`, never a lying `Profil non supporté`), while every
-operation stays ❌ until support activates them line by line. Its
-metadata format column stays `—`: the internal structure of `.mdf` is not
-publicly documented and Rustory refuses to invent a version byte (see the
-FLAM recognition markers below).
+FLAM Gen1 is a **recognized** profile whose READ-side capabilities are
+activated line by line: library inventory, story inspection and story
+import are ✅ (their contract is the "FLAM library inventory & story
+import" section below), while every device WRITE stays ❌ until the
+update flow proves it end to end. Its metadata format column stays `—`:
+the internal structure of `.mdf` is not publicly documented and Rustory
+refuses to invent a version byte (see the FLAM recognition markers
+below). The general rule stays in force for any FUTURE zero-capability
+profile: recognition proves the device is officially known (the panel
+renders `Appareil reconnu — {famille}`, never a lying `Profil non
+supporté`) while every operation stays ❌ until support activates them
+line by line — recognition and capability are separate facts.
 
 The write column is wired by the transfer flow: `WriteStory` is `true` for
 **Origine v1** and **Mid-Gen v2**, and stays `false` for **V3** (device-write
@@ -246,7 +251,10 @@ storage and never interprets the ciphered content. This prolongs the
 media) is the transfer/edition scope of later phases, not the import.
 
 The import is **all-or-nothing per pack**. The declared supported subset
-is a closed set of entry names at the pack root:
+below is the LUNII pack format (a KNOWN format, so its entry names are
+validated); the FLAM pack is an UNKNOWN format and follows its own
+opaque contract (see "FLAM library inventory & story import"). Closed
+set of entry names at the Lunii pack root:
 
 | Entry | Status | Rule |
 | --- | --- | --- |
@@ -275,11 +283,21 @@ Atomicity & provenance:
   exist and be valid. Any intermediate failure cleans the staging and
   leaves no DB row and no orphan folder.
 - Provenance is persisted in `story_imports` (link `pack_uuid ↔
-  story_id`, source device identifier, timestamp, file count, total
-  bytes, aggregate SHA-256 checksum). The link is UNIQUE on
+  story_id`, source device identifier, SOURCE FAMILY — the closed
+  `source_family` set, `'lunii'` here; every row that predates the
+  column is backfilled `'lunii'`, the only family the import flow ever
+  acquired before it existed — timestamp, file count, total bytes,
+  aggregate SHA-256 checksum). The link is UNIQUE on
   `pack_uuid`: re-importing the same pack is refused
   (`already_imported`) while the link exists — even across devices,
   the pack UUID is the content identity.
+- **A pack is a device-format pack ONLY for its source family**
+  (fail-closed): the preparation and transfer flows read
+  `source_family` and treat an imported pack whose family does not
+  match the TARGET device's family exactly like a native story — no
+  device-format artifact exists for that target, so it is never marked
+  transferable and the write plan refuses it (`notTransferable`)
+  before a single byte reaches the device.
 - The device mount is **never written** (read-only end to end), and
   the import never blocks the UI (async command, bounded budget).
 - The wall-clock budget (300 s) is enforced **cooperatively**: the
@@ -301,6 +319,77 @@ Atomicity & provenance:
 V3 (metadata v7) stays ❌ for import — the matrix above is unchanged
 and the capability gate (`check_operation_allowed(ImportStory)`) is
 consulted before any acquisition.
+
+## FLAM library inventory & story import
+
+Sibling of the Lunii "Library Inventory" and "Story Import Contract"
+sections above: the FLAM read-side capabilities go through the SAME
+shared pipelines (`read_device_library`, `import_device_story` — one
+bridge, no parallel flow); only the family-dispatched adapter behind the
+`DeviceLibraryReader` / `DevicePackReader` traits changes how the
+inventory and the pack bytes are located on the volume. The family is
+taken from the re-scanned `DeviceProfile` (Rust authority), never
+re-sniffed from the mount.
+
+Knowledge source & certainty: the layout below comes from public FLAM
+observations in the `o-daneel/Lunii.QT` project (`pkg/api/device_flam.py`:
+`str/` and `str.hidden/` story base dirs, `etc/library/` holding the text
+index files `list` and `list.hidden`, story folders named by full
+lowercase UUID, ciphered content) — the same OSS reference as the FLAM
+recognition markers, and like them NOT yet confirmed on physical
+hardware. Every behavior below is therefore fail-closed: if real
+hardware diverges, the worst outcome is an EMPTY inventory or an
+explicit typed refusal (`pack_missing` / `pack_invalid`) — never a
+corruption, never a mount write, never a lying success.
+
+### Inventory (index-founded, like Lunii)
+
+The FLAM inventory is INDEX-FOUNDED: `etc/library/list` plays the role
+the `.pi` index plays on a Lunii — the index is authoritative for what
+the device library contains.
+
+| Property | Rule |
+| --- | --- |
+| Visible index | `etc/library/list` — an UTF-8 TEXT file, one canonical lowercase hyphenated pack UUID per line |
+| Hidden index | `etc/library/list.hidden` — same shape, read best-effort (like `.pi.hidden`) |
+| Read bound | `MAX_PACK_INDEX_BYTES` (64 KiB), read NO-FOLLOW end to end (lstat → `O_NOFOLLOW \| O_NONBLOCK` open on Unix → `(dev, ino)` handle re-check — the hardened reader shared with the `.mdf` probe) |
+| Line tolerance | a trailing `\r` is tolerated (CRLF-edited index); empty lines are ignored |
+| Malformed line | ignored AND counted into the existing "trailing bytes" diagnostic flag (never a hard failure — the healthy lines still list) |
+| Duplicates | deduplicated FIRST-OCCURRENCE (within an index, and across the two indexes — a visible entry wins over a hidden duplicate). The FLAM contract is born hardened here; the Lunii `.pi` duplicate behavior is deliberately NOT changed (family isolation) |
+| `list` absent, device still present | the inventory is legitimately EMPTY (a fresh FLAM may not have written it yet — the index is NOT a recognition marker, and the hidden index is not consulted either: the primary index owns the inventory). "Still present" is PROVEN, not assumed: the required recognition markers (`.mdf` regular, real `str/` and `etc/`) are re-probed no-follow when the index reads NotFound |
+| `list` absent, markers gone | the same NotFound is also the signature of a mount that vanished mid-read (unplug between the authoritative re-scan and the read): when the marker re-probe fails, the read surfaces a RECOVERABLE failure (`fs_read` / not_found — the honest Lunii behavior), never a lying empty inventory |
+| `list` unreadable / not a regular file / oversize | a RECOVERABLE read failure (`DEVICE_SCAN_FAILED`, same error contract as the Lunii inventory read) — never silently folded into an empty inventory |
+| Story content | a story's payload is the REAL directory `str/<uuid>/` (visible) or `str.hidden/<uuid>/` (hidden), probed no-follow |
+| Index entry without its folder | surfaced as `Contenu incomplet` (visible, not importable) — the index stays authoritative |
+| Folder without an index entry | INVISIBLE (never invented into the inventory — symmetric with the Lunii orphan rule) |
+| Order | the index order is preserved, visible entries first |
+| Budget | the shared 5 s read budget, checked between entries |
+
+### Story import (raw & OPAQUE — structural validation only)
+
+The public documentation of the FLAM story format says it plainly: the
+internal format is UNKNOWN. Any per-entry-name whitelist would therefore
+be an invention. The honest contract is a RAW, OPAQUE, all-or-nothing
+acquisition of the ONE story directory the selected index entry owns —
+`str/<uuid>/` for a visible entry, `str.hidden/<uuid>/` for a hidden one
+(the index is authoritative: the other root is NEVER consulted, so a
+same-UUID folder sitting on the wrong root can never be acquired in its
+place) — with STRUCTURAL validation only:
+
+| Property | Rule |
+| --- | --- |
+| Entry kinds | regular files and real directories ONLY — any symlink or special file refuses the whole pack (`pack_invalid`, no-follow walk end to end; born stricter than the historical Lunii walker). The walk re-probes each directory IMMEDIATELY before recursing into it (shared with the Lunii walk): a directory swapped for a symlink between its lstat and the recursive listing refuses (`details.cause = "dir_swapped_between_stat_and_recursion"`) instead of being followed |
+| Entry names | NO whitelist, NO ignore-list — the format is unknown, every regular file is copied verbatim (the pack is opaque) |
+| Bounds | reused from the Lunii import: `MAX_IMPORT_PACK_BYTES` (2 GiB), `MAX_IMPORT_PACK_FILES` (4096), `MAX_PACK_ASSET_DEPTH` (2) |
+| Empty pack | a story folder holding zero files refuses (`pack_invalid`, `details.cause = "empty_pack"`) |
+| Empty directory | a directory with NO file anywhere below it refuses (`pack_invalid`, `details.cause = "empty_directory"`): the manifest/checksum represent files only, so an empty directory cannot round-trip — refused rather than silently importing an altered tree |
+| Staging collision | staging writes are EXCLUSIVE, for files (`create_new`) AND directories (`create_dir` tracked per acquisition): two distinct source paths — file or directory — colliding onto one staging path (case-insensitive / Unicode-normalizing local filesystem) refuse (`pack_invalid`, `details.cause = "staging_path_collision"`) — never a silent truncation or a silently merged tree behind an intact-looking manifest |
+| Decryption | NONE — the ciphered bytes are copied as-is, never interpreted (no embedded title, no cover, no structure is ever derived) |
+| Atomicity & provenance | the SHARED import pipeline unchanged: staging → atomic `rename` → fsync → single SQLite commit. `story_imports.pack_uuid` carries the FLAM story UUID verbatim (the UNIQUE content identity — `already_imported` dedup inherited as-is, across devices too); `source_device_identifier` is the hashed FLAM identifier; `source_family` records `'flam'` durably — the fail-closed fact the transfer/preparation flows consult so an opaque FLAM pack can NEVER be treated as a Lunii device-format pack (it stays `notTransferable` toward a Lunii, exactly like a native story) |
+| Default title | `Histoire de mon FLAM ({SHORT_ID})` — the family-correct sibling of the Lunii copy, revalidated by the same title rules; `SHORT_ID` stays the uppercase last 8 hex chars of the UUID |
+| Mount | READ-ONLY end to end, never written |
+| Refusals | the CLOSED `IMPORT_FAILED` taxonomy is reused verbatim (`already_imported`, `pack_missing`, `pack_invalid`, `pack_oversize`, `device_changed`, `fs_read`, `read_timeout`, …) — no new reason, no new code |
+| Bound divergence | if real hardware exceeds a bound (deeper trees…), the refusal is EXPLICIT and actionable; the bound will be adjusted on evidence, never silently |
 
 ## Refusal Reasons (closed set)
 
@@ -464,6 +553,17 @@ Adding a new family:
    variants (+ contract tests), the TS guard family⇔cohort⇔version
    combinations, and the UI labels (`product-language.md` Change
    Control first).
+5. When a READ capability activates, the adapter contract covers the
+   DOWNSTREAM too: implement the family's inventory reader and pack
+   acquirer as internal dispatch branches behind the SHARED
+   `DeviceLibraryReader` / `DevicePackReader` traits (one implementation
+   per trait, family passed as a parameter from the re-scanned profile —
+   never re-sniffed from the mount). The shared pipelines
+   (`read_device_library`, `import_device_story`) stay family-agnostic:
+   only the source location/walk is family-dispatched, and the historical
+   family paths stay verbatim (isolation between families is the adapter
+   contract). Document the family's inventory & import section in this
+   file FIRST (sibling of "FLAM library inventory & story import").
 
 Both or none, never one without the other (the `family.rs` invariant):
 a family variant without its matrix/registry entries — or the reverse —

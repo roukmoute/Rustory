@@ -206,6 +206,41 @@ describe("<DeviceStoryInspector />", () => {
     expect(screen.getByText("Dans ta bibliothèque")).toBeInTheDocument();
   });
 
+  it("drives a FLAM story exactly like a Lunii one: CTA active on the FLAM matrix, incomplete content refused", async () => {
+    // `importableOps` IS the FLAM Gen1 matrix line (read ✅✅✅, write ❌):
+    // a FLAM inventory entry activates the copy CTA through the same
+    // gate, and its incomplete-content refusal keeps the same reason.
+    const flamStory: DeviceStoryDto = {
+      ...baseStory,
+      uuid: "12345678-9abc-def0-1122-334455667788",
+      shortId: "55667788",
+    };
+    const onImport = vi.fn();
+    const user = userEvent.setup();
+    const { rerender } = render(
+      <DeviceStoryInspector
+        story={flamStory}
+        supportedOperations={importableOps}
+        onImport={onImport}
+      />,
+    );
+    await user.click(copyButton());
+    expect(onImport).toHaveBeenCalledWith(flamStory);
+
+    rerender(
+      <DeviceStoryInspector
+        story={{ ...flamStory, contentPresent: false }}
+        supportedOperations={importableOps}
+        onImport={onImport}
+      />,
+    );
+    const disabled = copyButton();
+    expect(disabled).toHaveAttribute("aria-disabled", "true");
+    expect(
+      screen.getByText(/copie indisponible: contenu incomplet sur l'appareil/i),
+    ).toBeInTheDocument();
+  });
+
   it("phrases the disabled reason as 'profil non supporté' when import is gated off (V3)", () => {
     render(
       <DeviceStoryInspector

@@ -1133,6 +1133,47 @@ describe("<LibraryRoute />", () => {
     expect(mockGet).toHaveBeenCalledTimes(1);
   });
 
+  it("lights the device-library section for a supported FLAM through the capability matrix alone", async () => {
+    // The FLAM Gen1 wire (readLibrary=true) drives readableDeviceId
+    // through the SAME derivation as a Lunii — no family-conditional
+    // code: the section, the cards and the panel chip all follow.
+    const supportedFlam = JSON.parse(
+      '{"kind":"supported","family":"flam","firmwareCohort":"flamGen1",' +
+        '"deviceIdentifier":"fedcba9876543210fedcba9876543210",' +
+        '"supportedOperations":{"readLibrary":true,"inspectStory":true,' +
+        '"importStory":true,"writeStory":false}}',
+    ) as ConnectedDeviceDto;
+    mockGet.mockResolvedValueOnce({ stories: [{ id: "s1", title: "Le soleil" }] });
+    mockDevice.mockResolvedValue(supportedFlam);
+    mockDeviceLibrary.mockResolvedValue({
+      kind: "readable",
+      deviceIdentifier: "fedcba9876543210fedcba9876543210",
+      stories: [
+        {
+          uuid: "12345678-9abc-def0-1122-334455667788",
+          shortId: "55667788",
+          hidden: false,
+          contentPresent: true,
+          alreadyImported: false,
+          title: null,
+          titleSource: null,
+          thumbnail: null,
+        },
+      ],
+    });
+    renderLibrary();
+
+    // The panel renders the ready chip through hasAnyCapability.
+    await screen.findByText(/appareil prêt — flam/i);
+
+    // The device-library section lights up exactly like a Lunii one.
+    const main = screen.getByRole("main", { name: /collection d'histoires/i });
+    const deviceRegion = await within(main).findByRole("region", {
+      name: /bibliothèque de l'appareil/i,
+    });
+    expect(within(deviceRegion).getByText("55667788")).toBeInTheDocument();
+  });
+
   it("shows a recoverable device-library error in the center without breaking the local library (AC #3)", async () => {
     mockGet.mockResolvedValueOnce({ stories: [{ id: "s1", title: "Le soleil" }] });
     mockDevice.mockResolvedValue(supportedV3);
@@ -2449,13 +2490,14 @@ describe("<LibraryRoute />", () => {
     );
   });
 
-  it("mapDeviceForPanel maps a recognized FLAM DTO to idle with the FLAM label, family and closed matrix", () => {
-    // Real wire: the metadataFormatVersion key is absent for FLAM.
+  it("mapDeviceForPanel maps a supported FLAM DTO to idle with the FLAM label, family and its matrix", () => {
+    // Real wire: the metadataFormatVersion key is absent for FLAM, and
+    // the matrix line carries the activated read capabilities.
     const flamDto = JSON.parse(
       '{"kind":"supported","family":"flam","firmwareCohort":"flamGen1",' +
         '"deviceIdentifier":"fedcba9876543210fedcba9876543210",' +
-        '"supportedOperations":{"readLibrary":false,"inspectStory":false,' +
-        '"importStory":false,"writeStory":false}}',
+        '"supportedOperations":{"readLibrary":true,"inspectStory":true,' +
+        '"importStory":true,"writeStory":false}}',
     ) as ConnectedDeviceDto;
     const mapped = mapDeviceForPanel(
       { kind: "ready", device: flamDto },
@@ -2465,9 +2507,9 @@ describe("<LibraryRoute />", () => {
     expect(mapped.deviceLabel).toBe("FLAM");
     expect(mapped.deviceFamily).toBe("flam");
     expect(mapped.supportedOperations).toEqual({
-      readLibrary: false,
-      inspectStory: false,
-      importStory: false,
+      readLibrary: true,
+      inspectStory: true,
+      importStory: true,
       writeStory: false,
     });
   });

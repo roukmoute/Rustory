@@ -342,7 +342,7 @@ mod tests {
     }
 
     #[test]
-    fn read_connected_lunii_returns_supported_recognized_flam_gen1_without_version() {
+    fn read_connected_lunii_returns_supported_flam_gen1_with_read_capabilities_without_version() {
         let m = MockDeviceScanner::new();
         m.enqueue_supported_flam();
         let outcome = read_connected_lunii(&m, budget()).expect("scan");
@@ -356,10 +356,11 @@ mod tests {
                 // No version byte is ever invented for `.mdf`.
                 assert_eq!(p.metadata_format_version, None);
                 assert_eq!(p.device_identifier.len(), 32);
-                // Recognized ≠ ready: every capability stays closed.
-                assert!(!p.supported_operations.read_library);
-                assert!(!p.supported_operations.inspect_story);
-                assert!(!p.supported_operations.import_story);
+                // The FLAM Gen1 matrix line: read-side capabilities are
+                // activated, the write lock is never weakened.
+                assert!(p.supported_operations.read_library);
+                assert!(p.supported_operations.inspect_story);
+                assert!(p.supported_operations.import_story);
                 assert!(!p.supported_operations.write_story);
             }
             other => panic!("expected Supported, got {other:?}"),
@@ -693,35 +694,39 @@ mod tests {
         assert_eq!(v["details"]["firmware_cohort"], "flam_gen1");
     }
 
-    /// One matrix line = one test ×4: FLAM Gen1 refuses EVERY operation
-    /// through the same gate the four call sites consult — `ALL_FALSE`
-    /// inherits the refusal everywhere by construction, with actionable
-    /// details (`family`/`firmware_cohort` tags, non-empty copy).
+    /// One matrix line = one test ×4: FLAM Gen1 now AUTHORIZES its three
+    /// read-side operations through the same gate the call sites consult
+    /// (the matrix line ✅✅✅❌ inherits everywhere by construction),
+    /// while the WRITE lock is never weakened — refused with actionable
+    /// details (`family`/`firmware_cohort` tags, non-empty copy), so the
+    /// transfer/prepare sites keep refusing a FLAM write.
     #[test]
-    fn check_operation_allowed_blocks_every_operation_for_flam_gen1() {
+    fn check_operation_allowed_matches_the_flam_gen1_matrix_line() {
         let flam = build_flam_profile();
         for op in [
             SupportedOperation::ReadLibrary,
             SupportedOperation::InspectStory,
             SupportedOperation::ImportStory,
-            SupportedOperation::WriteStory,
         ] {
-            let err = match check_operation_allowed(&flam, op) {
-                Err(e) => e,
-                Ok(()) => panic!("{op:?} must be blocked for FLAM Gen1"),
-            };
-            let v = serde_json::to_value(&err).expect("ser");
-            assert_eq!(v["code"], "DEVICE_UNSUPPORTED", "{op:?}");
-            assert_eq!(v["details"]["source"], "capability_gate", "{op:?}");
-            assert_eq!(v["details"]["operation"], op.diagnostic_tag(), "{op:?}");
-            assert_eq!(v["details"]["family"], "flam", "{op:?}");
-            assert_eq!(v["details"]["firmware_cohort"], "flam_gen1", "{op:?}");
-            assert!(!err.message.is_empty(), "refusal needs a cause: {op:?}");
-            assert!(
-                !err.user_action.as_deref().unwrap_or("").is_empty(),
-                "refusal needs a next gesture: {op:?}"
-            );
+            check_operation_allowed(&flam, op)
+                .unwrap_or_else(|e| panic!("{op:?} must be allowed for FLAM Gen1: {e:?}"));
         }
+
+        let err = match check_operation_allowed(&flam, SupportedOperation::WriteStory) {
+            Err(e) => e,
+            Ok(()) => panic!("WriteStory must stay blocked for FLAM Gen1"),
+        };
+        let v = serde_json::to_value(&err).expect("ser");
+        assert_eq!(v["code"], "DEVICE_UNSUPPORTED");
+        assert_eq!(v["details"]["source"], "capability_gate");
+        assert_eq!(v["details"]["operation"], "write_story");
+        assert_eq!(v["details"]["family"], "flam");
+        assert_eq!(v["details"]["firmware_cohort"], "flam_gen1");
+        assert!(!err.message.is_empty(), "refusal needs a cause");
+        assert!(
+            !err.user_action.as_deref().unwrap_or("").is_empty(),
+            "refusal needs a next gesture"
+        );
     }
 
     #[test]

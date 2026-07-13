@@ -102,6 +102,10 @@ mod tests {
             imported_at: "2026-06-10T00:00:00.000Z".into(),
             pack_file_count: 5,
             pack_total_bytes: 18,
+            family: crate::domain::device::DeviceFamily::Lunii,
+            firmware_cohort: crate::domain::device::FirmwareCohort::Lunii(
+                crate::domain::device::LuniiFirmwareCohort::OrigineV1,
+            ),
         });
         let v = serde_json::to_value(&dto).expect("ser");
         assert_eq!(v["story"]["id"], "0197a5d0-0000-7000-8000-000000000000");

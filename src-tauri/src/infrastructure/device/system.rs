@@ -158,9 +158,12 @@ fn extra_mount_roots_from_env() -> Vec<PathBuf> {
 
 /// True for an actual directory entry — NOT for symlinks (even
 /// symlinks pointing to a directory). Used by `extra_mount_roots_from_env`
-/// to refuse following symlinks during the recursive expansion: a
-/// `/media/foo -> /media` loop must NOT feed itself.
-fn is_real_directory(path: &Path) -> bool {
+/// to refuse following symlinks during the recursive expansion (a
+/// `/media/foo -> /media` loop must NOT feed itself), by the FLAM probe
+/// for the required `str/` / `etc/` markers, and shared `pub(crate)`
+/// with the FLAM inventory reader for its `str/<uuid>/` content probes
+/// ("a hardened I/O helper is reused, never reinvented").
+pub(crate) fn is_real_directory(path: &Path) -> bool {
     match std::fs::symlink_metadata(path) {
         Ok(m) => m.is_dir(),
         Err(_) => false,
@@ -494,6 +497,20 @@ fn read_bounded_no_follow(
     path: &Path,
     deadline_exceeded: &Arc<AtomicBool>,
 ) -> Result<Option<Vec<u8>>, std::io::Error> {
+    read_bounded_no_follow_with_max(path, deadline_exceeded, MAX_METADATA_FILE_BYTES)
+}
+
+/// Bound-parameterized body of [`read_bounded_no_follow`], shared
+/// `pub(crate)` with the FLAM library reader ("a hardened I/O helper is
+/// reused, never reinvented"): the FLAM inventory index needs the same
+/// no-follow discipline under the 64 KiB inventory bound, while the
+/// `.mdf` probe keeps its 4 KiB marker bound through the wrapper above
+/// — the probe behavior does not change by a byte.
+pub(crate) fn read_bounded_no_follow_with_max(
+    path: &Path,
+    deadline_exceeded: &Arc<AtomicBool>,
+    max_bytes: u64,
+) -> Result<Option<Vec<u8>>, std::io::Error> {
     if deadline_exceeded.load(Ordering::Relaxed) {
         return Err(std::io::Error::new(
             std::io::ErrorKind::TimedOut,
@@ -509,7 +526,7 @@ fn read_bounded_no_follow(
     if pre.file_type().is_symlink() || !pre.is_file() {
         return Ok(None);
     }
-    if pre.len() > MAX_METADATA_FILE_BYTES {
+    if pre.len() > max_bytes {
         return Ok(None);
     }
     let Ok(file) = open_no_follow(path) else {
@@ -518,7 +535,7 @@ fn read_bounded_no_follow(
     let Ok(meta) = file.metadata() else {
         return Ok(None);
     };
-    if !meta.is_file() || meta.len() > MAX_METADATA_FILE_BYTES {
+    if !meta.is_file() || meta.len() > max_bytes {
         return Ok(None);
     }
     #[cfg(unix)]
@@ -533,11 +550,7 @@ fn read_bounded_no_follow(
     let mut buf = Vec::new();
     // MAX + 1 so a file GROWN past the bound between the fstat and the
     // read is still caught without a second metadata round-trip.
-    if file
-        .take(MAX_METADATA_FILE_BYTES + 1)
-        .read_to_end(&mut buf)
-        .is_err()
-    {
+    if file.take(max_bytes + 1).read_to_end(&mut buf).is_err() {
         return Ok(None);
     }
     if deadline_exceeded.load(Ordering::Relaxed) {
@@ -546,7 +559,7 @@ fn read_bounded_no_follow(
             "scan deadline exceeded during read",
         ));
     }
-    if buf.len() as u64 > MAX_METADATA_FILE_BYTES {
+    if buf.len() as u64 > max_bytes {
         return Ok(None);
     }
     Ok(Some(buf))

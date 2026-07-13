@@ -109,30 +109,106 @@ pub fn format_pack_uuid(bytes: &[u8; LUNII_PACK_UUID_BYTES]) -> String {
     out
 }
 
+/// Parse a canonical lowercase hyphenated UUID (8-4-4-4-12) — the exact
+/// shape [`format_pack_uuid`] emits — back into its 16 bytes. Returns
+/// `None` for ANY other shape (uppercase, wrong separator, wrong length,
+/// non-hex). Single source of truth with [`is_canonical_pack_uuid`]:
+/// accepting ⇔ parsing, by construction (the predicate delegates here),
+/// so the two can never drift apart.
+pub fn parse_canonical_pack_uuid(value: &str) -> Option<[u8; LUNII_PACK_UUID_BYTES]> {
+    let bytes = value.as_bytes();
+    if bytes.len() != 36 {
+        return None;
+    }
+    fn hex_nibble(b: u8) -> Option<u8> {
+        match b {
+            b'0'..=b'9' => Some(b - b'0'),
+            b'a'..=b'f' => Some(b - b'a' + 10),
+            _ => None,
+        }
+    }
+    let mut out = [0u8; LUNII_PACK_UUID_BYTES];
+    let mut out_index = 0;
+    let mut i = 0;
+    while i < bytes.len() {
+        match i {
+            8 | 13 | 18 | 23 => {
+                if bytes[i] != b'-' {
+                    return None;
+                }
+                i += 1;
+            }
+            _ => {
+                let hi = hex_nibble(bytes[i])?;
+                let lo = hex_nibble(bytes[i + 1])?;
+                out[out_index] = (hi << 4) | lo;
+                out_index += 1;
+                i += 2;
+            }
+        }
+    }
+    Some(out)
+}
+
 /// True when `value` is a canonical lowercase hyphenated UUID (8-4-4-4-12),
 /// the exact shape [`format_pack_uuid`] emits. The single source of truth
 /// for "is this a well-formed pack UUID?" at every boundary that accepts
 /// one (import input, manual-title input), so the rule never drifts.
+/// Delegates to [`parse_canonical_pack_uuid`]: accepts ⇔ parses.
 pub fn is_canonical_pack_uuid(value: &str) -> bool {
-    let bytes = value.as_bytes();
-    if bytes.len() != 36 {
-        return false;
-    }
-    for (i, b) in bytes.iter().enumerate() {
-        match i {
-            8 | 13 | 18 | 23 => {
-                if *b != b'-' {
-                    return false;
-                }
-            }
-            _ => {
-                if !(b.is_ascii_digit() || (b'a'..=b'f').contains(b)) {
-                    return false;
-                }
-            }
+    parse_canonical_pack_uuid(value).is_some()
+}
+
+/// Parse a FLAM text library index (`etc/library/list` /
+/// `etc/library/list.hidden`) into the same [`PackIndex`] shape the
+/// binary Lunii parser produces — one canonical lowercase hyphenated
+/// UUID per line. PURE: bytes in, index out, zero I/O.
+///
+/// Tolerances (documented in `device-support-profile.md` → "FLAM library
+/// inventory & story import"): a leading UTF-8 BOM is stripped and a
+/// trailing `\r` per line is tolerated (a hand-edited Windows index);
+/// empty lines are ignored; a MALFORMED line
+/// (non-UTF-8 bytes or a non-canonical UUID) is ignored AND flagged via
+/// [`PackIndex::had_trailing_bytes`] — the healthy lines still list, the
+/// diagnostic flag says the index was not pristine. DUPLICATES are
+/// deduplicated first-occurrence WITHIN the payload (the FLAM contract
+/// is born hardened; the Lunii `.pi` behavior is deliberately not
+/// changed — family isolation).
+pub fn parse_flam_library_index(payload: &[u8]) -> PackIndex {
+    // The same Windows editors that write CRLF endings prepend a UTF-8
+    // BOM: strip it so the FIRST entry of a hand-edited index does not
+    // silently vanish behind the malformed-line flag.
+    let payload = payload
+        .strip_prefix(b"\xef\xbb\xbf".as_slice())
+        .unwrap_or(payload);
+    let mut uuids: Vec<[u8; LUNII_PACK_UUID_BYTES]> = Vec::new();
+    let mut seen: std::collections::HashSet<[u8; LUNII_PACK_UUID_BYTES]> =
+        std::collections::HashSet::new();
+    let mut had_trailing_bytes = false;
+    for raw_line in payload.split(|b| *b == b'\n') {
+        let line = match raw_line.split_last() {
+            Some((b'\r', rest)) => rest,
+            _ => raw_line,
+        };
+        if line.is_empty() {
+            continue;
+        }
+        let Ok(text) = std::str::from_utf8(line) else {
+            had_trailing_bytes = true;
+            continue;
+        };
+        let Some(bytes) = parse_canonical_pack_uuid(text) else {
+            had_trailing_bytes = true;
+            continue;
+        };
+        if seen.insert(bytes) {
+            uuids.push(bytes);
         }
     }
-    true
+    PackIndex {
+        uuids,
+        had_trailing_bytes,
+    }
 }
 
 /// Derive the `.content` sub-folder name: the uppercase hex of the last
@@ -265,5 +341,157 @@ mod tests {
         assert!(!is_canonical_pack_uuid(
             "g2345678-9abc-def0-1122-334455667788"
         )); // non-hex
+    }
+
+    // ---- parse_canonical_pack_uuid (single source of truth) ----
+
+    #[test]
+    fn parse_canonical_pack_uuid_round_trips_format_pack_uuid_both_ways() {
+        // parse(format(bytes)) == bytes AND format(parse(text)) == text:
+        // the parser and the formatter are exact inverses on the
+        // canonical shape.
+        let bytes = [
+            0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf0, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66,
+            0x77, 0x88,
+        ];
+        let text = format_pack_uuid(&bytes);
+        assert_eq!(parse_canonical_pack_uuid(&text), Some(bytes));
+        let reparsed = parse_canonical_pack_uuid(&text).expect("parse");
+        assert_eq!(format_pack_uuid(&reparsed), text);
+    }
+
+    #[test]
+    fn parse_canonical_pack_uuid_accepts_iff_is_canonical_accepts() {
+        // Tested in BOTH directions across accepted and refused shapes:
+        // the predicate and the parser can never drift apart.
+        let cases = [
+            ("12345678-9abc-def0-1122-334455667788", true),
+            ("00000000-0000-0000-0000-000000000000", true),
+            ("", false),
+            ("12345678-9abc-def0-1122-33445566778", false),
+            ("12345678-9ABC-def0-1122-334455667788", false),
+            ("12345678_9abc_def0_1122_334455667788", false),
+            ("g2345678-9abc-def0-1122-334455667788", false),
+        ];
+        for (value, accepted) in cases {
+            assert_eq!(
+                is_canonical_pack_uuid(value),
+                accepted,
+                "predicate on {value:?}"
+            );
+            assert_eq!(
+                parse_canonical_pack_uuid(value).is_some(),
+                accepted,
+                "parser on {value:?}"
+            );
+        }
+    }
+
+    // ---- parse_flam_library_index (pure text index parser) ----
+
+    fn flam_uuid_line(tail: &str) -> String {
+        format!("12345678-9abc-def0-1122-33445566{tail}")
+    }
+
+    #[test]
+    fn parse_flam_library_index_reads_one_uuid_per_line_in_order() {
+        let payload = format!("{}\n{}\n", flam_uuid_line("aaaa"), flam_uuid_line("bbbb"));
+        let index = parse_flam_library_index(payload.as_bytes());
+        assert_eq!(index.uuids.len(), 2);
+        assert_eq!(format_pack_uuid(&index.uuids[0]), flam_uuid_line("aaaa"));
+        assert_eq!(format_pack_uuid(&index.uuids[1]), flam_uuid_line("bbbb"));
+        assert!(!index.had_trailing_bytes);
+    }
+
+    #[test]
+    fn parse_flam_library_index_strips_a_leading_utf8_bom() {
+        // A Windows-edited index often starts with a BOM: the FIRST
+        // entry must list, not vanish behind the malformed-line flag.
+        let mut payload = b"\xef\xbb\xbf".to_vec();
+        payload.extend_from_slice(flam_uuid_line("aaaa").as_bytes());
+        payload.push(b'\n');
+        let index = parse_flam_library_index(&payload);
+        assert_eq!(index.uuids.len(), 1);
+        assert_eq!(format_pack_uuid(&index.uuids[0]), flam_uuid_line("aaaa"));
+        assert!(!index.had_trailing_bytes);
+    }
+
+    #[test]
+    fn parse_flam_library_index_tolerates_crlf_line_endings() {
+        let payload = format!(
+            "{}\r\n{}\r\n",
+            flam_uuid_line("aaaa"),
+            flam_uuid_line("bbbb")
+        );
+        let index = parse_flam_library_index(payload.as_bytes());
+        assert_eq!(index.uuids.len(), 2);
+        assert!(!index.had_trailing_bytes);
+    }
+
+    #[test]
+    fn parse_flam_library_index_ignores_empty_lines_and_missing_final_newline() {
+        let payload = format!("\n{}\n\n{}", flam_uuid_line("aaaa"), flam_uuid_line("bbbb"));
+        let index = parse_flam_library_index(payload.as_bytes());
+        assert_eq!(index.uuids.len(), 2);
+        assert!(!index.had_trailing_bytes);
+    }
+
+    #[test]
+    fn parse_flam_library_index_flags_and_skips_a_malformed_line() {
+        // The healthy lines still list; the diagnostic flag reports the
+        // index was not pristine — never a hard failure.
+        let payload = format!(
+            "{}\nnot-a-uuid\n{}\n",
+            flam_uuid_line("aaaa"),
+            flam_uuid_line("bbbb")
+        );
+        let index = parse_flam_library_index(payload.as_bytes());
+        assert_eq!(index.uuids.len(), 2);
+        assert!(index.had_trailing_bytes);
+    }
+
+    #[test]
+    fn parse_flam_library_index_flags_and_skips_non_utf8_bytes() {
+        let mut payload = flam_uuid_line("aaaa").into_bytes();
+        payload.push(b'\n');
+        payload.extend_from_slice(&[0xFF, 0xFE, 0xFD]);
+        payload.push(b'\n');
+        let index = parse_flam_library_index(&payload);
+        assert_eq!(index.uuids.len(), 1);
+        assert!(index.had_trailing_bytes);
+    }
+
+    #[test]
+    fn parse_flam_library_index_dedups_duplicates_first_occurrence() {
+        let payload = format!(
+            "{}\n{}\n{}\n",
+            flam_uuid_line("aaaa"),
+            flam_uuid_line("bbbb"),
+            flam_uuid_line("aaaa")
+        );
+        let index = parse_flam_library_index(payload.as_bytes());
+        assert_eq!(index.uuids.len(), 2);
+        assert_eq!(format_pack_uuid(&index.uuids[0]), flam_uuid_line("aaaa"));
+        assert_eq!(format_pack_uuid(&index.uuids[1]), flam_uuid_line("bbbb"));
+        // A duplicate is a dedup, not an index corruption.
+        assert!(!index.had_trailing_bytes);
+    }
+
+    #[test]
+    fn parse_flam_library_index_empty_payload_yields_zero_packs() {
+        let index = parse_flam_library_index(&[]);
+        assert!(index.uuids.is_empty());
+        assert!(!index.had_trailing_bytes);
+    }
+
+    #[test]
+    fn parse_flam_library_index_rejects_uppercase_uuid_lines_as_malformed() {
+        // The canonical shape is LOWERCASE — an uppercase line is not
+        // silently normalized (single source of truth with
+        // `is_canonical_pack_uuid`).
+        let payload = "12345678-9ABC-DEF0-1122-334455667788\n";
+        let index = parse_flam_library_index(payload.as_bytes());
+        assert!(index.uuids.is_empty());
+        assert!(index.had_trailing_bytes);
     }
 }

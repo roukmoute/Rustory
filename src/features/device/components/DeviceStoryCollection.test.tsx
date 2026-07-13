@@ -157,6 +157,57 @@ describe("<DeviceStoryCollection />", () => {
     expect(covers[0].src).toContain("data:image/png;base64,COVER");
   });
 
+  it("renders FLAM inventory entries with the same badges as Lunii ones (family-neutral DTO)", () => {
+    // Real FLAM wire shapes: full lowercase story UUIDs from the text
+    // index, uppercase 8-hex tails. The chips derive from the SAME
+    // neutral flags — no family-conditional rendering exists.
+    renderState(
+      {
+        kind: "ready",
+        deviceIdentifier: "fedcba9876543210fedcba9876543210",
+        stories: [
+          makeStory({
+            uuid: "12345678-9abc-def0-1122-334455667788",
+            shortId: "55667788",
+            hidden: true,
+          }),
+          makeStory({
+            uuid: "aaaaaaaa-bbbb-cccc-dddd-eeeeffff0000",
+            shortId: "FFFF0000",
+            contentPresent: false,
+          }),
+          makeStory({
+            uuid: "bbbbbbbb-cccc-dddd-eeee-ffff00001111",
+            shortId: "00001111",
+            alreadyImported: true,
+          }),
+        ],
+      },
+      { deviceLabel: "FLAM" },
+    );
+    expect(
+      screen.getByRole("heading", { name: /histoires sur l'appareil — flam/i }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Masquée")).toBeInTheDocument();
+    expect(screen.getByText("Contenu incomplet")).toBeInTheDocument();
+    expect(screen.getByText("Dans ta bibliothèque")).toBeInTheDocument();
+  });
+
+  it("hints the empty device with the family-neutral copy (never a Lunii-only wording)", () => {
+    renderState(
+      {
+        kind: "ready",
+        deviceIdentifier: "fedcba9876543210fedcba9876543210",
+        stories: [],
+      },
+      { deviceLabel: "FLAM" },
+    );
+    expect(
+      screen.getByText(/l'appareil connecté ne contient aucune histoire lisible\./i),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/la lunii connectée/i)).toBeNull();
+  });
+
   it("distinguishes the empty device from the not-yet-loaded state", () => {
     renderState({
       kind: "ready",

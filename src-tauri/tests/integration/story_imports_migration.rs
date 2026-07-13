@@ -30,8 +30,8 @@ fn insert_story(db: &DbHandle, id: &str) {
 
 fn insert_import(db: &DbHandle, story_id: &str, pack_uuid: &str) -> Result<usize, rusqlite::Error> {
     db.conn().execute(
-        "INSERT INTO story_imports (story_id, pack_uuid, source_device_identifier, imported_at, pack_file_count, pack_total_bytes, pack_checksum) \
-         VALUES (?1, ?2, 'deadbeefdeadbeefdeadbeefdeadbeef', '2026-06-10T00:00:00.000Z', 8, 4096, ?3)",
+        "INSERT INTO story_imports (story_id, pack_uuid, source_device_identifier, imported_at, pack_file_count, pack_total_bytes, pack_checksum, source_family) \
+         VALUES (?1, ?2, 'deadbeefdeadbeefdeadbeefdeadbeef', '2026-06-10T00:00:00.000Z', 8, 4096, ?3, 'lunii')",
         rusqlite::params![story_id, pack_uuid, "a".repeat(64)],
     )
 }
@@ -62,6 +62,8 @@ fn fresh_install_applies_v3_migration_with_canonical_columns() {
             "pack_file_count",
             "pack_total_bytes",
             "pack_checksum",
+            // The family-aware provenance column (v12 rebuild).
+            "source_family",
         ],
         "schema must match the canonical column set"
     );
@@ -156,8 +158,8 @@ fn check_constraints_guard_uuid_count_and_checksum_shapes() {
     let err = db
         .conn()
         .execute(
-            "INSERT INTO story_imports (story_id, pack_uuid, source_device_identifier, imported_at, pack_file_count, pack_total_bytes, pack_checksum) \
-             VALUES ('story-checks', 'short-uuid', 'id', '2026-06-10T00:00:00.000Z', 1, 0, ?1)",
+            "INSERT INTO story_imports (story_id, pack_uuid, source_device_identifier, imported_at, pack_file_count, pack_total_bytes, pack_checksum, source_family) \
+             VALUES ('story-checks', 'short-uuid', 'id', '2026-06-10T00:00:00.000Z', 1, 0, ?1, 'lunii')",
             rusqlite::params!["a".repeat(64)],
         )
         .expect_err("non-canonical pack_uuid must trip CHECK");
@@ -168,8 +170,8 @@ fn check_constraints_guard_uuid_count_and_checksum_shapes() {
     let err = db
         .conn()
         .execute(
-            "INSERT INTO story_imports (story_id, pack_uuid, source_device_identifier, imported_at, pack_file_count, pack_total_bytes, pack_checksum) \
-             VALUES ('story-checks', ?1, 'id', '2026-06-10T00:00:00.000Z', 0, 0, ?2)",
+            "INSERT INTO story_imports (story_id, pack_uuid, source_device_identifier, imported_at, pack_file_count, pack_total_bytes, pack_checksum, source_family) \
+             VALUES ('story-checks', ?1, 'id', '2026-06-10T00:00:00.000Z', 0, 0, ?2, 'lunii')",
             rusqlite::params![PACK_UUID, "a".repeat(64)],
         )
         .expect_err("zero file count must trip CHECK");
@@ -179,8 +181,8 @@ fn check_constraints_guard_uuid_count_and_checksum_shapes() {
     let err = db
         .conn()
         .execute(
-            "INSERT INTO story_imports (story_id, pack_uuid, source_device_identifier, imported_at, pack_file_count, pack_total_bytes, pack_checksum) \
-             VALUES ('story-checks', ?1, 'id', '2026-06-10T00:00:00.000Z', 1, 0, 'abc')",
+            "INSERT INTO story_imports (story_id, pack_uuid, source_device_identifier, imported_at, pack_file_count, pack_total_bytes, pack_checksum, source_family) \
+             VALUES ('story-checks', ?1, 'id', '2026-06-10T00:00:00.000Z', 1, 0, 'abc', 'lunii')",
             rusqlite::params![PACK_UUID],
         )
         .expect_err("short checksum must trip CHECK");
@@ -233,7 +235,7 @@ fn existing_v2_database_upgrades_to_v3() {
         .expect("collect");
     assert_eq!(
         versions,
-        vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
+        vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
         "v1+v2 preserved, v3 added (and later migrations recorded)"
     );
 

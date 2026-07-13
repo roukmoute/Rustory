@@ -189,9 +189,10 @@ export function LibraryRoute(): React.JSX.Element {
   } = mapDeviceForPanel(device.state, device.isRefreshing);
 
   // Derive the device whose library we may read: a supported device
-  // that is read-authorized (the capability matrix decides — a
-  // recognized FLAM has readLibrary=false and never reads). Fall back
-  // to the cached snapshot so the device section survives a background
+  // that is read-authorized (the capability matrix decides — a FLAM
+  // Gen1 carries readLibrary=true and reads through this same gate; a
+  // future zero-capability profile never reads). Fall back to the
+  // cached snapshot so the device section survives a background
   // detection refresh (SWR). `null` ⇒ the device-library hook stays
   // idle and issues no IPC.
   const effectiveDevice: ConnectedDeviceDto | null =
@@ -223,6 +224,7 @@ export function LibraryRoute(): React.JSX.Element {
   const transferPreview = useTransferPreview(
     singleSelectedStoryId,
     readableDeviceId,
+    deviceFamily,
   );
   // Distinguish WHY there is no comparison so the hint is actionable: the
   // route knows the cause (no/multi selection, or no readable device) that
@@ -243,6 +245,7 @@ export function LibraryRoute(): React.JSX.Element {
   const storyValidation = useStoryValidation(
     singleSelectedStoryId,
     readableDeviceId,
+    deviceFamily,
   );
   const validationView: StoryValidationView =
     singleSelectedStoryId === null || readableDeviceId === null

@@ -237,9 +237,13 @@ pub async fn read_device_library(
     let event = match &outcome {
         Ok(DeviceLibraryOutcome::Readable {
             device_identifier,
+            family,
+            firmware_cohort,
             library,
         }) => Some(device_log::Event::DeviceLibraryRead {
             device_identifier: device_identifier.clone(),
+            family: family.diagnostic_tag(),
+            firmware_cohort: firmware_cohort.diagnostic_tag(),
             story_count: library.entries.len() as u32,
             hidden_count: library.entries.iter().filter(|e| e.hidden).count() as u32,
             elapsed_ms,
@@ -499,6 +503,8 @@ pub async fn import_device_story(
     let event = match &outcome {
         Ok(imported) => device_log::Event::DeviceStoryImported {
             short_id: imported.pack_short_id.clone(),
+            family: imported.family.diagnostic_tag(),
+            firmware_cohort: imported.firmware_cohort.diagnostic_tag(),
             story_id: imported.story.id.clone(),
             elapsed_ms,
             bytes_copied: imported.pack_total_bytes,

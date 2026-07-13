@@ -65,6 +65,7 @@ fn reads_real_inventory_through_scanner_and_reader() {
         DeviceLibraryOutcome::Readable {
             device_identifier,
             library,
+            ..
         } => {
             assert_eq!(device_identifier, identifier);
             assert_eq!(library.entries.len(), 2);
@@ -124,4 +125,124 @@ fn no_device_when_mount_root_has_no_markers() {
     let outcome =
         read_device_library(&scanner, &reader, "whatever", budget()).expect("read resolves");
     assert_eq!(outcome, DeviceLibraryOutcome::None);
+}
+
+// ---------------- FLAM inventory through the shared pipeline ----------------
+
+mod flam_fixture {
+    //! Thin per-file aliases over the SHARED harness fixture
+    //! (`crate::flam_support`) — one FLAM mount construction for the
+    //! whole integration crate.
+    pub use crate::flam_support::temp_flam_mount_with_entries;
+
+    pub const FLAM_UUID_A: &str = "12345678-9abc-def0-1122-334455667788";
+    pub const FLAM_UUID_B: &str = "aaaaaaaa-bbbb-cccc-dddd-eeeeffff0000";
+}
+
+#[test]
+fn reads_a_real_flam_inventory_in_index_order_through_scanner_and_reader() {
+    // Signature path: a conforming fake FLAM with a two-story index
+    // resolves through the REAL scanner + reader to a readable outcome —
+    // index order preserved, shortId = uppercase last 8 hex, wire flags
+    // honest (`alreadyImported` stays composed at the command layer from
+    // an EMPTY provenance set here).
+    use std::collections::{HashMap, HashSet};
+    let (_guard, root, identifier) = flam_fixture::temp_flam_mount_with_entries(&[
+        (flam_fixture::FLAM_UUID_A, false, true),
+        (flam_fixture::FLAM_UUID_B, false, true),
+    ]);
+    let scanner = SystemDeviceScanner::with_explicit_mount_roots(vec![root]);
+    let reader = SystemDeviceLibraryReader;
+
+    let outcome = read_device_library(&scanner, &reader, &identifier, budget()).expect("read");
+    let dto = rustory_lib::ipc::dto::DeviceLibraryDto::from_outcome(
+        outcome,
+        &HashSet::new(),
+        &HashMap::new(),
+    );
+    let v = serde_json::to_value(&dto).expect("ser");
+    assert_eq!(v["kind"], "readable");
+    assert_eq!(v["deviceIdentifier"], identifier);
+    assert_eq!(v["stories"][0]["uuid"], flam_fixture::FLAM_UUID_A);
+    assert_eq!(v["stories"][0]["shortId"], "55667788");
+    assert_eq!(v["stories"][0]["hidden"], false);
+    assert_eq!(v["stories"][0]["contentPresent"], true);
+    assert_eq!(v["stories"][0]["alreadyImported"], false);
+    assert_eq!(v["stories"][1]["uuid"], flam_fixture::FLAM_UUID_B);
+}
+
+#[test]
+fn flam_hidden_entry_reads_hidden_true_from_the_hidden_root() {
+    let (_guard, root, identifier) = flam_fixture::temp_flam_mount_with_entries(&[
+        (flam_fixture::FLAM_UUID_A, false, true),
+        (flam_fixture::FLAM_UUID_B, true, true),
+    ]);
+    let scanner = SystemDeviceScanner::with_explicit_mount_roots(vec![root]);
+    let outcome = read_device_library(&scanner, &SystemDeviceLibraryReader, &identifier, budget())
+        .expect("read");
+    match outcome {
+        DeviceLibraryOutcome::Readable { library, .. } => {
+            assert_eq!(library.entries.len(), 2);
+            assert!(!library.entries[0].hidden);
+            assert!(library.entries[1].hidden);
+            assert!(
+                library.entries[1].content_present,
+                "the hidden payload lives under str.hidden/"
+            );
+        }
+        other => panic!("expected Readable, got {other:?}"),
+    }
+}
+
+#[test]
+fn flam_index_entry_without_story_folder_reads_content_absent() {
+    let (_guard, root, identifier) =
+        flam_fixture::temp_flam_mount_with_entries(&[(flam_fixture::FLAM_UUID_A, false, false)]);
+    let scanner = SystemDeviceScanner::with_explicit_mount_roots(vec![root]);
+    let outcome = read_device_library(&scanner, &SystemDeviceLibraryReader, &identifier, budget())
+        .expect("read");
+    match outcome {
+        DeviceLibraryOutcome::Readable { library, .. } => {
+            assert_eq!(library.entries.len(), 1);
+            assert!(!library.entries[0].content_present);
+        }
+        other => panic!("expected Readable, got {other:?}"),
+    }
+}
+
+#[test]
+fn flam_without_index_reads_a_legitimately_empty_inventory() {
+    // `list` absent is NOT an error: a recognized FLAM without the index
+    // file resolves to an EMPTY readable inventory.
+    let (_guard, root, identifier) = flam_fixture::temp_flam_mount_with_entries(&[]);
+    std::fs::remove_file(root.join("etc/library/list")).expect("drop list");
+    let scanner = SystemDeviceScanner::with_explicit_mount_roots(vec![root]);
+    let outcome = read_device_library(&scanner, &SystemDeviceLibraryReader, &identifier, budget())
+        .expect("absent index must read");
+    match outcome {
+        DeviceLibraryOutcome::Readable { library, .. } => assert!(library.entries.is_empty()),
+        other => panic!("expected Readable(empty), got {other:?}"),
+    }
+}
+
+#[test]
+fn flam_malformed_index_line_is_ignored_and_the_healthy_lines_still_list() {
+    let (_guard, root, identifier) =
+        flam_fixture::temp_flam_mount_with_entries(&[(flam_fixture::FLAM_UUID_A, false, true)]);
+    std::fs::write(
+        root.join("etc/library/list"),
+        format!("not-a-uuid\n{}\n", flam_fixture::FLAM_UUID_A),
+    )
+    .expect("rewrite index");
+    let scanner = SystemDeviceScanner::with_explicit_mount_roots(vec![root]);
+    let outcome = read_device_library(&scanner, &SystemDeviceLibraryReader, &identifier, budget())
+        .expect("read");
+    match outcome {
+        DeviceLibraryOutcome::Readable { library, .. } => {
+            assert_eq!(library.entries.len(), 1);
+            assert_eq!(library.entries[0].uuid, flam_fixture::FLAM_UUID_A);
+            assert!(library.had_trailing_bytes, "the malformed line is flagged");
+        }
+        other => panic!("expected Readable, got {other:?}"),
+    }
 }

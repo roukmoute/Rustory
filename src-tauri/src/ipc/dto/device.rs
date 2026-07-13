@@ -340,7 +340,10 @@ mod tests {
     }
 
     #[test]
-    fn from_outcome_maps_supported_flam_gen1_without_version_and_all_operations_false() {
+    fn from_outcome_maps_supported_flam_gen1_without_version_with_read_capabilities() {
+        // The FLAM Gen1 matrix line (read ✅ / inspect ✅ / import ✅ /
+        // write ❌) flows to the wire as-is; the version key stays
+        // ABSENT (never null, never invented).
         let outcome = ConnectedLuniiOutcome::Supported(match crate::domain::device::classify_flam(
             b"MDF", true, true, "id",
         ) {
@@ -357,9 +360,9 @@ mod tests {
             .expect("object")
             .get("metadataFormatVersion")
             .is_none());
-        assert_eq!(v["supportedOperations"]["readLibrary"], false);
-        assert_eq!(v["supportedOperations"]["inspectStory"], false);
-        assert_eq!(v["supportedOperations"]["importStory"], false);
+        assert_eq!(v["supportedOperations"]["readLibrary"], true);
+        assert_eq!(v["supportedOperations"]["inspectStory"], true);
+        assert_eq!(v["supportedOperations"]["importStory"], true);
         assert_eq!(v["supportedOperations"]["writeStory"], false);
     }
 }

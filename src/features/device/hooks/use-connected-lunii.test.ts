@@ -37,14 +37,15 @@ const supported = {
   },
 };
 
-// REAL Rust wire for a recognized FLAM Gen1: the metadataFormatVersion
-// key is ABSENT (never null) and every operation is false — mirrors the
-// byte-for-byte contract test (src-tauri/tests/contracts/device.rs).
+// REAL Rust wire for a supported FLAM Gen1: the metadataFormatVersion
+// key is ABSENT (never null) and the matrix line carries the activated
+// read capabilities (write stays false) — mirrors the byte-for-byte
+// contract test (src-tauri/tests/contracts/device.rs).
 const supportedFlam = JSON.parse(
   '{"kind":"supported","family":"flam","firmwareCohort":"flamGen1",' +
     '"deviceIdentifier":"fedcba9876543210fedcba9876543210",' +
-    '"supportedOperations":{"readLibrary":false,"inspectStory":false,' +
-    '"importStory":false,"writeStory":false}}',
+    '"supportedOperations":{"readLibrary":true,"inspectStory":true,' +
+    '"importStory":true,"writeStory":false}}',
 );
 
 function mockHandle(promise: Promise<unknown>): { promise: Promise<unknown>; cancel: () => void } {
@@ -86,7 +87,7 @@ describe("useConnectedLunii", () => {
     }
   });
 
-  it("resolves to ready with a recognized FLAM device (real wire, no version key)", async () => {
+  it("resolves to ready with a supported FLAM device (real wire, no version key)", async () => {
     vi.mocked(readConnectedLunii).mockReturnValueOnce(
       mockHandle(Promise.resolve(supportedFlam)) as never,
     );
@@ -100,7 +101,10 @@ describe("useConnectedLunii", () => {
         expect(device.firmwareCohort).toBe("flamGen1");
         // Absent key reads as undefined on the typed DTO — never null.
         expect(device.metadataFormatVersion).toBeUndefined();
-        expect(device.supportedOperations.readLibrary).toBe(false);
+        // The FLAM Gen1 matrix line: read capabilities active, write closed.
+        expect(device.supportedOperations.readLibrary).toBe(true);
+        expect(device.supportedOperations.inspectStory).toBe(true);
+        expect(device.supportedOperations.importStory).toBe(true);
         expect(device.supportedOperations.writeStory).toBe(false);
       }
     }

@@ -12,7 +12,8 @@ use std::fs;
 use std::path::PathBuf;
 
 use crate::domain::device::{
-    pack_short_id, FLAM_CONFIG_DIR, FLAM_PRIMARY_MARKER, FLAM_STORY_DIR, LUNII_BINARY_TOKEN_MARKER,
+    pack_short_id, FLAM_CONFIG_DIR, FLAM_HIDDEN_LIBRARY_INDEX_REL, FLAM_HIDDEN_STORY_DIR,
+    FLAM_LIBRARY_INDEX_REL, FLAM_PRIMARY_MARKER, FLAM_STORY_DIR, LUNII_BINARY_TOKEN_MARKER,
     LUNII_CONTENT_DIR, LUNII_DEVICE_ID_MARKER, LUNII_HIDDEN_INDEX_MARKER, LUNII_PRIMARY_MARKER,
 };
 
@@ -148,6 +149,92 @@ pub fn temp_lunii_mount_with_library(
     }
     for uuid in hidden {
         fs::create_dir_all(content.join(pack_short_id(uuid))).expect("mkdir hidden content folder");
+    }
+
+    (dir, root)
+}
+
+/// One FLAM library entry for [`temp_flam_mount_with_library`]: the
+/// canonical lowercase UUID line, whether the index lists it hidden, and
+/// whether its story folder (`str/<uuid>/` or `str.hidden/<uuid>/`) is
+/// materialized with a small opaque payload.
+#[derive(Debug, Clone)]
+pub struct FlamLibraryEntry {
+    pub uuid: String,
+    pub hidden: bool,
+    pub content_present: bool,
+}
+
+impl FlamLibraryEntry {
+    pub fn visible(uuid: &str) -> Self {
+        Self {
+            uuid: uuid.to_string(),
+            hidden: false,
+            content_present: true,
+        }
+    }
+
+    pub fn hidden(uuid: &str) -> Self {
+        Self {
+            uuid: uuid.to_string(),
+            hidden: true,
+            content_present: true,
+        }
+    }
+
+    pub fn orphan(uuid: &str) -> Self {
+        Self {
+            uuid: uuid.to_string(),
+            hidden: false,
+            content_present: false,
+        }
+    }
+}
+
+/// Fill a FLAM story directory with a small OPAQUE payload (the format
+/// is publicly unknown — the fixture writes arbitrary regular files, one
+/// of them inside a subdirectory, exactly what the structural-only
+/// validation accepts).
+pub fn write_opaque_flam_story(story_dir: &std::path::Path) {
+    fs::create_dir_all(story_dir).expect("mkdir flam story dir");
+    fs::write(story_dir.join("00000001"), vec![0x11; 256]).expect("write flam payload 1");
+    fs::write(story_dir.join("index.bin"), vec![0x22; 64]).expect("write flam payload 2");
+    let nested = story_dir.join("data");
+    fs::create_dir_all(&nested).expect("mkdir flam nested dir");
+    fs::write(nested.join("chunk"), vec![0x33; 128]).expect("write flam payload 3");
+}
+
+/// Build a conforming FLAM mount whose library inventory is fully
+/// described: `etc/library/list` lists the non-hidden entries (in
+/// order), `etc/library/list.hidden` the hidden ones (file omitted when
+/// none), and each `content_present` entry gets its real story folder
+/// under `str/` (visible) or `str.hidden/` (hidden) with an opaque
+/// payload. Returns `(TempDir guard, mount path)`.
+pub fn temp_flam_mount_with_library(entries: &[FlamLibraryEntry]) -> (tempfile::TempDir, PathBuf) {
+    let (dir, root) = temp_flam_mount();
+
+    let index_path = root.join(FLAM_LIBRARY_INDEX_REL);
+    fs::create_dir_all(index_path.parent().expect("index parent")).expect("mkdir etc/library");
+    let mut visible_lines = String::new();
+    let mut hidden_lines = String::new();
+    for entry in entries {
+        let target = if entry.hidden {
+            hidden_lines.push_str(&entry.uuid);
+            hidden_lines.push('\n');
+            root.join(FLAM_HIDDEN_STORY_DIR).join(&entry.uuid)
+        } else {
+            visible_lines.push_str(&entry.uuid);
+            visible_lines.push('\n');
+            root.join(FLAM_STORY_DIR).join(&entry.uuid)
+        };
+        if entry.content_present {
+            write_opaque_flam_story(&target);
+        }
+    }
+    fs::write(&index_path, visible_lines).expect("write etc/library/list");
+    if !hidden_lines.is_empty() {
+        fs::write(root.join(FLAM_HIDDEN_LIBRARY_INDEX_REL), hidden_lines)
+            .expect("write etc/library/list.hidden");
     }
 
     (dir, root)

@@ -16,13 +16,15 @@ pub mod title;
 
 pub use family::{DeviceFamily, FirmwareCohort, FlamFirmwareCohort, LuniiFirmwareCohort};
 pub use library::{
-    format_pack_uuid, is_canonical_pack_uuid, pack_short_id, parse_pack_index, DeviceLibrary,
-    DeviceStoryEntry, PackIndex, LUNII_PACK_UUID_BYTES, MAX_PACK_INDEX_BYTES,
+    format_pack_uuid, is_canonical_pack_uuid, pack_short_id, parse_canonical_pack_uuid,
+    parse_flam_library_index, parse_pack_index, DeviceLibrary, DeviceStoryEntry, PackIndex,
+    LUNII_PACK_UUID_BYTES, MAX_PACK_INDEX_BYTES,
 };
 pub use markers::{
-    FLAM_CONFIG_DIR, FLAM_PRIMARY_MARKER, FLAM_STORY_DIR, LUNII_BINARY_TOKEN_MARKER,
-    LUNII_CONTENT_DIR, LUNII_DEVICE_ID_MARKER, LUNII_HIDDEN_INDEX_MARKER, LUNII_LIB_INFO_MARKER,
-    LUNII_PRIMARY_MARKER, LUNII_ROM_INFO_MARKER, MAX_METADATA_FILE_BYTES,
+    FLAM_CONFIG_DIR, FLAM_HIDDEN_LIBRARY_INDEX_REL, FLAM_HIDDEN_STORY_DIR, FLAM_LIBRARY_INDEX_REL,
+    FLAM_PRIMARY_MARKER, FLAM_STORY_DIR, LUNII_BINARY_TOKEN_MARKER, LUNII_CONTENT_DIR,
+    LUNII_DEVICE_ID_MARKER, LUNII_HIDDEN_INDEX_MARKER, LUNII_LIB_INFO_MARKER, LUNII_PRIMARY_MARKER,
+    LUNII_ROM_INFO_MARKER, MAX_METADATA_FILE_BYTES,
 };
 pub use operations::{SupportedOperation, SupportedOperations};
 pub use pack::{

@@ -143,7 +143,7 @@ export function DeviceStoryCollection({
             Aucune histoire sur l'appareil
           </h3>
           <p className="device-story-collection__empty-hint">
-            La Lunii connectée ne contient aucune histoire lisible.
+            L'appareil connecté ne contient aucune histoire lisible.
           </p>
         </section>
       ) : null}

@@ -1,5 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 
+import type { SupportedFamilyDto } from "../../shared/ipc-contracts/device";
+
 import { toAppError } from "../../shared/errors/app-error";
 import {
   isStoryValidationDto,
@@ -20,14 +22,27 @@ export interface ReadStoryValidationInput {
  */
 export const READ_STORY_VALIDATION_TIMEOUT_MS = 5500;
 
-/** Discriminant emitted when {@link readStoryValidation} trips its timeout. */
-export const READ_STORY_VALIDATION_TIMEOUT_ERROR = {
-  code: "UNKNOWN",
-  message: "Rustory a mis trop de temps à valider l'histoire avec l'appareil.",
-  userAction:
-    "Réessaie la validation. Si le problème persiste, débranche la Lunii puis rebranche-la.",
-  details: null,
-} as const;
+/** Discriminant emitted when {@link readStoryValidation} trips its timeout.
+ *  Family-correct: a Lunii keeps the historical next gesture VERBATIM,
+ *  any other family reads the device-generic one (product-language.md). */
+export function readStoryValidationTimeoutError(
+  family?: SupportedFamilyDto,
+): {
+  code: "UNKNOWN";
+  message: string;
+  userAction: string;
+  details: null;
+} {
+  return {
+    code: "UNKNOWN",
+    message: "Rustory a mis trop de temps à valider l'histoire avec l'appareil.",
+    userAction:
+      family === undefined || family === "lunii"
+        ? "Réessaie la validation. Si le problème persiste, débranche la Lunii puis rebranche-la."
+        : "Réessaie la validation. Si le problème persiste, débranche l'appareil puis rebranche-le.",
+    details: null,
+  };
+}
 
 /**
  * Cancelable handle returned by {@link readStoryValidation}. Callers that
@@ -67,6 +82,7 @@ export class ReadStoryValidationContractDriftError extends Error {
 export function readStoryValidation(
   input: ReadStoryValidationInput,
   timeoutMs: number = READ_STORY_VALIDATION_TIMEOUT_MS,
+  deviceFamily?: SupportedFamilyDto,
 ): ReadStoryValidationCall {
   const call = invoke<unknown>("read_story_validation", { input })
     .then((raw) => {
@@ -92,7 +108,7 @@ export function readStoryValidation(
     timer = setTimeout(() => {
       timer = undefined;
       if (cancelled) return;
-      reject(READ_STORY_VALIDATION_TIMEOUT_ERROR);
+      reject(readStoryValidationTimeoutError(deviceFamily));
     }, timeoutMs);
   });
 

@@ -66,6 +66,40 @@ describe("useDeviceLibrary", () => {
     }
   });
 
+  it("loads a FLAM inventory exactly like a Lunii one (real wire, family-neutral hook)", async () => {
+    // What the FLAM reader actually emits: a full lowercase story UUID
+    // from the text index, its uppercase tail as shortId, hidden from
+    // list.hidden. The hook has no family code — it must pass through.
+    const flamReadable = {
+      kind: "readable" as const,
+      deviceIdentifier: ID_B,
+      stories: [
+        {
+          uuid: "12345678-9abc-def0-1122-334455667788",
+          shortId: "55667788",
+          hidden: true,
+          contentPresent: true,
+          alreadyImported: false,
+          title: null,
+          titleSource: null,
+          thumbnail: null,
+        },
+      ],
+    };
+    vi.mocked(readDeviceLibrary).mockReturnValueOnce(
+      mockHandle(Promise.resolve(flamReadable)) as never,
+    );
+    const { result } = renderHook(() => useDeviceLibrary(ID_B));
+    await waitFor(() => expect(result.current.state.kind).toBe("ready"));
+    if (result.current.state.kind === "ready") {
+      expect(result.current.state.stories).toHaveLength(1);
+      expect(result.current.state.stories[0].uuid).toBe(
+        "12345678-9abc-def0-1122-334455667788",
+      );
+      expect(result.current.state.stories[0].hidden).toBe(true);
+    }
+  });
+
   it("maps a none payload to idle (device gone between detection and read)", async () => {
     vi.mocked(readDeviceLibrary).mockReturnValueOnce(
       mockHandle(Promise.resolve({ kind: "none" })) as never,

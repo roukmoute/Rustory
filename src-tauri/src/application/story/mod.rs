@@ -904,8 +904,8 @@ mod tests {
         .expect("create");
         db.conn()
             .execute(
-                "INSERT INTO story_imports (story_id, pack_uuid, source_device_identifier, imported_at, pack_file_count, pack_total_bytes, pack_checksum) \
-                 VALUES (?1, '019739b2-0000-7000-8000-000000000000', '0123456789abcdef0123456789abcdef', '2026-07-06T00:00:00.000Z', 5, 18, ?2)",
+                "INSERT INTO story_imports (story_id, pack_uuid, source_device_identifier, imported_at, pack_file_count, pack_total_bytes, pack_checksum, source_family) \
+                 VALUES (?1, '019739b2-0000-7000-8000-000000000000', '0123456789abcdef0123456789abcdef', '2026-07-06T00:00:00.000Z', 5, 18, ?2, 'lunii')",
                 rusqlite::params![created.id, "ab".repeat(32)],
             )
             .expect("pack provenance");
@@ -1106,8 +1106,8 @@ mod tests {
         .id;
         db.conn()
             .execute(
-                "INSERT INTO story_imports (story_id, pack_uuid, source_device_identifier, imported_at, pack_file_count, pack_total_bytes, pack_checksum) \
-                 VALUES (?1, '019739b2-0000-7000-8000-000000000001', '0123456789abcdef0123456789abcdef', '2026-07-06T00:00:00.000Z', 5, 18, ?2)",
+                "INSERT INTO story_imports (story_id, pack_uuid, source_device_identifier, imported_at, pack_file_count, pack_total_bytes, pack_checksum, source_family) \
+                 VALUES (?1, '019739b2-0000-7000-8000-000000000001', '0123456789abcdef0123456789abcdef', '2026-07-06T00:00:00.000Z', 5, 18, ?2, 'lunii')",
                 rusqlite::params![pack, "ab".repeat(32)],
             )
             .expect("pack provenance");

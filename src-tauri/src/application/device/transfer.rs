@@ -88,6 +88,7 @@ pub fn read_transfer_preview(
         DeviceLibraryOutcome::Readable {
             device_identifier,
             library,
+            ..
         } => {
             // Compose local truth AFTER the device I/O, under a scoped DB lock
             // (taken here, never held across the scan/read), keyed by the
@@ -245,8 +246,8 @@ mod tests {
             .unwrap()
             .conn()
             .execute(
-                "INSERT INTO story_imports (story_id, pack_uuid, source_device_identifier, imported_at, pack_file_count, pack_total_bytes, pack_checksum) \
-                 VALUES (?1, ?2, '0123456789abcdef0123456789abcdef', '2026-06-16T00:00:00.000Z', 5, 18, ?3)",
+                "INSERT INTO story_imports (story_id, pack_uuid, source_device_identifier, imported_at, pack_file_count, pack_total_bytes, pack_checksum, source_family) \
+                 VALUES (?1, ?2, '0123456789abcdef0123456789abcdef', '2026-06-16T00:00:00.000Z', 5, 18, ?3, 'lunii')",
                 rusqlite::params![story_id, pack_uuid, "ab".repeat(32)],
             )
             .expect("insert provenance");

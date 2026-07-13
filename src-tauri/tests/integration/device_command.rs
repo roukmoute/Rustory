@@ -161,10 +161,12 @@ mod flam_fixture {
 }
 
 /// Signature path: a conforming fake FLAM mount, through the REAL
-/// scanner + classifier, resolves to the recognized supported wire —
-/// `family:"flam"`, `firmwareCohort:"flamGen1"`, all four capabilities
+/// scanner + classifier, resolves to the supported wire —
+/// `family:"flam"`, `firmwareCohort:"flamGen1"`, the read capabilities
+/// (`readLibrary`/`inspectStory`/`importStory`) `true`, `writeStory`
 /// `false`, and the `metadataFormatVersion` key ABSENT. The capability
-/// gate then refuses all four operations with actionable details.
+/// gate authorizes the three read operations and keeps refusing the
+/// write with actionable details (the lock is never weakened).
 #[test]
 fn fake_flam_mount_resolves_to_recognized_supported_wire_and_fully_gated_profile() {
     let (_g, root) = flam_fixture::temp_flam_mount();
@@ -176,33 +178,36 @@ fn fake_flam_mount_resolves_to_recognized_supported_wire_and_fully_gated_profile
         other => panic!("expected Supported, got {other:?}"),
     };
 
-    // Gate inheritance by construction: every operation is refused on
-    // the recognized FLAM profile, with the family/cohort tags in the
-    // details (the same gate the four call sites consult).
+    // Gate inheritance by construction: the matrix line ✅✅✅❌ flows
+    // through the same gate the call sites consult — the three read
+    // operations pass, the write keeps refusing with the family/cohort
+    // tags in the details.
     for op in [
         SupportedOperation::ReadLibrary,
         SupportedOperation::InspectStory,
         SupportedOperation::ImportStory,
-        SupportedOperation::WriteStory,
     ] {
-        let err = match check_operation_allowed(&profile, op) {
-            Err(e) => e,
-            Ok(()) => panic!("{op:?} must be refused for FLAM Gen1"),
-        };
-        let v = serde_json::to_value(&err).expect("ser");
-        assert_eq!(v["details"]["source"], "capability_gate", "{op:?}");
-        assert_eq!(v["details"]["family"], "flam", "{op:?}");
-        assert_eq!(v["details"]["firmware_cohort"], "flam_gen1", "{op:?}");
+        check_operation_allowed(&profile, op)
+            .unwrap_or_else(|e| panic!("{op:?} must be allowed for FLAM Gen1: {e:?}"));
     }
+    let err = match check_operation_allowed(&profile, SupportedOperation::WriteStory) {
+        Err(e) => e,
+        Ok(()) => panic!("WriteStory must stay refused for FLAM Gen1"),
+    };
+    let v = serde_json::to_value(&err).expect("ser");
+    assert_eq!(v["details"]["source"], "capability_gate");
+    assert_eq!(v["details"]["operation"], "write_story");
+    assert_eq!(v["details"]["family"], "flam");
+    assert_eq!(v["details"]["firmware_cohort"], "flam_gen1");
 
     let dto = ConnectedDeviceDto::from_outcome(outcome);
     let v = serde_json::to_value(&dto).expect("ser");
     assert_eq!(v["kind"], "supported");
     assert_eq!(v["family"], "flam");
     assert_eq!(v["firmwareCohort"], "flamGen1");
-    assert_eq!(v["supportedOperations"]["readLibrary"], false);
-    assert_eq!(v["supportedOperations"]["inspectStory"], false);
-    assert_eq!(v["supportedOperations"]["importStory"], false);
+    assert_eq!(v["supportedOperations"]["readLibrary"], true);
+    assert_eq!(v["supportedOperations"]["inspectStory"], true);
+    assert_eq!(v["supportedOperations"]["importStory"], true);
     assert_eq!(v["supportedOperations"]["writeStory"], false);
     assert!(
         v.as_object()

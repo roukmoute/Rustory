@@ -319,8 +319,8 @@ mod tests {
             .expect("insert story");
         db.conn()
             .execute(
-                "INSERT INTO story_imports (story_id, pack_uuid, source_device_identifier, imported_at, pack_file_count, pack_total_bytes, pack_checksum) \
-                 VALUES (?1, ?2, '0123456789abcdef0123456789abcdef', '2026-06-16T00:00:00.000Z', 5, 18, ?3)",
+                "INSERT INTO story_imports (story_id, pack_uuid, source_device_identifier, imported_at, pack_file_count, pack_total_bytes, pack_checksum, source_family) \
+                 VALUES (?1, ?2, '0123456789abcdef0123456789abcdef', '2026-06-16T00:00:00.000Z', 5, 18, ?3, 'lunii')",
                 rusqlite::params![story_id, pack_uuid, "ab".repeat(32)],
             )
             .expect("insert provenance");
@@ -350,6 +350,38 @@ mod tests {
         assert_eq!(title.title, "La Sorcière du placard");
         assert_eq!(title.source, PackTitleSource::Unofficial);
         assert!(truth.imported.contains(UUID_A));
+    }
+
+    #[test]
+    fn title_recognition_is_uuid_neutral_and_covers_a_flam_story_without_change() {
+        // The title-recognition path is UUID-neutral by construction:
+        // keyed by pack UUID only — a FLAM story UUID (imported via the
+        // shared bridge) resolves its local-library inference and a
+        // user-typed name exactly like a Lunii pack. No family-specific
+        // code exists to exercise.
+        const FLAM_UUID: &str = "12345678-9abc-def0-1122-334455667788";
+        let mut db = fresh_db();
+
+        // Inference path: an imported local story linked to the FLAM UUID.
+        insert_imported_story(
+            &db,
+            "story-flam",
+            FLAM_UUID,
+            "Histoire de mon FLAM (55667788)",
+        );
+        let truth = resolve_local_truth(&db, &[FLAM_UUID.to_string()]).expect("resolve");
+        let title = truth.titles.get(FLAM_UUID).expect("title");
+        assert_eq!(title.title, "Histoire de mon FLAM (55667788)");
+        assert_eq!(title.source, PackTitleSource::Unofficial);
+        assert!(truth.imported.contains(FLAM_UUID));
+
+        // User path: a typed name outranks the inference (same priority
+        // rule, same table, same UUID key).
+        set_user_title(&mut db, FLAM_UUID, "Les aventures de Nour").expect("set user title");
+        let truth = resolve_local_truth(&db, &[FLAM_UUID.to_string()]).expect("re-resolve");
+        let title = truth.titles.get(FLAM_UUID).expect("title");
+        assert_eq!(title.title, "Les aventures de Nour");
+        assert_eq!(title.source, PackTitleSource::User);
     }
 
     #[test]

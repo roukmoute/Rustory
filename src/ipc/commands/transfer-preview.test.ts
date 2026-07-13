@@ -7,7 +7,7 @@ vi.mock("@tauri-apps/api/core", () => ({
 import { invoke } from "@tauri-apps/api/core";
 
 import {
-  READ_TRANSFER_PREVIEW_TIMEOUT_ERROR,
+  readTransferPreviewTimeoutError,
   READ_TRANSFER_PREVIEW_TIMEOUT_MS,
   ReadTransferPreviewContractDriftError,
   readTransferPreview,
@@ -94,7 +94,7 @@ describe("readTransferPreview", () => {
     const handle = readTransferPreview(INPUT, 50);
     const observed = handle.promise.catch((e) => e);
     await vi.advanceTimersByTimeAsync(60);
-    expect(await observed).toBe(READ_TRANSFER_PREVIEW_TIMEOUT_ERROR);
+    expect(await observed).toEqual(readTransferPreviewTimeoutError());
   });
 
   it("does not reject after cancel() even if the budget elapses", async () => {

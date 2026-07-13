@@ -43,6 +43,26 @@ describe("isDeviceLibraryDto", () => {
     ).toBe(true);
   });
 
+  it("accepts a readable FLAM inventory (real wire — the DTO is family-neutral)", () => {
+    // What the FLAM reader actually emits: a real story UUID from the
+    // text index, its uppercase 8-hex tail, the same flags as a Lunii
+    // entry. No family field exists on this wire — the guard passes it
+    // exactly like a Lunii inventory.
+    expect(
+      isDeviceLibraryDto({
+        kind: "readable",
+        deviceIdentifier: "fedcba9876543210fedcba9876543210",
+        stories: [
+          story({
+            uuid: "12345678-9abc-def0-1122-334455667788",
+            shortId: "55667788",
+            hidden: true,
+          }),
+        ],
+      }),
+    ).toBe(true);
+  });
+
   it("accepts kind=readable with an empty story list (empty device)", () => {
     expect(
       isDeviceLibraryDto({

@@ -13,12 +13,14 @@ import {
  */
 export const READ_DEVICE_LIBRARY_TIMEOUT_MS = 5500;
 
-/** Discriminant emitted when {@link readDeviceLibrary} trips its timeout. */
+/** Discriminant emitted when {@link readDeviceLibrary} trips its timeout.
+ *  Device-generic copy: the read path serves every readable family
+ *  (Lunii, FLAM), so the next gesture never names a specific one. */
 export const READ_DEVICE_LIBRARY_TIMEOUT_ERROR = {
   code: "UNKNOWN",
   message: "Rustory a mis trop de temps à lire la bibliothèque de l'appareil.",
   userAction:
-    "Réessaie la lecture. Si le problème persiste, débranche la Lunii puis rebranche-la.",
+    "Réessaie la lecture. Si le problème persiste, débranche l'appareil puis rebranche-le.",
   details: null,
 } as const;
 

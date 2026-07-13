@@ -476,7 +476,7 @@ fn verify_written_pack(
         return unreadable;
     }
     let remaining = budget.saturating_sub(started.elapsed());
-    let library = match library_reader.read_library(&mount_path, remaining) {
+    let library = match library_reader.read_library(&mount_path, profile.family, remaining) {
         Ok(library) => library,
         Err(_) => return unreadable,
     };
@@ -694,7 +694,7 @@ fn run_transfer_preflight(
     // unreadable must end recoverably, never written blindly), and capture it to
     // resolve whether the pack is already present.
     let remaining = budget.saturating_sub(started.elapsed());
-    let library = match library_reader.read_library(&mount_path, remaining) {
+    let library = match library_reader.read_library(&mount_path, profile.family, remaining) {
         Ok(library) => library,
         Err(err) => {
             let cause = if details_source(&err) == Some("read_timeout") {
@@ -709,7 +709,18 @@ fn run_transfer_preflight(
     let facts = read_transfer_facts(db, story_id)?;
     let blockers = validate_canonical(&facts.facts);
 
-    let (source, expected_aggregate) = match &facts.pack_checksum {
+    // FAMILY-AWARE fail-closed: an imported pack is a device-format pack
+    // ONLY for its source family. A pack imported from another family
+    // (FLAM toward a Lunii target) has NO device-format pack for THIS
+    // target — the whole flow treats it like a native story: no pack
+    // UUID to target (the early `NotTransferable` refusal fires before
+    // any assembly), a Native assembly source, and the canonical
+    // checksum as baseline. No byte can ever reach the device.
+    let family_matches =
+        facts.pack_source_family.as_deref() == Some(profile.family.diagnostic_tag());
+    let target_family_pack = facts.pack_checksum.as_ref().filter(|_| family_matches);
+    let target_pack_uuid = facts.pack_uuid.filter(|_| family_matches);
+    let (source, expected_aggregate) = match target_family_pack {
         Some(pack_checksum) => (AssemblySource::ImportedPack, pack_checksum.clone()),
         None => (
             AssemblySource::Native {
@@ -720,8 +731,7 @@ fn run_transfer_preflight(
     };
     let target_cohort = profile.firmware_cohort.diagnostic_tag().to_string();
 
-    let pack_present = facts
-        .pack_uuid
+    let pack_present = target_pack_uuid
         .as_deref()
         .map(|uuid| {
             library
@@ -732,8 +742,7 @@ fn run_transfer_preflight(
         .unwrap_or(false);
     // Count EVERY entry matching the pack (a `.pi` + `.pi.hidden` duplicate yields
     // two): all are excluded from the unchanged count, mirroring 3.1.
-    let pack_match_count = facts
-        .pack_uuid
+    let pack_match_count = target_pack_uuid
         .as_deref()
         .map(|uuid| library.entries.iter().filter(|e| e.uuid == uuid).count())
         .unwrap_or(0);
@@ -743,7 +752,7 @@ fn run_transfer_preflight(
         device_identifier: profile.device_identifier,
         device_cohort: target_cohort.clone(),
         story_title: facts.facts.title.clone(),
-        pack_uuid: facts.pack_uuid,
+        pack_uuid: target_pack_uuid,
         plan: AssemblyPlan {
             story_id: story_id.to_string(),
             target_cohort,
@@ -806,6 +815,11 @@ struct TransferFacts {
     facts: CanonicalStoryFacts,
     pack_uuid: Option<String>,
     pack_checksum: Option<String>,
+    /// Device family the imported pack bytes came from (`story_imports.
+    /// source_family`), `None` for a native story. The preflight only
+    /// treats the pack as a device-format artifact when it matches the
+    /// TARGET family (fail-closed).
+    pack_source_family: Option<String>,
 }
 
 fn read_transfer_facts(db: &Mutex<DbHandle>, story_id: &str) -> Result<TransferFacts, AppError> {
@@ -824,18 +838,18 @@ fn read_transfer_facts(db: &Mutex<DbHandle>, story_id: &str) -> Result<TransferF
         return Err(story_missing_error());
     };
 
-    let import_row: Option<(String, String)> = db
+    let import_row: Option<(String, String, String)> = db
         .conn()
         .query_row(
-            "SELECT pack_uuid, pack_checksum FROM story_imports WHERE story_id = ?1",
+            "SELECT pack_uuid, pack_checksum, source_family FROM story_imports WHERE story_id = ?1",
             rusqlite::params![story_id],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .optional()
         .map_err(|_| local_read_error("select_pack"))?;
-    let (pack_uuid, pack_checksum) = match import_row {
-        Some((uuid, checksum)) => (Some(uuid), Some(checksum)),
-        None => (None, None),
+    let (pack_uuid, pack_checksum, pack_source_family) = match import_row {
+        Some((uuid, checksum, family)) => (Some(uuid), Some(checksum), Some(family)),
+        None => (None, None, None),
     };
 
     Ok(TransferFacts {
@@ -847,6 +861,7 @@ fn read_transfer_facts(db: &Mutex<DbHandle>, story_id: &str) -> Result<TransferF
         },
         pack_uuid,
         pack_checksum,
+        pack_source_family,
     })
 }
 
@@ -922,9 +937,23 @@ mod tests {
             .unwrap()
             .conn()
             .execute(
-                "INSERT INTO story_imports (story_id, pack_uuid, source_device_identifier, imported_at, pack_file_count, pack_total_bytes, pack_checksum) \
-                 VALUES (?1, ?2, 'dev', '2026-06-22T00:00:00.000Z', 7, 1024, ?3)",
+                "INSERT INTO story_imports (story_id, pack_uuid, source_device_identifier, imported_at, pack_file_count, pack_total_bytes, pack_checksum, source_family) \
+                 VALUES (?1, ?2, 'dev', '2026-06-22T00:00:00.000Z', 7, 1024, ?3, 'lunii')",
                 rusqlite::params![id, PACK_UUID, PACK_CHECKSUM],
+            )
+            .expect("insert import");
+    }
+
+    /// Family-explicit variant of [`insert_import`] — seeds the provenance a
+    /// FLAM (or any family) import records.
+    fn insert_import_with_family(db: &Mutex<DbHandle>, id: &str, source_family: &str) {
+        db.lock()
+            .unwrap()
+            .conn()
+            .execute(
+                "INSERT INTO story_imports (story_id, pack_uuid, source_device_identifier, imported_at, pack_file_count, pack_total_bytes, pack_checksum, source_family) \
+                 VALUES (?1, ?2, 'dev', '2026-07-13T00:00:00.000Z', 7, 1024, ?3, ?4)",
+                rusqlite::params![id, PACK_UUID, PACK_CHECKSUM, source_family],
             )
             .expect("insert import");
     }
@@ -1558,6 +1587,49 @@ mod tests {
             }
         );
         assert_eq!(writer.call_count(), 0);
+    }
+
+    #[test]
+    fn not_transferable_for_a_flam_import_toward_a_lunii() {
+        // Fail-closed: a FLAM-imported pack is NOT a device-format
+        // pack for a Lunii target. The preflight assembles it like a
+        // native story, the write plan refuses (`NotTransferable`) and
+        // the writer is NEVER reached — no byte can land on the Lunii.
+        let dir = tempfile::tempdir().expect("app data");
+        let db = fresh_db();
+        insert_story(&db, "s1");
+        insert_import_with_family(&db, "s1", "flam");
+        let scanner = supported_scanner(3); // Lunii Origine target (writable)
+        let reader = readable_reader();
+        let artifacts = MockTransferArtifactSource::new(); // never assembled as a pack
+        let writer = MockDevicePackWriter::new();
+        let emitter = CapturingEmitter::default();
+
+        let outcome = transfer_story(
+            &db,
+            &scanner,
+            &reader,
+            &artifacts,
+            &writer,
+            dir.path(),
+            "s1",
+            &mock_identifier(),
+            budget(),
+            budget(),
+            &emitter,
+        );
+        assert_eq!(
+            outcome,
+            TransferOutcome::Retryable {
+                cause: TransferFailureCause::NotTransferable,
+                completeness: TransferCompleteness::Failed,
+            }
+        );
+        assert_eq!(
+            writer.call_count(),
+            0,
+            "a FLAM import must never reach the device writer on a Lunii target"
+        );
     }
 
     #[test]

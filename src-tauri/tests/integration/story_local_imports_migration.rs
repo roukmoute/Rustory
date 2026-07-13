@@ -340,7 +340,7 @@ fn existing_v5_database_upgrades_to_v6() {
         .expect("collect");
     assert_eq!(
         versions,
-        vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
+        vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
         "v1..v5 preserved, v6+ added"
     );
 

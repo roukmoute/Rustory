@@ -1,5 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 
+import type { SupportedFamilyDto } from "../../shared/ipc-contracts/device";
+
 import { toAppError } from "../../shared/errors/app-error";
 import {
   isTransferPreviewDto,
@@ -21,14 +23,27 @@ export interface ReadTransferPreviewInput {
  */
 export const READ_TRANSFER_PREVIEW_TIMEOUT_MS = 5500;
 
-/** Discriminant emitted when {@link readTransferPreview} trips its timeout. */
-export const READ_TRANSFER_PREVIEW_TIMEOUT_ERROR = {
-  code: "UNKNOWN",
-  message: "Rustory a mis trop de temps à comparer l'histoire avec l'appareil.",
-  userAction:
-    "Réessaie la comparaison. Si le problème persiste, débranche la Lunii puis rebranche-la.",
-  details: null,
-} as const;
+/** Discriminant emitted when {@link readTransferPreview} trips its timeout.
+ *  Family-correct: a Lunii keeps the historical next gesture VERBATIM,
+ *  any other family reads the device-generic one (product-language.md). */
+export function readTransferPreviewTimeoutError(
+  family?: SupportedFamilyDto,
+): {
+  code: "UNKNOWN";
+  message: string;
+  userAction: string;
+  details: null;
+} {
+  return {
+    code: "UNKNOWN",
+    message: "Rustory a mis trop de temps à comparer l'histoire avec l'appareil.",
+    userAction:
+      family === undefined || family === "lunii"
+        ? "Réessaie la comparaison. Si le problème persiste, débranche la Lunii puis rebranche-la."
+        : "Réessaie la comparaison. Si le problème persiste, débranche l'appareil puis rebranche-le.",
+    details: null,
+  };
+}
 
 /**
  * Cancelable handle returned by {@link readTransferPreview}. Callers that
@@ -67,6 +82,7 @@ export class ReadTransferPreviewContractDriftError extends Error {
 export function readTransferPreview(
   input: ReadTransferPreviewInput,
   timeoutMs: number = READ_TRANSFER_PREVIEW_TIMEOUT_MS,
+  deviceFamily?: SupportedFamilyDto,
 ): ReadTransferPreviewCall {
   const call = invoke<unknown>("read_transfer_preview", { input })
     .then((raw) => {
@@ -92,7 +108,7 @@ export function readTransferPreview(
     timer = setTimeout(() => {
       timer = undefined;
       if (cancelled) return;
-      reject(READ_TRANSFER_PREVIEW_TIMEOUT_ERROR);
+      reject(readTransferPreviewTimeoutError(deviceFamily));
     }, timeoutMs);
   });
 

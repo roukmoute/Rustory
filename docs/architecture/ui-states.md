@@ -128,7 +128,7 @@ Preferred patterns:
 - `Profil non supporté: marqueurs appareil incomplets`
 - `Profil ambigu: {n} candidats détectés. Débranche les autres puis réessaie.`
 - `Lecture appareil indisponible: profil non autorisé`
-- `Lecture de la bibliothèque appareil indisponible: vérifie que la Lunii est branchée et réessaie.`
+- `Lecture de la bibliothèque appareil indisponible: vérifie que la Lunii est branchée et réessaie.` — Lunii read path VERBATIM; the FLAM read path emits the family-correct sibling `Lecture de la bibliothèque appareil indisponible: vérifie que l'appareil est branché et réessaie.` (same `DEVICE_SCAN_FAILED` / `fs_read` contract)
 - `Lecture de la bibliothèque appareil indisponible: l'index des histoires est illisible.`
 - `Lecture de la bibliothèque appareil indisponible: l'appareil met trop de temps à répondre.`
 - `Lecture de la bibliothèque appareil indisponible: l'appareil connecté a changé.`
@@ -251,8 +251,17 @@ at least one activated capability: the panel derives
 `hasAnyCapability = readLibrary || inspectStory || importStory || writeStory`
 from the authoritative DTO — never from the family name (no
 `if family === "flam"` in state rendering; any future zero-capability
-profile is honest by construction). A supported profile whose capabilities
-are ALL `false` (FLAM Gen1 today) renders:
+profile is honest by construction). A FLAM Gen1 now carries three
+activated read-side capabilities (see the support matrix), so it renders
+`Appareil prêt — FLAM` through this EXISTING rule — no family-conditional
+code; its transfer capability line renders non-activated
+(`— Transfert vers l'appareil`) and the send stays disabled through the
+capability-closed path below.
+
+A supported profile whose capabilities are ALL `false` — a DECLARED state
+with **no live emitter** since the FLAM read capabilities activated (kept
+in the closed set for any future zero-capability family, per the
+declared-state discipline of this document) — renders:
 
 - the STATIC chip `Appareil reconnu — {famille}` (a durable state, never
   `role="alert"`),
@@ -261,9 +270,9 @@ are ALL `false` (FLAM Gen1 today) renders:
   opération activée dans cette version. Consulte le profil de support pour
   comprendre ce qui est permis.`) — rendered in this
   recognized-without-capability idle state ONLY, never in a
-  capability-bearing idle (Lunii). The pointer is informative text with NO
-  navigation and NO network (NFR14): consulting the profiles is a separate
-  surface, so no internal target exists to wire yet; the external
+  capability-bearing idle (Lunii, FLAM). The pointer is informative text
+  with NO navigation and NO network (NFR14): consulting the profiles is a
+  separate surface, so no internal target exists to wire yet; the external
   `Consulter le profil de support` CTA keeps its pre-existing scope
   (unsupported / ambiguous / error) and is NOT offered here,
 - the send disabled through the EXISTING capability-closed path
@@ -271,6 +280,14 @@ are ALL `false` (FLAM Gen1 today) renders:
   `Envoi indisponible: transfert pas encore activé (MVP Phase 1)` stays
   EXCLUSIVE to write-planned Lunii cohorts and is never rendered for a
   zero-capability profile.
+
+The send CTA label is family-correct: a Lunii panel keeps
+`Envoyer vers la Lunii` VERBATIM; any other family renders
+`Envoyer vers l'appareil` (Change Control,
+[product-language.md](./product-language.md)). The FLAM send stays
+disabled through the capability-closed reason
+(`Envoi indisponible: profil non supporté`) — `writeStory` is `false`
+on the FLAM Gen1 matrix line.
 
 The metadata format version NEVER appears in a FLAM rendering — the wire
 omits the `metadataFormatVersion` key entirely for a profile that has no
@@ -317,12 +334,18 @@ hosted by the right decision panel (which stays "device state + send
 CTA"). This keeps local truth and device truth distinguishable at all
 times.
 
+This contract is FAMILY-NEUTRAL: it lights up for ANY supported profile
+whose `readLibrary` capability is `true` on the support matrix (every
+supported Lunii cohort, FLAM Gen1) — same states, same chips, same error
+surface, no per-family rendering. The wire DTO carries no family field;
+the capability matrix alone decides.
+
 The frontend hook `useDeviceLibrary(deviceIdentifier)` reads the
 inventory through the `read_device_library` command. It is orthogonal to
 `useLibraryOverview`: a device-read failure never alters the LOCAL
 library. There is no polling of the inventory — device PRESENCE is polled
 by `useConnectedLunii`; the heavier inventory read fires when the
-identifier changes (a different Lunii) and on a manual retry.
+identifier changes (a different device) and on a manual retry.
 
 Scope: listing + recognition. Each entry shows its recognized `title` when a
 local index covers the pack (composed Rust-side — see
@@ -338,7 +361,7 @@ but never editable here; that selection is separate from the local
 | idle | nothing | No readable device (none / unsupported / not read-authorized). |
 | loading | `ProgressIndicator` + `Lecture de la bibliothèque de l'appareil…` | "État non encore chargé" — must never read as "aucune histoire". |
 | ready (n > 0) | list of entries + count | Each entry: the recognized `title` (or `Histoire non reconnue`) + `Identifiant: <shortId>` + a provenance chip when recognized. |
-| ready (n = 0) | `Aucune histoire sur l'appareil` | Distinct from the loading state. |
+| ready (n = 0) | `Aucune histoire sur l'appareil` | Distinct from the loading state. Its hint is family-neutral: `L'appareil connecté ne contient aucune histoire lisible.` |
 | error | `LibraryErrorBanner` (`role="alert"`) titled `Bibliothèque de l'appareil indisponible` + `Réessayer` | Recoverable, in-context, never a toast. The local library stays intact. |
 
 Provenance is explicit: the section heading is `Histoires sur l'appareil`
@@ -352,7 +375,7 @@ are also folded into each card's accessible name.
 Error payloads under the read carry a stable `details.source`:
 
 - `fs_read` — index-file read failure. `details.kind` ∈ `permission_denied`, `not_found`, `timeout`, `interrupted`, `other` (a mid-read unplug typically surfaces as `not_found`).
-- `pack_index` — the `.pi` exceeded the 64 KB inventory bound (`details.kind = "oversize"`).
+- `pack_index` — the story index is unreadable: it exceeded the 64 KB inventory bound (`details.kind = "oversize"` — `.pi` or FLAM `etc/library/list`), or the FLAM index entry is not a regular file (`details.kind = "not_a_regular_file"` — symlink/special file, refused no-follow).
 - `read_timeout` — the read budget was exhausted (`details.elapsed_ms`).
 - `device_changed` — the live re-scan no longer resolves to the requested device (swapped / unplugged-and-replaced).
 - `scan_timeout` / `os_enum` / `mount_unavailable` / `spawn_blocking_join` / `other` — re-scan transport failures, mirroring the detection set.
@@ -370,7 +393,7 @@ anything (the import flow is a later story).
 | Source of truth | A single selected device-story `uuid`, held by `LibraryRoute` as local UI state. Separate from the local `selectedStoryIds`: selecting a device story never touches the local selection, and vice-versa. |
 | Cardinality | Single selection — inspection (and the later import) target one device story at a time. |
 | Persistence | None. Never survives a restart, and is dropped when the readable device changes or the selected entry is absent from a fresh inventory read — no silent stale target (a `uuid` that resolves to no current entry renders no inspector for that render). |
-| Capability gate | Offered only when the detected profile authorizes `inspectStory` (✅ for every supported Lunii cohort, V3 included — distinct from `importStory`, which is ❌ for V3). When `inspectStory` is false, the device cards stay non-interactive. |
+| Capability gate | Offered only when the detected profile authorizes `inspectStory` (✅ for every supported Lunii cohort — V3 included — AND for FLAM Gen1; distinct from `importStory`, which is ❌ for V3). When `inspectStory` is false, the device cards stay non-interactive. Family-neutral: the matrix decides, never the family name. |
 | Non-color signal | A selected device card renders a colored border, a visible `✓` prefix in the DOM and `aria-pressed="true"` — the selection survives grayscale / color-blindness, exactly like a local `Story Card`. |
 | Interaction | A selectable device card is a `role="button" aria-pressed={selected}` focus stop. Click (or `Space` / `Enter` on the focused card) toggles its selection. There is no double-click / open: a device story is not editable. |
 
@@ -398,7 +421,11 @@ itself stays "device state + send CTA".
 Activating the `Copier dans ma bibliothèque` affordance starts a raw,
 structurally validated acquisition of the selected device pack into the
 local library (see
-[device-support-profile.md#Story Import Contract](./device-support-profile.md)).
+[device-support-profile.md#Story Import Contract](./device-support-profile.md)
+for the Lunii pack format, and "FLAM library inventory & story import"
+for the opaque FLAM pack — same UI machine, same taxonomy, family-neutral
+rendering; the created story's default title is family-correct:
+`Histoire de ma Lunii (XXXXXXXX)` / `Histoire de mon FLAM (XXXXXXXX)`).
 This contract is **distinct from the `Post-MVP Import State Contract`**
 (local structured imports, Epic 4): the `reconnu` / `partiel` / `à
 revoir` labels MUST NOT be reused here — a device copy either fully
@@ -451,8 +478,9 @@ Surface rules:
 Post-success traces (AC: trace on BOTH sides):
 
 - Local: `invalidateLibraryOverviewCache()` + authoritative overview
-  re-read — the new story card appears, titled `Histoire de ma Lunii
-  (XXXXXXXX)` (the provenance is carried by the title).
+  re-read — the new story card appears, titled with the family-correct
+  default (`Histoire de ma Lunii (XXXXXXXX)` / `Histoire de mon FLAM
+  (XXXXXXXX)` — the provenance is carried by the title).
 - Device: `deviceLibrary.refresh()` re-reads the inventory; the device
   card now renders a `Dans ta bibliothèque` chip (tone success, glyph,
   folded into the card's `aria-label`) and the inspector CTA flips back
@@ -476,7 +504,7 @@ Error taxonomy — rejections cross the boundary as `AppError { code:
 
 - `already_imported` — a `story_imports` row already links this `pack_uuid` to a local story.
 - `pack_missing` — the pack UUID is no longer in the device index, or its `.content/<SHORT_ID>` folder is absent.
-- `pack_invalid` — the pack content violates the declared supported subset (missing/empty required entry, unknown entry, non-regular file, depth exceeded).
+- `pack_invalid` — the pack content violates its family's structural contract. Lunii (known format): missing/empty required entry, unknown entry, non-regular file, depth exceeded. FLAM (opaque format): non-regular entry (symlink/special file), empty story folder (`details.cause = "empty_pack"`), empty directory (`"empty_directory"` — not round-trippable), depth exceeded. Both families: a staging path collision (`"staging_path_collision"` — exclusive staging writes, never a silent truncation).
 - `pack_oversize` — the pack exceeds `MAX_IMPORT_PACK_BYTES` or `MAX_IMPORT_PACK_FILES`.
 - `device_changed` — the live re-scan no longer resolves to the requested device (swapped / unplugged), or no supported device answers.
 - `fs_read` — reading the pack from the device failed mid-copy. `details.kind` reuses the export I/O set (`permission_denied`, `no_space`, `read_only_filesystem`, `not_found`, `already_exists`, `io`).

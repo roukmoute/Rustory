@@ -82,8 +82,8 @@ fn insert_import(db: &Mutex<DbHandle>, story_id: &str, pack_uuid: &str) {
         .unwrap()
         .conn()
         .execute(
-            "INSERT INTO story_imports (story_id, pack_uuid, source_device_identifier, imported_at, pack_file_count, pack_total_bytes, pack_checksum) \
-             VALUES (?1, ?2, 'deadbeefdeadbeefdeadbeefdeadbeef', '2026-06-16T00:00:00.000Z', 8, 4096, ?3)",
+            "INSERT INTO story_imports (story_id, pack_uuid, source_device_identifier, imported_at, pack_file_count, pack_total_bytes, pack_checksum, source_family) \
+             VALUES (?1, ?2, 'deadbeefdeadbeefdeadbeefdeadbeef', '2026-06-16T00:00:00.000Z', 8, 4096, ?3, 'lunii')",
             rusqlite::params![story_id, pack_uuid, "a".repeat(64)],
         )
         .expect("insert provenance");
@@ -232,13 +232,18 @@ struct LockProbeReader {
 }
 
 impl DeviceLibraryReader for LockProbeReader {
-    fn read_library(&self, mount_path: &Path, budget: Duration) -> Result<DeviceLibrary, AppError> {
+    fn read_library(
+        &self,
+        mount_path: &Path,
+        family: rustory_lib::domain::device::DeviceFamily,
+        budget: Duration,
+    ) -> Result<DeviceLibrary, AppError> {
         // `try_lock` succeeds only if no other holder is in the lock right now.
         // The guard (if acquired) drops at the end of this statement.
         if self.db.try_lock().is_ok() {
             self.lock_free_during_read.store(true, Ordering::SeqCst);
         }
-        SystemDeviceLibraryReader.read_library(mount_path, budget)
+        SystemDeviceLibraryReader.read_library(mount_path, family, budget)
     }
 }
 

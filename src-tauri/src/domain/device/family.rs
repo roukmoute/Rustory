@@ -5,11 +5,22 @@
 pub enum DeviceFamily {
     /// Lunii device family. The MVP target.
     Lunii,
-    /// FLAM device family. Recognized with zero activated capability —
-    /// the support matrix keeps every operation ❌ until support
-    /// activates them line by line.
+    /// FLAM device family. Read-side capabilities (inventory,
+    /// inspection, import) are activated on the support matrix; device
+    /// write stays ❌ until the update flow proves it end to end.
     Flam,
     // Tonies, etc. — future families.
+}
+
+impl DeviceFamily {
+    /// Stable, log-friendly tag — same contract as the cohort tags:
+    /// never reworded between releases (`device.jsonl` greps stay valid).
+    pub const fn diagnostic_tag(self) -> &'static str {
+        match self {
+            Self::Lunii => "lunii",
+            Self::Flam => "flam",
+        }
+    }
 }
 
 /// Cohort of firmware versions sharing the same metadata format and the
@@ -125,6 +136,15 @@ mod tests {
             FirmwareCohort::Flam(FlamFirmwareCohort::Gen1).diagnostic_tag(),
             "flam_gen1"
         );
+    }
+
+    #[test]
+    fn device_family_diagnostic_tags_are_stable() {
+        // Must stay byte-identical to the tags the capability gate
+        // writes into `details.family` — one namespace across the
+        // diagnostics.
+        assert_eq!(DeviceFamily::Lunii.diagnostic_tag(), "lunii");
+        assert_eq!(DeviceFamily::Flam.diagnostic_tag(), "flam");
     }
 
     #[test]

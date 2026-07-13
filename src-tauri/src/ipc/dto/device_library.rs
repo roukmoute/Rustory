@@ -119,6 +119,7 @@ impl DeviceLibraryDto {
             DeviceLibraryOutcome::Readable {
                 device_identifier,
                 library,
+                ..
             } => Self::Readable {
                 device_identifier,
                 stories: library
@@ -185,6 +186,10 @@ mod tests {
     fn readable_variant_round_trips_with_camel_case_fields() {
         let dto = DeviceLibraryDto::from_outcome(
             DeviceLibraryOutcome::Readable {
+                family: crate::domain::device::DeviceFamily::Lunii,
+                firmware_cohort: crate::domain::device::FirmwareCohort::Lunii(
+                    crate::domain::device::LuniiFirmwareCohort::OrigineV1,
+                ),
                 device_identifier: "0123456789abcdef0123456789abcdef".into(),
                 library: DeviceLibrary {
                     entries: vec![
@@ -223,6 +228,10 @@ mod tests {
         let imported: HashSet<String> = [entry("0000ABCD", false, true).uuid].into();
         let dto = DeviceLibraryDto::from_outcome(
             DeviceLibraryOutcome::Readable {
+                family: crate::domain::device::DeviceFamily::Lunii,
+                firmware_cohort: crate::domain::device::FirmwareCohort::Lunii(
+                    crate::domain::device::LuniiFirmwareCohort::OrigineV1,
+                ),
                 device_identifier: "0123456789abcdef0123456789abcdef".into(),
                 library: DeviceLibrary {
                     entries: vec![
@@ -254,6 +263,10 @@ mod tests {
         );
         let dto = DeviceLibraryDto::from_outcome(
             DeviceLibraryOutcome::Readable {
+                family: crate::domain::device::DeviceFamily::Lunii,
+                firmware_cohort: crate::domain::device::FirmwareCohort::Lunii(
+                    crate::domain::device::LuniiFirmwareCohort::OrigineV1,
+                ),
                 device_identifier: "0123456789abcdef0123456789abcdef".into(),
                 library: DeviceLibrary {
                     entries: vec![recognized, entry("0000BEEF", false, true)],
@@ -296,6 +309,10 @@ mod tests {
         );
         let dto = DeviceLibraryDto::from_outcome(
             DeviceLibraryOutcome::Readable {
+                family: crate::domain::device::DeviceFamily::Lunii,
+                firmware_cohort: crate::domain::device::FirmwareCohort::Lunii(
+                    crate::domain::device::LuniiFirmwareCohort::OrigineV1,
+                ),
                 device_identifier: "0123456789abcdef0123456789abcdef".into(),
                 library: DeviceLibrary {
                     entries: vec![a, b],
@@ -330,6 +347,10 @@ mod tests {
     fn readable_empty_library_serializes_empty_stories_array() {
         let dto = DeviceLibraryDto::from_outcome(
             DeviceLibraryOutcome::Readable {
+                family: crate::domain::device::DeviceFamily::Lunii,
+                firmware_cohort: crate::domain::device::FirmwareCohort::Lunii(
+                    crate::domain::device::LuniiFirmwareCohort::OrigineV1,
+                ),
                 device_identifier: "ffffffffffffffffffffffffffffffff".into(),
                 library: DeviceLibrary::default(),
             },

@@ -392,7 +392,7 @@ fn run_preflight(
         }
     };
     let remaining = budget.saturating_sub(started.elapsed());
-    if let Err(err) = library_reader.read_library(&mount_path, remaining) {
+    if let Err(err) = library_reader.read_library(&mount_path, profile.family, remaining) {
         // A read timeout is `Interrupted` (budget); any other read failure means
         // the device is no longer readable → `DeviceChanged`.
         let cause = if details_source(&err) == Some("read_timeout") {
@@ -406,12 +406,22 @@ fn run_preflight(
     let facts = read_prepare_facts(db, story_id)?;
     let blockers = validate_canonical(&facts.facts);
 
-    let (source, expected_aggregate) = match facts.pack_checksum {
-        // An imported raw pack: re-checksum the promoted files, baseline is the
-        // pack checksum the import recorded.
+    // FAMILY-AWARE fail-closed: an imported pack is a device-format pack
+    // ONLY for its source family. A pack imported from another family
+    // (FLAM toward a Lunii target) has NO device-format pack for THIS
+    // target — it assembles like a native story (canonical structure
+    // only), so it can never be marked transferable and the write plan
+    // keeps refusing it (`NotTransferable`).
+    let target_family_pack = facts
+        .pack_checksum
+        .filter(|_| facts.pack_source_family.as_deref() == Some(profile.family.diagnostic_tag()));
+    let (source, expected_aggregate) = match target_family_pack {
+        // An imported raw pack OF THE TARGET FAMILY: re-checksum the
+        // promoted files, baseline is the pack checksum the import recorded.
         Some(pack_checksum) => (AssemblySource::ImportedPack, pack_checksum),
-        // A native minimal story: the canonical structure is the artifact, the
-        // baseline is its `content_checksum`.
+        // A native minimal story, or an imported pack of another family:
+        // the canonical structure is the artifact, the baseline is its
+        // `content_checksum`.
         None => (
             AssemblySource::Native {
                 structure_json: facts.facts.structure_json.clone(),
@@ -446,6 +456,11 @@ fn details_source(err: &AppError) -> Option<&str> {
 struct PrepareFacts {
     facts: CanonicalStoryFacts,
     pack_checksum: Option<String>,
+    /// Device family the imported pack bytes came from (`story_imports.
+    /// source_family`), `None` for a native story. The preflight only
+    /// treats the pack as a device-format artifact when it matches the
+    /// TARGET family (fail-closed).
+    pack_source_family: Option<String>,
 }
 
 fn read_prepare_facts(db: &Mutex<DbHandle>, story_id: &str) -> Result<PrepareFacts, AppError> {
@@ -464,15 +479,19 @@ fn read_prepare_facts(db: &Mutex<DbHandle>, story_id: &str) -> Result<PrepareFac
         return Err(story_missing_error());
     };
 
-    let pack_checksum: Option<String> = db
+    let import_row: Option<(String, String)> = db
         .conn()
         .query_row(
-            "SELECT pack_checksum FROM story_imports WHERE story_id = ?1",
+            "SELECT pack_checksum, source_family FROM story_imports WHERE story_id = ?1",
             rusqlite::params![story_id],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .optional()
-        .map_err(|_| local_read_error("select_pack_checksum"))?;
+        .map_err(|_| local_read_error("select_import_provenance"))?;
+    let (pack_checksum, pack_source_family) = match import_row {
+        Some((checksum, family)) => (Some(checksum), Some(family)),
+        None => (None, None),
+    };
 
     Ok(PrepareFacts {
         facts: CanonicalStoryFacts {
@@ -482,6 +501,7 @@ fn read_prepare_facts(db: &Mutex<DbHandle>, story_id: &str) -> Result<PrepareFac
             content_checksum,
         },
         pack_checksum,
+        pack_source_family,
     })
 }
 
@@ -589,15 +609,36 @@ mod tests {
     }
 
     /// Seed a `story_imports` row so the preparation reads the story as an
-    /// imported pack (its integrity baseline becomes `pack_checksum`).
+    /// imported pack (its integrity baseline becomes `pack_checksum`),
+    /// with the EXPLICIT 'lunii' family (no implicit family exists — the
+    /// schema refuses an INSERT without one).
     fn insert_import(db: &Mutex<DbHandle>, story_id: &str, pack_checksum: &str) {
         db.lock()
             .unwrap()
             .conn()
             .execute(
-                "INSERT INTO story_imports (story_id, pack_uuid, source_device_identifier, imported_at, pack_file_count, pack_total_bytes, pack_checksum) \
-                 VALUES (?1, '0197a5d0-0000-7000-8000-0000000000aa', 'devhash', '2026-06-22T00:00:00.000Z', 1, 16, ?2)",
+                "INSERT INTO story_imports (story_id, pack_uuid, source_device_identifier, imported_at, pack_file_count, pack_total_bytes, pack_checksum, source_family) \
+                 VALUES (?1, '0197a5d0-0000-7000-8000-0000000000aa', 'devhash', '2026-06-22T00:00:00.000Z', 1, 16, ?2, 'lunii')",
                 rusqlite::params![story_id, pack_checksum],
+            )
+            .expect("insert story_imports");
+    }
+
+    /// Family-explicit variant of [`insert_import`] — seeds the provenance a
+    /// FLAM (or any family) import records.
+    fn insert_import_with_family(
+        db: &Mutex<DbHandle>,
+        story_id: &str,
+        pack_checksum: &str,
+        source_family: &str,
+    ) {
+        db.lock()
+            .unwrap()
+            .conn()
+            .execute(
+                "INSERT INTO story_imports (story_id, pack_uuid, source_device_identifier, imported_at, pack_file_count, pack_total_bytes, pack_checksum, source_family) \
+                 VALUES (?1, '0197a5d0-0000-7000-8000-0000000000ab', 'devhash', '2026-07-13T00:00:00.000Z', 1, 16, ?2, ?3)",
+                rusqlite::params![story_id, pack_checksum, source_family],
             )
             .expect("insert story_imports");
     }
@@ -1106,6 +1147,76 @@ mod tests {
             PreparationStateView::Prepared { transferable, .. } => assert!(
                 transferable,
                 "an imported story carries a device-format pack → transferable"
+            ),
+            other => panic!("expected Prepared, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn preflight_degrades_a_flam_import_to_a_native_source_toward_a_lunii() {
+        // Fail-closed: an imported pack is a device-format pack ONLY
+        // for its source family. A FLAM import prepared toward a Lunii
+        // target assembles the canonical structure (Native source) with
+        // the content checksum as baseline — never the FLAM pack bytes.
+        let db = fresh_db();
+        insert_healthy(&db, "s1");
+        insert_import_with_family(&db, "s1", &"c".repeat(64), "flam");
+        let scanner = supported_scanner(3); // Lunii Origine target
+        let reader = readable_reader();
+
+        let confirmed = match run_preflight(
+            &db,
+            &scanner,
+            &reader,
+            "s1",
+            Some(&mock_identifier()),
+            budget(),
+        )
+        .expect("preflight")
+        {
+            Preflight::Confirmed(confirmed) => *confirmed,
+            Preflight::NotConfirmed(cause) => panic!("expected Confirmed, got {cause:?}"),
+        };
+        assert!(
+            matches!(confirmed.plan.source, AssemblySource::Native { .. }),
+            "a FLAM import must assemble as Native toward a Lunii target"
+        );
+        assert_eq!(
+            confirmed.expected_aggregate,
+            content_checksum(HEALTHY_JSON),
+            "the baseline must be the canonical checksum, never the FLAM pack checksum"
+        );
+    }
+
+    #[test]
+    fn read_preparation_state_never_marks_a_flam_import_transferable_toward_a_lunii() {
+        // End-to-end proof of the same fail-closed rule: the prepared state of a
+        // FLAM import against a Lunii target carries transferable=false
+        // (no device-format PackFile artifact exists for this target).
+        let dir = tempfile::tempdir().expect("app data");
+        let db = fresh_db();
+        insert_healthy(&db, "s1");
+        insert_import_with_family(&db, "s1", &"c".repeat(64), "flam");
+        let scanner = supported_scanner(3);
+        let reader = readable_reader();
+        let artifacts = MockTransferArtifactSource::new();
+        artifacts.enqueue(Ok(healthy_native_descriptor("s1")));
+
+        let view = read_preparation_state(
+            &db,
+            &scanner,
+            &reader,
+            &artifacts,
+            dir.path(),
+            "s1",
+            budget(),
+            budget(),
+        )
+        .expect("read state");
+        match view {
+            PreparationStateView::Prepared { transferable, .. } => assert!(
+                !transferable,
+                "a FLAM import must NEVER be marked transferable toward a Lunii"
             ),
             other => panic!("expected Prepared, got {other:?}"),
         }

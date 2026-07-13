@@ -111,17 +111,21 @@ describe("<LuniiDecisionPanel />", () => {
       writeStory: false,
     };
 
-    it("renders the STATIC 'Appareil reconnu — FLAM' chip instead of 'Appareil prêt' (recognized ≠ ready)", () => {
+    it("renders the STATIC 'Appareil reconnu — …' chip instead of 'Appareil prêt' (recognized ≠ ready)", () => {
+      // Generic zero-capability profile: since the FLAM read capabilities
+      // activated, no live family carries this state — it survives,
+      // DECLARED, for any future zero-capability family.
       render(
         <LuniiDecisionPanel
           deviceState="idle"
-          deviceLabel="FLAM"
+          deviceLabel="Conteuse X"
           supportedOperations={zeroCapabilities}
-          deviceFamily="flam"
           onEdit={noop}
         />,
       );
-      expect(screen.getByText(/appareil reconnu — flam/i)).toBeInTheDocument();
+      expect(
+        screen.getByText(/appareil reconnu — conteuse x/i),
+      ).toBeInTheDocument();
       expect(screen.queryByText(/appareil prêt/i)).toBeNull();
       // A durable state, never an action error: no alert role on the
       // recognized chip nor on the explanation.
@@ -148,13 +152,12 @@ describe("<LuniiDecisionPanel />", () => {
       expect(screen.queryByText(/appareil reconnu — lunii v3/i)).toBeNull();
     });
 
-    it("renders the four capability lines as '—', with the family-correct transfer label", () => {
+    it("renders the four capability lines as '—' for a generic zero-capability profile", () => {
       render(
         <LuniiDecisionPanel
           deviceState="idle"
-          deviceLabel="FLAM"
+          deviceLabel="Conteuse X"
           supportedOperations={zeroCapabilities}
-          deviceFamily="flam"
           onEdit={noop}
         />,
       );
@@ -168,6 +171,37 @@ describe("<LuniiDecisionPanel />", () => {
         "— Lecture bibliothèque appareil",
         "— Inspection d'histoire",
         "— Copie dans la bibliothèque locale",
+        "— Transfert vers la Lunii",
+      ]);
+    });
+
+    it("renders the FLAM read capabilities active with the family-correct transfer line", () => {
+      // The real FLAM Gen1 matrix line (✅✅✅❌): three activated lines,
+      // the non-activated transfer line with the device-generic wording.
+      render(
+        <LuniiDecisionPanel
+          deviceState="idle"
+          deviceLabel="FLAM"
+          supportedOperations={{
+            readLibrary: true,
+            inspectStory: true,
+            importStory: true,
+            writeStory: false,
+          }}
+          deviceFamily="flam"
+          onEdit={noop}
+        />,
+      );
+      const list = screen.getByRole("list", {
+        name: /opérations supportées par l'appareil détecté/i,
+      });
+      const lines = within(list)
+        .getAllByRole("listitem")
+        .map((li) => li.textContent);
+      expect(lines).toEqual([
+        "✓ Lecture bibliothèque appareil",
+        "✓ Inspection d'histoire",
+        "✓ Copie dans la bibliothèque locale",
         "— Transfert vers l'appareil",
       ]);
       // The Lunii-specific wording must NOT legend a FLAM line.
@@ -200,9 +234,8 @@ describe("<LuniiDecisionPanel />", () => {
       render(
         <LuniiDecisionPanel
           deviceState="idle"
-          deviceLabel="FLAM"
+          deviceLabel="Conteuse X"
           supportedOperations={zeroCapabilities}
-          deviceFamily="flam"
           onEdit={noop}
           onConsultSupportProfile={onConsultSupportProfile}
         />,
@@ -261,9 +294,8 @@ describe("<LuniiDecisionPanel />", () => {
       render(
         <LuniiDecisionPanel
           deviceState="idle"
-          deviceLabel="FLAM"
+          deviceLabel="Conteuse X"
           supportedOperations={zeroCapabilities}
-          deviceFamily="flam"
           onEdit={noop}
         />,
       );
@@ -276,6 +308,219 @@ describe("<LuniiDecisionPanel />", () => {
         /envoi indisponible: profil non supporté/i,
       );
       expect(screen.queryByText(/mvp phase 1/i)).toBeNull();
+    });
+  });
+
+  describe("FLAM panel (read capabilities active)", () => {
+    const flamCapabilities = {
+      readLibrary: true,
+      inspectStory: true,
+      importStory: true,
+      writeStory: false,
+    };
+
+    it("renders 'Appareil prêt — FLAM' through the EXISTING hasAnyCapability rule", () => {
+      render(
+        <LuniiDecisionPanel
+          deviceState="idle"
+          deviceLabel="FLAM"
+          supportedOperations={flamCapabilities}
+          deviceFamily="flam"
+          onEdit={noop}
+        />,
+      );
+      expect(screen.getByText(/appareil prêt — flam/i)).toBeInTheDocument();
+      expect(screen.queryByText(/appareil reconnu/i)).toBeNull();
+    });
+
+    it("does NOT render the zero-capability explanation on a capability-bearing FLAM idle", () => {
+      render(
+        <LuniiDecisionPanel
+          deviceState="idle"
+          deviceLabel="FLAM"
+          supportedOperations={flamCapabilities}
+          deviceFamily="flam"
+          onEdit={noop}
+        />,
+      );
+      expect(
+        screen.queryByText(
+          /appareil reconnu, aucune opération activée dans cette version\./i,
+        ),
+      ).toBeNull();
+    });
+
+    it("legacy fallback never renders the 'MVP Phase 1' promise for a capability-bearing FLAM", () => {
+      // Without a transfer prop (legacy fallback), an idle FLAM with its
+      // read capabilities active must follow the capability-closed path:
+      // the "MVP Phase 1" promise stays EXCLUSIVE to write-planned Lunii
+      // cohorts (a FLAM write is not planned in this phase).
+      render(
+        <LuniiDecisionPanel
+          deviceState="idle"
+          deviceLabel="FLAM"
+          supportedOperations={flamCapabilities}
+          deviceFamily="flam"
+          onEdit={noop}
+        />,
+      );
+      const cta = screen.getByRole("button", {
+        name: /envoyer vers l'appareil/i,
+      });
+      const reasonId = cta.getAttribute("aria-describedby");
+      const reason = document.getElementById(reasonId as string);
+      expect(reason).toHaveTextContent(
+        /envoi indisponible: profil non supporté/i,
+      );
+      expect(screen.queryByText(/mvp phase 1/i)).toBeNull();
+    });
+
+    it("renders the family-correct 'Envoyer vers l'appareil' send CTA on the transfer region", () => {
+      render(
+        <LuniiDecisionPanel
+          deviceState="idle"
+          deviceLabel="FLAM"
+          supportedOperations={flamCapabilities}
+          deviceFamily="flam"
+          transfer={{
+            kind: "unavailable",
+            reason: "Envoi indisponible: profil non supporté",
+          }}
+          onEdit={noop}
+        />,
+      );
+      const cta = screen.getByRole("button", {
+        name: /envoyer vers l'appareil/i,
+      });
+      expect(cta).toHaveAttribute("aria-disabled", "true");
+      expect(screen.queryByText(/envoyer vers la lunii/i)).toBeNull();
+      // The capability-closed reason (the V3 pattern) legends the CTA.
+      const reasonId = cta.getAttribute("aria-describedby");
+      const reason = document.getElementById(reasonId as string);
+      expect(reason).toHaveTextContent(
+        /envoi indisponible: profil non supporté/i,
+      );
+    });
+
+    it("renders the shared validation/comparison copies family-correct on a FLAM panel", () => {
+      // The shared sections reach a FLAM panel now that its read
+      // capabilities light the flow: their copies must never name the
+      // Lunii there.
+      render(
+        <LuniiDecisionPanel
+          deviceState="idle"
+          deviceLabel="FLAM"
+          supportedOperations={flamCapabilities}
+          deviceFamily="flam"
+          comparison={{ kind: "none", reason: "no-device" }}
+          validation={{ kind: "none" }}
+          onEdit={noop}
+        />,
+      );
+      expect(
+        screen.getByText(
+          /branche un appareil lisible pour comparer l'histoire sélectionnée avant l'envoi\./i,
+        ),
+      ).toBeInTheDocument();
+      expect(
+        screen.getByText(
+          /sélectionne une histoire locale et branche un appareil lisible pour vérifier la compatibilité avant l'envoi\./i,
+        ),
+      ).toBeInTheDocument();
+      expect(screen.queryByText(/lunii lisible/i)).toBeNull();
+    });
+
+    it("headings a deviceProfile blocker group 'Compatibilité appareil' on a FLAM panel", () => {
+      render(
+        <LuniiDecisionPanel
+          deviceState="idle"
+          deviceLabel="FLAM"
+          supportedOperations={flamCapabilities}
+          deviceFamily="flam"
+          validation={{
+            kind: "ready",
+            verdict: "blocked",
+            blockers: [
+              {
+                axis: "deviceProfile",
+                cause: "metadataUnsupported",
+                message: "Le profil de l'appareil connecté n'est pas pris en charge.",
+                userAction:
+                  "Consulte le profil de support pour voir les appareils compatibles.",
+              },
+            ],
+          }}
+          onEdit={noop}
+        />,
+      );
+      expect(
+        screen.getByRole("heading", { name: /compatibilité appareil/i }),
+      ).toBeInTheDocument();
+      expect(screen.queryByText(/compatibilité lunii/i)).toBeNull();
+    });
+
+    it("keeps the Lunii wording VERBATIM for the shared copies on a Lunii panel", () => {
+      render(
+        <LuniiDecisionPanel
+          deviceState="idle"
+          deviceLabel="Lunii Origine"
+          supportedOperations={{
+            readLibrary: true,
+            inspectStory: true,
+            importStory: true,
+            writeStory: true,
+          }}
+          deviceFamily="lunii"
+          comparison={{ kind: "none", reason: "no-device" }}
+          validation={{
+            kind: "ready",
+            verdict: "blocked",
+            blockers: [
+              {
+                axis: "deviceProfile",
+                cause: "metadataUnsupported",
+                message: "Le profil de l'appareil connecté n'est pas pris en charge.",
+                userAction:
+                  "Consulte le profil de support pour voir les appareils compatibles.",
+              },
+            ],
+          }}
+          onEdit={noop}
+        />,
+      );
+      expect(
+        screen.getByText(
+          /branche une lunii lisible pour comparer l'histoire sélectionnée avant l'envoi\./i,
+        ),
+      ).toBeInTheDocument();
+      expect(
+        screen.getByRole("heading", { name: /compatibilité lunii/i }),
+      ).toBeInTheDocument();
+    });
+
+    it("keeps the Lunii send CTA VERBATIM on a Lunii panel", () => {
+      render(
+        <LuniiDecisionPanel
+          deviceState="idle"
+          deviceLabel="Lunii Origine"
+          supportedOperations={{
+            readLibrary: true,
+            inspectStory: true,
+            importStory: true,
+            writeStory: true,
+          }}
+          deviceFamily="lunii"
+          transfer={{
+            kind: "unavailable",
+            reason: "Envoi indisponible: prépare l'histoire d'abord",
+          }}
+          onEdit={noop}
+        />,
+      );
+      expect(
+        screen.getByRole("button", { name: /envoyer vers la lunii/i }),
+      ).toBeInTheDocument();
+      expect(screen.queryByText(/envoyer vers l'appareil/i)).toBeNull();
     });
   });
 

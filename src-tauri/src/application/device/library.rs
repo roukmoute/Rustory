@@ -14,7 +14,9 @@
 
 use std::time::{Duration, Instant};
 
-use crate::domain::device::{DeviceLibrary, SupportedOperation, UnsupportedReason};
+use crate::domain::device::{
+    DeviceFamily, DeviceLibrary, FirmwareCohort, SupportedOperation, UnsupportedReason,
+};
 use crate::domain::shared::AppError;
 use crate::infrastructure::device::{DeviceLibraryReader, DeviceScanner};
 
@@ -36,9 +38,13 @@ pub enum DeviceLibraryOutcome {
         firmware_hint: Option<String>,
     },
     /// The inventory was read. `entries` may be empty (a valid empty
-    /// Lunii) — that is NOT an error.
+    /// device) — that is NOT an error. `family` / `firmware_cohort` come
+    /// from the re-scanned profile and feed the diagnostic log entry
+    /// (they NEVER cross the wire — the DTO stays family-neutral).
     Readable {
         device_identifier: String,
+        family: DeviceFamily,
+        firmware_cohort: FirmwareCohort,
         library: DeviceLibrary,
     },
 }
@@ -90,14 +96,18 @@ pub fn read_device_library(
 
             let mount_path = resolved
                 .supported_mount_path
-                .ok_or_else(mount_unavailable_error)?;
+                .ok_or_else(|| mount_unavailable_error(profile.family))?;
             // Charge the remaining budget to the read so the total stays
-            // bounded even after a slow scan.
+            // bounded even after a slow scan. The family comes from the
+            // re-scanned profile (Rust authority) — the reader dispatches
+            // its family adapter on it, never on a mount re-sniff.
             let remaining = budget.saturating_sub(started.elapsed());
-            let library = reader.read_library(&mount_path, remaining)?;
+            let library = reader.read_library(&mount_path, profile.family, remaining)?;
 
             Ok(DeviceLibraryOutcome::Readable {
                 device_identifier: profile.device_identifier,
+                family: profile.family,
+                firmware_cohort: profile.firmware_cohort,
                 library,
             })
         }
@@ -105,22 +115,34 @@ pub fn read_device_library(
 }
 
 fn device_changed_error() -> AppError {
+    // Device-generic next gesture: the REQUESTED device's family is
+    // unknowable here (only its hashed identifier travels), and the copy
+    // is reachable from a FLAM panel too — `appareil` is the honest
+    // family-correct wording (product-language.md Change Control).
     AppError::device_scan_failed(
         "Lecture de la bibliothèque appareil indisponible: l'appareil connecté a changé.",
-        "Rebranche la Lunii souhaitée puis réessaie la lecture de la bibliothèque.",
+        "Rebranche l'appareil souhaité puis réessaie la lecture de la bibliothèque.",
     )
     .with_details(serde_json::json!({
         "source": "device_changed",
     }))
 }
 
-fn mount_unavailable_error() -> AppError {
+fn mount_unavailable_error(family: DeviceFamily) -> AppError {
     // Defensive: a `Supported` outcome always carries a mount path in the
     // current pipeline. If that invariant ever breaks, fail recoverably
-    // rather than panic.
+    // rather than panic. FAMILY-CORRECT copy: unlike `device_changed`
+    // (where the REQUESTED device's family is unknowable — only its hash
+    // travels), the identity just MATCHED here, so the requested family
+    // IS the re-scanned profile's — a Lunii keeps its historical wording
+    // VERBATIM, any other family reads the device-generic one.
+    let action = match family {
+        DeviceFamily::Lunii => "Rebranche la Lunii puis réessaie la lecture de la bibliothèque.",
+        DeviceFamily::Flam => "Rebranche l'appareil puis réessaie la lecture de la bibliothèque.",
+    };
     AppError::device_scan_failed(
         "Lecture de la bibliothèque appareil indisponible: point de montage introuvable.",
-        "Rebranche la Lunii puis réessaie la lecture de la bibliothèque.",
+        action,
     )
     .with_details(serde_json::json!({
         "source": "mount_unavailable",
@@ -156,13 +178,50 @@ mod tests {
         match outcome {
             DeviceLibraryOutcome::Readable {
                 device_identifier,
+                family,
+                firmware_cohort,
                 library,
             } => {
                 assert_eq!(device_identifier, mock_identifier());
+                assert_eq!(family, DeviceFamily::Lunii);
+                assert_eq!(firmware_cohort.diagnostic_tag(), "origine_v1");
                 assert_eq!(library.entries.len(), 2);
             }
             other => panic!("expected Readable, got {other:?}"),
         }
+        // Dispatch fact: the adapter received the re-scanned profile's family.
+        assert_eq!(reader.last_family(), Some(DeviceFamily::Lunii));
+    }
+
+    #[test]
+    fn returns_readable_for_a_flam_whose_read_capability_is_active() {
+        // The FLAM Gen1 matrix line activates ReadLibrary: the same
+        // shared pipeline resolves a FLAM to Readable, carrying the
+        // family/cohort facts for the diagnostic entry.
+        let scanner = MockDeviceScanner::new();
+        scanner.enqueue_supported_flam();
+        let reader = MockDeviceLibraryReader::new();
+        reader.enqueue_library_with(1);
+
+        let flam_identifier = compute_device_identifier(b"MOCK_MDF", Some("FLAM_SERIAL"));
+        let outcome =
+            read_device_library(&scanner, &reader, &flam_identifier, budget()).expect("read");
+        match outcome {
+            DeviceLibraryOutcome::Readable {
+                device_identifier,
+                family,
+                firmware_cohort,
+                library,
+            } => {
+                assert_eq!(device_identifier, flam_identifier);
+                assert_eq!(family, DeviceFamily::Flam);
+                assert_eq!(firmware_cohort.diagnostic_tag(), "flam_gen1");
+                assert_eq!(library.entries.len(), 1);
+            }
+            other => panic!("expected Readable, got {other:?}"),
+        }
+        // Dispatch fact: the adapter received the re-scanned profile's family.
+        assert_eq!(reader.last_family(), Some(DeviceFamily::Flam));
     }
 
     #[test]
@@ -178,6 +237,47 @@ mod tests {
             DeviceLibraryOutcome::Readable { library, .. } => assert!(library.entries.is_empty()),
             other => panic!("expected Readable(empty), got {other:?}"),
         }
+    }
+
+    #[test]
+    fn mount_unavailable_next_gesture_is_family_correct() {
+        // The identity MATCHED before this defensive refusal fires: the
+        // requested family is known, so the copy bifurcates — Lunii
+        // VERBATIM historical wording, device-generic otherwise.
+        let lunii = mount_unavailable_error(DeviceFamily::Lunii);
+        assert_eq!(
+            lunii.user_action.as_deref(),
+            Some("Rebranche la Lunii puis réessaie la lecture de la bibliothèque.")
+        );
+        let flam = mount_unavailable_error(DeviceFamily::Flam);
+        assert_eq!(
+            flam.user_action.as_deref(),
+            Some("Rebranche l'appareil puis réessaie la lecture de la bibliothèque.")
+        );
+        for err in [lunii, flam] {
+            let v = serde_json::to_value(&err).expect("ser");
+            assert_eq!(v["details"]["source"], "mount_unavailable");
+        }
+    }
+
+    #[test]
+    fn device_changed_next_gesture_is_device_generic() {
+        // The copy is reachable from any family's panel — it must not
+        // name the Lunii (Change Control, product-language.md).
+        let scanner = MockDeviceScanner::new();
+        scanner.enqueue_supported_lunii(3);
+        let reader = MockDeviceLibraryReader::new();
+        let err = read_device_library(
+            &scanner,
+            &reader,
+            "deadbeefdeadbeefdeadbeefdeadbeef",
+            budget(),
+        )
+        .expect_err("identity mismatch must fail");
+        assert_eq!(
+            err.user_action.as_deref(),
+            Some("Rebranche l'appareil souhaité puis réessaie la lecture de la bibliothèque.")
+        );
     }
 
     #[test]

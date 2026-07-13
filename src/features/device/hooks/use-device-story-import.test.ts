@@ -82,6 +82,55 @@ describe("useDeviceStoryImport", () => {
     expect(invalidateLibraryOverviewCache).not.toHaveBeenCalled();
   });
 
+  it("imports a FLAM story through the same machine (family-correct title, dedup, failure)", async () => {
+    // The hook has no family code: a FLAM outcome (title composed by
+    // Rust) and the inherited refusals ride the same idle → importing →
+    // imported | failed machine.
+    const FLAM_PACK_UUID = "12345678-9abc-def0-1122-334455667788";
+    const flamOutcome = {
+      story: {
+        id: "0197a5d0-0000-7000-8000-000000000001",
+        title: "Histoire de mon FLAM (55667788)",
+      },
+      packShortId: "55667788",
+      importedAt: "2026-07-13T12:00:00.000Z",
+    };
+    vi.mocked(importDeviceStory).mockResolvedValueOnce(flamOutcome);
+    const { result } = renderHook(() => useDeviceStoryImport());
+    await act(async () => {
+      await result.current.triggerImport(DEVICE_ID, FLAM_PACK_UUID);
+    });
+    expect(result.current.status).toEqual({
+      kind: "imported",
+      story: flamOutcome.story,
+      packShortId: "55667788",
+    });
+
+    // The inherited dedup refusal surfaces through the same failed state.
+    const alreadyImported = {
+      code: "IMPORT_FAILED" as const,
+      message: "Copie impossible: cette histoire est déjà dans ta bibliothèque.",
+      userAction:
+        "Retrouve-la dans ta bibliothèque locale ; aucune nouvelle copie n'est nécessaire.",
+      details: { source: "already_imported" },
+    };
+    vi.mocked(importDeviceStory).mockRejectedValueOnce(alreadyImported);
+    await act(async () => {
+      await result.current.triggerImport(DEVICE_ID, FLAM_PACK_UUID);
+    });
+    expect(result.current.status).toEqual({
+      kind: "failed",
+      error: alreadyImported,
+    });
+
+    // A transport failure keeps the same shape too.
+    vi.mocked(importDeviceStory).mockRejectedValueOnce(RUST_ERROR);
+    await act(async () => {
+      await result.current.triggerImport(DEVICE_ID, FLAM_PACK_UUID);
+    });
+    expect(result.current.status).toEqual({ kind: "failed", error: RUST_ERROR });
+  });
+
   it("re-entrancy: a second trigger while a first is in flight is a no-op", async () => {
     let resolveFirst!: (value: typeof SUCCESS_OUTCOME) => void;
     vi.mocked(importDeviceStory).mockReturnValueOnce(

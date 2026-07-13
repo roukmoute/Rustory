@@ -63,6 +63,7 @@ fn main() {
         DeviceLibraryOutcome::Readable {
             device_identifier,
             library,
+            ..
         } => {
             println!(
                 "READABLE: device={device_identifier} stories={} trailing_bytes={}",

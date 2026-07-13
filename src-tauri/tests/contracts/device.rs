@@ -24,10 +24,11 @@ fn supported_flam_dto() -> ConnectedDeviceDto {
         firmware_cohort: FirmwareCohortDto::FlamGen1,
         metadata_format_version: None,
         device_identifier: "fedcba9876543210fedcba9876543210".into(),
+        // The FLAM Gen1 matrix line: read capabilities ✅✅✅, write ❌.
         supported_operations: SupportedOperationsDto {
-            read_library: false,
-            inspect_story: false,
-            import_story: false,
+            read_library: true,
+            inspect_story: true,
+            import_story: true,
             write_story: false,
         },
     }
@@ -215,9 +216,11 @@ fn connected_device_supported_lunii_wire_string_is_byte_for_byte_unchanged() {
     );
 }
 
-/// Twin of the invariance test for the FLAM wire: `family`/`firmwareCohort`
-/// discriminate, all four operations are `false`, and the
-/// `metadataFormatVersion` key is ABSENT from the string (never `null`).
+/// Twin of the invariance test for the FLAM wire (re-scoped with the
+/// activated read capabilities, never deleted): `family`/`firmwareCohort`
+/// discriminate, `readLibrary`/`inspectStory`/`importStory` are `true`,
+/// `writeStory` stays `false`, and the `metadataFormatVersion` key is
+/// ABSENT from the string (never `null`).
 #[test]
 fn connected_device_supported_flam_wire_string_omits_version_key() {
     let s = serde_json::to_string(&supported_flam_dto()).expect("ser");
@@ -225,8 +228,8 @@ fn connected_device_supported_flam_wire_string_omits_version_key() {
         s,
         "{\"kind\":\"supported\",\"family\":\"flam\",\"firmwareCohort\":\"flamGen1\",\
          \"deviceIdentifier\":\"fedcba9876543210fedcba9876543210\",\
-         \"supportedOperations\":{\"readLibrary\":false,\"inspectStory\":false,\
-         \"importStory\":false,\"writeStory\":false}}"
+         \"supportedOperations\":{\"readLibrary\":true,\"inspectStory\":true,\
+         \"importStory\":true,\"writeStory\":false}}"
     );
     assert!(!s.contains("metadataFormatVersion"));
     assert!(!s.contains("null"));

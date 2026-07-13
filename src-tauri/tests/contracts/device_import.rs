@@ -64,6 +64,37 @@ fn outcome_round_trips_the_documented_wire_shape() {
 }
 
 #[test]
+fn flam_outcome_round_trips_the_same_wire_shape_with_the_family_correct_title() {
+    // The outcome DTO is family-NEUTRAL (no new field, no variant): a
+    // FLAM import differs on the wire only by the family-correct default
+    // title composed Rust-side. Fixture = real wire.
+    let dto = ImportDeviceStoryOutcomeDto {
+        story: StoryCardDto::native(
+            "0197a5d0-0000-7000-8000-000000000001".into(),
+            "Histoire de mon FLAM (55667788)".into(),
+        ),
+        pack_short_id: "55667788".into(),
+        imported_at: "2026-07-13T12:00:00.000Z".into(),
+    };
+    let v = serde_json::to_value(&dto).expect("ser");
+    assert_eq!(
+        v,
+        serde_json::json!({
+            "story": {
+                "id": "0197a5d0-0000-7000-8000-000000000001",
+                "title": "Histoire de mon FLAM (55667788)",
+            },
+            "packShortId": "55667788",
+            "importedAt": "2026-07-13T12:00:00.000Z",
+        })
+    );
+    // No family/cohort leaks onto the wire — they are diagnostics-only.
+    let raw = serde_json::to_string(&dto).expect("ser");
+    assert!(!raw.contains("family"));
+    assert!(!raw.contains("firmwareCohort"));
+}
+
+#[test]
 fn import_failed_error_carries_stable_code_and_closed_source() {
     let err = AppError::import_failed(
         "Copie impossible: l'appareil connecté a changé.",

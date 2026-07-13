@@ -89,6 +89,11 @@ pub const MIGRATIONS: &[(u32, &str, Option<MigrationHook>)] = &[
         include_str!("../../../migrations/0011_structured_folder_provenance.sql"),
         None,
     ),
+    (
+        12,
+        include_str!("../../../migrations/0012_story_imports_source_family.sql"),
+        None,
+    ),
 ];
 
 /// Migration 0009 hook: re-stamp every v2 story to the v3 graph shape.

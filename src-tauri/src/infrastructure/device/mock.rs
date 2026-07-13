@@ -203,6 +203,10 @@ impl DeviceScanner for MockDeviceScanner {
 #[derive(Clone, Default)]
 pub struct MockDeviceLibraryReader {
     queue: Arc<Mutex<Vec<Result<DeviceLibrary, AppError>>>>,
+    /// Family received by the LAST `read_library` call — lets application
+    /// tests assert the dispatch fact (the re-scanned profile's family is
+    /// what reaches the adapter, never a re-sniff).
+    last_family: Arc<Mutex<Option<crate::domain::device::DeviceFamily>>>,
 }
 
 impl MockDeviceLibraryReader {
@@ -236,6 +240,11 @@ impl MockDeviceLibraryReader {
         self.enqueue(Ok(DeviceLibrary::default()));
     }
 
+    /// Family received by the LAST `read_library` call (None before any).
+    pub fn last_family(&self) -> Option<crate::domain::device::DeviceFamily> {
+        *self.last_family.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
     /// Queue a recoverable read failure mimicking the device disappearing
     /// mid-read (AC #3).
     pub fn enqueue_disconnected_mid_read(&self) {
@@ -254,8 +263,10 @@ impl DeviceLibraryReader for MockDeviceLibraryReader {
     fn read_library(
         &self,
         _mount_path: &Path,
+        family: crate::domain::device::DeviceFamily,
         _budget: Duration,
     ) -> Result<DeviceLibrary, AppError> {
+        *self.last_family.lock().unwrap_or_else(|p| p.into_inner()) = Some(family);
         let mut g = self.queue.lock().unwrap_or_else(|p| p.into_inner());
         if g.is_empty() {
             Ok(DeviceLibrary::default())
@@ -286,6 +297,12 @@ enum PackAcquisitionScript {
 #[derive(Clone, Default)]
 pub struct MockDevicePackReader {
     queue: Arc<Mutex<Vec<PackAcquisitionScript>>>,
+    /// `(family, pack_ref, hidden)` received by the LAST `acquire_pack`
+    /// call — lets application tests assert the dispatch facts: the
+    /// re-scanned profile's family, the family-correct pack reference
+    /// (Lunii SHORT_ID verbatim / FLAM story UUID) and the SELECTED index
+    /// entry's visibility.
+    last_request: Arc<Mutex<Option<(crate::domain::device::DeviceFamily, String, bool)>>>,
 }
 
 impl MockDevicePackReader {
@@ -318,6 +335,15 @@ impl MockDevicePackReader {
                 "cause": "unknown_entry",
             })),
         ));
+    }
+
+    /// `(family, pack_ref, hidden)` received by the LAST `acquire_pack`
+    /// call (None before any).
+    pub fn last_request(&self) -> Option<(crate::domain::device::DeviceFamily, String, bool)> {
+        self.last_request
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
     }
 
     /// The deterministic staged shape produced by a `Success` script.
@@ -363,10 +389,14 @@ impl DevicePackReader for MockDevicePackReader {
     fn acquire_pack(
         &self,
         _mount_path: &Path,
-        _short_id: &str,
+        family: crate::domain::device::DeviceFamily,
+        pack_ref: &str,
+        hidden: bool,
         staging_dir: &Path,
         _budget: Duration,
     ) -> Result<AcquiredPack, AppError> {
+        *self.last_request.lock().unwrap_or_else(|p| p.into_inner()) =
+            Some((family, pack_ref.to_string(), hidden));
         let script = {
             let mut g = self.queue.lock().unwrap_or_else(|p| p.into_inner());
             if g.is_empty() {

@@ -56,6 +56,18 @@ pub const FLAM_PRIMARY_MARKER: &str = ".mdf";
 pub const FLAM_STORY_DIR: &str = "str";
 pub const FLAM_CONFIG_DIR: &str = "etc";
 
+/// FLAM inventory layout (see `docs/architecture/device-support-profile.md`
+/// → "FLAM library inventory & story import"). Source: public FLAM
+/// observations from the `o-daneel/Lunii.QT` project (`device_flam.py`:
+/// `STORIES_BASEDIR "str/"`, `HIDDEN_STORIES_BASEDIR "str.hidden/"`,
+/// `LIB_BASEDIR "etc/library/"` with the text index files `list` and
+/// `list.hidden`) — NOT yet confirmed on physical hardware; every
+/// consumer is fail-closed on divergence. Hidden stories change ROOT on
+/// a FLAM (`str.hidden/`), unlike a Lunii where only the index differs.
+pub const FLAM_HIDDEN_STORY_DIR: &str = "str.hidden";
+pub const FLAM_LIBRARY_INDEX_REL: &str = "etc/library/list";
+pub const FLAM_HIDDEN_LIBRARY_INDEX_REL: &str = "etc/library/list.hidden";
+
 /// Tight upper bound on the `.md` (and other marker) file size we are
 /// willing to read into memory during the scan. A genuine `.md` is < 1 KB;
 /// anything bigger is treated as `metadata_corrupt`. Bounded I/O on the
@@ -123,5 +135,22 @@ mod tests {
         // `etc/` (device-support-profile.md → FLAM recognition markers).
         assert_eq!(FLAM_STORY_DIR, "str");
         assert_eq!(FLAM_CONFIG_DIR, "etc");
+    }
+
+    #[test]
+    fn flam_hidden_story_dir_is_str_hidden() {
+        assert_eq!(FLAM_HIDDEN_STORY_DIR, "str.hidden");
+    }
+
+    #[test]
+    fn flam_library_index_paths_live_under_the_etc_config_dir() {
+        // The inventory indexes live under the recognized `etc/` marker
+        // directory — the layout documented from Lunii.QT observations.
+        assert_eq!(FLAM_LIBRARY_INDEX_REL, "etc/library/list");
+        assert_eq!(FLAM_HIDDEN_LIBRARY_INDEX_REL, "etc/library/list.hidden");
+        // Path-COMPONENT containment (a string prefix would accept
+        // "etcetera/list").
+        assert!(std::path::Path::new(FLAM_LIBRARY_INDEX_REL).starts_with(FLAM_CONFIG_DIR));
+        assert!(std::path::Path::new(FLAM_HIDDEN_LIBRARY_INDEX_REL).starts_with(FLAM_CONFIG_DIR));
     }
 }

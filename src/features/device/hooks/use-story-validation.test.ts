@@ -75,6 +75,31 @@ describe("useStoryValidation", () => {
     }
   });
 
+  it("phrases the device-changed next gesture family-correct (FLAM vs Lunii verbatim)", async () => {
+    vi.mocked(readStoryValidation).mockReturnValueOnce(
+      mockHandle(Promise.resolve({ kind: "noDevice" })) as never,
+    );
+    const flam = renderHook(() => useStoryValidation(STORY, ID_A, "flam"));
+    await waitFor(() => expect(flam.result.current.state.kind).toBe("error"));
+    if (flam.result.current.state.kind === "error") {
+      expect(flam.result.current.state.error.userAction).toBe(
+        "Vérifie que l'appareil est toujours branché puis réessaie la validation.",
+      );
+    }
+    flam.unmount();
+
+    vi.mocked(readStoryValidation).mockReturnValueOnce(
+      mockHandle(Promise.resolve({ kind: "noDevice" })) as never,
+    );
+    const lunii = renderHook(() => useStoryValidation(STORY, ID_A, "lunii"));
+    await waitFor(() => expect(lunii.result.current.state.kind).toBe("error"));
+    if (lunii.result.current.state.kind === "error") {
+      expect(lunii.result.current.state.error.userAction).toBe(
+        "Vérifie que la Lunii est toujours branchée puis réessaie la validation.",
+      );
+    }
+  });
+
   it("surfaces a recoverable error when the read rejects", async () => {
     const err = {
       code: "DEVICE_SCAN_FAILED",

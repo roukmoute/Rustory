@@ -164,6 +164,87 @@ fn device_log_does_not_leak_filesystem_path_in_serialized_event() {
 }
 
 #[test]
+fn device_log_read_and_import_entries_carry_family_and_cohort_tags() {
+    // The read/import entries name their family/cohort so support can
+    // triage per family; the FLAM lines never carry a metadata version
+    // (the field does not exist on these events — nothing is invented,
+    // nothing is null).
+    let tmp = TempDir::new().expect("tempdir");
+    let path = log_path_for(tmp.path());
+    record_event_at_path(
+        &path,
+        Event::DeviceLibraryRead {
+            device_identifier: "fedcba9876543210fedcba9876543210".into(),
+            family: "flam",
+            firmware_cohort: "flam_gen1",
+            story_count: 2,
+            hidden_count: 1,
+            elapsed_ms: 30,
+        },
+    )
+    .expect("rec read");
+    record_event_at_path(
+        &path,
+        Event::DeviceStoryImported {
+            short_id: "55667788".into(),
+            family: "flam",
+            firmware_cohort: "flam_gen1",
+            story_id: "0197a5d0-0000-7000-8000-000000000002".into(),
+            elapsed_ms: 700,
+            bytes_copied: 448,
+            file_count: 3,
+        },
+    )
+    .expect("rec import");
+    let lines = read_lines(&path);
+    assert_eq!(lines.len(), 2);
+    for line in &lines {
+        let parsed: serde_json::Value = serde_json::from_str(line).expect("parsable");
+        assert_eq!(parsed["event"]["family"], "flam");
+        assert_eq!(parsed["event"]["firmware_cohort"], "flam_gen1");
+        assert!(!line.contains("metadata_format_version"));
+        assert!(!line.contains("null"));
+    }
+}
+
+#[test]
+fn device_log_lunii_read_and_import_entries_carry_their_family_tags_too() {
+    let tmp = TempDir::new().expect("tempdir");
+    let path = log_path_for(tmp.path());
+    record_event_at_path(
+        &path,
+        Event::DeviceLibraryRead {
+            device_identifier: "0123456789abcdef0123456789abcdef".into(),
+            family: "lunii",
+            firmware_cohort: "origine_v1",
+            story_count: 4,
+            hidden_count: 0,
+            elapsed_ms: 12,
+        },
+    )
+    .expect("rec read");
+    record_event_at_path(
+        &path,
+        Event::DeviceStoryImported {
+            short_id: "FAC5562D".into(),
+            family: "lunii",
+            firmware_cohort: "origine_v1",
+            story_id: "0197a5d0-0000-7000-8000-000000000003".into(),
+            elapsed_ms: 800,
+            bytes_copied: 7168,
+            file_count: 7,
+        },
+    )
+    .expect("rec import");
+    let lines = read_lines(&path);
+    for line in &lines {
+        let parsed: serde_json::Value = serde_json::from_str(line).expect("parsable");
+        assert_eq!(parsed["event"]["family"], "lunii");
+        assert_eq!(parsed["event"]["firmware_cohort"], "origine_v1");
+    }
+}
+
+#[test]
 fn device_log_rotates_when_file_exceeds_cap() {
     let tmp = TempDir::new().expect("tempdir");
     let path = log_path_for(tmp.path());

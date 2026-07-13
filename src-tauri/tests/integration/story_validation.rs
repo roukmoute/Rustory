@@ -252,11 +252,16 @@ struct LockProbeReader {
 }
 
 impl DeviceLibraryReader for LockProbeReader {
-    fn read_library(&self, mount_path: &Path, budget: Duration) -> Result<DeviceLibrary, AppError> {
+    fn read_library(
+        &self,
+        mount_path: &Path,
+        family: rustory_lib::domain::device::DeviceFamily,
+        budget: Duration,
+    ) -> Result<DeviceLibrary, AppError> {
         if self.db.try_lock().is_ok() {
             self.lock_free_during_read.store(true, Ordering::SeqCst);
         }
-        SystemDeviceLibraryReader.read_library(mount_path, budget)
+        SystemDeviceLibraryReader.read_library(mount_path, family, budget)
     }
 }
 

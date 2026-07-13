@@ -121,10 +121,11 @@ export interface LuniiDecisionPanelProps {
    *  is satisfied. Omitted on non-idle states. */
   supportedOperations?: SupportedOperationsDto;
   /** Family of the detected supported device. Drives ONLY the
-   *  family-correct label of the transfer capability line (Lunii keeps
-   *  `Transfert vers la Lunii`; any other family reads `Transfert vers
-   *  l'appareil`). State rendering NEVER branches on it — the
-   *  recognized-vs-ready rule derives from the capabilities. */
+   *  family-correct labels: the transfer capability line and the send
+   *  CTA (Lunii keeps `Transfert vers la Lunii` / `Envoyer vers la
+   *  Lunii`; any other family reads `Transfert vers l'appareil` /
+   *  `Envoyer vers l'appareil`). State rendering NEVER branches on it —
+   *  the recognized-vs-ready rule derives from the capabilities. */
   deviceFamily?: SupportedFamilyDto;
   /** Number of selected stories in the library. Drives the Éditer
    *  CTA's enabled state. */
@@ -269,7 +270,7 @@ export function LuniiDecisionPanel({
   const editIsActive = selectedCount === 1;
 
   const sendDisabledReason =
-    deviceReason ?? formatSendReason(deviceState, hasAnyCapability);
+    deviceReason ?? formatSendReason(deviceState, hasAnyCapability, deviceFamily);
 
   const isScanning = deviceState === "scanning";
 
@@ -312,7 +313,7 @@ export function LuniiDecisionPanel({
           aria-label="Comparaison avant envoi"
           aria-live="polite"
         >
-          {renderComparison(comparison, onRetryComparison)}
+          {renderComparison(comparison, deviceFamily, onRetryComparison)}
         </section>
       )}
 
@@ -322,7 +323,7 @@ export function LuniiDecisionPanel({
           aria-label="Validation avant envoi"
           aria-live="polite"
         >
-          {renderValidation(validation, onRetryValidation)}
+          {renderValidation(validation, deviceFamily, onRetryValidation)}
         </section>
       )}
 
@@ -335,6 +336,7 @@ export function LuniiDecisionPanel({
           {renderPreparation(
             preparation,
             preparationReasonId,
+            deviceFamily,
             onPrepare,
             onRetryPreparation,
           )}
@@ -350,6 +352,7 @@ export function LuniiDecisionPanel({
           {renderTransfer(
             transfer,
             transferReasonId,
+            deviceFamily,
             onSend,
             onRetryTransfer,
             onDismissTransfer,
@@ -391,7 +394,7 @@ export function LuniiDecisionPanel({
           // CTA lives here, disabled, with its standardized reason.
           <>
             <Button aria-disabled="true" aria-describedby={deviceReasonId}>
-              Envoyer vers la Lunii
+              {formatSendCtaLabel(deviceFamily)}
             </Button>
             <p id={deviceReasonId} className="lunii-panel__reason">
               {sendDisabledReason}
@@ -430,6 +433,7 @@ export function LuniiDecisionPanel({
 
 function renderComparison(
   view: TransferComparisonView,
+  deviceFamily: SupportedFamilyDto | undefined,
   onRetryComparison?: () => void,
 ): React.JSX.Element {
   switch (view.kind) {
@@ -437,7 +441,7 @@ function renderComparison(
       // Distinct hint per cause so the next gesture is unambiguous.
       return (
         <p className="lunii-panel__reason">
-          {formatNoComparisonHint(view.reason)}
+          {formatNoComparisonHint(view.reason, deviceFamily)}
         </p>
       );
     case "loading":
@@ -488,16 +492,20 @@ function renderComparison(
 
 function renderValidation(
   view: StoryValidationView,
+  deviceFamily: SupportedFamilyDto | undefined,
   onRetryValidation?: () => void,
 ): React.JSX.Element {
   switch (view.kind) {
     case "none":
       // Sober "nothing to validate yet" — the comparison section above already
-      // tells the user which gesture (select / plug) is missing.
+      // tells the user which gesture (select / plug) is missing. Family-correct
+      // copy: a Lunii panel keeps the historical wording VERBATIM, any other
+      // family reads the device-generic one (product-language.md).
       return (
         <p className="lunii-panel__reason">
-          Sélectionne une histoire locale et branche une Lunii lisible pour
-          vérifier la compatibilité avant l'envoi.
+          {deviceFamily === undefined || deviceFamily === "lunii"
+            ? "Sélectionne une histoire locale et branche une Lunii lisible pour vérifier la compatibilité avant l'envoi."
+            : "Sélectionne une histoire locale et branche un appareil lisible pour vérifier la compatibilité avant l'envoi."}
         </p>
       );
     case "loading":
@@ -505,7 +513,7 @@ function renderValidation(
         <ProgressIndicator mode="indeterminate" label="Validation en cours…" />
       );
     case "ready":
-      return renderVerdict(view.verdict, view.blockers);
+      return renderVerdict(view.verdict, view.blockers, deviceFamily);
     case "error":
       // Critical feedback IN CONTEXT (role="alert"), never a toast (UX-DR15).
       // The "Réessaie la validation" copy is made actionable by a retry CTA.
@@ -530,6 +538,7 @@ function renderValidation(
 function renderPreparation(
   view: PreparationView,
   reasonId: string,
+  deviceFamily: SupportedFamilyDto | undefined,
   onPrepare?: () => void,
   onRetryPreparation?: () => void,
 ): React.JSX.Element {
@@ -596,7 +605,8 @@ function renderPreparation(
           <StateChip tone="error" label="échec récupérable" />
           <p>{view.message}</p>
           <p className="lunii-panel__reason">{view.userAction}</p>
-          {view.blockers.length > 0 && renderPreparationBlockers(view.blockers)}
+          {view.blockers.length > 0 &&
+            renderPreparationBlockers(view.blockers, deviceFamily)}
           {onRetryPreparation && (
             <Button
               variant="quiet"
@@ -630,15 +640,17 @@ function renderPreparation(
 
 function renderPreparationBlockers(
   blockers: ValidationBlocker[],
+  deviceFamily: SupportedFamilyDto | undefined,
 ): React.JSX.Element {
   // Same two-axis split + grouping as the validation verdict, so a non-passing
   // preflight reuses the exact blocker presentation (never a second wording).
   const canonical = blockers.filter((b) => b.axis !== "deviceProfile");
-  const lunii = blockers.filter((b) => b.axis === "deviceProfile");
+  const device = blockers.filter((b) => b.axis === "deviceProfile");
   return (
     <>
       {canonical.length > 0 && renderBlockerGroup("Validité Rustory", canonical)}
-      {lunii.length > 0 && renderBlockerGroup("Compatibilité Lunii", lunii)}
+      {device.length > 0 &&
+        renderBlockerGroup(formatDeviceCompatibilityHeading(deviceFamily), device)}
     </>
   );
 }
@@ -646,6 +658,7 @@ function renderPreparationBlockers(
 function renderTransfer(
   view: TransferView,
   reasonId: string,
+  deviceFamily: SupportedFamilyDto | undefined,
   onSend?: () => void,
   onRetryTransfer?: () => void,
   onDismissTransfer?: () => void,
@@ -657,7 +670,7 @@ function renderTransfer(
       return (
         <>
           <Button aria-disabled="true" aria-describedby={reasonId}>
-            Envoyer vers la Lunii
+            {formatSendCtaLabel(deviceFamily)}
           </Button>
           <p id={reasonId} className="lunii-panel__reason">
             {view.reason}
@@ -666,8 +679,10 @@ function renderTransfer(
       );
     case "ready":
       // Writable cohort + a `Préparée` story + a clear target: the write can run.
-      // No confirmation modal (AC1) — the context is unambiguous.
-      return <Button onClick={onSend}>Envoyer vers la Lunii</Button>;
+      // No confirmation modal (AC1) — the context is unambiguous. Only a Lunii
+      // can be write-authorized in this phase, so `ready` always renders the
+      // Lunii label — the family-correct helper keeps that true by derivation.
+      return <Button onClick={onSend}>{formatSendCtaLabel(deviceFamily)}</Button>;
     case "transferring": {
       // Honest progress (AC1): the phase is NAMED (preflight gate vs write); a
       // determinate bar shows ONLY when a reliable fraction is known, never a fake
@@ -838,11 +853,12 @@ function renderTransferRecovery(
 function renderVerdict(
   verdict: ValidationVerdict,
   blockers: ValidationBlocker[],
+  deviceFamily: SupportedFamilyDto | undefined,
 ): React.JSX.Element {
   // AC1: the two axes are kept visible side by side — canonical validity
-  // (structure / media / filesystem) vs Lunii compatibility (deviceProfile).
+  // (structure / media / filesystem) vs device compatibility (deviceProfile).
   const canonical = blockers.filter((b) => b.axis !== "deviceProfile");
-  const lunii = blockers.filter((b) => b.axis === "deviceProfile");
+  const device = blockers.filter((b) => b.axis === "deviceProfile");
   const { tone, label } = formatVerdictChip(verdict);
   return (
     <>
@@ -855,8 +871,8 @@ function renderVerdict(
         <>
           {canonical.length > 0 &&
             renderBlockerGroup("Validité Rustory", canonical)}
-          {lunii.length > 0 &&
-            renderBlockerGroup("Compatibilité Lunii", lunii)}
+          {device.length > 0 &&
+            renderBlockerGroup(formatDeviceCompatibilityHeading(deviceFamily), device)}
         </>
       )}
     </>
@@ -898,14 +914,21 @@ function formatVerdictChip(verdict: ValidationVerdict): {
   }
 }
 
-function formatNoComparisonHint(reason: NoComparisonReason): string {
+function formatNoComparisonHint(
+  reason: NoComparisonReason,
+  deviceFamily: SupportedFamilyDto | undefined,
+): string {
   switch (reason) {
     case "no-selection":
       return "Sélectionne une histoire locale pour comparer avant l'envoi.";
     case "multi-selection":
       return "Sélectionne une seule histoire locale pour comparer (le transfert multiple n'est pas encore disponible).";
     case "no-device":
-      return "Branche une Lunii lisible pour comparer l'histoire sélectionnée avant l'envoi.";
+      // Family-correct: a Lunii panel keeps the historical wording
+      // VERBATIM, any other family reads the device-generic one.
+      return deviceFamily === undefined || deviceFamily === "lunii"
+        ? "Branche une Lunii lisible pour comparer l'histoire sélectionnée avant l'envoi."
+        : "Branche un appareil lisible pour comparer l'histoire sélectionnée avant l'envoi.";
   }
 }
 
@@ -937,6 +960,28 @@ function formatFamilyLabel(family: SupportedFamilyDto): string {
     case "flam":
       return "FLAM";
   }
+}
+
+/** Family-correct send CTA label (product-language.md Change Control):
+ *  a Lunii panel keeps `Envoyer vers la Lunii` VERBATIM; any other
+ *  family reads the generic device wording. `undefined` (legacy callers
+ *  without a family) keeps the historical Lunii copy — the same rule as
+ *  the transfer capability line. */
+function formatSendCtaLabel(family: SupportedFamilyDto | undefined): string {
+  return family === undefined || family === "lunii"
+    ? "Envoyer vers la Lunii"
+    : "Envoyer vers l'appareil";
+}
+
+/** Family-correct heading of the `deviceProfile` blocker group: a Lunii
+ *  panel keeps `Compatibilité Lunii` VERBATIM; any other family reads the
+ *  generic device wording (product-language.md Change Control). */
+function formatDeviceCompatibilityHeading(
+  family: SupportedFamilyDto | undefined,
+): string {
+  return family === undefined || family === "lunii"
+    ? "Compatibilité Lunii"
+    : "Compatibilité appareil";
 }
 
 function formatDeviceChipLabel(
@@ -1021,6 +1066,7 @@ function formatSupportedOperationLabels(
 function formatSendReason(
   state: LuniiDeviceState,
   hasAnyCapability: boolean,
+  deviceFamily: SupportedFamilyDto | undefined,
 ): string {
   switch (state) {
     case "absent":
@@ -1030,11 +1076,15 @@ function formatSendReason(
       // docs/architecture/ui-states.md.
       return "Envoi indisponible: aucun appareil connecté";
     case "idle":
-      // A recognized zero-capability profile follows the EXISTING
-      // capability-closed path (the V3 pattern): the "MVP Phase 1"
-      // copy PROMISES a future transfer and stays exclusive to
-      // write-planned Lunii cohorts — never rendered here.
+      // The "MVP Phase 1" copy PROMISES a future transfer and stays
+      // exclusive to write-planned Lunii cohorts: a zero-capability
+      // profile AND any capability-bearing non-Lunii family (FLAM —
+      // read capabilities active, write not planned) both follow the
+      // EXISTING capability-closed path (the V3 pattern) instead.
       if (!hasAnyCapability) {
+        return "Envoi indisponible: profil non supporté";
+      }
+      if (deviceFamily !== undefined && deviceFamily !== "lunii") {
         return "Envoi indisponible: profil non supporté";
       }
       // MVP Phase 1: even a supported device cannot accept a transfer

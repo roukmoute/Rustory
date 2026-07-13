@@ -102,8 +102,8 @@ fn seed_device_pack(db: &mut DbHandle, title: &str) -> String {
     .id;
     db.conn()
         .execute(
-            "INSERT INTO story_imports (story_id, pack_uuid, source_device_identifier, imported_at, pack_file_count, pack_total_bytes, pack_checksum) \
-             VALUES (?1, '019739b2-0000-7000-8000-00000000abcd', '0123456789abcdef0123456789abcdef', '2026-07-06T00:00:00.000Z', 5, 18, ?2)",
+            "INSERT INTO story_imports (story_id, pack_uuid, source_device_identifier, imported_at, pack_file_count, pack_total_bytes, pack_checksum, source_family) \
+             VALUES (?1, '019739b2-0000-7000-8000-00000000abcd', '0123456789abcdef0123456789abcdef', '2026-07-06T00:00:00.000Z', 5, 18, ?2, 'lunii')",
             rusqlite::params![id, "ab".repeat(32)],
         )
         .expect("insert pack provenance");

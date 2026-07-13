@@ -81,11 +81,17 @@ pub enum Event {
         reason: &'static str,
     },
     /// The device-side library inventory was read. Carries the opaque
-    /// (hashed) `device_identifier`, the pack COUNTS (never the raw pack
-    /// UUIDs — keeping the line PII-free and bounded regardless of
-    /// library size) and the wall-clock elapsed time.
+    /// (hashed) `device_identifier`, the FAMILY/COHORT tags of the
+    /// re-scanned profile (`"lunii"`/`"origine_v1"`, `"flam"`/
+    /// `"flam_gen1"` — so support can triage per family; no metadata
+    /// version is ever carried here, so nothing is invented for FLAM),
+    /// the pack COUNTS (never the raw pack UUIDs — keeping the line
+    /// PII-free and bounded regardless of library size) and the
+    /// wall-clock elapsed time.
     DeviceLibraryRead {
         device_identifier: String,
+        family: &'static str,
+        firmware_cohort: &'static str,
         story_count: u32,
         hidden_count: u32,
         elapsed_ms: u64,
@@ -100,11 +106,15 @@ pub enum Event {
         elapsed_ms: u64,
     },
     /// A device pack was copied into the local library. Carries the
-    /// opaque `short_id` (NEVER the full pack UUID), the created local
-    /// `story_id`, the copy size/count and the wall-clock elapsed time.
-    /// No absolute path — same PII rules as every device event.
+    /// opaque `short_id` (NEVER the full pack UUID), the FAMILY/COHORT
+    /// tags of the re-scanned profile (same closed sets as the read
+    /// entry), the created local `story_id`, the copy size/count and the
+    /// wall-clock elapsed time. No absolute path — same PII rules as
+    /// every device event.
     DeviceStoryImported {
         short_id: String,
+        family: &'static str,
+        firmware_cohort: &'static str,
         story_id: String,
         elapsed_ms: u64,
         bytes_copied: u64,
@@ -313,6 +323,8 @@ mod tests {
     fn event_device_library_read_carries_counts_not_raw_uuids() {
         let event = Event::DeviceLibraryRead {
             device_identifier: "0123456789abcdef0123456789abcdef".into(),
+            family: "lunii",
+            firmware_cohort: "origine_v1",
             story_count: 7,
             hidden_count: 1,
             elapsed_ms: 120,
@@ -320,12 +332,35 @@ mod tests {
         let v = serde_json::to_value(&event).expect("ser");
         assert_eq!(v["category"], "device_library_read");
         assert_eq!(v["device_identifier"], "0123456789abcdef0123456789abcdef");
+        assert_eq!(v["family"], "lunii");
+        assert_eq!(v["firmware_cohort"], "origine_v1");
         assert_eq!(v["story_count"], 7);
         assert_eq!(v["hidden_count"], 1);
         assert_eq!(v["elapsed_ms"], 120);
         // The payload exposes only counts — no array of pack UUIDs.
         assert!(v.get("uuids").is_none());
         assert!(v.get("stories").is_none());
+    }
+
+    #[test]
+    fn event_device_library_read_flam_carries_family_tags_without_version() {
+        // The FLAM read entry names its family/cohort and never carries
+        // a metadata version (the field does not exist on this event —
+        // nothing is invented, nothing is null).
+        let event = Event::DeviceLibraryRead {
+            device_identifier: "fedcba9876543210fedcba9876543210".into(),
+            family: "flam",
+            firmware_cohort: "flam_gen1",
+            story_count: 2,
+            hidden_count: 1,
+            elapsed_ms: 40,
+        };
+        let line = serde_json::to_string(&event).expect("ser");
+        let v: serde_json::Value = serde_json::from_str(&line).expect("parse");
+        assert_eq!(v["family"], "flam");
+        assert_eq!(v["firmware_cohort"], "flam_gen1");
+        assert!(!line.contains("metadata_format_version"));
+        assert!(!line.contains("null"));
     }
 
     #[test]
@@ -346,6 +381,8 @@ mod tests {
     fn event_device_story_imported_carries_short_id_never_full_uuid() {
         let event = Event::DeviceStoryImported {
             short_id: "FAC5562D".into(),
+            family: "lunii",
+            firmware_cohort: "origine_v1",
             story_id: "0197a5d0-0000-7000-8000-000000000000".into(),
             elapsed_ms: 1200,
             bytes_copied: 7168,
@@ -354,6 +391,8 @@ mod tests {
         let v = serde_json::to_value(&event).expect("ser");
         assert_eq!(v["category"], "device_story_imported");
         assert_eq!(v["short_id"], "FAC5562D");
+        assert_eq!(v["family"], "lunii");
+        assert_eq!(v["firmware_cohort"], "origine_v1");
         assert_eq!(v["story_id"], "0197a5d0-0000-7000-8000-000000000000");
         assert_eq!(v["elapsed_ms"], 1200);
         assert_eq!(v["bytes_copied"], 7168);
@@ -362,6 +401,25 @@ mod tests {
         assert!(v.get("pack_uuid").is_none());
         assert!(v.get("uuid").is_none());
         assert!(v.get("path").is_none());
+    }
+
+    #[test]
+    fn event_device_story_imported_flam_carries_family_tags_without_version() {
+        let event = Event::DeviceStoryImported {
+            short_id: "55667788".into(),
+            family: "flam",
+            firmware_cohort: "flam_gen1",
+            story_id: "0197a5d0-0000-7000-8000-000000000001".into(),
+            elapsed_ms: 900,
+            bytes_copied: 448,
+            file_count: 3,
+        };
+        let line = serde_json::to_string(&event).expect("ser");
+        let v: serde_json::Value = serde_json::from_str(&line).expect("parse");
+        assert_eq!(v["family"], "flam");
+        assert_eq!(v["firmware_cohort"], "flam_gen1");
+        assert!(!line.contains("metadata_format_version"));
+        assert!(!line.contains("null"));
     }
 
     #[test]

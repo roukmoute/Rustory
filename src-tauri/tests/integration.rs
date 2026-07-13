@@ -30,6 +30,9 @@ mod import_review_resolution_migration;
 #[path = "integration/structured_folder_provenance_migration.rs"]
 mod structured_folder_provenance_migration;
 
+#[path = "integration/story_imports_source_family_migration.rs"]
+mod story_imports_source_family_migration;
+
 #[path = "integration/structured_folder_creation.rs"]
 mod structured_folder_creation;
 
@@ -50,6 +53,9 @@ mod device_log;
 
 #[path = "integration/device_command.rs"]
 mod device_command;
+
+#[path = "integration/flam_support.rs"]
+mod flam_support;
 
 #[path = "integration/device_library.rs"]
 mod device_library;

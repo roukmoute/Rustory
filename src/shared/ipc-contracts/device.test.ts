@@ -16,16 +16,17 @@ const validSupported = {
   },
 };
 
-// REAL Rust wire for a recognized FLAM Gen1 (see the byte-for-byte
+// REAL Rust wire for a supported FLAM Gen1 (see the byte-for-byte
 // contract test src-tauri/tests/contracts/device.rs): the
-// `metadataFormatVersion` KEY is absent — never null — and every
-// operation is false. A verdict emitted by Rust must NEVER be rejected
-// by this guard.
+// `metadataFormatVersion` KEY is absent — never null — and the matrix
+// line carries the activated read capabilities (readLibrary /
+// inspectStory / importStory true, writeStory false). A verdict emitted
+// by Rust must NEVER be rejected by this guard.
 const validSupportedFlam = JSON.parse(
   '{"kind":"supported","family":"flam","firmwareCohort":"flamGen1",' +
     '"deviceIdentifier":"fedcba9876543210fedcba9876543210",' +
-    '"supportedOperations":{"readLibrary":false,"inspectStory":false,' +
-    '"importStory":false,"writeStory":false}}',
+    '"supportedOperations":{"readLibrary":true,"inspectStory":true,' +
+    '"importStory":true,"writeStory":false}}',
 ) as Record<string, unknown>;
 
 describe("isConnectedDeviceDto — valid payloads", () => {
@@ -81,6 +82,25 @@ describe("isConnectedDeviceDto — valid payloads", () => {
 
   it("accepts the real FLAM Gen1 wire (no metadataFormatVersion key)", () => {
     expect(isConnectedDeviceDto(validSupportedFlam)).toBe(true);
+  });
+
+  it("imposes no capability rule on flam — FAMILY_CONTRACTS freezes family⇔cohort⇔version only", () => {
+    // The guard must NEVER assume "flam ⇒ all operations false": the
+    // activated read capabilities pass (the real wire above), and a
+    // zero-capability payload stays representable for any future
+    // zero-capability profile.
+    expect(isConnectedDeviceDto(validSupportedFlam)).toBe(true);
+    expect(
+      isConnectedDeviceDto({
+        ...validSupportedFlam,
+        supportedOperations: {
+          readLibrary: false,
+          inspectStory: false,
+          importStory: false,
+          writeStory: false,
+        },
+      }),
+    ).toBe(true);
   });
 });
 

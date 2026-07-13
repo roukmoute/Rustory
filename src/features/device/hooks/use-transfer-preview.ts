@@ -5,6 +5,7 @@ import {
   ReadTransferPreviewContractDriftError,
 } from "../../../ipc/commands/transfer-preview";
 import { toAppError, type AppError } from "../../../shared/errors/app-error";
+import type { SupportedFamilyDto } from "../../../shared/ipc-contracts/device";
 
 export type TransferPreviewState =
   | { kind: "idle" }
@@ -31,13 +32,21 @@ const DRIFT_ERROR: AppError = {
 // payload identifiers don't match the request). This is NOT "no device":
 // a device WAS detected, so the recoverable "ça a changé, réessaie" wording
 // (with the retry CTA) is honest, where a "plug a Lunii" hint would mislead.
-const DEVICE_CHANGED_ERROR: AppError = {
-  code: "DEVICE_SCAN_FAILED",
-  message: "L'appareil a changé pendant la comparaison.",
-  userAction:
-    "Vérifie que la Lunii est toujours branchée puis réessaie la comparaison.",
-  details: null,
-};
+/** Family-correct "device changed" error: the REQUESTED device's family is
+ *  known here (the route derived it from the same detection DTO as the
+ *  identifier) — a Lunii keeps the historical wording VERBATIM, any other
+ *  family reads the device-generic one (product-language.md). */
+function deviceChangedError(family: SupportedFamilyDto | undefined): AppError {
+  return {
+    code: "DEVICE_SCAN_FAILED",
+    message: "L'appareil a changé pendant la comparaison.",
+    userAction:
+      family === undefined || family === "lunii"
+        ? "Vérifie que la Lunii est toujours branchée puis réessaie la comparaison."
+        : "Vérifie que l'appareil est toujours branché puis réessaie la comparaison.",
+    details: null,
+  };
+}
 
 export interface UseTransferPreview {
   state: TransferPreviewState;
@@ -71,6 +80,7 @@ export interface UseTransferPreview {
 export function useTransferPreview(
   storyId: string | null,
   deviceIdentifier: string | null,
+  deviceFamily?: SupportedFamilyDto,
 ): UseTransferPreview {
   const [state, setState] = useState<TransferPreviewState>(() =>
     storyId && deviceIdentifier ? { kind: "loading" } : { kind: "idle" },
@@ -87,7 +97,11 @@ export function useTransferPreview(
       cancelRef.current = null;
     }
 
-    const handle = readTransferPreview({ storyId: sid, deviceIdentifier: did });
+    const handle = readTransferPreview(
+      { storyId: sid, deviceIdentifier: did },
+      undefined,
+      deviceFamily,
+    );
     cancelRef.current = handle.cancel;
 
     handle.promise
@@ -102,7 +116,7 @@ export function useTransferPreview(
           // longer the one we asked about — surface it as a recoverable
           // "device changed" rather than paint a verdict for the wrong target.
           if (dto.deviceIdentifier !== did || dto.story.id !== sid) {
-            setState({ kind: "error", error: DEVICE_CHANGED_ERROR });
+            setState({ kind: "error", error: deviceChangedError(deviceFamily) });
             return;
           }
           setState({
@@ -119,7 +133,7 @@ export function useTransferPreview(
           // detection and this read. Surface a recoverable "device changed"
           // (with retry), never the misleading "plug a Lunii" hint. The LOCAL
           // library stays untouched.
-          setState({ kind: "error", error: DEVICE_CHANGED_ERROR });
+          setState({ kind: "error", error: deviceChangedError(deviceFamily) });
         }
       })
       .catch((err) => {
@@ -135,7 +149,7 @@ export function useTransferPreview(
           setState({ kind: "error", error: toAppError(err) });
         }
       });
-  }, []);
+  }, [deviceFamily]);
 
   const refresh = useCallback(() => {
     if (storyId && deviceIdentifier) load(storyId, deviceIdentifier);

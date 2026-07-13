@@ -398,6 +398,237 @@ fn invalid_pack_content_refuses_all_or_nothing_with_no_residue() {
     }
 }
 
+// ---------------- FLAM import through the shared bridge ----------------
+
+mod flam_mount {
+    //! Thin per-file alias over the SHARED harness fixture
+    //! (`crate::flam_support`) — one FLAM mount construction for the
+    //! whole integration crate.
+    use std::path::PathBuf;
+    use tempfile::TempDir;
+
+    pub const FLAM_UUID: &str = "12345678-9abc-def0-1122-334455667788";
+    pub const FLAM_SHORT_ID: &str = "55667788";
+
+    /// Conforming FLAM mount holding one indexed story. Returns
+    /// `(guard, mount, device_identifier)`.
+    pub fn build(hidden: bool, present: bool) -> (TempDir, PathBuf, String) {
+        crate::flam_support::temp_flam_mount_with_entries(&[(FLAM_UUID, hidden, present)])
+    }
+}
+
+#[test]
+fn imports_a_flam_story_end_to_end_with_family_correct_title_and_inherited_provenance() {
+    // Signature path: the SHARED bridge imports a FLAM story — local
+    // canonical story titled `Histoire de mon FLAM (…)`, `story_imports`
+    // provenance carrying the FLAM story UUID verbatim,
+    // promoted artifacts byte-identical to the opaque source.
+    let (guard, mount, identifier) = flam_mount::build(false, true);
+    let h = RealHarness::new();
+
+    let outcome = h
+        .run(mount.clone(), &identifier, flam_mount::FLAM_UUID)
+        .expect("FLAM import");
+    assert_eq!(
+        outcome.story.title,
+        format!("Histoire de mon FLAM ({})", flam_mount::FLAM_SHORT_ID)
+    );
+    assert_eq!(outcome.pack_short_id, flam_mount::FLAM_SHORT_ID);
+
+    {
+        let db = h.db.lock().expect("lock");
+        let detail = get_story_detail(&db, &std::env::temp_dir(), &outcome.story.id, None)
+            .expect("detail read")
+            .expect("row present");
+        assert_eq!(detail.schema_version, 3);
+        assert_eq!(detail.created_at, detail.updated_at);
+
+        let (db_pack_uuid, source_id, file_count, total_bytes, checksum): (
+            String,
+            String,
+            u32,
+            u64,
+            String,
+        ) = db
+            .conn()
+            .query_row(
+                "SELECT pack_uuid, source_device_identifier, pack_file_count, pack_total_bytes, \
+                 pack_checksum FROM story_imports WHERE story_id = ?1",
+                rusqlite::params![&outcome.story.id],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .expect("provenance row");
+        assert_eq!(db_pack_uuid, flam_mount::FLAM_UUID);
+        assert_eq!(source_id, identifier);
+        assert_eq!(file_count, 3);
+        assert_eq!(total_bytes, 256 + 64 + 128);
+        assert_eq!(checksum.len(), 64);
+    }
+
+    // Promoted files are byte-identical to the opaque source story.
+    let promoted = h.imports_dir().join(&outcome.story.id);
+    let source_tree = snapshot_tree(&mount.join("str").join(flam_mount::FLAM_UUID));
+    let promoted_tree = snapshot_tree(&promoted);
+    assert_eq!(source_tree, promoted_tree, "opaque bytes must match");
+
+    // The story survives without the device (same AC1 proof as Lunii).
+    drop(guard);
+    {
+        let db = h.db.lock().expect("lock");
+        let detail = get_story_detail(&db, &std::env::temp_dir(), &outcome.story.id, None)
+            .expect("re-read without device")
+            .expect("still present");
+        assert_eq!(detail.title, outcome.story.title);
+    }
+}
+
+#[test]
+fn re_importing_the_same_flam_story_refuses_with_the_inherited_already_imported() {
+    let (_guard, mount, identifier) = flam_mount::build(false, true);
+    let h = RealHarness::new();
+    h.run(mount.clone(), &identifier, flam_mount::FLAM_UUID)
+        .expect("first FLAM import");
+    let err = h
+        .run(mount, &identifier, flam_mount::FLAM_UUID)
+        .expect_err("second import must be blocked");
+    let v = serde_json::to_value(&err).expect("ser");
+    assert_eq!(v["details"]["source"], "already_imported");
+    assert_eq!(h.story_rows(), 1);
+    assert_eq!(h.import_rows(), 1);
+}
+
+#[test]
+fn a_hidden_flam_story_is_importable_from_the_hidden_root() {
+    let (_guard, mount, identifier) = flam_mount::build(true, true);
+    let h = RealHarness::new();
+    let outcome = h
+        .run(mount, &identifier, flam_mount::FLAM_UUID)
+        .expect("hidden FLAM import");
+    assert_eq!(
+        outcome.story.title,
+        format!("Histoire de mon FLAM ({})", flam_mount::FLAM_SHORT_ID)
+    );
+}
+
+#[test]
+fn a_hidden_flam_entry_imports_the_hidden_folder_never_a_visible_homonym() {
+    // `list.hidden` references a UUID whose payload lives under
+    // `str.hidden/<uuid>`, while a DIFFERENT orphan folder with the same
+    // UUID sits under `str/<uuid>`. The import must take the hidden
+    // folder — the selected index is authoritative, the other root is
+    // never consulted.
+    let (_guard, mount, identifier) = flam_mount::build(true, true);
+    let decoy = mount.join("str").join(flam_mount::FLAM_UUID);
+    std::fs::create_dir_all(&decoy).expect("mk decoy");
+    std::fs::write(decoy.join("decoy.bin"), b"DECOY").expect("seed decoy");
+
+    let h = RealHarness::new();
+    let outcome = h
+        .run(mount.clone(), &identifier, flam_mount::FLAM_UUID)
+        .expect("hidden FLAM import");
+
+    let promoted = h.imports_dir().join(&outcome.story.id);
+    let hidden_tree = snapshot_tree(&mount.join("str.hidden").join(flam_mount::FLAM_UUID));
+    let promoted_tree = snapshot_tree(&promoted);
+    assert_eq!(
+        hidden_tree, promoted_tree,
+        "the promoted bytes must be the HIDDEN folder's, never the visible decoy's"
+    );
+    assert!(
+        !promoted.join("decoy.bin").exists(),
+        "the visible decoy must never be imported"
+    );
+}
+
+#[test]
+fn flam_index_entry_without_story_folder_refuses_with_pack_missing() {
+    // The UI already refuses `contentPresent:false`; the forced import
+    // hits the live re-check and refuses with `pack_missing`.
+    let (_guard, mount, identifier) = flam_mount::build(false, false);
+    let h = RealHarness::new();
+    let err = h
+        .run(mount, &identifier, flam_mount::FLAM_UUID)
+        .expect_err("absent story folder must fail");
+    let v = serde_json::to_value(&err).expect("ser");
+    assert_eq!(v["details"]["source"], "pack_missing");
+    assert_eq!(h.story_rows(), 0);
+}
+
+#[test]
+fn an_empty_flam_story_folder_refuses_with_pack_invalid_and_no_residue() {
+    let (_guard, mount, identifier) = flam_mount::build(false, false);
+    std::fs::create_dir_all(mount.join("str").join(flam_mount::FLAM_UUID))
+        .expect("mk empty story dir");
+    let h = RealHarness::new();
+    let err = h
+        .run(mount, &identifier, flam_mount::FLAM_UUID)
+        .expect_err("empty story must fail");
+    let v = serde_json::to_value(&err).expect("ser");
+    assert_eq!(v["details"]["source"], "pack_invalid");
+    assert_eq!(v["details"]["cause"], "empty_pack");
+    assert_eq!(h.story_rows(), 0);
+    assert!(h.non_staging_import_dirs().is_empty());
+}
+
+#[cfg(unix)]
+#[test]
+fn a_symlink_inside_a_flam_story_refuses_all_or_nothing_with_no_residue() {
+    let (_guard, mount, identifier) = flam_mount::build(false, true);
+    let story_dir = mount.join("str").join(flam_mount::FLAM_UUID);
+    std::os::unix::fs::symlink(story_dir.join("00000001"), story_dir.join("link")).expect("mklink");
+    let h = RealHarness::new();
+    let err = h
+        .run(mount, &identifier, flam_mount::FLAM_UUID)
+        .expect_err("symlink must refuse the whole pack");
+    let v = serde_json::to_value(&err).expect("ser");
+    assert_eq!(v["details"]["source"], "pack_invalid");
+    assert_eq!(v["details"]["cause"], "not_a_regular_file");
+    assert_eq!(h.story_rows(), 0, "no DB row may exist");
+    assert!(h.non_staging_import_dirs().is_empty(), "no orphan folder");
+}
+
+#[test]
+fn an_oversize_flam_story_refuses_with_pack_oversize() {
+    // A sparse file beyond the pack byte bound: refused by the pure
+    // inventory validation BEFORE any copy (fast, no 2 GiB read).
+    let (_guard, mount, identifier) = flam_mount::build(false, false);
+    let story_dir = mount.join("str").join(flam_mount::FLAM_UUID);
+    std::fs::create_dir_all(&story_dir).expect("mk story dir");
+    let big = std::fs::File::create(story_dir.join("huge")).expect("create sparse");
+    big.set_len(rustory_lib::domain::device::MAX_IMPORT_PACK_BYTES + 1)
+        .expect("set_len");
+
+    let h = RealHarness::new();
+    let err = h
+        .run(mount, &identifier, flam_mount::FLAM_UUID)
+        .expect_err("oversize story must fail");
+    let v = serde_json::to_value(&err).expect("ser");
+    assert_eq!(v["details"]["source"], "pack_oversize");
+    assert_eq!(h.story_rows(), 0);
+}
+
+#[test]
+fn the_flam_mount_is_strictly_read_only_across_an_import() {
+    let (_guard, mount, identifier) = flam_mount::build(false, true);
+    let before = snapshot_tree(&mount);
+    let h = RealHarness::new();
+    h.run(mount.clone(), &identifier, flam_mount::FLAM_UUID)
+        .expect("import");
+    let after = snapshot_tree(&mount);
+    assert_eq!(
+        before, after,
+        "the FLAM volume must be byte-identical after an import (read-only end to end)"
+    );
+}
+
 #[test]
 fn boot_sweep_clears_residues_left_by_a_simulated_crash() {
     let h = RealHarness::new();

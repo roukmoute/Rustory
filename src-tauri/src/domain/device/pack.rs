@@ -99,6 +99,13 @@ pub enum PackValidationIssue {
     TooManyFiles { count: usize },
     /// Total bytes beyond [`MAX_IMPORT_PACK_BYTES`].
     TooLarge { total_bytes: u64 },
+    /// An OPAQUE pack (FLAM) holding zero files — nothing to acquire.
+    EmptyPack,
+    /// A directory inside an OPAQUE pack with no file anywhere below it.
+    /// The manifest/checksum represent FILES only, so an empty directory
+    /// cannot round-trip — the honest all-or-nothing contract refuses it
+    /// rather than silently importing an altered tree.
+    EmptyDirectory { rel_path: String },
 }
 
 impl PackValidationIssue {
@@ -220,12 +227,107 @@ pub fn validate_pack_inventory(entries: &[PackEntry]) -> Result<PackManifest, Pa
     Ok(PackManifest { files, total_bytes })
 }
 
+/// Validate an enumerated OPAQUE pack inventory (FLAM — the internal
+/// format is publicly unknown, so any entry-name whitelist would be an
+/// invention). STRUCTURAL rules only, all-or-nothing, born stricter than
+/// the historical Lunii walker (see
+/// `device-support-profile.md#FLAM library inventory & story import`):
+///
+/// - every entry must be a regular file or a real directory — a symlink
+///   or special file refuses the whole pack;
+/// - NO name whitelist, NO OS-cruft skip: every regular file is retained
+///   verbatim (the pack is opaque);
+/// - the Lunii bounds are REUSED: [`MAX_IMPORT_PACK_FILES`],
+///   [`MAX_IMPORT_PACK_BYTES`], and the same numeric depth rule
+///   ([`MAX_PACK_ASSET_DEPTH`] — a directory beyond it, or a file nested
+///   deeper than a 2-level tree, refuses);
+/// - a pack holding ZERO files refuses ([`PackValidationIssue::EmptyPack`]).
+pub fn validate_opaque_pack_inventory(
+    entries: &[PackEntry],
+) -> Result<PackManifest, PackValidationIssue> {
+    let mut files: Vec<PackFile> = Vec::new();
+    let mut total_bytes: u64 = 0;
+
+    for entry in entries {
+        let component_count = entry.rel_path.split('/').count();
+        match entry.kind {
+            PackEntryKind::Symlink | PackEntryKind::Other => {
+                return Err(PackValidationIssue::NotARegularFile {
+                    rel_path: entry.rel_path.clone(),
+                });
+            }
+            PackEntryKind::Dir => {
+                // Same numeric rule as the Lunii asset trees: a directory
+                // deeper than MAX_PACK_ASSET_DEPTH is refused OUTRIGHT so
+                // the enumerator can stop recursing at a bounded depth
+                // without ever silently skipping content.
+                if component_count > MAX_PACK_ASSET_DEPTH {
+                    return Err(PackValidationIssue::TooDeep {
+                        rel_path: entry.rel_path.clone(),
+                    });
+                }
+            }
+            PackEntryKind::File => {
+                // A root file has 1 component; a file inside a 2-level
+                // tree has 3. Deeper is refused — the same ceiling the
+                // Lunii `rf/000/x` shape sits exactly under.
+                if component_count > MAX_PACK_ASSET_DEPTH + 1 {
+                    return Err(PackValidationIssue::TooDeep {
+                        rel_path: entry.rel_path.clone(),
+                    });
+                }
+                files.push(PackFile {
+                    rel_path: entry.rel_path.clone(),
+                    size: entry.size,
+                });
+                total_bytes = total_bytes.saturating_add(entry.size);
+            }
+        }
+    }
+
+    if files.is_empty() {
+        return Err(PackValidationIssue::EmptyPack);
+    }
+    // A directory with NO file anywhere below it (a leaf-empty dir, or a
+    // dir holding only empty dirs) cannot round-trip: the manifest and
+    // the staging represent files only. Refuse it — the imported tree
+    // must be the source tree or nothing (all-or-nothing).
+    for entry in entries {
+        if entry.kind != PackEntryKind::Dir {
+            continue;
+        }
+        let prefix = format!("{}/", entry.rel_path);
+        let holds_a_file = files.iter().any(|f| f.rel_path.starts_with(&prefix));
+        if !holds_a_file {
+            return Err(PackValidationIssue::EmptyDirectory {
+                rel_path: entry.rel_path.clone(),
+            });
+        }
+    }
+    if files.len() > MAX_IMPORT_PACK_FILES {
+        return Err(PackValidationIssue::TooManyFiles { count: files.len() });
+    }
+    if total_bytes > MAX_IMPORT_PACK_BYTES {
+        return Err(PackValidationIssue::TooLarge { total_bytes });
+    }
+
+    files.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
+
+    Ok(PackManifest { files, total_bytes })
+}
+
 /// Default title of the local draft created by a device copy. The opaque
-/// short identifier carries the provenance ("Histoire de ma Lunii
-/// (FAC5562D)"); the user can rename immediately in the editor. MUST pass
-/// `validate_title` for every possible 8-hex shortId — asserted by test.
-pub fn imported_story_title(short_id: &str) -> String {
-    format!("Histoire de ma Lunii ({short_id})")
+/// short identifier carries the provenance and the wording is
+/// FAMILY-CORRECT ("Histoire de ma Lunii (FAC5562D)" verbatim for a
+/// Lunii, "Histoire de mon FLAM (FAC5562D)" for a FLAM — Change Control,
+/// product-language.md); the user can rename immediately in the editor.
+/// MUST pass `validate_title` for every possible 8-hex shortId and both
+/// families — asserted by test.
+pub fn imported_story_title(family: super::DeviceFamily, short_id: &str) -> String {
+    match family {
+        super::DeviceFamily::Lunii => format!("Histoire de ma Lunii ({short_id})"),
+        super::DeviceFamily::Flam => format!("Histoire de mon FLAM ({short_id})"),
+    }
 }
 
 #[cfg(test)]
@@ -502,17 +604,194 @@ mod tests {
 
     #[test]
     fn imported_story_title_passes_title_validation_for_any_8_hex_short_id() {
+        use crate::domain::device::DeviceFamily;
         for short_id in ["FAC5562D", "00000000", "FFFFFFFF", "0A1B2C3D"] {
-            let title = imported_story_title(short_id);
-            assert_eq!(title, format!("Histoire de ma Lunii ({short_id})"));
-            let normalized = normalize_title(&title);
-            assert_eq!(
-                normalized, title,
-                "the default title must already be normalized (NFC, no surrounding spaces)"
-            );
-            validate_title(&normalized).unwrap_or_else(|err| {
-                panic!("default title for {short_id} must pass validate_title: {err:?}")
-            });
+            for (family, expected) in [
+                (
+                    DeviceFamily::Lunii,
+                    format!("Histoire de ma Lunii ({short_id})"),
+                ),
+                (
+                    DeviceFamily::Flam,
+                    format!("Histoire de mon FLAM ({short_id})"),
+                ),
+            ] {
+                let title = imported_story_title(family, short_id);
+                assert_eq!(title, expected);
+                let normalized = normalize_title(&title);
+                assert_eq!(
+                    normalized, title,
+                    "the default title must already be normalized (NFC, no surrounding spaces)"
+                );
+                validate_title(&normalized).unwrap_or_else(|err| {
+                    panic!(
+                        "default title for {family:?}/{short_id} must pass validate_title: {err:?}"
+                    )
+                });
+            }
         }
+    }
+
+    #[test]
+    fn imported_story_title_lunii_literal_stays_verbatim() {
+        // AC2 family isolation: the Lunii default title does not change
+        // by a byte with the FLAM extension.
+        use crate::domain::device::DeviceFamily;
+        assert_eq!(
+            imported_story_title(DeviceFamily::Lunii, "FAC5562D"),
+            "Histoire de ma Lunii (FAC5562D)"
+        );
+    }
+
+    // ---- validate_opaque_pack_inventory (FLAM — structural only) ----
+
+    #[test]
+    fn opaque_validation_retains_every_regular_file_without_whitelist() {
+        // Arbitrary names (unknown format): everything regular is
+        // retained verbatim — even names the Lunii subset would refuse.
+        let entries = vec![
+            file("whatever.bin", 128),
+            file("Thumbs.db", 16), // no cruft skip: the pack is opaque
+            dir("data"),
+            file("data/chunk", 64),
+        ];
+        let manifest = validate_opaque_pack_inventory(&entries).expect("valid");
+        assert_eq!(manifest.files.len(), 3);
+        assert_eq!(manifest.total_bytes, 208);
+        // Deterministic order: sorted by rel_path.
+        assert_eq!(manifest.files[0].rel_path, "Thumbs.db");
+        assert_eq!(manifest.files[1].rel_path, "data/chunk");
+        assert_eq!(manifest.files[2].rel_path, "whatever.bin");
+    }
+
+    #[test]
+    fn opaque_validation_refuses_a_symlink_anywhere() {
+        let entries = vec![
+            file("a", 1),
+            PackEntry {
+                rel_path: "link".into(),
+                kind: PackEntryKind::Symlink,
+                size: 0,
+            },
+        ];
+        assert_eq!(
+            validate_opaque_pack_inventory(&entries),
+            Err(PackValidationIssue::NotARegularFile {
+                rel_path: "link".into()
+            })
+        );
+    }
+
+    #[test]
+    fn opaque_validation_refuses_a_special_file_anywhere() {
+        let entries = vec![
+            file("a", 1),
+            PackEntry {
+                rel_path: "fifo".into(),
+                kind: PackEntryKind::Other,
+                size: 0,
+            },
+        ];
+        assert_eq!(
+            validate_opaque_pack_inventory(&entries),
+            Err(PackValidationIssue::NotARegularFile {
+                rel_path: "fifo".into()
+            })
+        );
+    }
+
+    #[test]
+    fn opaque_validation_refuses_an_empty_directory_beside_files() {
+        // A pack with at least one file AND an empty directory refuses:
+        // the empty directory cannot round-trip through a files-only
+        // manifest — never a silently altered tree.
+        let entries = vec![file("payload", 8), dir("empty")];
+        assert_eq!(
+            validate_opaque_pack_inventory(&entries),
+            Err(PackValidationIssue::EmptyDirectory {
+                rel_path: "empty".into()
+            })
+        );
+        // A directory holding ONLY an empty subdirectory is refused too
+        // (no descendant file exists anywhere below it).
+        let nested = vec![file("payload", 8), dir("a"), dir("a/b")];
+        assert_eq!(
+            validate_opaque_pack_inventory(&nested),
+            Err(PackValidationIssue::EmptyDirectory {
+                rel_path: "a".into()
+            })
+        );
+        // A directory that DOES hold a file (directly or nested) passes.
+        let populated = vec![file("payload", 8), dir("a"), dir("a/b"), file("a/b/x", 4)];
+        assert!(validate_opaque_pack_inventory(&populated).is_ok());
+    }
+
+    #[test]
+    fn opaque_validation_refuses_an_empty_pack() {
+        assert_eq!(
+            validate_opaque_pack_inventory(&[]),
+            Err(PackValidationIssue::EmptyPack)
+        );
+        // Directories alone hold no acquirable bytes either.
+        let dirs_only = vec![dir("data")];
+        assert_eq!(
+            validate_opaque_pack_inventory(&dirs_only),
+            Err(PackValidationIssue::EmptyPack)
+        );
+    }
+
+    #[test]
+    fn opaque_validation_reuses_the_lunii_depth_ceiling() {
+        // A file inside a 2-level tree sits exactly under the ceiling —
+        // the same shape as the Lunii `rf/000/x`.
+        let ok = vec![dir("a"), dir("a/b"), file("a/b/x", 4)];
+        assert!(validate_opaque_pack_inventory(&ok).is_ok());
+        // One level deeper refuses (directory first, like the walker).
+        let deep_dir = vec![dir("a"), dir("a/b"), dir("a/b/c")];
+        assert_eq!(
+            validate_opaque_pack_inventory(&deep_dir),
+            Err(PackValidationIssue::TooDeep {
+                rel_path: "a/b/c".into()
+            })
+        );
+        let deep_file = vec![file("a/b/c/x", 4)];
+        assert_eq!(
+            validate_opaque_pack_inventory(&deep_file),
+            Err(PackValidationIssue::TooDeep {
+                rel_path: "a/b/c/x".into()
+            })
+        );
+    }
+
+    #[test]
+    fn opaque_validation_reuses_the_lunii_count_and_byte_bounds() {
+        let too_many: Vec<PackEntry> = (0..=MAX_IMPORT_PACK_FILES)
+            .map(|i| file(&format!("f{i}"), 1))
+            .collect();
+        assert!(matches!(
+            validate_opaque_pack_inventory(&too_many),
+            Err(PackValidationIssue::TooManyFiles { .. })
+        ));
+
+        let too_large = vec![
+            file("a", MAX_IMPORT_PACK_BYTES),
+            file("b", 1), // one byte over the total
+        ];
+        assert!(matches!(
+            validate_opaque_pack_inventory(&too_large),
+            Err(PackValidationIssue::TooLarge { .. })
+        ));
+    }
+
+    #[test]
+    fn empty_pack_issue_maps_to_pack_invalid_source() {
+        assert_eq!(PackValidationIssue::EmptyPack.source_tag(), "pack_invalid");
+        assert_eq!(
+            PackValidationIssue::EmptyDirectory {
+                rel_path: "empty".into()
+            }
+            .source_tag(),
+            "pack_invalid"
+        );
     }
 }

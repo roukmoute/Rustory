@@ -66,6 +66,51 @@ fn device_library_readable_round_trip_wire_shape() {
 }
 
 #[test]
+fn device_library_readable_flam_round_trips_the_same_neutral_wire_shape() {
+    // The library DTO is family-NEUTRAL: a readable FLAM inventory rides
+    // the exact same shape as a Lunii one — a real FLAM story UUID, its
+    // uppercase 8-hex tail as shortId, the same flags and recognition
+    // fields. Fixture = real wire (what the FLAM reader actually emits).
+    let dto = DeviceLibraryDto::Readable {
+        device_identifier: "fedcba9876543210fedcba9876543210".into(),
+        stories: vec![DeviceStoryDto {
+            uuid: "12345678-9abc-def0-1122-334455667788".into(),
+            short_id: "55667788".into(),
+            hidden: true,
+            content_present: true,
+            already_imported: false,
+            title: None,
+            title_source: None,
+            thumbnail: None,
+        }],
+    };
+    let v = serde_json::to_value(&dto).expect("ser");
+    assert_eq!(
+        v,
+        serde_json::json!({
+            "kind": "readable",
+            "deviceIdentifier": "fedcba9876543210fedcba9876543210",
+            "stories": [
+                {
+                    "uuid": "12345678-9abc-def0-1122-334455667788",
+                    "shortId": "55667788",
+                    "hidden": true,
+                    "contentPresent": true,
+                    "alreadyImported": false,
+                    "title": null,
+                    "titleSource": null,
+                    "thumbnail": null,
+                },
+            ],
+        })
+    );
+    // No family field exists on this wire — the capability matrix alone
+    // decides what lights up.
+    let raw = serde_json::to_string(&dto).expect("ser");
+    assert!(!raw.contains("family"));
+}
+
+#[test]
 fn device_library_readable_with_no_packs_serializes_empty_stories_array() {
     let dto = DeviceLibraryDto::Readable {
         device_identifier: "ffffffffffffffffffffffffffffffff".into(),

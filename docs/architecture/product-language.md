@@ -43,7 +43,8 @@ It exists to keep the same product concepts named the same way across:
 | Device story provenance note (copy exists) | `Cette histoire vit sur l'appareil et une copie existe déjà dans ta bibliothèque locale` | Variant of the provenance note once a local copy exists (`alreadyImported`) | `pas encore` wording on an already-copied story |
 | Copy a device story into the library (action) | `Copier dans ma bibliothèque` | User-visible act of bringing a device story from the connected device into the local library | `importer` (reserved for file artifacts), `download`, `sync` |
 | Device story already copied locally | `Dans ta bibliothèque` | Marker on a device story card: a local copy of this device story exists (provenance link present) | `imported`, `synced`, `duplicate` |
-| Default title of a copied device story | `Histoire de ma Lunii (XXXXXXXX)` | Title given to the local draft created by a device copy — `XXXXXXXX` is the opaque short identifier; renamable immediately in the editor | titles asserting unverified content (`Histoire non reconnue` is a device-side state, never a local title) |
+| Default title of a copied device story (Lunii) | `Histoire de ma Lunii (XXXXXXXX)` | Title given to the local draft created by a Lunii device copy — `XXXXXXXX` is the opaque short identifier; renamable immediately in the editor. VERBATIM, family-frozen | titles asserting unverified content (`Histoire non reconnue` is a device-side state, never a local title) |
+| Default title of a copied device story (FLAM) | `Histoire de mon FLAM (XXXXXXXX)` | Family-correct sibling of the Lunii default title for a FLAM device copy — same short identifier, same renaming path | reusing the Lunii wording on a FLAM copy |
 | Complete device pack | `Contenu présent` | A listed device story whose payload folder is present on the device — a verified fact about the folder, never a claim about content quality | `valid`, `complete`, `ok`, asserting content quality |
 | Recognized device-story facts (inspector group) | `Ce que Rustory reconnaît` | Inspector header grouping the verified facts Rustory can vouch for before a copy (identifiers, content present) | `infos`, `metadata`, anything implying a recognized title |
 | Copy-blocking device-story facts (inspector group) | `Ce qui bloque la copie` | Inspector header grouping the verified facts that prevent a copy (incomplete content, copy already exists) | `erreurs`, `problèmes`, `blockers` |
@@ -57,7 +58,8 @@ It exists to keep the same product concepts named the same way across:
 | Start the preparation (action) | `Préparer` | User-visible action that starts assembling the artifacts a transfer would need, locally | `Lancer`, `Commencer`, `Build`, `Compiler` |
 | Preparation in flight | `Préparation en cours…` | Calm feedback while the preparation is running | `job en cours`, `traitement`, `processing` |
 | Story is prepared (indicator) | `Préparée` | Discreet marker that the artifacts were assembled and are fresh — never implies the transfer is enabled | `Prête`, `prête à transférer`, `prête à l'envoi` |
-| Send operation | `transfert` / `Envoyer vers la Lunii` | User-visible act of sending a story to the device | `deploy`, `sync job`, `push` |
+| Send operation | `transfert` / `Envoyer vers la Lunii` | User-visible act of sending a story to the device. The CTA label is family-correct: a Lunii panel keeps `Envoyer vers la Lunii` VERBATIM; any other family renders `Envoyer vers l'appareil` | `deploy`, `sync job`, `push` |
+| Send CTA on a non-Lunii family panel | `Envoyer vers l'appareil` | Family-correct send CTA label when the detected supported device is not a Lunii (FLAM today); the send stays governed by the `writeStory` capability | reusing `Envoyer vers la Lunii` on a non-Lunii panel |
 | Post-send confirmation | `vérification` | Explicit check that confirms what really happened on device | `post-check`, `validation finale` when it means something else |
 | Write interrupted after the device was touched | `transfert incomplet` | The write STARTED then was interrupted; the device may hold a partial copy and a relaunch (full cycle) restores a safe state. Distinct from `état partiel` (a verification verdict) and from `Contenu incomplet` (a device pack with a missing payload) | `incomplete`, `partial`, `corrupt`, `staging` |
 | Inspect the in-flight transfer detail (action) | `Consulter le détail` | Non-destructive disclosure of the running transfer's phase / progress, in-context (never a modal); distinct from any cancel (out of MVP scope) | `détails`, `debug`, `logs` |
@@ -182,13 +184,22 @@ The UI should favor these labels when they are user-visible:
 | A send would add the story to the device | `Cette histoire serait ajoutée à l'appareil.` |
 | No comparison — no local story selected | `Sélectionne une histoire locale pour comparer avant l'envoi.` |
 | No comparison — more than one story selected | `Sélectionne une seule histoire locale pour comparer (le transfert multiple n'est pas encore disponible).` |
-| No comparison — no readable device connected | `Branche une Lunii lisible pour comparer l'histoire sélectionnée avant l'envoi.` |
+| No comparison — no readable device connected (Lunii panel or no family known; a non-Lunii panel reads `Branche un appareil lisible pour comparer l'histoire sélectionnée avant l'envoi.`) | `Branche une Lunii lisible pour comparer l'histoire sélectionnée avant l'envoi.` |
+| No validation yet — select + plug (Lunii panel VERBATIM; a non-Lunii panel reads `Sélectionne une histoire locale et branche un appareil lisible pour vérifier la compatibilité avant l'envoi.`) | `Sélectionne une histoire locale et branche une Lunii lisible pour vérifier la compatibilité avant l'envoi.` |
+| Device-compatibility blocker group heading (Lunii panel keeps `Compatibilité Lunii` VERBATIM) | `Compatibilité appareil` (non-Lunii panel) |
+| Device changed during validation — next gesture (Lunii panel VERBATIM; non-Lunii reads `Vérifie que l'appareil est toujours branché puis réessaie la validation.`) | `Vérifie que la Lunii est toujours branchée puis réessaie la validation.` |
+| Device changed during comparison — next gesture (Lunii panel VERBATIM; non-Lunii reads `Vérifie que l'appareil est toujours branché puis réessaie la comparaison.`) | `Vérifie que la Lunii est toujours branchée puis réessaie la comparaison.` |
+| Validation timeout — next gesture (Lunii panel VERBATIM; non-Lunii reads `Réessaie la validation. Si le problème persiste, débranche l'appareil puis rebranche-le.`) | `Réessaie la validation. Si le problème persiste, débranche la Lunii puis rebranche-la.` |
+| Comparison timeout — next gesture (Lunii panel VERBATIM; non-Lunii reads `Réessaie la comparaison. Si le problème persiste, débranche l'appareil puis rebranche-le.`) | `Réessaie la comparaison. Si le problème persiste, débranche la Lunii puis rebranche-la.` |
 | Device changed while comparing (recoverable) | `L'appareil a changé pendant la comparaison.` |
 | Copy not allowed for this profile | `Copie indisponible: profil non supporté` |
 | Copy refused — local copy already exists | `Copie indisponible: déjà dans ta bibliothèque` |
 | Copy refused — pack payload missing on device | `Copie indisponible: contenu incomplet sur l'appareil` |
 | Device copy in flight | `Copie en cours…` |
 | Device copy just succeeded | `Histoire copiée dans ta bibliothèque` |
+| Send CTA label on a non-Lunii family panel (Lunii keeps `Envoyer vers la Lunii`) | `Envoyer vers l'appareil` |
+| Default title of a FLAM device copy (Lunii keeps `Histoire de ma Lunii (XXXXXXXX)`) | `Histoire de mon FLAM (XXXXXXXX)` |
+| Empty device library hint (family-neutral) | `L'appareil connecté ne contient aucune histoire lisible.` |
 | Device copy failed and user can retry | `Copie impossible` |
 | Device story with a local copy | `Dans ta bibliothèque` |
 | Device story whose payload folder is present | `Contenu présent` |
@@ -301,7 +312,9 @@ content comes from outside Rustory) and no label for a settled review
 ## Copy Rules
 
 - Prefer `Créer une histoire` over `Nouveau projet`.
-- Prefer `Envoyer vers la Lunii` over `Synchroniser`, unless the product is explicitly comparing and reconciling states.
+- Prefer `Envoyer vers la Lunii` over `Synchroniser`, unless the product is explicitly comparing and reconciling states. On a non-Lunii family panel the CTA reads `Envoyer vers l'appareil` — never the Lunii wording.
+- A residual `Rebranche la Lunii…` next-gesture copy reachable from a non-Lunii panel becomes device-generic (`Rebranche l'appareil…`); the transfer-relaunch copy `Rebranche la Lunii pour relancer.` stays VERBATIM — a preserved transfer only ever targets a write-authorized Lunii cohort, so its device IS a Lunii.
+- **Neutralize-vs-bifurcate criterion** for a family-named copy reachable from more than one family: when the concerned device's family is KNOWN at the emission site (a matched profile, a family prop), the copy BIFURCATES — Lunii keeps its historical wording VERBATIM, any other family reads the device-generic variant. When the family is UNKNOWABLE at the site (only a hashed identifier of a now-absent device travels — e.g. `device_changed`), the copy is NEUTRALIZED to the device-generic wording for every family. A neutralization is never justified by convenience alone.
 - Prefer `Copier dans ma bibliothèque` (from a device) over `Importer`; reserve `Importer` / `Exporter` for local file artifacts (`.rustory`, archives). The device pair is `Envoyer vers la Lunii` (library → device) / `Copier dans ma bibliothèque` (device → library).
 - Prefer `Reprendre` over `Restaurer la session` when the user continues a local story.
 - Prefer `Bloquée` with a short cause over a generic `Erreur`.
