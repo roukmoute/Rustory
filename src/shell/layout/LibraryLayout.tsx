@@ -26,7 +26,7 @@ export function LibraryLayout({
 }: LibraryLayoutProps): React.JSX.Element {
   return (
     <div className="library-layout">
-      <nav className="library-layout__nav" aria-label="Filtres bibliothèque">
+      <nav className="library-layout__nav" aria-label="Navigation bibliothèque">
         {leftNav}
       </nav>
       <main

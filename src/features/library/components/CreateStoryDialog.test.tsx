@@ -23,18 +23,25 @@ import type { ContentSourcePolicy } from "../../../shared/ipc-contracts/import-e
  *  serializes it (rss enabled; atom / jsonFeed known but not activated). */
 const RSS_ENABLED_POLICY: ContentSourcePolicy = {
   sources: [
-    { kind: "rss", label: "Flux RSS", activation: "enabled" },
+    {
+      kind: "rss",
+      label: "Flux RSS",
+      activation: "enabled",
+      activationMarker: "Activée par la distribution officielle",
+    },
     {
       kind: "atom",
       label: "Flux Atom",
       activation: "notActivated",
-      reason: "Source indisponible: non activée dans la distribution officielle",
+      reason:
+        "Source indisponible: non activée dans la distribution officielle",
     },
     {
       kind: "jsonFeed",
       label: "Flux JSON Feed",
       activation: "notActivated",
-      reason: "Source indisponible: non activée dans la distribution officielle",
+      reason:
+        "Source indisponible: non activée dans la distribution officielle",
     },
   ],
 };
@@ -88,8 +95,12 @@ describe("<CreateStoryDialog />", () => {
       screen.getByRole("heading", { name: /créer une histoire/i }),
     ).toBeInTheDocument();
     expect(screen.getByLabelText(/^titre$/i)).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /annuler/i })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /^créer$/i })).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /annuler/i }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /^créer$/i }),
+    ).toBeInTheDocument();
   });
 
   it("marks Créer as aria-disabled with the 'titre requis' reason while empty", () => {
@@ -227,7 +238,9 @@ describe("<CreateStoryDialog />", () => {
     field.value = "A";
     await user.keyboard("{Enter}");
 
-    await waitFor(() => expect(createStory).toHaveBeenCalledWith({ title: "A" }));
+    await waitFor(() =>
+      expect(createStory).toHaveBeenCalledWith({ title: "A" }),
+    );
     await waitFor(() =>
       expect(onCreated).toHaveBeenCalledWith({ id: "id-3", title: "A" }),
     );
@@ -288,7 +301,9 @@ describe("<CreateStoryDialog />", () => {
     renderDialog({ onCreateFromFolderRequest: vi.fn() });
     // The interactive path is INTACT: field + both CTAs still there.
     expect(screen.getByLabelText(/^titre$/i)).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /^créer$/i })).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /^créer$/i }),
+    ).toBeInTheDocument();
     // The secondary entry, with its frozen copy.
     expect(
       screen.getByText("Ou démarre depuis un dossier préparé hors de Rustory"),
@@ -353,7 +368,9 @@ describe("<CreateStoryDialog />", () => {
     });
     // The interactive path is INTACT: field + primary CTA still there.
     expect(screen.getByLabelText(/^titre$/i)).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /^créer$/i })).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /^créer$/i }),
+    ).toBeInTheDocument();
     // The folder entry is INTACT.
     expect(
       screen.getByRole("button", { name: "Choisir un dossier…" }),
@@ -450,7 +467,12 @@ describe("<CreateStoryDialog />", () => {
       onCreateFromRssRequest: vi.fn(),
       contentSourcePolicy: {
         sources: [
-          { kind: "rss", label: "Flux RSS", activation: "enabled" },
+          {
+            kind: "rss",
+            label: "Flux RSS",
+            activation: "enabled",
+            activationMarker: "Activée par la distribution officielle",
+          },
           { kind: "atom", label: "Flux Atom", activation: "enabled" },
         ],
       },
@@ -472,7 +494,12 @@ describe("<CreateStoryDialog />", () => {
       onCreateFromRssRequest: vi.fn(),
       contentSourcePolicy: {
         sources: [
-          { kind: "rss", label: "Flux RSS", activation: "enabled" },
+          {
+            kind: "rss",
+            label: "Flux RSS",
+            activation: "enabled",
+            activationMarker: "Activée par la distribution officielle",
+          },
           {
             kind: "atom",
             label: "Flux Atom",

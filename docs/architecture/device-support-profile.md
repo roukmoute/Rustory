@@ -8,6 +8,16 @@ here MUST have a corresponding test in
 `src-tauri/src/application/device/mod.rs::tests::check_operation_*`
 and a domain entry in `src-tauri/src/domain/device/profile.rs`.
 
+The device matrix and the local-artifact registry below are ENUMERABLE
+in the pure domain (`src-tauri/src/domain/device/support_matrix.rs`,
+`src-tauri/src/domain/import/local_artifact.rs`) and served in-app by
+the pure `read_support_profile` command: the classifiers and the
+`Profil de support` screen (route `/settings`, see
+[ui-states.md#Support Profile Screen Contract](./ui-states.md)) consult
+the SAME single truth. The `Consulter le profil de support` gesture
+targets that internal screen — this document stays the detailed
+developer reference.
+
 This document is the source of truth that the
 `application::device::check_operation_allowed` capability gate
 implements. Any divergence between the matrix below and the gate

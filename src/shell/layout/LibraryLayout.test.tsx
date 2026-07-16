@@ -13,8 +13,11 @@ describe("<LibraryLayout />", () => {
       />,
     );
 
+    // Re-scoped with the support-profile screen: the left column now
+    // carries filters AND navigation entries, so its accessible name is
+    // the generalized `Navigation bibliothèque` (Library Layout Contract).
     const nav = screen.getByRole("navigation", {
-      name: /filtres bibliothèque/i,
+      name: /navigation bibliothèque/i,
     });
     const main = screen.getByRole("main", { name: /collection d'histoires/i });
     const panel = screen.getByRole("complementary", {

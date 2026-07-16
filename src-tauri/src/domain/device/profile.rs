@@ -1,5 +1,6 @@
 use super::family::{DeviceFamily, FirmwareCohort, FlamFirmwareCohort, LuniiFirmwareCohort};
 use super::operations::SupportedOperations;
+use super::support_matrix::supported_operations_for;
 
 /// Canonical description of a recognized device. Built only by the
 /// per-family classifiers ([`classify_lunii`], [`classify_flam`]) — a
@@ -95,43 +96,14 @@ pub fn classify_lunii(
         };
     }
 
-    let (cohort, ops) = match metadata_version {
-        3 => (
-            LuniiFirmwareCohort::OrigineV1,
-            // Epic 3 wires the write gate: Origine v1 accepts the round-trip
-            // of an imported pack (opaque bytes already in device format) —
-            // the safest possible write, reproducing what the device held.
-            SupportedOperations {
-                read_library: true,
-                inspect_story: true,
-                import_story: true,
-                write_story: true,
-            },
-        ),
-        6 => (
-            LuniiFirmwareCohort::MidGenV2,
-            // Mid-Gen v2: same round-trip write support as Origine v1.
-            SupportedOperations {
-                read_library: true,
-                inspect_story: true,
-                import_story: true,
-                write_story: true,
-            },
-        ),
-        7 => (
-            LuniiFirmwareCohort::V3,
-            // V3 reverse engineering is still active in 2026; we cannot
-            // guarantee a corruption-free import. Read is allowed (just
-            // file enumeration), inspect is allowed (read-only metadata
-            // peek), but import_story stays false and write_story stays
-            // false until the V3 pipeline is verified end-to-end.
-            SupportedOperations {
-                read_library: true,
-                inspect_story: true,
-                import_story: false,
-                write_story: false,
-            },
-        ),
+    // The version→cohort mapping stays HERE (it is classification);
+    // the per-cohort capabilities live on the enumerable support
+    // matrix (`support_matrix.rs`), the single truth the in-app
+    // support-profile screen consults too.
+    let cohort = match metadata_version {
+        3 => LuniiFirmwareCohort::OrigineV1,
+        6 => LuniiFirmwareCohort::MidGenV2,
+        7 => LuniiFirmwareCohort::V3,
         _ => {
             return DeviceProfileClassification::Unsupported {
                 reason: UnsupportedReason::MetadataUnsupported,
@@ -146,7 +118,7 @@ pub fn classify_lunii(
         firmware_cohort: FirmwareCohort::Lunii(cohort),
         metadata_format_version: Some(metadata_version),
         device_identifier: hashed_id.to_string(),
-        supported_operations: ops,
+        supported_operations: supported_operations_for(FirmwareCohort::Lunii(cohort)),
     })
 }
 
@@ -200,13 +172,10 @@ pub fn classify_flam(
         device_identifier: hashed_id.to_string(),
         // The FLAM Gen1 matrix line (device-support-profile.md): read
         // capabilities ✅✅✅, write ❌ — activated line by line, never
-        // wholesale.
-        supported_operations: SupportedOperations {
-            read_library: true,
-            inspect_story: true,
-            import_story: true,
-            write_story: false,
-        },
+        // wholesale, consulted on the enumerable matrix.
+        supported_operations: supported_operations_for(FirmwareCohort::Flam(
+            FlamFirmwareCohort::Gen1,
+        )),
     })
 }
 

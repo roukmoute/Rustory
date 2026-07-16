@@ -446,10 +446,26 @@ pub fn content_source_reason(activation: ContentSourceActivation) -> Option<&'st
     }
 }
 
+/// The frozen entry-level activation marker of an ENABLED line — `None`
+/// otherwise (a non-enabled line carries its reason instead). Carried by
+/// the policy DTO so EVERY surface rendering the marker (the creation
+/// dialog, the support-profile screen) renders the SAME Rust-owned copy
+/// verbatim — never a re-typed frontend literal. Exhaustive match
+/// (tripwire).
+pub fn content_source_activation_marker(
+    activation: ContentSourceActivation,
+) -> Option<&'static str> {
+    match activation {
+        ContentSourceActivation::Enabled => Some("Activée par la distribution officielle"),
+        ContentSourceActivation::NotActivated | ContentSourceActivation::BlockedByPolicy => None,
+    }
+}
+
 /// One serialized line of the content-source policy: the closed wire tags
-/// (`kind`, `activation`), the frozen label and — on a non-enabled line
-/// only — the frozen disabled-entry reason (`reason` is OMITTED on an
-/// enabled line, and the TS guard refuses any incoherence). Every copy is
+/// (`kind`, `activation`), the frozen label, and EXACTLY ONE of — the
+/// frozen entry-level activation marker on an enabled line, or the frozen
+/// disabled-entry reason on a non-enabled one (each key is OMITTED
+/// otherwise, and the TS guard refuses any incoherence). Every copy is
 /// Rust-authoritative: the frontend renders these strings verbatim and
 /// never recomposes them.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -458,6 +474,8 @@ pub struct ContentSourceDto {
     pub kind: &'static str,
     pub label: &'static str,
     pub activation: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub activation_marker: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<&'static str>,
 }
@@ -482,6 +500,7 @@ impl ContentSourcePolicyDto {
                     kind: line.kind.wire_tag(),
                     label: content_source_label(line.kind),
                     activation: line.activation.wire_tag(),
+                    activation_marker: content_source_activation_marker(line.activation),
                     reason: content_source_reason(line.activation),
                 })
                 .collect(),

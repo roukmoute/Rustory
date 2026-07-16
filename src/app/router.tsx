@@ -6,6 +6,7 @@ import {
 } from "react-router-dom";
 
 import { LibraryRoute } from "../routes/library/LibraryRoute";
+import { SettingsRoute } from "../routes/settings/SettingsRoute";
 import { StoryEditRoute } from "../routes/story-edit/StoryEditRoute";
 import { AppShell } from "./AppShell";
 
@@ -21,6 +22,7 @@ export const appRoutes: RouteObject[] = [
     children: [
       { index: true, element: <Navigate to="/library" replace /> },
       { path: "library", element: <LibraryRoute /> },
+      { path: "settings", element: <SettingsRoute /> },
       { path: "story/:storyId/edit", element: <StoryEditRoute /> },
       { path: "*", element: <Navigate to="/library" replace /> },
     ],

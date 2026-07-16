@@ -8,6 +8,9 @@ mod rss_creation;
 #[path = "contracts/content_source_policy.rs"]
 mod content_source_policy;
 
+#[path = "contracts/support_profile.rs"]
+mod support_profile;
+
 #[path = "contracts/library_overview.rs"]
 mod library_overview;
 

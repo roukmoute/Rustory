@@ -12,6 +12,7 @@ pub mod markers;
 pub mod operations;
 pub mod pack;
 pub mod profile;
+pub mod support_matrix;
 pub mod title;
 
 pub use family::{DeviceFamily, FirmwareCohort, FlamFirmwareCohort, LuniiFirmwareCohort};
@@ -35,5 +36,9 @@ pub use pack::{
 };
 pub use profile::{
     classify_flam, classify_lunii, DeviceProfile, DeviceProfileClassification, UnsupportedReason,
+};
+pub use support_matrix::{
+    official_device_support_matrix, supported_operations_for, supported_operations_in,
+    DeviceOperationsSupport, DeviceSupportLine, OperationSupport, ALL_FIRMWARE_COHORTS,
 };
 pub use title::{PackTitle, PackTitleCandidates, PackTitleSource, TitleValue};

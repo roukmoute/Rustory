@@ -33,18 +33,25 @@ const mockReadContentSourcePolicy = vi.fn();
  *  `read_content_source_policy` serializes it. */
 const OFFICIAL_CONTENT_SOURCE_POLICY = {
   sources: [
-    { kind: "rss", label: "Flux RSS", activation: "enabled" },
+    {
+      kind: "rss",
+      label: "Flux RSS",
+      activation: "enabled",
+      activationMarker: "Activée par la distribution officielle",
+    },
     {
       kind: "atom",
       label: "Flux Atom",
       activation: "notActivated",
-      reason: "Source indisponible: non activée dans la distribution officielle",
+      reason:
+        "Source indisponible: non activée dans la distribution officielle",
     },
     {
       kind: "jsonFeed",
       label: "Flux JSON Feed",
       activation: "notActivated",
-      reason: "Source indisponible: non activée dans la distribution officielle",
+      reason:
+        "Source indisponible: non activée dans la distribution officielle",
     },
   ],
 };
@@ -145,7 +152,8 @@ vi.mock("../../ipc/commands/story-transfer", async () => {
     startTransferStory: (input: unknown) => mockStartTransfer(input),
     readTransferState: (input: unknown) => mockReadTransfer(input),
     readTransferOutcome: (input: unknown) => mockReadTransferOutcome(input),
-    discardTransferOutcome: (input: unknown) => mockDiscardTransferOutcome(input),
+    discardTransferOutcome: (input: unknown) =>
+      mockDiscardTransferOutcome(input),
   };
 });
 
@@ -192,8 +200,13 @@ function renderLibrary(options: { strict?: boolean } = {}) {
     { path: "/library", element: <LibraryRoute /> },
     {
       path: "/story/:storyId/edit",
-      element: <div data-testid="story-edit-stub">{STORY_EDIT_MARKER_TITLE}</div>,
+      element: (
+        <div data-testid="story-edit-stub">{STORY_EDIT_MARKER_TITLE}</div>
+      ),
     },
+    // The support-profile screen the navigation entry and the
+    // `Consulter le profil de support` gesture both target IN-APP.
+    { path: "/settings", element: <div data-testid="settings-stub" /> },
   ];
   const router = createMemoryRouter(routes, {
     initialEntries: ["/library"],
@@ -386,9 +399,7 @@ describe("<LibraryRoute />", () => {
 
     renderLibrary();
 
-    await user.click(
-      await screen.findByRole("button", { name: /réessayer/i }),
-    );
+    await user.click(await screen.findByRole("button", { name: /réessayer/i }));
 
     await waitFor(() =>
       expect(
@@ -448,7 +459,7 @@ describe("<LibraryRoute />", () => {
     await screen.findByRole("heading", { name: /ta bibliothèque est vide/i });
 
     expect(
-      screen.getByRole("navigation", { name: /filtres bibliothèque/i }),
+      screen.getByRole("navigation", { name: /navigation bibliothèque/i }),
     ).toBeInTheDocument();
     expect(
       screen.getByRole("main", { name: /collection d'histoires/i }),
@@ -472,7 +483,7 @@ describe("<LibraryRoute />", () => {
     ).toBeInTheDocument();
 
     const nav = screen.getByRole("navigation", {
-      name: /filtres bibliothèque/i,
+      name: /navigation bibliothèque/i,
     });
     expect(
       within(nav).queryByRole("heading", {
@@ -508,7 +519,7 @@ describe("<LibraryRoute />", () => {
     await screen.findByRole("alert");
 
     expect(
-      screen.getByRole("navigation", { name: /filtres bibliothèque/i }),
+      screen.getByRole("navigation", { name: /navigation bibliothèque/i }),
     ).toBeInTheDocument();
     expect(
       screen.getByRole("complementary", { name: /panneau de décision/i }),
@@ -556,9 +567,7 @@ describe("<LibraryRoute />", () => {
     });
     renderLibrary();
 
-    await user.click(
-      await screen.findByRole("button", { name: /le soleil/i }),
-    );
+    await user.click(await screen.findByRole("button", { name: /le soleil/i }));
     await user.keyboard("{Control>}");
     await user.click(screen.getByRole("button", { name: /la lune/i }));
     await user.keyboard("{/Control}");
@@ -587,9 +596,7 @@ describe("<LibraryRoute />", () => {
     });
     renderLibrary();
 
-    await user.click(
-      await screen.findByRole("button", { name: /le soleil/i }),
-    );
+    await user.click(await screen.findByRole("button", { name: /le soleil/i }));
     expect(useLibraryShell.getState().selectedStoryIds.has("s1")).toBe(true);
 
     // The previous revision of this test clicked on the `<nav>` "Filtres"
@@ -648,9 +655,7 @@ describe("<LibraryRoute />", () => {
     });
     const router = renderLibrary();
 
-    await user.click(
-      await screen.findByRole("button", { name: /le soleil/i }),
-    );
+    await user.click(await screen.findByRole("button", { name: /le soleil/i }));
 
     const panel = screen.getByRole("complementary", {
       name: /panneau de décision/i,
@@ -699,9 +704,9 @@ describe("<LibraryRoute />", () => {
     expect(alert).toHaveTextContent(
       /bibliothèque incohérente, recharge nécessaire/i,
     );
-    expect(
-      alert.textContent ?? "",
-    ).toMatch(/bibliothèque locale contient des histoires en double/i);
+    expect(alert.textContent ?? "").toMatch(
+      /bibliothèque locale contient des histoires en double/i,
+    );
   });
 
   it("renders the cached overview immediately on remount (stale-while-revalidate)", async () => {
@@ -742,9 +747,7 @@ describe("<LibraryRoute />", () => {
     renderLibrary();
 
     await waitFor(() =>
-      expect(useLibraryShell.getState().selectedStoryIds.has("s1")).toBe(
-        false,
-      ),
+      expect(useLibraryShell.getState().selectedStoryIds.has("s1")).toBe(false),
     );
     expect(useLibraryShell.getState().selectedStoryIds.size).toBe(0);
   });
@@ -828,9 +831,7 @@ describe("<LibraryRoute />", () => {
       screen.getByLabelText("Adresse du flux RSS"),
       "https://exemple.fr/flux.xml",
     );
-    await user.click(
-      screen.getByRole("button", { name: "Récupérer le flux" }),
-    );
+    await user.click(screen.getByRole("button", { name: "Récupérer le flux" }));
     expect(mockFetchRssPreview).toHaveBeenCalledTimes(1);
 
     const importButton = screen.getByRole("button", {
@@ -948,12 +949,8 @@ describe("<LibraryRoute />", () => {
       screen.getByLabelText("Adresse du flux RSS"),
       "https://exemple.fr/flux.xml",
     );
-    await user.click(
-      screen.getByRole("button", { name: "Récupérer le flux" }),
-    );
-    await user.click(
-      await screen.findByRole("button", { name: /Episode 1/ }),
-    );
+    await user.click(screen.getByRole("button", { name: "Récupérer le flux" }));
+    await user.click(await screen.findByRole("button", { name: /Episode 1/ }));
     await user.click(
       screen.getByRole("button", { name: "Créer le brouillon" }),
     );
@@ -995,10 +992,9 @@ describe("<LibraryRoute />", () => {
     // The known non-activated kinds render VISIBLE but DISABLED with the
     // Rust-carried reason.
     for (const label of ["Flux Atom", "Flux JSON Feed"]) {
-      expect(within(dialog).getByRole("button", { name: label })).toHaveAttribute(
-        "aria-disabled",
-        "true",
-      );
+      expect(
+        within(dialog).getByRole("button", { name: label }),
+      ).toHaveAttribute("aria-disabled", "true");
     }
     expect(
       within(dialog).getAllByText(
@@ -1062,7 +1058,9 @@ describe("<LibraryRoute />", () => {
       ).toHaveAttribute("aria-disabled", "true");
     });
     expect(
-      within(dialog).getByText("Sources externes indisponibles pour l'instant."),
+      within(dialog).getByText(
+        "Sources externes indisponibles pour l'instant.",
+      ),
     ).toBeInTheDocument();
   });
 
@@ -1090,9 +1088,13 @@ describe("<LibraryRoute />", () => {
     });
     expect(rssButton).toHaveAttribute("aria-disabled", "true");
     await user.click(rssButton);
-    expect(screen.queryByLabelText("Adresse du flux RSS")).not.toBeInTheDocument();
     expect(
-      within(dialog).getByText("Sources externes indisponibles pour l'instant."),
+      screen.queryByLabelText("Adresse du flux RSS"),
+    ).not.toBeInTheDocument();
+    expect(
+      within(dialog).getByText(
+        "Sources externes indisponibles pour l'instant.",
+      ),
     ).toBeInTheDocument();
     // The primary title path is NEVER blocked by a policy failure.
     expect(within(dialog).getByLabelText(/^titre$/i)).toBeInTheDocument();
@@ -1182,11 +1184,9 @@ describe("<LibraryRoute />", () => {
     const user = userEvent.setup();
     // First fetch returns an empty library; the second fetch — triggered
     // after invalidation — returns the freshly created story.
-    mockGet
-      .mockResolvedValueOnce({ stories: [] })
-      .mockResolvedValueOnce({
-        stories: [{ id: "new-id", title: "Mon histoire" }],
-      });
+    mockGet.mockResolvedValueOnce({ stories: [] }).mockResolvedValueOnce({
+      stories: [{ id: "new-id", title: "Mon histoire" }],
+    });
 
     const storyModule = await import("../../ipc/commands/story");
     const createStorySpy = vi.spyOn(storyModule, "createStory");
@@ -1209,8 +1209,13 @@ describe("<LibraryRoute />", () => {
       const dialog = await screen.findByRole("dialog", {
         name: /créer une histoire/i,
       });
-      await user.type(within(dialog).getByLabelText(/^titre$/i), "Mon histoire");
-      await user.click(within(dialog).getByRole("button", { name: /^créer$/i }));
+      await user.type(
+        within(dialog).getByLabelText(/^titre$/i),
+        "Mon histoire",
+      );
+      await user.click(
+        within(dialog).getByRole("button", { name: /^créer$/i }),
+      );
 
       await waitFor(() =>
         expect(createStorySpy).toHaveBeenCalledWith({
@@ -1301,6 +1306,50 @@ describe("<LibraryRoute />", () => {
     );
   });
 
+  it("navigates to /settings through the permanent left-column support-profile entry", async () => {
+    mockGet.mockResolvedValueOnce({ stories: [] });
+    renderLibrary();
+    const nav = screen.getByRole("navigation", {
+      name: /navigation bibliothèque/i,
+    });
+    const user = userEvent.setup();
+    await user.click(
+      within(nav).getByRole("button", { name: "Profil de support" }),
+    );
+    await waitFor(() => {
+      expect(screen.getByTestId("settings-stub")).toBeInTheDocument();
+    });
+  });
+
+  it("navigates to /settings in-app through the Consulter le profil de support gesture — no external browser", async () => {
+    mockGet.mockResolvedValueOnce({ stories: [] });
+    mockDevice.mockResolvedValueOnce({
+      kind: "unsupported",
+      reason: "metadataUnsupported",
+      firmwareHint: "metadata_v99",
+    });
+    renderLibrary();
+    const panel = screen.getByRole("complementary", {
+      name: /panneau de décision/i,
+    });
+    const user = userEvent.setup();
+    await waitFor(() =>
+      expect(
+        within(panel).getByRole("button", {
+          name: "Consulter le profil de support officiel",
+        }),
+      ).toBeInTheDocument(),
+    );
+    await user.click(
+      within(panel).getByRole("button", {
+        name: "Consulter le profil de support officiel",
+      }),
+    );
+    await waitFor(() => {
+      expect(screen.getByTestId("settings-stub")).toBeInTheDocument();
+    });
+  });
+
   it("passes device state 'error' when the scan transport fails (DEVICE_SCAN_FAILED)", async () => {
     mockGet.mockResolvedValueOnce({ stories: [] });
     mockDevice.mockRejectedValueOnce({
@@ -1337,7 +1386,9 @@ describe("<LibraryRoute />", () => {
     const panel = screen.getByRole("complementary", {
       name: /panneau de décision/i,
     });
-    expect(within(panel).getByText(/détection indisponible/i)).toBeInTheDocument();
+    expect(
+      within(panel).getByText(/détection indisponible/i),
+    ).toBeInTheDocument();
   });
 
   it("renders the device state when the library overview is in error (orthogonality — inverse of AC #3)", async () => {
@@ -1363,21 +1414,19 @@ describe("<LibraryRoute />", () => {
   it("the refresh button in the panel re-runs the device scan only", async () => {
     const user = userEvent.setup();
     mockGet.mockResolvedValueOnce({ stories: [] });
-    mockDevice
-      .mockResolvedValueOnce({ kind: "none" })
-      .mockResolvedValueOnce({
-        kind: "supported",
-        family: "lunii",
-        firmwareCohort: "midGenV2",
-        metadataFormatVersion: 6,
-        deviceIdentifier: "id2",
-        supportedOperations: {
-          readLibrary: true,
-          inspectStory: true,
-          importStory: true,
-          writeStory: false,
-        },
-      });
+    mockDevice.mockResolvedValueOnce({ kind: "none" }).mockResolvedValueOnce({
+      kind: "supported",
+      family: "lunii",
+      firmwareCohort: "midGenV2",
+      metadataFormatVersion: 6,
+      deviceIdentifier: "id2",
+      supportedOperations: {
+        readLibrary: true,
+        inspectStory: true,
+        importStory: true,
+        writeStory: false,
+      },
+    });
     renderLibrary();
     const panel = screen.getByRole("complementary", {
       name: /panneau de décision/i,
@@ -1409,7 +1458,9 @@ describe("<LibraryRoute />", () => {
       name: /panneau de décision/i,
     });
     await waitFor(() =>
-      expect(within(panel).getAllByText(/profil ambigu/i).length).toBeGreaterThan(0),
+      expect(
+        within(panel).getAllByText(/profil ambigu/i).length,
+      ).toBeGreaterThan(0),
     );
     expect(
       within(panel).getByText(/2 candidats détectés/i),
@@ -1433,7 +1484,9 @@ describe("<LibraryRoute />", () => {
   };
 
   it("lists the device library distinctly in the center column when a supported Lunii exposes packs", async () => {
-    mockGet.mockResolvedValueOnce({ stories: [{ id: "s1", title: "Le soleil" }] });
+    mockGet.mockResolvedValueOnce({
+      stories: [{ id: "s1", title: "Le soleil" }],
+    });
     mockDevice.mockResolvedValue(supportedV3);
     mockDeviceLibrary.mockResolvedValue({
       kind: "readable",
@@ -1480,7 +1533,9 @@ describe("<LibraryRoute />", () => {
         '"supportedOperations":{"readLibrary":true,"inspectStory":true,' +
         '"importStory":true,"writeStory":false}}',
     ) as ConnectedDeviceDto;
-    mockGet.mockResolvedValueOnce({ stories: [{ id: "s1", title: "Le soleil" }] });
+    mockGet.mockResolvedValueOnce({
+      stories: [{ id: "s1", title: "Le soleil" }],
+    });
     mockDevice.mockResolvedValue(supportedFlam);
     mockDeviceLibrary.mockResolvedValue({
       kind: "readable",
@@ -1512,7 +1567,9 @@ describe("<LibraryRoute />", () => {
   });
 
   it("shows a recoverable device-library error in the center without breaking the local library (AC #3)", async () => {
-    mockGet.mockResolvedValueOnce({ stories: [{ id: "s1", title: "Le soleil" }] });
+    mockGet.mockResolvedValueOnce({
+      stories: [{ id: "s1", title: "Le soleil" }],
+    });
     mockDevice.mockResolvedValue(supportedV3);
     mockDeviceLibrary.mockRejectedValue({
       code: "DEVICE_SCAN_FAILED",
@@ -1566,7 +1623,9 @@ describe("<LibraryRoute />", () => {
 
   it("selecting a device story opens the right-column inspector with its identity + provenance (AC1)", async () => {
     const user = userEvent.setup();
-    mockGet.mockResolvedValueOnce({ stories: [{ id: "s1", title: "Le soleil" }] });
+    mockGet.mockResolvedValueOnce({
+      stories: [{ id: "s1", title: "Le soleil" }],
+    });
     mockDevice.mockResolvedValue(supportedV3);
     mockDeviceLibrary.mockResolvedValue(readableTwo);
     renderLibrary();
@@ -1635,7 +1694,9 @@ describe("<LibraryRoute />", () => {
 
   it("device-story selection is independent from the local selection — they never merge", async () => {
     const user = userEvent.setup();
-    mockGet.mockResolvedValueOnce({ stories: [{ id: "s1", title: "Le soleil" }] });
+    mockGet.mockResolvedValueOnce({
+      stories: [{ id: "s1", title: "Le soleil" }],
+    });
     mockDevice.mockResolvedValue(supportedV3);
     mockDeviceLibrary.mockResolvedValue(readableTwo);
     renderLibrary();
@@ -1804,7 +1865,9 @@ describe("<LibraryRoute />", () => {
       name: /copier dans ma bibliothèque/i,
     });
     expect(cta).toHaveAttribute("aria-disabled", "true");
-    expect(within(inspector).getByText(/profil non supporté/i)).toBeInTheDocument();
+    expect(
+      within(inspector).getByText(/profil non supporté/i),
+    ).toBeInTheDocument();
 
     // A soft-disabled CTA swallows the activation — no IPC fires.
     await user.click(cta);
@@ -1891,7 +1954,9 @@ describe("<LibraryRoute />", () => {
       ).toHaveAttribute("aria-disabled", "true"),
     );
     expect(
-      within(inspector).getByText("Copie indisponible: déjà dans ta bibliothèque"),
+      within(inspector).getByText(
+        "Copie indisponible: déjà dans ta bibliothèque",
+      ),
     ).toBeInTheDocument();
     // The provenance note follows the local truth too (F4): never
     // "pas encore" on a story whose copy exists.
@@ -2144,7 +2209,9 @@ describe("<LibraryRoute />", () => {
     expect(within(inspector).getByRole("alert")).toBeInTheDocument();
 
     // The explicit Fermer DOES dismiss it…
-    await user.click(within(inspector).getByRole("button", { name: /fermer/i }));
+    await user.click(
+      within(inspector).getByRole("button", { name: /fermer/i }),
+    );
     expect(within(inspector).queryByRole("alert")).not.toBeInTheDocument();
 
     // …and it stays gone after another A→B→A (now genuinely idle).
@@ -2232,7 +2299,9 @@ describe("<LibraryRoute />", () => {
 
   it("renders the pre-send comparison when one local story is selected against a readable device (AC1)", async () => {
     const user = userEvent.setup();
-    mockGet.mockResolvedValueOnce({ stories: [{ id: "s1", title: "Le soleil" }] });
+    mockGet.mockResolvedValueOnce({
+      stories: [{ id: "s1", title: "Le soleil" }],
+    });
     mockDevice.mockResolvedValue(supportedV3);
     mockTransferPreview.mockResolvedValue(readyNew);
     renderLibrary();
@@ -2252,12 +2321,16 @@ describe("<LibraryRoute />", () => {
       expect(comparison).toHaveTextContent(/nouvelle sur l'appareil/i),
     );
     expect(comparison).toHaveTextContent(/serait ajoutée à l'appareil/i);
-    expect(comparison).toHaveTextContent(/2 autres histoires.*resteront inchangées/i);
+    expect(comparison).toHaveTextContent(
+      /2 autres histoires.*resteront inchangées/i,
+    );
   });
 
   it("shows the replacement verdict when the selected story's pack is on the device (AC1)", async () => {
     const user = userEvent.setup();
-    mockGet.mockResolvedValueOnce({ stories: [{ id: "s1", title: "Le soleil" }] });
+    mockGet.mockResolvedValueOnce({
+      stories: [{ id: "s1", title: "Le soleil" }],
+    });
     mockDevice.mockResolvedValue(supportedV3);
     mockTransferPreview.mockResolvedValue({
       ...readyNew,
@@ -2275,12 +2348,16 @@ describe("<LibraryRoute />", () => {
       expect(comparison).toHaveTextContent(/déjà présente sur l'appareil/i),
     );
     expect(comparison).toHaveTextContent(/un envoi la remplacerait/i);
-    expect(comparison).toHaveTextContent(/1 autre histoire.*restera inchangée/i);
+    expect(comparison).toHaveTextContent(
+      /1 autre histoire.*restera inchangée/i,
+    );
   });
 
   it("keeps the send CTA disabled even when the comparison is ready (AC2)", async () => {
     const user = userEvent.setup();
-    mockGet.mockResolvedValueOnce({ stories: [{ id: "s1", title: "Le soleil" }] });
+    mockGet.mockResolvedValueOnce({
+      stories: [{ id: "s1", title: "Le soleil" }],
+    });
     mockDevice.mockResolvedValue(supportedV3);
     mockTransferPreview.mockResolvedValue(readyNew);
     renderLibrary();
@@ -2329,14 +2406,18 @@ describe("<LibraryRoute />", () => {
     await user.click(screen.getByRole("button", { name: /la lune/i }));
     await user.keyboard("{/Control}");
 
-    expect(comparison).toHaveTextContent(/sélectionne une seule histoire locale/i);
+    expect(comparison).toHaveTextContent(
+      /sélectionne une seule histoire locale/i,
+    );
     expect(comparison).not.toHaveTextContent(/nouvelle sur l'appareil/i);
     expect(comparison).not.toHaveTextContent(/déjà présente sur l'appareil/i);
   });
 
   it("distinguishes the no-device hint when one story is selected but no readable device (AC3)", async () => {
     const user = userEvent.setup();
-    mockGet.mockResolvedValueOnce({ stories: [{ id: "s1", title: "Le soleil" }] });
+    mockGet.mockResolvedValueOnce({
+      stories: [{ id: "s1", title: "Le soleil" }],
+    });
     // Device present but NOT read-authorized → no readable device id.
     mockDevice.mockResolvedValue({
       ...supportedV3,
@@ -2360,7 +2441,9 @@ describe("<LibraryRoute />", () => {
 
   it("surfaces a comparison failure in-context without breaking the local library (AC3)", async () => {
     const user = userEvent.setup();
-    mockGet.mockResolvedValueOnce({ stories: [{ id: "s1", title: "Le soleil" }] });
+    mockGet.mockResolvedValueOnce({
+      stories: [{ id: "s1", title: "Le soleil" }],
+    });
     mockDevice.mockResolvedValue(supportedV3);
     mockTransferPreview.mockRejectedValue({
       code: "DEVICE_SCAN_FAILED",
@@ -2401,7 +2484,9 @@ describe("<LibraryRoute />", () => {
 
   it("shows a recoverable device-changed comparison (not the no-device hint) when a readable device folds (AC1)", async () => {
     const user = userEvent.setup();
-    mockGet.mockResolvedValueOnce({ stories: [{ id: "s1", title: "Le soleil" }] });
+    mockGet.mockResolvedValueOnce({
+      stories: [{ id: "s1", title: "Le soleil" }],
+    });
     mockDevice.mockResolvedValue(supportedV3); // a readable device IS detected…
     mockTransferPreview.mockResolvedValue({ kind: "noDevice" }); // …but the re-read folds
     renderLibrary();
@@ -2444,7 +2529,9 @@ describe("<LibraryRoute />", () => {
 
   it("renders the validation verdict when one local story is selected against a readable device (AC1)", async () => {
     const user = userEvent.setup();
-    mockGet.mockResolvedValueOnce({ stories: [{ id: "s1", title: "Le soleil" }] });
+    mockGet.mockResolvedValueOnce({
+      stories: [{ id: "s1", title: "Le soleil" }],
+    });
     mockDevice.mockResolvedValue(supportedV3);
     mockStoryValidation.mockResolvedValue(blockedValidation);
     renderLibrary();
@@ -2472,7 +2559,9 @@ describe("<LibraryRoute />", () => {
 
   it("keeps the send CTA disabled even when the verdict is présumée transférable (AC3/FR34)", async () => {
     const user = userEvent.setup();
-    mockGet.mockResolvedValueOnce({ stories: [{ id: "s1", title: "Le soleil" }] });
+    mockGet.mockResolvedValueOnce({
+      stories: [{ id: "s1", title: "Le soleil" }],
+    });
     mockDevice.mockResolvedValue(supportedV3);
     mockStoryValidation.mockResolvedValue({
       ...blockedValidation,
@@ -2528,7 +2617,9 @@ describe("<LibraryRoute />", () => {
 
   it("does not fire validation without a readable device (AC3)", async () => {
     const user = userEvent.setup();
-    mockGet.mockResolvedValueOnce({ stories: [{ id: "s1", title: "Le soleil" }] });
+    mockGet.mockResolvedValueOnce({
+      stories: [{ id: "s1", title: "Le soleil" }],
+    });
     mockDevice.mockResolvedValue({
       ...supportedV3,
       supportedOperations: {
@@ -2550,7 +2641,9 @@ describe("<LibraryRoute />", () => {
 
   it("surfaces a validation failure in-context without breaking the local library (orthogonality, AC3)", async () => {
     const user = userEvent.setup();
-    mockGet.mockResolvedValueOnce({ stories: [{ id: "s1", title: "Le soleil" }] });
+    mockGet.mockResolvedValueOnce({
+      stories: [{ id: "s1", title: "Le soleil" }],
+    });
     mockDevice.mockResolvedValue(supportedV3);
     mockStoryValidation.mockRejectedValue({
       code: "DEVICE_SCAN_FAILED",
@@ -2585,7 +2678,9 @@ describe("<LibraryRoute />", () => {
 
   it("offers an active Préparer CTA for a présumée-transférable selection and triggers the preparation (T10)", async () => {
     const user = userEvent.setup();
-    mockGet.mockResolvedValueOnce({ stories: [{ id: "s1", title: "Le soleil" }] });
+    mockGet.mockResolvedValueOnce({
+      stories: [{ id: "s1", title: "Le soleil" }],
+    });
     mockDevice.mockResolvedValue(supportedV3);
     mockStoryValidation.mockResolvedValue(presumedTransferableValidation);
     renderLibrary();
@@ -2641,12 +2736,16 @@ describe("<LibraryRoute />", () => {
     expect(
       screen.getByRole("button", { name: /le soleil/i }),
     ).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /la lune/i })).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /la lune/i }),
+    ).toBeInTheDocument();
   });
 
   it("surfaces a preparation failure in-context and leaves the local library intact (T10/AC3)", async () => {
     const user = userEvent.setup();
-    mockGet.mockResolvedValueOnce({ stories: [{ id: "s1", title: "Le soleil" }] });
+    mockGet.mockResolvedValueOnce({
+      stories: [{ id: "s1", title: "Le soleil" }],
+    });
     mockDevice.mockResolvedValue(supportedV3);
     mockStoryValidation.mockResolvedValue(presumedTransferableValidation);
     // The authoritative re-read folds to a recoverable failure.
@@ -2654,7 +2753,8 @@ describe("<LibraryRoute />", () => {
       kind: "retryable",
       story: { id: "s1", title: "Le soleil" },
       cause: "artifactMissing",
-      message: "Préparation impossible : un fichier nécessaire est introuvable.",
+      message:
+        "Préparation impossible : un fichier nécessaire est introuvable.",
       userAction: "Vérifie l'histoire locale puis relance la préparation.",
       blockers: [],
     });
@@ -2765,10 +2865,7 @@ describe("<LibraryRoute />", () => {
 
   it("mapDeviceForPanel returns 'scanning' when isRefreshing flips on top of a ready snapshot", () => {
     expect(
-      mapDeviceForPanel(
-        { kind: "ready", device: { kind: "none" } },
-        true,
-      ),
+      mapDeviceForPanel({ kind: "ready", device: { kind: "none" } }, true),
     ).toMatchObject({ deviceState: "scanning" });
   });
 
@@ -2836,10 +2933,7 @@ describe("<LibraryRoute />", () => {
         '"supportedOperations":{"readLibrary":true,"inspectStory":true,' +
         '"importStory":true,"writeStory":false}}',
     ) as ConnectedDeviceDto;
-    const mapped = mapDeviceForPanel(
-      { kind: "ready", device: flamDto },
-      false,
-    );
+    const mapped = mapDeviceForPanel({ kind: "ready", device: flamDto }, false);
     expect(mapped.deviceState).toBe("idle");
     expect(mapped.deviceLabel).toBe("FLAM");
     expect(mapped.deviceFamily).toBe("flam");
@@ -2876,13 +2970,25 @@ describe("<LibraryRoute />", () => {
 
   it("mapPreparationView disables Préparer with the selection reasons", () => {
     expect(
-      mapPreparationView({ kind: "idle" }, null, 0, "readable", presumedTransferable),
+      mapPreparationView(
+        { kind: "idle" },
+        null,
+        0,
+        "readable",
+        presumedTransferable,
+      ),
     ).toEqual({
       kind: "unavailable",
       reason: "Préparation indisponible: aucune histoire sélectionnée",
     });
     expect(
-      mapPreparationView({ kind: "idle" }, null, 2, "readable", presumedTransferable),
+      mapPreparationView(
+        { kind: "idle" },
+        null,
+        2,
+        "readable",
+        presumedTransferable,
+      ),
     ).toEqual({
       kind: "unavailable",
       reason: "Préparation indisponible: sélection multiple",
@@ -2891,7 +2997,13 @@ describe("<LibraryRoute />", () => {
 
   it("mapPreparationView disables Préparer with the device reasons", () => {
     expect(
-      mapPreparationView({ kind: "idle" }, STORY_A, 1, "absent", presumedTransferable),
+      mapPreparationView(
+        { kind: "idle" },
+        STORY_A,
+        1,
+        "absent",
+        presumedTransferable,
+      ),
     ).toEqual({
       kind: "unavailable",
       reason: "Préparation indisponible: aucun appareil connecté",
@@ -2919,7 +3031,13 @@ describe("<LibraryRoute />", () => {
     ];
     for (const validation of validations) {
       expect(
-        mapPreparationView({ kind: "idle" }, STORY_A, 1, "readable", validation),
+        mapPreparationView(
+          { kind: "idle" },
+          STORY_A,
+          1,
+          "readable",
+          validation,
+        ),
       ).toEqual({
         kind: "unavailable",
         reason: "Préparation indisponible: corrige les blocages d'abord",
@@ -3016,7 +3134,9 @@ describe("<LibraryRoute />", () => {
 
   it("activates the Envoyer CTA on a writable cohort once the story is Préparée, then triggers the transfer (T10/AC1)", async () => {
     const user = userEvent.setup();
-    mockGet.mockResolvedValueOnce({ stories: [{ id: "s1", title: "Le soleil" }] });
+    mockGet.mockResolvedValueOnce({
+      stories: [{ id: "s1", title: "Le soleil" }],
+    });
     mockDevice.mockResolvedValue(writableOrigine);
     mockStoryValidation.mockResolvedValue(presumedTransferableValidation);
     mockReadPreparation.mockResolvedValue(preparedReread);
@@ -3056,7 +3176,9 @@ describe("<LibraryRoute />", () => {
     const send = within(panel).getByRole("button", {
       name: /envoyer vers la lunii/i,
     });
-    await waitFor(() => expect(send).not.toHaveAttribute("aria-disabled", "true"));
+    await waitFor(() =>
+      expect(send).not.toHaveAttribute("aria-disabled", "true"),
+    );
     await user.click(send);
     expect(mockStartTransfer).toHaveBeenCalledWith({
       storyId: "s1",
@@ -3078,7 +3200,9 @@ describe("<LibraryRoute />", () => {
 
   it("re-hydrates a remembered recoverable failure for the selected story with Relancer + Abandonner and a card badge (AC2/AC3)", async () => {
     const user = userEvent.setup();
-    mockGet.mockResolvedValueOnce({ stories: [{ id: "s1", title: "Le soleil" }] });
+    mockGet.mockResolvedValueOnce({
+      stories: [{ id: "s1", title: "Le soleil" }],
+    });
     mockDevice.mockResolvedValue(writableOrigine);
     mockReadTransferOutcome.mockResolvedValue(rememberedFailure);
     renderLibrary();
@@ -3109,7 +3233,9 @@ describe("<LibraryRoute />", () => {
 
   it("Relancer on a re-hydrated terminal restarts a full cycle with the FRESH writable device id (AC1)", async () => {
     const user = userEvent.setup();
-    mockGet.mockResolvedValueOnce({ stories: [{ id: "s1", title: "Le soleil" }] });
+    mockGet.mockResolvedValueOnce({
+      stories: [{ id: "s1", title: "Le soleil" }],
+    });
     mockDevice.mockResolvedValue(writableOrigine);
     mockReadTransferOutcome.mockResolvedValue(rememberedFailure);
     renderLibrary();
@@ -3133,13 +3259,16 @@ describe("<LibraryRoute />", () => {
 
   it("Abandonner on a re-hydrated terminal purges the durable memory and clears the panel terminal (AC3)", async () => {
     const user = userEvent.setup();
-    mockGet.mockResolvedValueOnce({ stories: [{ id: "s1", title: "Le soleil" }] });
+    mockGet.mockResolvedValueOnce({
+      stories: [{ id: "s1", title: "Le soleil" }],
+    });
     mockDevice.mockResolvedValue(writableOrigine);
     mockReadTransferOutcome.mockResolvedValue({
       ...rememberedFailure,
       terminalKind: "incomplete" as const,
       cause: "writeRejected" as const,
-      message: "Envoi incomplet : l'appareil peut contenir une copie partielle.",
+      message:
+        "Envoi incomplet : l'appareil peut contenir une copie partielle.",
       userAction: "Relance l'envoi pour rétablir un état sûr.",
     });
     renderLibrary();
@@ -3161,7 +3290,9 @@ describe("<LibraryRoute />", () => {
 
   it("never re-hydrates a remembered verified as a live success when the device read is idle (no false success)", async () => {
     const user = userEvent.setup();
-    mockGet.mockResolvedValueOnce({ stories: [{ id: "s1", title: "Le soleil" }] });
+    mockGet.mockResolvedValueOnce({
+      stories: [{ id: "s1", title: "Le soleil" }],
+    });
     mockDevice.mockResolvedValue(writableOrigine);
     mockReadTransfer.mockResolvedValue({ kind: "idle" });
     mockReadTransferOutcome.mockResolvedValue({
@@ -3190,7 +3321,9 @@ describe("<LibraryRoute />", () => {
 
   it("re-hydration yields to a live verified — the device proves the pack over a remembered failure (F1/§2)", async () => {
     const user = userEvent.setup();
-    mockGet.mockResolvedValueOnce({ stories: [{ id: "s1", title: "Le soleil" }] });
+    mockGet.mockResolvedValueOnce({
+      stories: [{ id: "s1", title: "Le soleil" }],
+    });
     mockDevice.mockResolvedValue(writableOrigine);
     // Memory remembers a failure, but the connected device proves the pack present
     // + byte-faithful: the LIVE `verified` always wins (no stale failure over a real
@@ -3224,7 +3357,9 @@ describe("<LibraryRoute />", () => {
 
   it("offers the reconnect hint instead of an inert Relancer when no writable device is connected (C1 gate)", async () => {
     const user = userEvent.setup();
-    mockGet.mockResolvedValueOnce({ stories: [{ id: "s1", title: "Le soleil" }] });
+    mockGet.mockResolvedValueOnce({
+      stories: [{ id: "s1", title: "Le soleil" }],
+    });
     mockDevice.mockResolvedValue(supportedV3); // readable but NOT writable
     mockReadTransferOutcome.mockResolvedValue(rememberedFailure);
     renderLibrary();
@@ -3253,7 +3388,9 @@ describe("<LibraryRoute />", () => {
 
   it("blocks the Envoyer CTA when the story was Préparée for a DIFFERENT device (re-prepare required, F6)", async () => {
     const user = userEvent.setup();
-    mockGet.mockResolvedValueOnce({ stories: [{ id: "s1", title: "Le soleil" }] });
+    mockGet.mockResolvedValueOnce({
+      stories: [{ id: "s1", title: "Le soleil" }],
+    });
     mockDevice.mockResolvedValue(writableOrigine); // connected writable device
     mockStoryValidation.mockResolvedValue(presumedTransferableValidation);
     // Prepared for ANOTHER device (≠ the currently-connected writable device): a
@@ -3294,7 +3431,9 @@ describe("<LibraryRoute />", () => {
 
   it("blocks the Envoyer CTA on a non-writable V3 cohort with 'profil non supporté' (T10/AC2)", async () => {
     const user = userEvent.setup();
-    mockGet.mockResolvedValueOnce({ stories: [{ id: "s1", title: "Le soleil" }] });
+    mockGet.mockResolvedValueOnce({
+      stories: [{ id: "s1", title: "Le soleil" }],
+    });
     mockDevice.mockResolvedValue(supportedV3); // writeStory: false
     mockStoryValidation.mockResolvedValue(presumedTransferableValidation);
     renderLibrary();
@@ -3309,7 +3448,9 @@ describe("<LibraryRoute />", () => {
       });
       expect(send).toHaveAttribute("aria-disabled", "true");
       expect(
-        document.getElementById(send.getAttribute("aria-describedby") as string),
+        document.getElementById(
+          send.getAttribute("aria-describedby") as string,
+        ),
       ).toHaveTextContent(/profil non supporté/i);
     });
     expect(mockStartTransfer).not.toHaveBeenCalled();
@@ -3342,7 +3483,9 @@ describe("<LibraryRoute />", () => {
     const send = within(panel).getByRole("button", {
       name: /envoyer vers la lunii/i,
     });
-    await waitFor(() => expect(send).not.toHaveAttribute("aria-disabled", "true"));
+    await waitFor(() =>
+      expect(send).not.toHaveAttribute("aria-disabled", "true"),
+    );
     await user.click(send);
 
     // The transfer surface shows the in-flight phase IN the panel...
@@ -3355,12 +3498,16 @@ describe("<LibraryRoute />", () => {
     expect(
       screen.getByRole("button", { name: /le soleil/i }),
     ).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /la lune/i })).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /la lune/i }),
+    ).toBeInTheDocument();
   });
 
   it("surfaces a transfer failure in-context and leaves the local library intact (T10/AC3)", async () => {
     const user = userEvent.setup();
-    mockGet.mockResolvedValueOnce({ stories: [{ id: "s1", title: "Le soleil" }] });
+    mockGet.mockResolvedValueOnce({
+      stories: [{ id: "s1", title: "Le soleil" }],
+    });
     mockDevice.mockResolvedValue(writableOrigine);
     mockStoryValidation.mockResolvedValue(presumedTransferableValidation);
     mockReadPreparation.mockResolvedValue(preparedReread);
@@ -3386,11 +3533,17 @@ describe("<LibraryRoute />", () => {
     const send = within(panel).getByRole("button", {
       name: /envoyer vers la lunii/i,
     });
-    await waitFor(() => expect(send).not.toHaveAttribute("aria-disabled", "true"));
+    await waitFor(() =>
+      expect(send).not.toHaveAttribute("aria-disabled", "true"),
+    );
     await user.click(send);
 
-    const transfer = within(panel).getByRole("region", { name: /^transfert$/i });
-    await waitFor(() => expect(transfer).toHaveTextContent(/échec récupérable/i));
+    const transfer = within(panel).getByRole("region", {
+      name: /^transfert$/i,
+    });
+    await waitFor(() =>
+      expect(transfer).toHaveTextContent(/échec récupérable/i),
+    );
     // In-context recovery (never a toast), and the local library stays intact.
     expect(
       within(transfer).getByRole("button", { name: /relancer le transfert/i }),
@@ -3434,7 +3587,15 @@ describe("<LibraryRoute />", () => {
     ] as const;
     for (const [deviceState, reason] of cases) {
       expect(
-        mapTransferView({ kind: "idle" }, STORY_A, 1, deviceState, false, true, true),
+        mapTransferView(
+          { kind: "idle" },
+          STORY_A,
+          1,
+          deviceState,
+          false,
+          true,
+          true,
+        ),
       ).toEqual({ kind: "unavailable", reason });
     }
   });
@@ -3473,7 +3634,12 @@ describe("<LibraryRoute />", () => {
     // The FINAL verify phase maps to the transient verifying view.
     expect(
       mapTransferView(
-        { kind: "transferring", storyId: STORY_A, progress: null, phase: "verify" },
+        {
+          kind: "transferring",
+          storyId: STORY_A,
+          progress: null,
+          phase: "verify",
+        },
         STORY_A,
         1,
         "idle",

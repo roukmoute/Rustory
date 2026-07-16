@@ -298,7 +298,11 @@ describe("isImportArtifactAnalysis", () => {
         quality: "partial",
         state: "needsReview",
         findings: [
-          { aspect: "timestamps", category: "ambiguous", message: "date conservée" },
+          {
+            aspect: "timestamps",
+            category: "ambiguous",
+            message: "date conservée",
+          },
         ],
         importableContent: { ...IMPORTABLE_CONTENT, createdAt: "" },
         sourceName: "histoire.rustory",
@@ -312,9 +316,17 @@ describe("isImportArtifactAnalysis", () => {
 
 const FOLDER_FINDINGS_CLEAN = [
   { aspect: "envelope", category: "recognized", message: "Manifest lisible." },
-  { aspect: "formatVersion", category: "recognized", message: "Version prise en charge." },
+  {
+    aspect: "formatVersion",
+    category: "recognized",
+    message: "Version prise en charge.",
+  },
   { aspect: "title", category: "recognized", message: "Titre valide." },
-  { aspect: "structure", category: "recognized", message: "Structure reconnue." },
+  {
+    aspect: "structure",
+    category: "recognized",
+    message: "Structure reconnue.",
+  },
   { aspect: "media", category: "recognized", message: "Médias présents." },
 ] as const;
 
@@ -347,7 +359,11 @@ const FOLDER_ANALYZED_PARTIAL: AnalyzedFolderVerdict = {
     FOLDER_FINDINGS_CLEAN[1],
     FOLDER_FINDINGS_CLEAN[2],
     FOLDER_FINDINGS_CLEAN[3],
-    { aspect: "media", category: "missing", message: "Des fichiers sont introuvables." },
+    {
+      aspect: "media",
+      category: "missing",
+      message: "Des fichiers sont introuvables.",
+    },
   ],
   creatableSummary: {
     title: "Sans image",
@@ -364,7 +380,11 @@ const FOLDER_ANALYZED_BLOCKED: AnalyzedFolderVerdict = {
   quality: "unusable",
   state: "blocked",
   findings: [
-    { aspect: "envelope", category: "blocking", message: "Manifest illisible." },
+    {
+      aspect: "envelope",
+      category: "blocking",
+      message: "Manifest illisible.",
+    },
   ],
   folderName: "casse",
   folderPath: "/home/user/casse",
@@ -385,22 +405,28 @@ describe("isStructuredCreationAnalysis", () => {
 
   it("accepts a cancelled payload with only the kind discriminant", () => {
     expect(isStructuredCreationAnalysis({ kind: "cancelled" })).toBe(true);
-    expect(
-      isStructuredCreationAnalysis({ kind: "cancelled", extra: 1 }),
-    ).toBe(false);
+    expect(isStructuredCreationAnalysis({ kind: "cancelled", extra: 1 })).toBe(
+      false,
+    );
   });
 
   it("rejects an analyzed verdict without folderPath", () => {
     const { folderPath: _dropped, ...rest } = FOLDER_ANALYZED_CLEAN;
     expect(isStructuredCreationAnalysis(rest)).toBe(false);
     expect(
-      isStructuredCreationAnalysis({ ...FOLDER_ANALYZED_CLEAN, folderPath: "" }),
+      isStructuredCreationAnalysis({
+        ...FOLDER_ANALYZED_CLEAN,
+        folderPath: "",
+      }),
     ).toBe(false);
   });
 
   it("rejects an empty folderName", () => {
     expect(
-      isStructuredCreationAnalysis({ ...FOLDER_ANALYZED_CLEAN, folderName: "" }),
+      isStructuredCreationAnalysis({
+        ...FOLDER_ANALYZED_CLEAN,
+        folderName: "",
+      }),
     ).toBe(false);
   });
 
@@ -414,7 +440,11 @@ describe("isStructuredCreationAnalysis", () => {
           FOLDER_FINDINGS_CLEAN[0],
           FOLDER_FINDINGS_CLEAN[1],
           FOLDER_FINDINGS_CLEAN[2],
-          { aspect: "structure", category: "ambiguous", message: "Champ inattendu." },
+          {
+            aspect: "structure",
+            category: "ambiguous",
+            message: "Champ inattendu.",
+          },
           FOLDER_FINDINGS_CLEAN[4],
         ],
       }),
@@ -438,7 +468,11 @@ describe("isStructuredCreationAnalysis", () => {
         ...FOLDER_ANALYZED_CLEAN,
         findings: [
           ...FOLDER_FINDINGS_CLEAN.slice(0, 4),
-          { aspect: "timestamps", category: "recognized", message: "Dates ok." },
+          {
+            aspect: "timestamps",
+            category: "recognized",
+            message: "Dates ok.",
+          },
         ],
       }),
     ).toBe(false);
@@ -448,7 +482,10 @@ describe("isStructuredCreationAnalysis", () => {
     expect(
       isStructuredCreationAnalysis({
         ...FOLDER_ANALYZED_CLEAN,
-        findings: [...FOLDER_FINDINGS_CLEAN.slice(0, 4), FOLDER_FINDINGS_CLEAN[3]],
+        findings: [
+          ...FOLDER_FINDINGS_CLEAN.slice(0, 4),
+          FOLDER_FINDINGS_CLEAN[3],
+        ],
       }),
     ).toBe(false);
   });
@@ -487,13 +524,19 @@ describe("isStructuredCreationAnalysis", () => {
     expect(
       isStructuredCreationAnalysis({
         ...FOLDER_ANALYZED_CLEAN,
-        creatableSummary: { ...FOLDER_ANALYZED_CLEAN.creatableSummary!, nodeCount: 0 },
+        creatableSummary: {
+          ...FOLDER_ANALYZED_CLEAN.creatableSummary!,
+          nodeCount: 0,
+        },
       }),
     ).toBe(false);
     expect(
       isStructuredCreationAnalysis({
         ...FOLDER_ANALYZED_CLEAN,
-        creatableSummary: { ...FOLDER_ANALYZED_CLEAN.creatableSummary!, title: "" },
+        creatableSummary: {
+          ...FOLDER_ANALYZED_CLEAN.creatableSummary!,
+          title: "",
+        },
       }),
     ).toBe(false);
   });
@@ -533,7 +576,11 @@ const RSS_PREVIEW_EXPLOITABLE: RssPreview = {
     },
   ],
   findings: [
-    { aspect: "envelope", category: "recognized", message: "Le flux RSS est lisible." },
+    {
+      aspect: "envelope",
+      category: "recognized",
+      message: "Le flux RSS est lisible.",
+    },
     {
       aspect: "formatVersion",
       category: "recognized",
@@ -557,7 +604,8 @@ const RSS_PREVIEW_BLOCKED: RssPreview = {
     {
       aspect: "envelope",
       category: "blocking",
-      message: "Ce contenu n'est pas un flux RSS lisible. Relance la récupération du flux.",
+      message:
+        "Ce contenu n'est pas un flux RSS lisible. Relance la récupération du flux.",
     },
   ],
   state: "blocked",
@@ -626,9 +674,9 @@ describe("isRssPreview", () => {
   });
 
   it("rejects a blocked flag diverging from the state", () => {
-    expect(
-      isRssPreview({ ...RSS_PREVIEW_EXPLOITABLE, blocked: true }),
-    ).toBe(false);
+    expect(isRssPreview({ ...RSS_PREVIEW_EXPLOITABLE, blocked: true })).toBe(
+      false,
+    );
     expect(isRssPreview({ ...RSS_PREVIEW_BLOCKED, blocked: false })).toBe(
       false,
     );
@@ -638,9 +686,9 @@ describe("isRssPreview", () => {
     expect(
       isRssPreview({ ...RSS_PREVIEW_EXPLOITABLE, state: "recognized" }),
     ).toBe(false);
-    expect(
-      isRssPreview({ ...RSS_PREVIEW_EXPLOITABLE, state: "partial" }),
-    ).toBe(false);
+    expect(isRssPreview({ ...RSS_PREVIEW_EXPLOITABLE, state: "partial" })).toBe(
+      false,
+    );
   });
 
   it("rejects an exploitable preview missing the nominal source finding", () => {
@@ -655,9 +703,7 @@ describe("isRssPreview", () => {
   });
 
   it("rejects an exploitable preview with zero item", () => {
-    expect(isRssPreview({ ...RSS_PREVIEW_EXPLOITABLE, items: [] })).toBe(
-      false,
-    );
+    expect(isRssPreview({ ...RSS_PREVIEW_EXPLOITABLE, items: [] })).toBe(false);
   });
 
   it("rejects a blocked verdict that still carries items", () => {
@@ -736,18 +782,25 @@ describe("isRssPreview", () => {
 
 const OFFICIAL_POLICY: ContentSourcePolicy = {
   sources: [
-    { kind: "rss", label: "Flux RSS", activation: "enabled" },
+    {
+      kind: "rss",
+      label: "Flux RSS",
+      activation: "enabled",
+      activationMarker: "Activée par la distribution officielle",
+    },
     {
       kind: "atom",
       label: "Flux Atom",
       activation: "notActivated",
-      reason: "Source indisponible: non activée dans la distribution officielle",
+      reason:
+        "Source indisponible: non activée dans la distribution officielle",
     },
     {
       kind: "jsonFeed",
       label: "Flux JSON Feed",
       activation: "notActivated",
-      reason: "Source indisponible: non activée dans la distribution officielle",
+      reason:
+        "Source indisponible: non activée dans la distribution officielle",
     },
   ],
 };
@@ -775,7 +828,41 @@ describe("isContentSourceEntry", () => {
         kind: "rss",
         label: "Flux RSS",
         activation: "enabled",
+        activationMarker: "Activée par la distribution officielle",
         reason: "surnuméraire",
+      }),
+    ).toBe(false);
+  });
+
+  it("requires the exact Rust-owned activation marker on an enabled line", () => {
+    // Missing marker: the enabled line lost its Rust-carried copy.
+    expect(
+      isContentSourceEntry({
+        kind: "rss",
+        label: "Flux RSS",
+        activation: "enabled",
+      }),
+    ).toBe(false);
+    // Drifted marker: never rendered as authoritative.
+    expect(
+      isContentSourceEntry({
+        kind: "rss",
+        label: "Flux RSS",
+        activation: "enabled",
+        activationMarker: "Activée",
+      }),
+    ).toBe(false);
+  });
+
+  it("refuses a marker on a non-enabled line (the reason replaces it)", () => {
+    expect(
+      isContentSourceEntry({
+        kind: "atom",
+        label: "Flux Atom",
+        activation: "notActivated",
+        activationMarker: "Activée par la distribution officielle",
+        reason:
+          "Source indisponible: non activée dans la distribution officielle",
       }),
     ).toBe(false);
   });
@@ -852,7 +939,11 @@ describe("isContentSourcePolicy", () => {
 
   it("refuses a drifted label or a drifted reason (frozen couples only)", () => {
     expect(
-      isContentSourceEntry({ kind: "rss", label: "RSS", activation: "enabled" }),
+      isContentSourceEntry({
+        kind: "rss",
+        label: "RSS",
+        activation: "enabled",
+      }),
     ).toBe(false);
     expect(
       isContentSourceEntry({
@@ -901,7 +992,14 @@ describe("isContentSourcePolicy", () => {
     // silently drop Atom / JSON Feed from the dialog.
     expect(
       isContentSourcePolicy({
-        sources: [{ kind: "rss", label: "Flux RSS", activation: "enabled" }],
+        sources: [
+          {
+            kind: "rss",
+            label: "Flux RSS",
+            activation: "enabled",
+            activationMarker: "Activée par la distribution officielle",
+          },
+        ],
       }),
     ).toBe(false);
     expect(

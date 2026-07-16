@@ -81,11 +81,7 @@ export type ImportQuality = "clean" | "partial" | "unusable";
 /** Durable per-story import state. On a Story Card only `recognized` /
  *  `partial` / `needsReview` ever appear. */
 export type ImportState =
-  | "recognized"
-  | "partial"
-  | "needsReview"
-  | "blocked"
-  | "resolved";
+  "recognized" | "partial" | "needsReview" | "blocked" | "resolved";
 
 /** The aspect of the analyzed input a finding refers to (`media` belongs
  *  to the structured-folder and RSS flows, `source` to the RSS ingestion
@@ -103,10 +99,7 @@ export type ImportAspect =
 
 /** The recognition category of a finding. */
 export type ImportCategory =
-  | "recognized"
-  | "ambiguous"
-  | "missing"
-  | "blocking";
+  "recognized" | "ambiguous" | "missing" | "blocking";
 
 /** A single recognition finding: a closed `(aspect, category)` pair plus the
  *  canonical FR message. Rust owns the message; the UI renders it verbatim. */
@@ -268,7 +261,9 @@ export function isImportArtifactAnalysis(
  *  ambiguous/missing ⟹ partial, else clean (mirrors the Rust derivation). */
 function qualityFromFindings(findings: ImportFinding[]): ImportQuality {
   if (findings.some((f) => f.category === "blocking")) return "unusable";
-  if (findings.some((f) => f.category === "ambiguous" || f.category === "missing")) {
+  if (
+    findings.some((f) => f.category === "ambiguous" || f.category === "missing")
+  ) {
     return "partial";
   }
   return "clean";
@@ -471,9 +466,7 @@ export function isRssPreview(value: unknown): value is RssPreview {
     if (items.length === 0) return false;
     if (findings.some((f) => f.category === "blocking")) return false;
     if (
-      !findings.some(
-        (f) => f.aspect === "source" && f.category === "ambiguous",
-      )
+      !findings.some((f) => f.aspect === "source" && f.category === "ambiguous")
     ) {
       return false;
     }
@@ -494,18 +487,22 @@ export type ContentSourceKind = "rss" | "atom" | "jsonFeed";
 
 /** Closed set of activation states a distribution can assign to a kind. */
 export type ContentSourceActivation =
-  | "enabled"
-  | "notActivated"
-  | "blockedByPolicy";
+  "enabled" | "notActivated" | "blockedByPolicy";
 
-/** One line of the read policy: the closed tags, the frozen label, and —
- *  on a non-enabled line ONLY — the frozen disabled-entry reason. */
+/** One line of the read policy: the closed tags, the frozen label, and
+ *  EXACTLY ONE of — the frozen entry-level activation marker on an
+ *  enabled line, or the frozen disabled-entry reason on a non-enabled
+ *  one (the guard refuses incoherence). */
 export interface ContentSourceEntry {
   kind: ContentSourceKind;
   label: string;
   activation: ContentSourceActivation;
-  /** Present IFF the line is not enabled (the guard refuses incoherence);
-   *  an enabled entry carries the activation marker instead. */
+  /** Present IFF the line is enabled — the Rust-owned entry-level
+   *  marker every rendering surface (creation dialog, support-profile
+   *  screen) renders verbatim. */
+  activationMarker?: string;
+  /** Present IFF the line is not enabled (the guard refuses
+   *  incoherence); an enabled entry carries the marker instead. */
   reason?: string;
 }
 
@@ -536,6 +533,12 @@ const CONTENT_SOURCE_REASONS: Readonly<
     "Source indisponible: bloquée par la politique de distribution",
 };
 
+/** The frozen entry-level activation marker of an enabled line, exactly
+ *  as Rust serializes it (VALIDATION literal — the rendering keeps
+ *  using the Rust-carried value). */
+const CONTENT_SOURCE_ACTIVATION_MARKER =
+  "Activée par la distribution officielle";
+
 function isContentSourceKind(value: unknown): value is ContentSourceKind {
   return typeof value === "string" && value in CONTENT_SOURCE_LABELS;
 }
@@ -556,15 +559,22 @@ export function isContentSourceEntry(
     // activation marker). Activating another kind is an explicit
     // re-scope of this guard, alongside its ingestion flow.
     if (c.kind !== "rss") return false;
-    // An enabled line carries NO reason (the marker replaces it) — the
-    // mirror of the Rust `Option` + `skip_serializing_if`.
-    return c.reason === undefined;
+    // An enabled line carries NO reason and EXACTLY its frozen
+    // Rust-owned entry-level marker — the mirror of the Rust `Option`
+    // + `skip_serializing_if` pair.
+    return (
+      c.reason === undefined &&
+      c.activationMarker === CONTENT_SOURCE_ACTIVATION_MARKER
+    );
   }
   if (c.activation !== "notActivated" && c.activation !== "blockedByPolicy") {
     return false;
   }
-  // A non-enabled line carries EXACTLY its frozen reason.
-  return c.reason === CONTENT_SOURCE_REASONS[c.activation];
+  // A non-enabled line carries EXACTLY its frozen reason and NO marker.
+  return (
+    c.reason === CONTENT_SOURCE_REASONS[c.activation] &&
+    c.activationMarker === undefined
+  );
 }
 
 /**

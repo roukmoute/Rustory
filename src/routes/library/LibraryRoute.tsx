@@ -2,8 +2,6 @@ import type React from "react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 
-import { openUrl } from "@tauri-apps/plugin-opener";
-
 import {
   CatalogPanel,
   DeviceStoryCollection,
@@ -17,20 +15,6 @@ import {
   useStoryValidation,
   useTransferPreview,
 } from "../../features/device";
-
-/** Public URL of the canonical device-support-profile document. Kept
- *  as a single constant so a future move (rename, monorepo, branch
- *  policy) is a one-line change. */
-const SUPPORT_PROFILE_URL =
-  "https://github.com/roukmoute/Rustory/blob/main/docs/architecture/device-support-profile.md";
-
-function openSupportProfile(): void {
-  // tauri-plugin-opener delegates to the OS default browser. The
-  // promise is intentionally not awaited: a failure (no network, no
-  // browser configured) does not block the UI — the user can still
-  // click again or copy the URL by hand.
-  void openUrl(SUPPORT_PROFILE_URL);
-}
 import { CreateStoryDialog } from "../../features/library/components/CreateStoryDialog";
 import { LibraryErrorBanner } from "../../features/library/components/LibraryErrorBanner";
 import { LibraryFiltersNav } from "../../features/library/components/LibraryFiltersNav";
@@ -65,6 +49,7 @@ import type {
 import type { DeviceStoryDto } from "../../shared/ipc-contracts/device-library";
 import type { ContentSourcePolicy } from "../../shared/ipc-contracts/import-export";
 import type { StoryCardDto } from "../../shared/ipc-contracts/library";
+import { Button, SurfacePanel } from "../../shared/ui";
 import { LibraryLayout } from "../../shell/layout/LibraryLayout";
 import { useLibraryShell } from "../../shell/state/library-shell-store";
 
@@ -80,6 +65,14 @@ export function LibraryRoute(): React.JSX.Element {
   const setSort = useLibraryShell((s) => s.setSort);
   const resetFilters = useLibraryShell((s) => s.resetFilters);
   const navigate = useNavigate();
+
+  // The `Consulter le profil de support` gesture navigates IN-APP to
+  // the support-profile screen (`Support Profile Screen Contract`) —
+  // no external browser, no network (NFR14). The three consuming
+  // surfaces keep their `onConsultSupportProfile` prop unchanged.
+  const openSupportProfile = (): void => {
+    navigate("/settings");
+  };
 
   const [isCreateOpen, setIsCreateOpen] = useState<boolean>(false);
   // The distribution's content-source policy, read ANEW at every dialog
@@ -626,7 +619,19 @@ export function LibraryRoute(): React.JSX.Element {
   return (
     <>
       <LibraryLayout
-        leftNav={<LibraryFiltersNav />}
+        leftNav={
+          <>
+            <LibraryFiltersNav />
+            {/* Permanent navigation entry to the support-profile
+                screen — a light block with no business state (the UX
+                constraint of the left column). */}
+            <SurfacePanel elevation={0}>
+              <Button variant="quiet" onClick={openSupportProfile}>
+                Profil de support
+              </Button>
+            </SurfacePanel>
+          </>
+        }
         center={center}
         rightPanel={
           <>

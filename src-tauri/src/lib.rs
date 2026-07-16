@@ -134,7 +134,6 @@ fn collect_pending_transfer_outcomes(
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
-        .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let app_data_dir = infrastructure::filesystem::ensure_app_data_dir(app.handle())
@@ -314,6 +313,7 @@ pub fn run() {
             commands::story::read_recoverable_draft,
             commands::story::read_recoverable_node_draft,
             commands::device::read_story_validation,
+            commands::settings::read_support_profile,
             commands::transfer::read_transfer_outcome,
             commands::device::read_transfer_preview,
             commands::transfer::read_transfer_state,

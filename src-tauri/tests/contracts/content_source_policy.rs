@@ -10,7 +10,8 @@ use rustory_lib::domain::import::{
 };
 use rustory_lib::domain::shared::AppError;
 use rustory_lib::ipc::dto::import_export::{
-    content_source_label, content_source_reason, ContentSourcePolicyDto,
+    content_source_activation_marker, content_source_label, content_source_reason,
+    ContentSourcePolicyDto,
 };
 
 // ===== Frozen copies (product-language.md — byte-for-byte) =====
@@ -38,6 +39,25 @@ fn disabled_entry_reasons_are_frozen() {
     assert_eq!(
         content_source_reason(ContentSourceActivation::BlockedByPolicy),
         Some("Source indisponible: bloquée par la politique de distribution")
+    );
+}
+
+#[test]
+fn entry_level_activation_marker_is_frozen_and_enabled_only() {
+    // The marker is Rust-owned so BOTH rendering surfaces (creation
+    // dialog, support-profile screen) render the same copy verbatim —
+    // never a re-typed frontend literal.
+    assert_eq!(
+        content_source_activation_marker(ContentSourceActivation::Enabled),
+        Some("Activée par la distribution officielle")
+    );
+    assert_eq!(
+        content_source_activation_marker(ContentSourceActivation::NotActivated),
+        None
+    );
+    assert_eq!(
+        content_source_activation_marker(ContentSourceActivation::BlockedByPolicy),
+        None
     );
 }
 
@@ -75,6 +95,7 @@ fn the_official_policy_serializes_exactly() {
                     "kind": "rss",
                     "label": "Flux RSS",
                     "activation": "enabled",
+                    "activationMarker": "Activée par la distribution officielle",
                 },
                 {
                     "kind": "atom",
@@ -94,7 +115,7 @@ fn the_official_policy_serializes_exactly() {
 }
 
 #[test]
-fn an_enabled_line_omits_the_reason_key_entirely() {
+fn an_enabled_line_omits_the_reason_key_and_carries_the_marker() {
     let dto = ContentSourcePolicyDto::from_lines(&[ContentSourceLine {
         kind: ContentSourceKind::Rss,
         activation: ContentSourceActivation::Enabled,
@@ -105,10 +126,14 @@ fn an_enabled_line_omits_the_reason_key_entirely() {
         v["sources"][0].get("reason").is_none(),
         "an enabled line carries NO reason key (the marker replaces it)"
     );
+    assert_eq!(
+        v["sources"][0]["activationMarker"],
+        "Activée par la distribution officielle"
+    );
 }
 
 #[test]
-fn a_blocked_line_serializes_its_own_frozen_reason() {
+fn a_blocked_line_serializes_its_own_frozen_reason_and_no_marker() {
     // No official line is blocked today — the wire shape is proven on a
     // custom distribution so the copy stays frozen ahead of need.
     let dto = ContentSourcePolicyDto::from_lines(&[ContentSourceLine {
@@ -121,6 +146,10 @@ fn a_blocked_line_serializes_its_own_frozen_reason() {
     assert_eq!(
         v["sources"][0]["reason"],
         "Source indisponible: bloquée par la politique de distribution"
+    );
+    assert!(
+        v["sources"][0].get("activationMarker").is_none(),
+        "a non-enabled line carries NO marker key (the reason replaces it)"
     );
 }
 
@@ -144,6 +173,14 @@ fn every_activation_serializes_a_tag_and_a_coherent_reason() {
             reason.is_none(),
             activation == ContentSourceActivation::Enabled,
             "reason present IFF the line is not enabled"
+        );
+        // The marker is the exact complement of the reason: present
+        // IFF the line is enabled — a line always carries exactly one
+        // of the two copies.
+        assert_eq!(
+            content_source_activation_marker(activation).is_some(),
+            activation == ContentSourceActivation::Enabled,
+            "marker present IFF the line is enabled"
         );
     }
 }

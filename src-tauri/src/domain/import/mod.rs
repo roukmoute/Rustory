@@ -4,6 +4,7 @@
 
 pub mod artifact;
 pub mod content_source;
+pub mod local_artifact;
 pub mod recognition;
 pub mod rss;
 pub mod structured_folder;
@@ -15,6 +16,10 @@ pub use artifact::{
 pub use content_source::{
     content_source_activation, official_content_sources, ContentSourceActivation,
     ContentSourceKind, ContentSourceLine, ALL_CONTENT_SOURCE_ACTIVATIONS, ALL_CONTENT_SOURCE_KINDS,
+};
+pub use local_artifact::{
+    official_local_artifacts, LocalArtifactCapabilities, LocalArtifactKind, LocalArtifactLine,
+    LocalArtifactSupport, ALL_LOCAL_ARTIFACT_KINDS,
 };
 pub use recognition::{
     folder_import_state, import_state, recognition_quality, ImportState, RecognitionAspect,

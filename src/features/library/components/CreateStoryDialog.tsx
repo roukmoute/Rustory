@@ -47,16 +47,12 @@ export interface CreateStoryDialogProps {
   contentSourcePolicy?: ContentSourcePolicy | null;
 }
 
-/** The frozen entry-level activation marker (`product-language.md`) —
- *  same copy family as the surface mention, distinct literal (no final
- *  period). */
-const ACTIVATION_MARKER = "Activée par la distribution officielle";
-
 /** The frozen fail-closed reason when the policy read failed or has not
  *  landed — the only content-source copy rendered WITHOUT a successful
- *  policy read (the activation marker above is a frontend literal too,
- *  but it only accompanies a successfully read `enabled` line). */
-const POLICY_FAIL_CLOSED_REASON = "Sources externes indisponibles pour l'instant.";
+ *  policy read (the entry-level activation marker is Rust-carried by
+ *  the policy DTO and rendered verbatim, never re-typed here). */
+const POLICY_FAIL_CLOSED_REASON =
+  "Sources externes indisponibles pour l'instant.";
 
 /**
  * Modal used to collect the minimal input required to create a new local
@@ -248,10 +244,7 @@ export function CreateStoryDialog({
       ) : null}
       {isSubmitting ? (
         <div id={progressId} className="create-story-dialog__progress">
-          <ProgressIndicator
-            mode="indeterminate"
-            label="Création en cours…"
-          />
+          <ProgressIndicator mode="indeterminate" label="Création en cours…" />
         </div>
       ) : null}
       <div className="create-story-dialog__actions">
@@ -271,11 +264,7 @@ export function CreateStoryDialog({
             variant="primary"
             aria-disabled="true"
             aria-describedby={
-              issue !== null
-                ? reasonId
-                : isSubmitting
-                  ? progressId
-                  : undefined
+              issue !== null ? reasonId : isSubmitting ? progressId : undefined
             }
           >
             Créer
@@ -318,18 +307,23 @@ export function CreateStoryDialog({
                         variant="quiet"
                         onClick={handleCreateFromRss}
                         aria-disabled={
-                          isSubmitting || isCreateFromRssUnavailable || undefined
+                          isSubmitting ||
+                          isCreateFromRssUnavailable ||
+                          undefined
                         }
                         aria-describedby={subTextId}
                       >
                         Démarrer depuis une source externe (RSS)
                       </Button>
-                      <p id={subTextId} className="create-story-dialog__source-note">
+                      <p
+                        id={subTextId}
+                        className="create-story-dialog__source-note"
+                      >
                         <span className="create-story-dialog__source-label">
                           {entry.label}
                         </span>
                         <span className="create-story-dialog__source-marker">
-                          {ACTIVATION_MARKER}
+                          {entry.activationMarker}
                         </span>
                       </p>
                     </>

@@ -86,7 +86,10 @@ describe("exportStoryWithSaveDialog", () => {
     };
     vi.mocked(invoke).mockRejectedValueOnce(rustError);
     await expect(
-      exportStoryWithSaveDialog({ storyId: STORY_ID, suggestedFilename: SUGGESTED }),
+      exportStoryWithSaveDialog({
+        storyId: STORY_ID,
+        suggestedFilename: SUGGESTED,
+      }),
     ).rejects.toEqual(rustError);
   });
 
@@ -99,7 +102,10 @@ describe("exportStoryWithSaveDialog", () => {
     };
     vi.mocked(invoke).mockRejectedValueOnce(rustError);
     await expect(
-      exportStoryWithSaveDialog({ storyId: STORY_ID, suggestedFilename: SUGGESTED }),
+      exportStoryWithSaveDialog({
+        storyId: STORY_ID,
+        suggestedFilename: SUGGESTED,
+      }),
     ).rejects.toEqual(rustError);
   });
 });
@@ -199,7 +205,8 @@ describe("acceptArtifactImport", () => {
     const rustError = {
       code: "IMPORT_FAILED",
       message: "Import impossible: enregistrement local refusé.",
-      userAction: "Réessaie ; si le problème persiste, consulte les traces locales.",
+      userAction:
+        "Réessaie ; si le problème persiste, consulte les traces locales.",
       details: { source: "db_commit", stage: "insert_story" },
     };
     vi.mocked(invoke).mockRejectedValueOnce(rustError);
@@ -220,10 +227,18 @@ const FOLDER_ANALYZED = {
   quality: "clean",
   state: "recognized",
   findings: [
-    { aspect: "envelope", category: "recognized", message: "Manifest lisible." },
+    {
+      aspect: "envelope",
+      category: "recognized",
+      message: "Manifest lisible.",
+    },
     { aspect: "formatVersion", category: "recognized", message: "Version ok." },
     { aspect: "title", category: "recognized", message: "Titre valide." },
-    { aspect: "structure", category: "recognized", message: "Structure reconnue." },
+    {
+      aspect: "structure",
+      category: "recognized",
+      message: "Structure reconnue.",
+    },
     { aspect: "media", category: "recognized", message: "Médias présents." },
   ],
   creatableSummary: {
@@ -244,7 +259,9 @@ describe("analyzeStructuredFolderForCreation", () => {
   it("calls the analyze_structured_folder_for_creation command with no payload", async () => {
     vi.mocked(invoke).mockResolvedValueOnce(FOLDER_ANALYZED);
     const result = await analyzeStructuredFolderForCreation();
-    expect(invoke).toHaveBeenCalledWith("analyze_structured_folder_for_creation");
+    expect(invoke).toHaveBeenCalledWith(
+      "analyze_structured_folder_for_creation",
+    );
     expect(result.kind).toBe("analyzed");
   });
 
@@ -271,12 +288,16 @@ describe("analyzeStructuredFolderForCreation", () => {
   it("propagates an IMPORT_FAILED transport error verbatim", async () => {
     const rustError = {
       code: "IMPORT_FAILED",
-      message: "Création impossible: la fenêtre de sélection n'a pas pu s'ouvrir.",
-      userAction: "Relance Rustory ; si le problème persiste, consulte les traces locales.",
+      message:
+        "Création impossible: la fenêtre de sélection n'a pas pu s'ouvrir.",
+      userAction:
+        "Relance Rustory ; si le problème persiste, consulte les traces locales.",
       details: { source: "dialog_failed" },
     };
     vi.mocked(invoke).mockRejectedValueOnce(rustError);
-    await expect(analyzeStructuredFolderForCreation()).rejects.toEqual(rustError);
+    await expect(analyzeStructuredFolderForCreation()).rejects.toEqual(
+      rustError,
+    );
   });
 });
 
@@ -513,7 +534,12 @@ describe("readContentSourcePolicy", () => {
 
   const OFFICIAL_POLICY = {
     sources: [
-      { kind: "rss", label: "Flux RSS", activation: "enabled" },
+      {
+        kind: "rss",
+        label: "Flux RSS",
+        activation: "enabled",
+        activationMarker: "Activée par la distribution officielle",
+      },
       {
         kind: "atom",
         label: "Flux Atom",
@@ -540,6 +566,7 @@ describe("readContentSourcePolicy", () => {
       kind: "rss",
       label: "Flux RSS",
       activation: "enabled",
+      activationMarker: "Activée par la distribution officielle",
     });
     expect(policy.sources[1].reason).toBe(
       "Source indisponible: non activée dans la distribution officielle",

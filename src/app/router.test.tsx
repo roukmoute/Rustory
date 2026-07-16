@@ -57,6 +57,33 @@ vi.mock("../ipc/commands/device", async () => {
   };
 });
 
+// SettingsRoute mounts two pure reads plus the version read. The
+// router tests only assert the landmark, so failed reads (rendering
+// the calm per-section unavailable state) are a fine default.
+vi.mock("../ipc/commands/settings", async () => {
+  const actual = await vi.importActual<
+    typeof import("../ipc/commands/settings")
+  >("../ipc/commands/settings");
+  return {
+    ...actual,
+    readSupportProfile: () => Promise.reject(new Error("not stubbed")),
+  };
+});
+
+vi.mock("../ipc/commands/import-export", async () => {
+  const actual = await vi.importActual<
+    typeof import("../ipc/commands/import-export")
+  >("../ipc/commands/import-export");
+  return {
+    ...actual,
+    readContentSourcePolicy: () => Promise.reject(new Error("not stubbed")),
+  };
+});
+
+vi.mock("@tauri-apps/api/app", () => ({
+  getVersion: () => Promise.reject(new Error("not stubbed")),
+}));
+
 import { createAppRouter } from "./router";
 
 describe("router", () => {
@@ -132,6 +159,20 @@ describe("router", () => {
     );
     expect(
       screen.getByRole("heading", { name: /le soleil/i }),
+    ).toBeInTheDocument();
+  });
+
+  it("matches /settings to SettingsRoute and mounts its main landmark", async () => {
+    const router = createAppRouter(["/settings"]);
+    render(<RouterProvider router={router} />);
+
+    await waitFor(() => {
+      expect(
+        screen.getByRole("main", { name: "Profil de support" }),
+      ).toBeInTheDocument();
+    });
+    expect(
+      screen.getByRole("heading", { level: 1, name: "Profil de support" }),
     ).toBeInTheDocument();
   });
 

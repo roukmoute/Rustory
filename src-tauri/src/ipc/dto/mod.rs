@@ -5,6 +5,7 @@ pub mod device_library;
 pub mod device_title;
 pub mod import_export;
 pub mod library;
+pub mod settings;
 pub mod story;
 pub mod story_preparation;
 pub mod story_transfer;
@@ -27,6 +28,9 @@ pub use import_export::{
     StructuredCreationAnalysisDto,
 };
 pub use library::{LibraryOverviewDto, StoryCardDto};
+pub use settings::{
+    DeviceCapabilityDto, DeviceSupportLineDto, LocalArtifactLineDto, SupportProfileDto,
+};
 pub use story::{
     AddNodeOptionInputDto, AddStoryNodeInputDto, ApplyRecoveryInputDto, AttachNodeMediaOutcomeDto,
     CreateStoryInputDto, DeleteStoryNodeInputDto, DiscardDraftInputDto, DiscardNodeDraftInputDto,

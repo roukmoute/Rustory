@@ -177,6 +177,7 @@ Avoid:
 
 - `bibliothèque` is the stable home for selection, transfer visibility, and recovery traces
 - `édition` is a separate context and must not silently replace library state vocabulary
+- `Profil de support` (route `/settings`) is the read-only screen where the distribution's support facts live — devices, local artifacts, content sources, posture; it never becomes a settings/toggles surface (see `Support Profile Screen Contract`)
 - `modals` and reports may clarify a state, but should not become the only place where a critical state exists
 
 ## Implementation Rule
@@ -213,7 +214,7 @@ compose the library must reuse this contract rather than invent a variant.
 
 | Zone | Role | ARIA region | CSS column (standard mode) | CSS column (reduced-density) |
 | --- | --- | --- | --- | --- |
-| Left column | Global filters / navigation entry points | `<nav aria-label="Filtres bibliothèque">` | `minmax(240px, 280px)` | `200px` |
+| Left column | Global filters / navigation entry points | `<nav aria-label="Navigation bibliothèque">` | `minmax(240px, 280px)` | `200px` |
 | Center column | Story collection — the main work surface | `<main aria-label="Collection d'histoires">` | `1fr` | `1fr` |
 | Right column | Decision panel (device state + send CTA) | `<aside aria-label="Panneau de décision">` | `minmax(320px, 360px)` | `300px` |
 
@@ -273,11 +274,12 @@ declared-state discipline of this document) — renders:
   opération activée dans cette version. Consulte le profil de support pour
   comprendre ce qui est permis.`) — rendered in this
   recognized-without-capability idle state ONLY, never in a
-  capability-bearing idle (Lunii, FLAM). The pointer is informative text
-  with NO navigation and NO network (NFR14): consulting the profiles is a
-  separate surface, so no internal target exists to wire yet; the external
-  `Consulter le profil de support` CTA keeps its pre-existing scope
-  (unsupported / ambiguous / error) and is NOT offered here,
+  capability-bearing idle (Lunii, FLAM). The pointer stays informative
+  text with NO navigation and NO network (NFR14); the internal target it
+  speaks about now exists — the `Consulter le profil de support` CTA
+  keeps its pre-existing scope (unsupported / ambiguous / error), is NOT
+  offered here, and navigates IN-APP to `/settings` (see `Support
+  Profile Screen Contract`) — no external browser, no network,
 - the send disabled through the EXISTING capability-closed path
   (`Envoi indisponible: profil non supporté`, the V3 pattern). The idle copy
   `Envoi indisponible: transfert pas encore activé (MVP Phase 1)` stays
@@ -1177,12 +1179,14 @@ A click that lands outside a card (header, controls, empty space, other columns)
 | `/` | redirect to `/library` | Default entry point. |
 | `/library` | `LibraryRoute` | Three-column library context (see `Library Layout Contract`). |
 | `/story/:storyId/edit` | `StoryEditRoute` | Resume a `brouillon local` for a library-owned story. No device call, no mutation at this stage. |
+| `/settings` | `SettingsRoute` | Read-only `Profil de support` screen (see `Support Profile Screen Contract`). Standalone single-column view; zero network, zero mutation. |
 | `*` | redirect to `/library` | Unknown paths bounce back to the library. |
 
 Rules:
 
 - Returning to `/library` from `/story/:storyId/edit` preserves shell continuity (selection, filters) through the Zustand store — the URL does not carry that state.
-- New routes land here only when a real dominant-context switch appears. The `settings` route is not wired at this stage; add it when a specific need emerges.
+- New routes land here only when a real dominant-context switch appears. The `settings` context is wired by the `Profil de support` screen — a real dominant-context switch, read-only by contract.
+- The library left column carries the permanent navigation entry to `/settings` (below the filters block, no business state — see `Support Profile Screen Contract`); the column's `<nav>` label is the generalized `Navigation bibliothèque`.
 
 ## Story Creation Contract
 
@@ -1709,10 +1713,14 @@ Where the policy is decided, enforced and surfaced:
 
 - **Rust alone decides.** The registry lives in the pure domain; the
   `read_content_source_policy` command serializes it (kind, frozen label,
-  activation, frozen full reason for the non-enabled lines — absent on an
-  enabled line) as a PURE, synchronous read: zero network, zero DB, zero
-  lock. The frontend NEVER hardcodes the source list, the labels or the
-  reasons: it renders what Rust declares.
+  activation, the frozen entry-level activation marker
+  `activationMarker` on an enabled line — the exact complement of the
+  frozen full `reason` carried by the non-enabled lines: each line
+  carries exactly one of the two copies, the other key stays absent) as
+  a PURE, synchronous read: zero network, zero DB, zero lock. The
+  frontend NEVER hardcodes the source list, the labels, the marker or
+  the reasons: every consuming surface (the creation dialog, the
+  support-profile screen) renders what Rust declares, verbatim.
 - **The application facades refuse BEFORE any I/O.** Both RSS facades
   (preview AND accept) consult the matrix they receive as a parameter and
   refuse a non-enabled kind with the dedicated
@@ -2033,3 +2041,28 @@ message:
 - Draft row vanished between propose and apply — `RECOVERY_DRAFT_UNAVAILABLE`, `details.source = "draft_missing_in_transaction"`.
 - Draft fails authoritative validation at apply time — `INVALID_STORY_TITLE` with `details.source = "recovery_draft_invalid"`. The draft row is preserved so Discard remains available.
 - Story disappeared (FK violation or rows_affected == 0) — `LIBRARY_INCONSISTENT` with `details.source = "story_missing"`.
+
+## Support Profile Screen Contract
+
+The read-only screen where the user consults what the OFFICIAL
+DISTRIBUTION supports: device families and firmware cohorts, local
+artifact types, content sources, and the distribution posture. It is
+the navigable in-app face of the documented support profile
+([device-support-profile.md](./device-support-profile.md) stays the
+detailed developer reference) and the internal target the existing
+`Consulter le profil de support` gesture navigates to.
+
+| Aspect | Value |
+| --- | --- |
+| Route | `/settings` — the `settings` dominant context. The screen is a standalone single-column view (the `StoryEditRoute` pattern), NOT the three-column library grid. |
+| Screen title | `<h1>` `Profil de support` (canonical term — never `matrice` in user copy). The `<main>` carries `aria-label="Profil de support"`. |
+| Version header | The app version renders in the header as `Version {version}` via `getVersion()` (`@tauri-apps/api/app`, covered by `core:default`). The `consulte le profil de support de ta version` gesture copy becomes literal. If the version read fails, the line is omitted — never an invented value. |
+| Entry points | (a) A permanent navigation entry in the library left column (below the filters block): a light `SurfacePanel` + quiet `Button` labeled `Profil de support` that navigates to `/settings` — no business state in the column. (b) The existing `Consulter le profil de support` gesture (detection panel, device story inspector, device import surface) navigates IN-APP to `/settings` — no external browser, no network. |
+| Exit | A `Retour à la bibliothèque` button navigating to `/library`. |
+| Read model | Content is ENTIRELY Rust-driven through two independent pure reads at route entry: `read_support_profile` (devices + local artifacts, frozen labels and reasons) and `read_content_source_policy` (content sources, reused VERBATIM from the Content Source Activation Contract — the screen is a second consumer, never a second truth). NO hardcoded TS list of families, cohorts, kinds, labels or reasons. Reads are pinned by a per-mount token (the `policyReadTokenRef` pattern) so a stale resolution never applies. |
+| Screen states | `loading` (accessible via `aria-busy`) → `loaded` \| `unavailable` PER SECTION: a failed read renders the affected section(s) in a calm `unavailable` state (honest frozen copy, `role="status"`, NO `Réessayer` — a failed pure read is a contract drift, not a transient failure) while the sections whose read succeeded stay fully served (fail-closed per section, never invented content). |
+| Sections | Four `<h2>` sections, in order: `Appareils` (the device support matrix grouped by family — every cohort line with its metadata format label and its four capability lines), `Artefacts locaux` (the three artifact registry lines plus the node-media formats line `Formats acceptés : images PNG, JPEG ; sons MP3, WAV, OGG` VERBATIM), `Sources de contenu` (the read policy rendered as-is: an enabled kind with its Rust-carried frozen entry-level marker `Activée par la distribution officielle` — the DTO's `activationMarker` — non-enabled kinds with their Rust-carried frozen reasons), `Politique de distribution` (the frozen posture copy derived from the PRD distribution policy). |
+| Capability rendering | An available capability renders StateChip `success` + `Disponible`; a non-available one renders StateChip `neutral` + `Non disponible dans cette version` PLUS its frozen Rust reason — NEVER a bare ✗, NEVER tone `error`/`warning`, NEVER `role="alert"`: a distribution limit is durable calm information, not a runtime error (the fourth vocabulary — see the non-collision rule in [product-language.md](./product-language.md)). Chips carry glyphs; color alone never carries the distinction. |
+| Read-only | NO setting, NO toggle, NO persistence: activation is a DISTRIBUTION decision (Content Source Activation Contract). `/settings` is the route context; `Profil de support` is the screen. |
+| Offline | The screen triggers ZERO network request (NFR14). Repatriating the support-profile gesture REMOVES the only external-browser call of that path and introduces none. |
+| Forbidden | No modal, no toast, no new design-system component (the matrix composes SurfacePanel / StateChip / Button), no runtime non-support copy reused for a matrix line (the detection panel's `raison de non-support` vocabulary stays its own). |
