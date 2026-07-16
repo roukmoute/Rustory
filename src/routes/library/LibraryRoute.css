@@ -1,0 +1,19 @@
+/*
+ * LibraryRoute-owned bits: the permanent visually-hidden status region the
+ * OS-open calm-limit copies route through. The region must EXIST before a
+ * copy lands — a live region inserted into the DOM already filled is not
+ * reliably announced; only CHANGES of an existing region are (the exact
+ * pattern of the import/creation surfaces' `__live` regions).
+ */
+
+.library-route__os-open-live {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}

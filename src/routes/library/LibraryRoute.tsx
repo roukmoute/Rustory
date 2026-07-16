@@ -1,5 +1,5 @@
 import type React from "react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 
 import {
@@ -30,7 +30,10 @@ import { useStoryPreparation, useStoryTransfer } from "../../features/transfer";
 import { CreateFromFolderSurface } from "../../features/import-export/components/CreateFromFolderSurface";
 import { CreateFromRssSurface } from "../../features/import-export/components/CreateFromRssSurface";
 import { ImportArtifactSurface } from "../../features/import-export/components/ImportArtifactSurface";
-import { readContentSourcePolicy } from "../../ipc/commands/import-export";
+import {
+  discardOsOpenRequest,
+  readContentSourcePolicy,
+} from "../../ipc/commands/import-export";
 import { useRssCreation } from "../../features/import-export/hooks/use-rss-creation";
 import { useStoryImport } from "../../features/import-export/hooks/use-story-import";
 import { useStructuredCreation } from "../../features/import-export/hooks/use-structured-creation";
@@ -52,6 +55,18 @@ import type { StoryCardDto } from "../../shared/ipc-contracts/library";
 import { Button, SurfacePanel } from "../../shared/ui";
 import { LibraryLayout } from "../../shell/layout/LibraryLayout";
 import { useLibraryShell } from "../../shell/state/library-shell-store";
+import { useOsOpenShell } from "../../shell/state/os-open-shell-store";
+
+import "./LibraryRoute.css";
+
+/**
+ * Frozen calm-limit copy when an OS-open intent arrives while a library
+ * flow (import / creation / transfer) is in flight (`product-language.md`).
+ * A frontend-owned SURFACE literal, typed exactly once: the living flow is
+ * never interrupted, the intent is discarded, the user reopens the file.
+ */
+const OS_OPEN_BUSY_NOTICE =
+  "Une opération est déjà en cours dans la bibliothèque. Termine-la, puis rouvre le fichier.";
 
 export function LibraryRoute(): React.JSX.Element {
   const { state, retry, invalidate } = useLibraryOverview();
@@ -75,6 +90,11 @@ export function LibraryRoute(): React.JSX.Element {
   };
 
   const [isCreateOpen, setIsCreateOpen] = useState<boolean>(false);
+  // Mirror of the creation dialog's INTERNAL submission state, reported
+  // upward so the primary title creation joins the flows' mutual
+  // exclusion (an OS-open intent arriving mid-submission is declined
+  // calmly, never interleaved with the create → navigate sequence).
+  const [isCreateSubmitting, setIsCreateSubmitting] = useState<boolean>(false);
   // The distribution's content-source policy, read ANEW at every dialog
   // opening (a point-in-time read — no cache, no authoritative frontend
   // state; Rust alone decides). `null` = not read / read failed: the
@@ -166,10 +186,14 @@ export function LibraryRoute(): React.JSX.Element {
   // AC1: analysis never mutates; the overview is re-read only after a
   // successful commit (the hook already dropped the module cache; the effect
   // below reloads THIS route so the fresh card appears).
+  // `isOsOpenSettling` joins the busy set: the OS-open pull renders no
+  // transient state (silent by contract) but IS an in-flight operation —
+  // no sibling flow may start under a live OS read.
   const storyImport = useStoryImport();
   const isImportBusy =
     storyImport.status.kind === "analyzing" ||
-    storyImport.status.kind === "importing";
+    storyImport.status.kind === "importing" ||
+    storyImport.isOsOpenSettling;
   const importStatusKind = storyImport.status.kind;
   useEffect(() => {
     if (importStatusKind === "imported") {
@@ -399,6 +423,122 @@ export function LibraryRoute(): React.JSX.Element {
     }
   }, [singleSelectedStoryId, writableDeviceId, hydrateTransfer]);
 
+  // ===== OS-open intent reaction (`OS Open Contract`) =====
+  //
+  // The library is the landing context of every OS-open intent: one pull at
+  // mount (covers the cold start — the intent was seeded before the
+  // frontend existed), plus one pull per `os-open:requested` signal relayed
+  // by the bootstrap. The verdict feeds the SAME import machine as the
+  // dialog flow; the two calm limits (several files / busy flow) render
+  // inline `role="status"` and never touch the machine.
+  const osOpenSignal = useOsOpenShell((s) => s.pendingSignal);
+  const clearOsOpenSignal = useOsOpenShell((s) => s.clear);
+  const [osOpenNotice, setOsOpenNotice] = useState<string | null>(null);
+
+  // StrictMode-safe mount flag for the OS-open settlements (the same
+  // re-armed flag the import/creation hooks use): a synthetic
+  // unmount+remount re-arms it, so the FIRST mount's settlement (which may
+  // carry the one-shot verdict) still applies to the living component,
+  // while a REAL unmount drops any late settlement — no ghost notice, no
+  // ghost state.
+  const osOpenMountedRef = useRef(true);
+  useEffect(() => {
+    osOpenMountedRef.current = true;
+    return () => {
+      osOpenMountedRef.current = false;
+    };
+  }, []);
+
+  const analyzeFromOsOpen = storyImport.analyzeFromOsOpen;
+  const handleOsOpenIntent = useCallback(async (): Promise<void> => {
+    const outcome = await analyzeFromOsOpen();
+    if (!osOpenMountedRef.current) return;
+    if (outcome.kind === "multipleFiles") {
+      // Rendered VERBATIM — the copy travels in the Rust DTO.
+      setOsOpenNotice(outcome.message);
+    } else if (outcome.kind !== "none") {
+      // A fresh intent (review / failed) replaces a lingering calm limit.
+      setOsOpenNotice(null);
+    }
+  }, [analyzeFromOsOpen]);
+
+  // One-shot pull at mount. The Rust-side one-shot take makes the
+  // StrictMode double-effect harmless by construction: the second pull
+  // answers `none` (total no-op).
+  useEffect(() => {
+    void handleOsOpenIntent();
+  }, [handleOsOpenIntent]);
+
+  // A live flow has priority over an arriving intent: decline calmly,
+  // consume the intent, NEVER interrupt (Pattern Priorities). The existing
+  // flags are CONSULTED, not modified; the primary creation's submission
+  // (reported by the dialog) joins them — a create → navigate sequence
+  // must never be interleaved with an arriving intent.
+  //
+  // The OS-open settlement itself (`isOsOpenSettling`) is DELIBERATELY
+  // absent: the channel serializes through its OWN mono-slot queue. A
+  // signal landing while a pull settles must QUEUE (Rust-side the newer
+  // offer already replaced the slot — the newest gesture wins), never hit
+  // the busy refusal: that refusal would DISCARD the newer intent and
+  // render a busy copy while no visible operation exists. The sibling-CTA
+  // gates (`isImportBusy` & co) DO keep the settling flag — starting a
+  // sibling flow under a live OS read stays refused.
+  const isOsOpenBlockedByLiveFlow =
+    storyImport.status.kind === "analyzing" ||
+    storyImport.status.kind === "importing" ||
+    isCreateFromFolderBusy ||
+    isRssCreationActive ||
+    isCreateSubmitting ||
+    storyTransfer.state.kind === "transferring";
+
+  useEffect(() => {
+    if (!osOpenSignal) return;
+    clearOsOpenSignal();
+    if (isOsOpenBlockedByLiveFlow) {
+      void discardOsOpenRequest().catch(() => {
+        // Best-effort: a failed discard leaves a pending intent the next
+        // pull will surface — never a broken living flow.
+      });
+      setOsOpenNotice(OS_OPEN_BUSY_NOTICE);
+      return;
+    }
+    void handleOsOpenIntent();
+  }, [
+    osOpenSignal,
+    clearOsOpenSignal,
+    isOsOpenBlockedByLiveFlow,
+    handleOsOpenIntent,
+  ]);
+
+  const handleImportRetry = (): void => {
+    if (storyImport.origin === "osOpen") {
+      if (storyImport.failedPhase === "accept") {
+        // The commit failed AFTER the one-shot intent was consumed:
+        // `Réessayer` re-runs the accept with the preserved verdict — a
+        // re-pull would answer `none` and retry nothing.
+        void storyImport.retryAccept();
+      } else {
+        // The read failure left the intent pending Rust-side: `Réessayer`
+        // replays the SAME intent — never the file picker.
+        void handleOsOpenIntent();
+      }
+    } else {
+      void storyImport.pickAndAnalyze();
+    }
+  };
+
+  const handleImportDismiss = (): void => {
+    if (
+      storyImport.origin === "osOpen" &&
+      storyImport.status.kind === "failed"
+    ) {
+      // `Fermer` on an OS-open read failure abandons the still-pending
+      // intent (idempotent — a post-accept failure has nothing left).
+      void discardOsOpenRequest().catch(() => {});
+    }
+    storyImport.dismiss();
+  };
+
   // Reflect the in-flight / failed preparation as a discreet card badge (AC2),
   // keyed on the job's TARGET story (from the hook state) — never the current
   // selection — so it survives the user selecting another story. The panel stays
@@ -562,12 +702,36 @@ export function LibraryRoute(): React.JSX.Element {
 
   const center = (
     <>
+      {/* Persistent status region the calm-limit copies route through
+          (`OS Open Contract`): mounted (empty) as long as the center
+          column exists so AT reliably announces the copy when it LANDS —
+          a live region inserted into the DOM already filled (like the
+          visual block below) is not reliably announced; only CHANGES of
+          an existing region are (the surfaces' `__live` pattern). */}
+      <div
+        className="library-route__os-open-live"
+        role="status"
+        aria-atomic="true"
+      >
+        {osOpenNotice ?? ""}
+      </div>
+      {osOpenNotice ? (
+        // The VISUAL calm-limit block (`OS Open Contract`) — inline, calm,
+        // never a toast, never a modal, never an alert tone. The
+        // announcement rides the persistent region above.
+        <SurfacePanel elevation={0}>
+          <p>{osOpenNotice}</p>
+          <Button variant="quiet" onClick={() => setOsOpenNotice(null)}>
+            Fermer
+          </Button>
+        </SurfacePanel>
+      ) : null}
       <ImportArtifactSurface
         status={storyImport.status}
         onAccept={storyImport.acceptRecognized}
         onAbandon={storyImport.abandon}
-        onRetry={storyImport.pickAndAnalyze}
-        onDismiss={storyImport.dismiss}
+        onRetry={handleImportRetry}
+        onDismiss={handleImportDismiss}
       />
       <CreateFromFolderSurface
         status={structuredCreation.status}
@@ -695,6 +859,8 @@ export function LibraryRoute(): React.JSX.Element {
         isCreateFromRssUnavailable={
           isImportBusy || isCreateFromFolderBusy || isRssCreationActive
         }
+        isSubmitUnavailable={storyImport.isOsOpenSettling}
+        onSubmittingChange={setIsCreateSubmitting}
         contentSourcePolicy={contentSourcePolicy}
       />
     </>

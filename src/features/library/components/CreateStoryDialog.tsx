@@ -37,6 +37,16 @@ export interface CreateStoryDialogProps {
   onCreateFromRssRequest?: () => void;
   /** Same cross-flow exclusivity for the RSS entry. */
   isCreateFromRssUnavailable?: boolean;
+  /** Cross-flow exclusivity for the PRIMARY title path: while a sibling
+   *  operation that must not overlap a creation is in flight (an OS-open
+   *  analysis settling), the `Créer` submission is refused — mirrors the
+   *  folder/RSS entry gating. */
+  isSubmitUnavailable?: boolean;
+  /** Mirror of the internal `isSubmitting` state, reported upward so the
+   *  route can include the PRIMARY creation in the flows' mutual
+   *  exclusion (an OS-open intent arriving mid-submission must be
+   *  declined calmly, never interleaved). */
+  onSubmittingChange?: (submitting: boolean) => void;
   /** The distribution's content-source policy, read by the route when the
    *  dialog opens (`read_content_source_policy` — Rust alone decides; the
    *  dialog renders what it declares, never a hardcoded list). `null` /
@@ -71,6 +81,8 @@ export function CreateStoryDialog({
   isCreateFromFolderUnavailable = false,
   onCreateFromRssRequest,
   isCreateFromRssUnavailable = false,
+  isSubmitUnavailable = false,
+  onSubmittingChange,
   contentSourcePolicy = null,
 }: CreateStoryDialogProps): React.JSX.Element {
   const descriptionId = useId();
@@ -104,7 +116,13 @@ export function CreateStoryDialog({
     }
   }, [open]);
 
-  const canSubmit = issue === null && !isSubmitting;
+  // Report the submission state upward (the reset above flows through this
+  // same effect, so the route's mirror can never stick on a closed dialog).
+  useEffect(() => {
+    onSubmittingChange?.(isSubmitting);
+  }, [isSubmitting, onSubmittingChange]);
+
+  const canSubmit = issue === null && !isSubmitting && !isSubmitUnavailable;
 
   const describedBy = [
     descriptionId,
@@ -117,7 +135,7 @@ export function CreateStoryDialog({
     .join(" ");
 
   const handleSubmit = async (): Promise<void> => {
-    if (isSubmitting) return;
+    if (isSubmitting || isSubmitUnavailable) return;
     // Read the live value straight from the input instead of reusing the
     // memoized `normalized`: a keystroke that lands between React's last
     // render and this handler (Enter race) would otherwise submit a stale

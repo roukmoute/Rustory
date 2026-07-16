@@ -88,6 +88,54 @@ pub fn analyze_artifact(bytes: &[u8], source_name: String) -> ImportAnalysis {
     }
 }
 
+/// Upper bound on the artifact bytes read into memory before parsing. A
+/// `.rustory` MVP file is < 100 kB; 8 MiB is a generous ceiling that still
+/// refuses an accidental giant file before loading it.
+pub(crate) const MAX_ARTIFACT_BYTES: u64 = 8 * 1024 * 1024;
+
+/// Read an artifact file with a HARD upper bound, refusing non-regular files.
+///
+/// The file TYPE is gated BEFORE opening: `std::fs::metadata` (which follows
+/// symlinks to the real target) rejects a directory / device / FIFO so
+/// `File::open` only ever runs on a regular file. This matters on Linux,
+/// where opening a FIFO in `O_RDONLY` BLOCKS until a writer appears — a
+/// pre-open type check would never be reached if it lived on the opened
+/// handle, freezing the `spawn_blocking` worker. The opened handle is
+/// re-checked (defense in depth against a TOCTOU swap) and its own size +
+/// the capped `take(MAX_ARTIFACT_BYTES + 1)` read close the size window: a
+/// file that grows past the bound after the metadata check is still refused
+/// (the extra byte makes the overflow observable) instead of being loaded
+/// whole.
+pub(crate) fn read_artifact_bounded(path: &std::path::Path) -> Result<Vec<u8>, AppError> {
+    use std::io::Read;
+
+    // Pre-open type gate — refuses a FIFO/device/dir BEFORE the (potentially
+    // blocking) `O_RDONLY` open.
+    let pre = std::fs::metadata(path).map_err(|_| file_read_error("metadata"))?;
+    if !pre.is_file() {
+        return Err(file_read_error("not_regular_file"));
+    }
+
+    let file = std::fs::File::open(path).map_err(|_| file_read_error("open"))?;
+    let meta = file.metadata().map_err(|_| file_read_error("metadata"))?;
+    // Re-check on the opened handle (TOCTOU defense) and read the size from
+    // the fd so a stale pre-open length cannot understate it.
+    if !meta.is_file() {
+        return Err(file_read_error("not_regular_file"));
+    }
+    if meta.len() > MAX_ARTIFACT_BYTES {
+        return Err(file_read_error("oversize"));
+    }
+    let mut bytes = Vec::new();
+    file.take(MAX_ARTIFACT_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| file_read_error("read"))?;
+    if bytes.len() as u64 > MAX_ARTIFACT_BYTES {
+        return Err(file_read_error("oversize"));
+    }
+    Ok(bytes)
+}
+
 /// Phase 2 — re-validate the carried content from ZERO and commit. Never
 /// trusts the frontend: it re-runs the canonical title validation
 /// (`INVALID_STORY_TITLE` on failure, exactly like `create_story`) and the

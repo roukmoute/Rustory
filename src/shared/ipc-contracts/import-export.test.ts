@@ -6,12 +6,14 @@ import {
   isExportStoryDialogOutcome,
   isImportArtifactAnalysis,
   isImportFinding,
+  isOsOpenAnalysis,
   isRssItemRef,
   isRssPreview,
   isStructuredCreationAnalysis,
   type ContentSourcePolicy,
   type ExportStoryDialogOutcome,
   type ImportArtifactAnalysis,
+  type OsOpenAnalysis,
   type RssPreview,
   type StructuredCreationAnalysis,
 } from "./import-export";
@@ -389,6 +391,75 @@ const FOLDER_ANALYZED_BLOCKED: AnalyzedFolderVerdict = {
   folderName: "casse",
   folderPath: "/home/user/casse",
 };
+
+describe("isOsOpenAnalysis", () => {
+  const MULTIPLE_FILES: OsOpenAnalysis = {
+    kind: "multipleFiles",
+    message:
+      "Rustory ouvre un fichier à la fois. Rouvre chaque fichier séparément.",
+  };
+
+  it("accepts a none payload with only the kind discriminant", () => {
+    expect(isOsOpenAnalysis({ kind: "none" })).toBe(true);
+  });
+
+  it("rejects a none payload that carries extra fields", () => {
+    expect(isOsOpenAnalysis({ kind: "none", leaked: 1 })).toBe(false);
+  });
+
+  it("accepts the multipleFiles calm limit with its Rust-carried copy", () => {
+    expect(isOsOpenAnalysis(MULTIPLE_FILES)).toBe(true);
+  });
+
+  it("rejects a multipleFiles payload with a missing or empty message (fail-closed)", () => {
+    expect(isOsOpenAnalysis({ kind: "multipleFiles" })).toBe(false);
+    expect(isOsOpenAnalysis({ kind: "multipleFiles", message: "" })).toBe(
+      false,
+    );
+  });
+
+  it("rejects a multipleFiles payload with extra fields", () => {
+    expect(
+      isOsOpenAnalysis({ ...MULTIPLE_FILES, leaked: true }),
+    ).toBe(false);
+  });
+
+  it("accepts an analyzed verdict — importable and blocked alike (the dialog-import guard)", () => {
+    expect(isOsOpenAnalysis(ANALYZED_PARTIAL)).toBe(true);
+    expect(isOsOpenAnalysis(ANALYZED_BLOCKED)).toBe(true);
+  });
+
+  it("rejects an altered analyzed verdict exactly like the dialog-import guard", () => {
+    // Quality incoherent with its findings — the reused guard refuses it.
+    expect(
+      isOsOpenAnalysis({ ...ANALYZED_PARTIAL, quality: "clean" }),
+    ).toBe(false);
+    // A blocked verdict must not carry importable content.
+    expect(
+      isOsOpenAnalysis({
+        ...ANALYZED_BLOCKED,
+        importableContent: IMPORTABLE_CONTENT,
+      }),
+    ).toBe(false);
+    // A drifted field type never renders.
+    expect(
+      isOsOpenAnalysis({ ...ANALYZED_PARTIAL, sourceName: "" }),
+    ).toBe(false);
+  });
+
+  it("rejects the dialog-only cancelled kind and unknown kinds", () => {
+    // The OS channel has no dialog, hence no cancelled variant.
+    expect(isOsOpenAnalysis({ kind: "cancelled" })).toBe(false);
+    expect(isOsOpenAnalysis({ kind: "weird" })).toBe(false);
+  });
+
+  it.each([null, undefined, 42, "string", []])(
+    "rejects non-objects (%s)",
+    (value) => {
+      expect(isOsOpenAnalysis(value)).toBe(false);
+    },
+  );
+});
 
 describe("isStructuredCreationAnalysis", () => {
   it("accepts a clean creatable verdict", () => {

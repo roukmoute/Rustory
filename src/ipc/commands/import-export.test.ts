@@ -10,13 +10,16 @@ import {
   ContentSourcePolicyContractDriftError,
   ExportStoryContractDriftError,
   ImportArtifactContractDriftError,
+  OsOpenContractDriftError,
   RssCreationContractDriftError,
   StructuredCreationContractDriftError,
   acceptArtifactImport,
   acceptRssStoryCreation,
   acceptStructuredCreation,
   analyzeArtifactForImport,
+  analyzeOsOpenRequest,
   analyzeStructuredFolderForCreation,
+  discardOsOpenRequest,
   exportStoryWithSaveDialog,
   fetchRssSourcePreview,
   readContentSourcePolicy,
@@ -217,6 +220,83 @@ describe("acceptArtifactImport", () => {
         artifactChecksum: "b".repeat(64),
       }),
     ).rejects.toEqual(rustError);
+  });
+});
+
+describe("analyzeOsOpenRequest", () => {
+  beforeEach(() => {
+    vi.mocked(invoke).mockReset();
+  });
+
+  it("calls analyze_os_open_request and returns the validated verdict", async () => {
+    vi.mocked(invoke).mockResolvedValueOnce(ANALYZED);
+    const result = await analyzeOsOpenRequest();
+    expect(invoke).toHaveBeenCalledWith("analyze_os_open_request");
+    expect(result.kind).toBe("analyzed");
+  });
+
+  it("resolves the none and multipleFiles kinds as-is", async () => {
+    vi.mocked(invoke).mockResolvedValueOnce({ kind: "none" });
+    expect(await analyzeOsOpenRequest()).toEqual({ kind: "none" });
+
+    const limit = {
+      kind: "multipleFiles",
+      message:
+        "Rustory ouvre un fichier à la fois. Rouvre chaque fichier séparément.",
+    };
+    vi.mocked(invoke).mockResolvedValueOnce(limit);
+    expect(await analyzeOsOpenRequest()).toEqual(limit);
+  });
+
+  it("rejects with OsOpenContractDriftError (carrying the raw payload) on a shape drift", async () => {
+    const raw = { kind: "multipleFiles", message: "" };
+    vi.mocked(invoke).mockResolvedValueOnce(raw);
+    const err = (await analyzeOsOpenRequest().then(
+      () => {
+        throw new Error("expected rejection");
+      },
+      (e: unknown) => e,
+    )) as OsOpenContractDriftError;
+    expect(err).toBeInstanceOf(OsOpenContractDriftError);
+    expect(err.raw).toEqual(raw);
+  });
+
+  it("propagates an IMPORT_FAILED read error verbatim (the intent stays pending Rust-side)", async () => {
+    const rustError = {
+      code: "IMPORT_FAILED",
+      message: "Import impossible: fichier illisible.",
+      userAction:
+        "Vérifie que le fichier existe, qu'il s'agit bien d'un artefact Rustory, puis réessaie.",
+      details: { source: "file_read", stage: "metadata" },
+    };
+    vi.mocked(invoke).mockRejectedValueOnce(rustError);
+    await expect(analyzeOsOpenRequest()).rejects.toEqual(rustError);
+  });
+
+  it("normalizes a non-AppError transport rejection", async () => {
+    vi.mocked(invoke).mockRejectedValueOnce("boom");
+    await expect(analyzeOsOpenRequest()).rejects.toMatchObject({
+      code: "UNKNOWN",
+    });
+  });
+});
+
+describe("discardOsOpenRequest", () => {
+  beforeEach(() => {
+    vi.mocked(invoke).mockReset();
+  });
+
+  it("calls discard_os_open_request and resolves", async () => {
+    vi.mocked(invoke).mockResolvedValueOnce(null);
+    await expect(discardOsOpenRequest()).resolves.toBeUndefined();
+    expect(invoke).toHaveBeenCalledWith("discard_os_open_request");
+  });
+
+  it("normalizes a transport rejection", async () => {
+    vi.mocked(invoke).mockRejectedValueOnce("boom");
+    await expect(discardOsOpenRequest()).rejects.toMatchObject({
+      code: "UNKNOWN",
+    });
   });
 });
 

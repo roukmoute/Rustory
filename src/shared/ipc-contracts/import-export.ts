@@ -141,6 +141,45 @@ export interface AcceptArtifactImportInput {
   artifactChecksum: string;
 }
 
+// ===== OS open channel (a file opened through the operating system) =====
+//
+// Mirror of `src-tauri/src/ipc/dto/import_export.rs::OsOpenAnalysisDto`.
+// The `analyzed` variant COMPOSES the exact field set of the dialog-import
+// verdict (same keys, same coherence rules — one guard validates both);
+// `none` is the total silent no-op; `multipleFiles` carries the Rust-frozen
+// calm-limit copy, rendered verbatim.
+
+/** Tagged outcome of `analyze_os_open_request`. A transport failure (the
+ *  file became unreadable) rejects with a normalized `AppError` instead —
+ *  the intent then STAYS pending Rust-side so a retry can replay it. */
+export type OsOpenAnalysis =
+  | { kind: "none" }
+  | { kind: "multipleFiles"; message: string }
+  | Extract<ImportArtifactAnalysis, { kind: "analyzed" }>;
+
+/**
+ * Runtime guard for an [`OsOpenAnalysis`] payload. Fail-closed: the
+ * `multipleFiles` copy must be non-empty (a calm limit with no words would
+ * render an empty status region), and the `analyzed` variant is validated
+ * by the SAME dialog-import guard (structural identity, never a re-typed
+ * sibling check).
+ */
+export function isOsOpenAnalysis(value: unknown): value is OsOpenAnalysis {
+  if (typeof value !== "object" || value === null) return false;
+  const c = value as Record<string, unknown>;
+  if (c.kind === "none") {
+    return Object.keys(c).length === 1;
+  }
+  if (c.kind === "multipleFiles") {
+    return (
+      Object.keys(c).length === 2 &&
+      typeof c.message === "string" &&
+      c.message.length > 0
+    );
+  }
+  return c.kind === "analyzed" && isImportArtifactAnalysis(value);
+}
+
 const IMPORT_QUALITIES: ReadonlySet<string> = new Set([
   "clean",
   "partial",

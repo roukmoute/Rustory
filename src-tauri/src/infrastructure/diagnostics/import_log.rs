@@ -62,6 +62,17 @@ pub enum Event {
     /// [`Event::RssSourceUnreachable`] (network) nor
     /// [`Event::RssCreationFailed`] (local).
     ContentSourceBlocked { kind: String },
+    /// An OS-open intent's file read failed at analysis time (the
+    /// `IMPORT_FAILED` / `file_read` transport regime): `source` / `stage`
+    /// mirror the upstream `AppError` details closed sets. STRICTLY
+    /// PII-free — never the path, never the basename (the support
+    /// chronology needs the stage, not the file identity).
+    OsOpenReadFailed { source: String, stage: String },
+    /// The living instance received a warm OS-open intent but FAILED to
+    /// emit the `os-open:requested` signal to the frontend. The intent
+    /// stays pending (the next library-mount pull serves it) — this line
+    /// makes the otherwise-invisible lost wake-up diagnosable.
+    OsOpenSignalEmitFailed,
 }
 
 /// Append a single event to the import log. Production entry point —
@@ -161,5 +172,36 @@ mod tests {
         // address fragment may ever appear on the line.
         assert!(!content.contains("host"));
         assert!(!content.contains("http"));
+    }
+
+    #[test]
+    fn os_open_read_failed_serializes_stage_tokens_and_never_a_file_identity() {
+        let dir = TempDir::new().expect("tempdir");
+        let log = dir.path().join("import.jsonl");
+        record_event_at_path(
+            &log,
+            Event::OsOpenReadFailed {
+                source: "file_read".into(),
+                stage: "metadata".into(),
+            },
+        )
+        .expect("write");
+        let content = std::fs::read_to_string(&log).expect("read");
+        assert!(content.contains("\"category\":\"os_open_read_failed\""));
+        assert!(content.contains("\"source\":\"file_read\""));
+        assert!(content.contains("\"stage\":\"metadata\""));
+        // PII discipline: the line carries stage tokens only — never a
+        // path, a basename or any file identity.
+        assert!(!content.contains("path"));
+        assert!(!content.contains(".rustory"));
+    }
+
+    #[test]
+    fn os_open_signal_emit_failed_serializes_its_bare_category() {
+        let dir = TempDir::new().expect("tempdir");
+        let log = dir.path().join("import.jsonl");
+        record_event_at_path(&log, Event::OsOpenSignalEmitFailed).expect("write");
+        let content = std::fs::read_to_string(&log).expect("read");
+        assert!(content.contains("\"category\":\"os_open_signal_emit_failed\""));
     }
 }

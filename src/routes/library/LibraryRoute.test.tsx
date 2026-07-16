@@ -25,6 +25,10 @@ const mockReadTransferOutcome = vi.fn();
 const mockDiscardTransferOutcome = vi.fn();
 const mockAnalyzeFolder = vi.fn();
 const mockAnalyzeArtifact = vi.fn();
+const mockAcceptArtifact = vi.fn();
+const mockAnalyzeOsOpen = vi.fn();
+const mockDiscardOsOpen = vi.fn();
+const mockCreateStory = vi.fn();
 const mockFetchRssPreview = vi.fn();
 const mockAcceptRssCreation = vi.fn();
 const mockReadContentSourcePolicy = vi.fn();
@@ -164,6 +168,16 @@ vi.mock("../../ipc/events/job-events", () => ({
   subscribeJobEvents: () => () => {},
 }));
 
+vi.mock("../../ipc/commands/story", async () => {
+  const actual = await vi.importActual<
+    typeof import("../../ipc/commands/story")
+  >("../../ipc/commands/story");
+  return {
+    ...actual,
+    createStory: (input: unknown) => mockCreateStory(input),
+  };
+});
+
 vi.mock("../../ipc/commands/import-export", async () => {
   const actual = await vi.importActual<
     typeof import("../../ipc/commands/import-export")
@@ -172,6 +186,9 @@ vi.mock("../../ipc/commands/import-export", async () => {
     ...actual,
     analyzeStructuredFolderForCreation: () => mockAnalyzeFolder(),
     analyzeArtifactForImport: () => mockAnalyzeArtifact(),
+    acceptArtifactImport: (input: unknown) => mockAcceptArtifact(input),
+    analyzeOsOpenRequest: () => mockAnalyzeOsOpen(),
+    discardOsOpenRequest: () => mockDiscardOsOpen(),
     fetchRssSourcePreview: (url: string) => mockFetchRssPreview(url),
     acceptRssStoryCreation: (url: string, ref: unknown) =>
       mockAcceptRssCreation(url, ref),
@@ -184,6 +201,7 @@ import { invalidateDeviceLibraryCache } from "../../features/device/hooks/use-de
 import { invalidateLibraryOverviewCache } from "../../features/library/hooks/use-library-overview";
 import type { ConnectedDeviceDto } from "../../shared/ipc-contracts/device";
 import { useLibraryShell } from "../../shell/state/library-shell-store";
+import { useOsOpenShell } from "../../shell/state/os-open-shell-store";
 import {
   LibraryRoute,
   mapDeviceForPanel,
@@ -277,6 +295,24 @@ describe("<LibraryRoute />", () => {
     // Default: the artifact import analysis is user-triggered too.
     mockAnalyzeArtifact.mockReset();
     mockAnalyzeArtifact.mockResolvedValue({ kind: "cancelled" });
+    // Default: the accept phase settles into a fresh card. Tests that
+    // exercise a commit failure override it.
+    mockAcceptArtifact.mockReset();
+    mockAcceptArtifact.mockResolvedValue({
+      id: "0197a5d0-0000-7000-8000-0000000000cc",
+      title: "Le Soleil",
+      importState: "needsReview",
+    });
+    // Default: no pending OS-open intent — the mount pull answers `none`
+    // (the total silent no-op). Tests exercising the channel override it.
+    mockAnalyzeOsOpen.mockReset();
+    mockAnalyzeOsOpen.mockResolvedValue({ kind: "none" });
+    mockDiscardOsOpen.mockReset();
+    mockDiscardOsOpen.mockResolvedValue(undefined);
+    // Default: the primary title creation never settles unless a test
+    // drives it explicitly.
+    mockCreateStory.mockReset();
+    mockCreateStory.mockImplementation(() => new Promise(() => {}));
     // Default: the RSS preview is user-triggered; a never-settling fetch is
     // overridden by the tests that exercise the flow.
     mockFetchRssPreview.mockReset();
@@ -300,6 +336,7 @@ describe("<LibraryRoute />", () => {
       query: "",
       sort: "titre-asc",
     });
+    useOsOpenShell.setState({ pendingSignal: false });
   });
 
   it("shows the loading state before the IPC call resolves", () => {
@@ -3770,6 +3807,436 @@ describe("<LibraryRoute />", () => {
     ).toEqual({
       kind: "unavailable",
       reason: "Envoi indisponible: un transfert est déjà en cours",
+    });
+  });
+
+  // ===== OS-open intent reaction (`OS Open Contract`) =====
+
+  const OS_OPEN_ANALYZED = {
+    kind: "analyzed" as const,
+    quality: "partial" as const,
+    state: "needsReview" as const,
+    findings: [
+      {
+        aspect: "title" as const,
+        category: "ambiguous" as const,
+        message: "Le titre a été normalisé à l'import.",
+      },
+    ],
+    importableContent: {
+      title: "Le Soleil",
+      structureJson: '{"schemaVersion":1,"nodes":[]}',
+      contentChecksum: "a".repeat(64),
+      createdAt: "2026-06-20T10:00:00.000Z",
+      updatedAt: "2026-06-24T14:15:00.000Z",
+    },
+    sourceName: "histoire.rustory",
+    artifactChecksum: "b".repeat(64),
+  };
+
+  const OS_OPEN_MULTIPLE_FILES_COPY =
+    "Rustory ouvre un fichier à la fois. Rouvre chaque fichier séparément.";
+  const OS_OPEN_BUSY_COPY =
+    "Une opération est déjà en cours dans la bibliothèque. Termine-la, puis rouvre le fichier.";
+
+  it("pulls the OS-open intent once at mount and renders NOTHING on none (total no-op)", async () => {
+    mockGet.mockResolvedValueOnce({ stories: [] });
+    renderLibrary();
+
+    await screen.findByRole("heading", { name: /ta bibliothèque est vide/i });
+    await waitFor(() => {
+      expect(mockAnalyzeOsOpen).toHaveBeenCalledTimes(1);
+    });
+    // Nothing renders, nothing announces: no review region, no OS-open
+    // notice, no alert (the empty-state statuses are the library's own).
+    expect(
+      screen.queryByRole("region", { name: "Import d'une histoire" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByText(OS_OPEN_MULTIPLE_FILES_COPY),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByText(OS_OPEN_BUSY_COPY)).not.toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("opens the EXISTING import review from a cold-start intent (mount pull → analyzed)", async () => {
+    mockGet.mockResolvedValueOnce({ stories: [] });
+    mockAnalyzeOsOpen.mockResolvedValueOnce(OS_OPEN_ANALYZED);
+    renderLibrary();
+
+    // The verdict (sourceName + findings) feeds the SAME review surface as
+    // the dialog import — quality chip + report, no new component.
+    expect(
+      await screen.findByText("Partiellement exploitable"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("Le titre a été normalisé à l'import."),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Importer ce qui est reconnu" }),
+    ).toBeInTheDocument();
+    // The dialog picker was never opened — the intent came from the OS.
+    expect(mockAnalyzeArtifact).not.toHaveBeenCalled();
+  });
+
+  it("reacts to a warm os-open signal: consumes it and opens the review", async () => {
+    mockGet.mockResolvedValueOnce({ stories: [] });
+    renderLibrary();
+    await screen.findByRole("heading", { name: /ta bibliothèque est vide/i });
+    await waitFor(() => {
+      expect(mockAnalyzeOsOpen).toHaveBeenCalledTimes(1);
+    });
+
+    mockAnalyzeOsOpen.mockResolvedValueOnce(OS_OPEN_ANALYZED);
+    act(() => {
+      useOsOpenShell.getState().raise();
+    });
+
+    expect(
+      await screen.findByText("Partiellement exploitable"),
+    ).toBeInTheDocument();
+    // The signal was consumed (a boolean relay, not a queue).
+    expect(useOsOpenShell.getState().pendingSignal).toBe(false);
+    expect(mockAnalyzeOsOpen).toHaveBeenCalledTimes(2);
+  });
+
+  it("queues a signal landing DURING an OS-open settlement — the mono-slot serialization, never the busy refusal", async () => {
+    mockGet.mockResolvedValue({ stories: [] });
+    // A's pull hangs (the OS read is settling); B's verdict is distinct so
+    // the final display is attributable.
+    const OS_OPEN_ANALYZED_B = {
+      ...OS_OPEN_ANALYZED,
+      sourceName: "b.rustory",
+      findings: [
+        {
+          aspect: "title" as const,
+          category: "ambiguous" as const,
+          message: "Le titre du second fichier a été normalisé.",
+        },
+      ],
+    };
+    let settleFirst!: (value: unknown) => void;
+    mockAnalyzeOsOpen
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            settleFirst = resolve;
+          }),
+      )
+      .mockResolvedValueOnce(OS_OPEN_ANALYZED_B);
+    renderLibrary();
+    await screen.findByRole("heading", { name: /ta bibliothèque est vide/i });
+
+    // The user opens B while A's read settles — the exact gesture the
+    // multi-file copy advises ("Rouvre chaque fichier séparément").
+    act(() => {
+      useOsOpenShell.getState().raise();
+    });
+
+    // NEVER the busy refusal: no discard (that would throw B away — the
+    // Rust slot already holds B), no lying busy copy.
+    expect(mockDiscardOsOpen).not.toHaveBeenCalled();
+    expect(screen.queryByText(OS_OPEN_BUSY_COPY)).not.toBeInTheDocument();
+    // The queued pull WAITS for A's settlement (mono-slot).
+    expect(mockAnalyzeOsOpen).toHaveBeenCalledTimes(1);
+
+    // A settles (its stale verdict — Rust-side B already replaced it, so
+    // the real backend would answer B; either way the queue pulls again).
+    await act(async () => {
+      settleFirst(OS_OPEN_ANALYZED);
+    });
+    await waitFor(() => {
+      expect(mockAnalyzeOsOpen).toHaveBeenCalledTimes(2);
+    });
+    // B's verdict is what ends displayed — the newest gesture wins.
+    expect(
+      await screen.findByText("Le titre du second fichier a été normalisé."),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText("Le titre a été normalisé à l'import."),
+    ).not.toBeInTheDocument();
+    expect(mockDiscardOsOpen).not.toHaveBeenCalled();
+  });
+
+  it("renders the multipleFiles calm limit VERBATIM as a status — never an alert", async () => {
+    mockGet.mockResolvedValueOnce({ stories: [] });
+    mockAnalyzeOsOpen.mockResolvedValueOnce({
+      kind: "multipleFiles",
+      message: OS_OPEN_MULTIPLE_FILES_COPY,
+    });
+    renderLibrary();
+
+    // Present twice by design: the persistent status region (the reliable
+    // announcement) + the visual calm-limit block.
+    const occurrences = await screen.findAllByText(
+      OS_OPEN_MULTIPLE_FILES_COPY,
+    );
+    expect(occurrences).toHaveLength(2);
+    expect(
+      occurrences.some((el) => el.getAttribute("role") === "status"),
+    ).toBe(true);
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    // No review opened — nothing was partially processed.
+    expect(
+      screen.queryByRole("region", { name: "Import d'une histoire" }),
+    ).not.toBeInTheDocument();
+    // The calm limit is dismissable explicitly — the visual block leaves
+    // AND the persistent region empties.
+    await userEvent.click(screen.getByRole("button", { name: "Fermer" }));
+    expect(
+      screen.queryByText(OS_OPEN_MULTIPLE_FILES_COPY),
+    ).not.toBeInTheDocument();
+  });
+
+  it("keeps a PERSISTENT live region mounted before any notice and routes the copy through it", async () => {
+    mockGet.mockResolvedValueOnce({ stories: [] });
+    renderLibrary();
+    await screen.findByRole("heading", { name: /ta bibliothèque est vide/i });
+    await waitFor(() => {
+      expect(mockAnalyzeOsOpen).toHaveBeenCalledTimes(1);
+    });
+
+    // The region EXISTS (empty) before any copy lands: only CHANGES of an
+    // existing live region are reliably announced — a region born filled
+    // is not (the surfaces' `__live` pattern).
+    const liveRegion = () =>
+      screen
+        .getAllByRole("status")
+        .find((el) => el.className.includes("library-route__os-open-live"));
+    expect(liveRegion()).toBeDefined();
+    expect(liveRegion()).toHaveTextContent("");
+
+    mockAnalyzeOsOpen.mockResolvedValueOnce({
+      kind: "multipleFiles",
+      message: OS_OPEN_MULTIPLE_FILES_COPY,
+    });
+    act(() => {
+      useOsOpenShell.getState().raise();
+    });
+    // The SAME persistent region receives the copy on settlement.
+    await waitFor(() => {
+      expect(liveRegion()).toHaveTextContent(OS_OPEN_MULTIPLE_FILES_COPY);
+    });
+  });
+
+  it("declines an intent while an import is busy: discard + busy copy, the living flow INTACT", async () => {
+    mockGet.mockResolvedValueOnce({ stories: [] });
+    // A dialog-import analysis that never settles keeps the flow busy.
+    mockAnalyzeArtifact.mockImplementation(() => new Promise(() => {}));
+    renderLibrary();
+    await screen.findByRole("heading", { name: /ta bibliothèque est vide/i });
+    await waitFor(() => {
+      expect(mockAnalyzeOsOpen).toHaveBeenCalledTimes(1);
+    });
+
+    await userEvent.click(
+      screen.getByRole("button", { name: "Importer une histoire" }),
+    );
+    expect(
+      screen.getByText("Analyse de l'artefact…"),
+    ).toBeInTheDocument();
+
+    act(() => {
+      useOsOpenShell.getState().raise();
+    });
+
+    // Twice by design: the persistent status region + the visual block.
+    const occurrences = await screen.findAllByText(OS_OPEN_BUSY_COPY);
+    expect(occurrences).toHaveLength(2);
+    expect(
+      occurrences.some((el) => el.getAttribute("role") === "status"),
+    ).toBe(true);
+    await waitFor(() => {
+      expect(mockDiscardOsOpen).toHaveBeenCalledTimes(1);
+    });
+    // The intent was NOT analyzed (the busy gate consumed it calmly)…
+    expect(mockAnalyzeOsOpen).toHaveBeenCalledTimes(1);
+    // …and the LIVING flow was never interrupted.
+    expect(
+      screen.getByText("Analyse de l'artefact…"),
+    ).toBeInTheDocument();
+  });
+
+  it("surfaces an unreadable OS-open file as the failed state; Réessayer replays the SAME intent", async () => {
+    mockGet.mockResolvedValueOnce({ stories: [] });
+    mockAnalyzeOsOpen.mockRejectedValueOnce({
+      code: "IMPORT_FAILED",
+      message: "Import impossible: fichier illisible.",
+      userAction:
+        "Vérifie que le fichier existe, qu'il s'agit bien d'un artefact Rustory, puis réessaie.",
+      details: { source: "file_read", stage: "metadata" },
+    });
+    renderLibrary();
+
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("Import impossible: fichier illisible.");
+
+    // `Réessayer` replays the still-pending intent — never the file picker.
+    mockAnalyzeOsOpen.mockResolvedValueOnce(OS_OPEN_ANALYZED);
+    await userEvent.click(screen.getByRole("button", { name: "Réessayer" }));
+    expect(
+      await screen.findByText("Partiellement exploitable"),
+    ).toBeInTheDocument();
+    expect(mockAnalyzeOsOpen).toHaveBeenCalledTimes(2);
+    expect(mockAnalyzeArtifact).not.toHaveBeenCalled();
+  });
+
+  it("Fermer on an OS-open read failure abandons the pending intent (discard) and returns to idle", async () => {
+    mockGet.mockResolvedValueOnce({ stories: [] });
+    mockAnalyzeOsOpen.mockRejectedValueOnce({
+      code: "IMPORT_FAILED",
+      message: "Import impossible: fichier illisible.",
+      userAction: "Réessaie.",
+      details: { source: "file_read", stage: "open" },
+    });
+    renderLibrary();
+
+    await screen.findByRole("alert");
+    await userEvent.click(screen.getByRole("button", { name: "Fermer" }));
+
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    await waitFor(() => {
+      expect(mockDiscardOsOpen).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it("keeps the StrictMode double-effect harmless: one review, the second pull answers none", async () => {
+    mockGet.mockResolvedValue({ stories: [] });
+    // The Rust-side one-shot take: the FIRST pull carries the verdict,
+    // every later pull answers `none`.
+    mockAnalyzeOsOpen.mockResolvedValueOnce(OS_OPEN_ANALYZED);
+    renderLibrary({ strict: true });
+
+    expect(
+      await screen.findByText("Partiellement exploitable"),
+    ).toBeInTheDocument();
+    // Exactly ONE review region — never a doubled surface.
+    expect(
+      screen.getAllByRole("region", { name: "Import d'une histoire" }),
+    ).toHaveLength(1);
+  });
+
+  it("accepts an OS-open reviewed story through the UNCHANGED accept phase and reloads the overview", async () => {
+    mockGet.mockResolvedValue({ stories: [] });
+    mockAnalyzeOsOpen.mockResolvedValueOnce(OS_OPEN_ANALYZED);
+    renderLibrary();
+
+    await screen.findByText("Partiellement exploitable");
+    await userEvent.click(
+      screen.getByRole("button", { name: "Importer ce qui est reconnu" }),
+    );
+
+    // Both the polite live region and the success chip carry the copy.
+    expect(
+      (await screen.findAllByText("Histoire importée dans ta bibliothèque"))
+        .length,
+    ).toBeGreaterThanOrEqual(1);
+    expect(mockAcceptArtifact).toHaveBeenCalledTimes(1);
+    // The accept phase is the EXISTING accept_artifact_import (mocked at
+    // the facade): the overview re-read happened (initial + post-import).
+    expect(mockGet.mock.calls.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("Réessayer after a FAILED accept re-runs the commit with the preserved verdict — never a dead re-pull", async () => {
+    mockGet.mockResolvedValue({ stories: [] });
+    mockAnalyzeOsOpen.mockResolvedValueOnce(OS_OPEN_ANALYZED);
+    mockAcceptArtifact
+      .mockRejectedValueOnce({
+        code: "IMPORT_FAILED",
+        message: "Import impossible: enregistrement local refusé.",
+        userAction: "Réessaie.",
+        details: { source: "db_commit", stage: "commit" },
+      })
+      .mockResolvedValueOnce({
+        id: "0197a5d0-0000-7000-8000-0000000000cc",
+        title: "Le Soleil",
+        importState: "needsReview",
+      });
+    renderLibrary();
+
+    await screen.findByText("Partiellement exploitable");
+    await userEvent.click(
+      screen.getByRole("button", { name: "Importer ce qui est reconnu" }),
+    );
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent(
+      "Import impossible: enregistrement local refusé.",
+    );
+
+    await userEvent.click(screen.getByRole("button", { name: "Réessayer" }));
+    expect(
+      (await screen.findAllByText("Histoire importée dans ta bibliothèque"))
+        .length,
+    ).toBeGreaterThanOrEqual(1);
+    // The retry re-ran the COMMIT with the preserved verdict…
+    expect(mockAcceptArtifact).toHaveBeenCalledTimes(2);
+    // …and never re-pulled the long-consumed intent (only the mount pull
+    // and the intent pull ran).
+    expect(mockAnalyzeOsOpen).toHaveBeenCalledTimes(1);
+  });
+
+  it("declines an intent arriving during the PRIMARY creation submission — the creation stays intact", async () => {
+    mockGet.mockResolvedValueOnce({ stories: [] });
+    renderLibrary();
+    await screen.findByRole("heading", { name: /ta bibliothèque est vide/i });
+    await waitFor(() => {
+      expect(mockAnalyzeOsOpen).toHaveBeenCalledTimes(1);
+    });
+
+    // Open the creation dialog, type a title, submit — the creation hangs.
+    await userEvent.click(
+      screen.getAllByRole("button", { name: /créer une histoire/i })[0],
+    );
+    await userEvent.type(screen.getByLabelText("Titre"), "Mon histoire");
+    await userEvent.click(screen.getByRole("button", { name: "Créer" }));
+    expect(screen.getByText("Création en cours…")).toBeInTheDocument();
+
+    act(() => {
+      useOsOpenShell.getState().raise();
+    });
+
+    // Twice by design: the persistent status region + the visual block.
+    const occurrences = await screen.findAllByText(OS_OPEN_BUSY_COPY);
+    expect(occurrences).toHaveLength(2);
+    await waitFor(() => {
+      expect(mockDiscardOsOpen).toHaveBeenCalledTimes(1);
+    });
+    // The intent was NOT analyzed (only the mount pull ran)…
+    expect(mockAnalyzeOsOpen).toHaveBeenCalledTimes(1);
+    // …and the LIVE submission was never interrupted.
+    expect(screen.getByText("Création en cours…")).toBeInTheDocument();
+  });
+
+  it("gates the sibling flow CTAs while a silent OS-open pull is in flight", async () => {
+    mockGet.mockResolvedValueOnce({ stories: [] });
+    // The mount pull hangs: the OS read is in flight, silently.
+    let settlePull!: (value: unknown) => void;
+    mockAnalyzeOsOpen.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          settlePull = resolve;
+        }),
+    );
+    renderLibrary();
+    await screen.findByRole("heading", { name: /ta bibliothèque est vide/i });
+
+    // Silent for the user (no surface, no alert)… but the import CTA is
+    // gated: no sibling flow may start under a live OS read.
+    expect(
+      screen.queryByRole("region", { name: "Import d'une histoire" }),
+    ).not.toBeInTheDocument();
+    const importCta = screen.getByRole("button", {
+      name: "Importer une histoire",
+    });
+    expect(importCta).toBeDisabled();
+
+    await act(async () => {
+      settlePull({ kind: "none" });
+    });
+    await waitFor(() => {
+      expect(
+        screen.getByRole("button", { name: "Importer une histoire" }),
+      ).not.toBeDisabled();
     });
   });
 });

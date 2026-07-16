@@ -8,6 +8,7 @@ import type {
   ExportStoryDialogInput,
   ExportStoryDialogOutcome,
   ImportArtifactAnalysis,
+  OsOpenAnalysis,
   RssCreationOutcome,
   RssItemRef,
   RssPreview,
@@ -18,6 +19,7 @@ import {
   isExportStoryDialogOutcome,
   isImportArtifactAnalysis,
   isImportFinding,
+  isOsOpenAnalysis,
   isRssPreview,
   isStructuredCreationAnalysis,
 } from "../../shared/ipc-contracts/import-export";
@@ -132,6 +134,65 @@ export async function acceptArtifactImport(
     throw new ImportArtifactContractDriftError("accept_artifact_import", raw);
   }
   return raw;
+}
+
+/**
+ * Error thrown when an OS-open command returns a payload that does not
+ * match the wire contract. A payload outside the contract NEVER renders a
+ * screen — the raw response is attached for debugging.
+ */
+export class OsOpenContractDriftError extends Error {
+  readonly raw: unknown;
+  constructor(command: string, raw: unknown) {
+    super(`${command} returned a payload that does not match the contract`);
+    this.name = "OsOpenContractDriftError";
+    this.raw = raw;
+  }
+}
+
+/**
+ * Analyze the pending OS-open intent (phase 1, NO mutation, NO dialog —
+ * `ui-states.md#OS Open Contract`). Called once at library mount (covers a
+ * cold start) and on each `os-open:requested` signal. Rust owns the intent,
+ * the bounded read and the recognition verdict — the frontend never sees
+ * the absolute filesystem path, only the file's `sourceName`.
+ *
+ * `{ kind: "none" }` is a TOTAL silent no-op (no pending intent — also the
+ * harmless second answer of a StrictMode double-effect, the intent being
+ * consumed one-shot Rust-side). `{ kind: "multipleFiles" }` carries the
+ * Rust-frozen calm-limit copy to render verbatim. A TRANSPORT failure (the
+ * file became unreadable) rejects with a normalized `AppError` and the
+ * intent STAYS pending Rust-side — a retry replays it. A drifted payload
+ * rejects with [`OsOpenContractDriftError`].
+ *
+ * Components MUST NOT call `invoke` directly — go through this facade so
+ * the wire contract stays owned by `src/ipc/`.
+ */
+export async function analyzeOsOpenRequest(): Promise<OsOpenAnalysis> {
+  let raw: unknown;
+  try {
+    raw = await invoke<unknown>("analyze_os_open_request");
+  } catch (err) {
+    throw toAppError(err);
+  }
+  if (!isOsOpenAnalysis(raw)) {
+    throw new OsOpenContractDriftError("analyze_os_open_request", raw);
+  }
+  return raw;
+}
+
+/**
+ * Drop the pending OS-open intent, if any (idempotent). Called when the
+ * user closes a failed OS-open read (`Fermer`) or when the library declines
+ * an intent because a flow is already in flight. A transport failure
+ * rejects with a normalized `AppError`; the callers treat it best-effort.
+ */
+export async function discardOsOpenRequest(): Promise<void> {
+  try {
+    await invoke<unknown>("discard_os_open_request");
+  } catch (err) {
+    throw toAppError(err);
+  }
 }
 
 /**

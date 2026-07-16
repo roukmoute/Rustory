@@ -694,6 +694,16 @@ type is documented here with its format contract: what is recognized, what is
 ambiguous, and what blocks the import. Anything not explicitly listed is refused
 (no implicit format).
 
+The **OS open channel** (a file opened through the operating system, see
+[ui-states.md#OS Open Contract](./ui-states.md)) routes into this SAME import
+pipeline: the `.rustory` artifact is the only double-clickable file of the
+registry (a structured folder is not a file; the structured archive is
+deferred), gated by the same `is_supported_artifact_source_name` authority and
+producing the same verdicts and copies. The declarative REGISTRATION of Rustory
+as an OS handler for its file types (`bundle.fileAssociations`, macOS
+`exportedType`, Linux MIME) stays OUTSIDE this channel — it belongs to the
+file-association contract of its own dedicated story.
+
 ### Supported local artifact types
 
 | Type | Extension | Format version | Status |

@@ -176,6 +176,7 @@ Avoid:
 ## Screen Ownership
 
 - `bibliothèque` is the stable home for selection, transfer visibility, and recovery traces
+- `bibliothèque` is also the landing context of every OS-open intent (`intention d'ouverture`): a file opened through the operating system always resolves into the library's existing artifact-import review — never a new screen, never a new route (see `OS Open Contract`)
 - `édition` is a separate context and must not silently replace library state vocabulary
 - `Profil de support` (route `/settings`) is the read-only screen where the distribution's support facts live — devices, local artifacts, content sources, posture; it never becomes a settings/toggles surface (see `Support Profile Screen Contract`)
 - `modals` and reports may clarify a state, but should not become the only place where a critical state exists
@@ -2066,3 +2067,99 @@ detailed developer reference) and the internal target the existing
 | Read-only | NO setting, NO toggle, NO persistence: activation is a DISTRIBUTION decision (Content Source Activation Contract). `/settings` is the route context; `Profil de support` is the screen. |
 | Offline | The screen triggers ZERO network request (NFR14). Repatriating the support-profile gesture REMOVES the only external-browser call of that path and introduces none. |
 | Forbidden | No modal, no toast, no new design-system component (the matrix composes SurfacePanel / StateChip / Button), no runtime non-support copy reused for a matrix line (the detection panel's `raison de non-support` vocabulary stays its own). |
+
+## OS Open Contract
+
+Opening a supported local artifact THROUGH THE OPERATING SYSTEM ("Ouvrir
+avec Rustory", a CLI launch with a file argument, a second launch while the
+app runs) delivers an **`intention d'ouverture`** (canonical term) to the
+app. This contract covers the RECEPTION and routing of that intent; the
+DECLARATIVE registration of Rustory as an OS handler (`bundle.fileAssociations`,
+macOS `exportedType`, Linux MIME/`.desktop`) belongs to the file-association
+contract of its own dedicated story — never to this channel.
+
+Reception channels (the three desktop channels of Tauri v2):
+
+| Channel | Platform | Mechanism |
+| --- | --- | --- |
+| Cold start argv | Windows/Linux | The opened file arrives as a raw process argument; seeded into the intent state at setup, WITHOUT any event (the frontend does not exist yet — the library-mount pull covers it). |
+| Second instance | Windows/Linux | The OS launches a second process with the file in argv; `tauri-plugin-single-instance` (registered FIRST) relays `(argv, cwd)` to the living instance — relative paths resolve against the SECOND instance's cwd, never this process's. The plugin also enforces the one-process-per-`app_data_dir` invariant the recovery journals assume. |
+| `RunEvent::Opened` | macOS | Cold AND warm starts (never argv); `url.to_file_path()` converts at the frontier. Compiled under `cfg(target_os = "macos")` — the variant does not exist elsewhere. |
+
+Intent state (Rust-owned, one-shot):
+
+- The absolute path NEVER crosses the IPC boundary — the frontend only ever
+  sees the file's `sourceName` (basename), the exact PII discipline of the
+  Local Artifact Import Contract.
+- ONE pending intent at a time; a newer offer REPLACES it (the user's last
+  gesture wins) — and this holds UNDER RACE: every offer stamps a
+  monotonic generation, a settling analysis claims exactly the generation
+  it read (compare-and-take), so a read finishing after a newer gesture
+  landed never consumes that newer intent — the stale settlement (verdict
+  or failure) is dropped and the newest intent is served. Raw arguments
+  travel as OS strings (a non-UTF-8 filename is a legal candidate, never a
+  panic) and are filtered PURELY: empty arguments and `-`-prefixed flags
+  are discarded; a `file://` URI is opportunistically converted to its
+  path at the frontier (anything non-file/unparseable stays raw); 0
+  candidates → no-op (a pending intent survives); 1 candidate → an
+  artifact intent; ≥ 2 candidates → a `multipleFiles` intent (NO partial
+  processing — no silent ambiguity).
+- The frontend PULLS the verdict by command (`analyze_os_open_request`) —
+  once at library mount (covers cold start; the Rust-side one-shot claim
+  makes the StrictMode double-effect harmless: the second response is
+  `none`) and on each `os-open:requested` PUSH event (app already running;
+  payload: an empty versionable object `{}` — the event is a signal, never
+  a carrier). Pulls are SERIALIZED frontend-side (mono-slot queue): a
+  signal landing while a pull is in flight waits for it, then pulls —
+  never dropped. The listener registration is HANDSHAKED: once it settles
+  (success or failure), one catch-up pull runs so an intent whose event
+  fired before the listener became effective is still served (no lost
+  wake-up); a failed emission Rust-side is traced to the local import log.
+  `discard_os_open_request` drops the pending intent (idempotent).
+  Explicit terminal gestures (`Fermer` / `Abandonner`) are TERMINAL: a
+  settlement still in flight at that moment is dropped on arrival — a
+  closed flow never resurrects. A failed ACCEPT keeps its verdict
+  preserved frontend-side: its `Réessayer` re-runs the commit (the
+  one-shot intent is long consumed); only a failed READ replays the
+  pending intent.
+- On a warm-channel intent the `main` window is unminimized, shown and
+  focused (best-effort) — "s'ouvre ou se réveille".
+
+Routing — INTO THE EXISTING artifact-import review, nothing new:
+
+- The analysis reuses `analyze_artifact` VERBATIM (same
+  `is_supported_artifact_source_name` authority, same findings, same
+  copies); the acceptance is the UNCHANGED `accept_artifact_import` phase 2.
+  No new route, no new pipeline, no new verdict: the landing screen is
+  `/library` (the library is the product's stable return base) and the
+  review renders through the SAME `idle→analyzing→review→importing→imported|failed`
+  machine as the Local Artifact Import Contract, naming the file
+  (`sourceName`) and its verdict exactly like the dialog import. The pull
+  itself is SILENT: no transient state renders while it settles (a `none`
+  answer must leave zero visual trace — most pulls are the empty
+  library-mount probe), so an artifact verdict lands directly in `review`
+  and an unreadable file directly in `failed`; the machine's later states
+  behave exactly as the dialog flow (the `analyzing` indicator belongs to
+  the picker gesture, whose read the user just initiated).
+- The signal-driven navigation to `/library` uses `replace` (the intent
+  must not trap the back button); an editor left this way unmounts through
+  its NORMAL lifecycle (autosave flush at unmount — no bypass, no new save
+  logic).
+
+Closed flow states:
+
+| Situation | Behavior |
+| --- | --- |
+| No pending intent (`none`) | TOTAL silent no-op — nothing renders, nothing announces. |
+| Artifact intent | The existing import machine: analysis → recognition report (sourceName + verdict) → explicit accept — no ambiguity about the content type. |
+| Several files in one gesture (`multipleFiles`) | Calm named limit: the Rust-carried frozen copy renders VERBATIM inline in the library, `role="status"` — never a toast, never a modal, never an error. The intent is consumed (no partial processing). |
+| A library flow is busy (import / creation — the primary title submission included — / RSS / transfer in flight) | Calm refusal: the frontend-frozen busy copy renders inline (`role="status"`) and the intent is DISCARDED — the living flow is NEVER interrupted (the user reopens the file afterwards; no queue, no hybrid state). The refusal applies to an intent ARRIVING WARM (signal); a dormant intent re-served by the library-mount pull follows the cold-start regime — its pure analysis may render its verdict beside a live flow (which re-hydrates asynchronously) without ever interrupting it. The exclusion is MUTUAL: while an OS-open read is settling (internally busy, visually silent), no sibling flow may start — the import CTA, the folder/RSS entries and the primary `Créer` submission are gated; the OS channel itself is NOT gated by its own settling — it serializes through its mono-slot queue. |
+| Unreadable file (gone, permissions, oversize) | The existing `failed` transport state (`IMPORT_FAILED` / `file_read`): the intent STAYS PENDING Rust-side, so `Réessayer` replays the SAME intent; `Fermer` discards it. |
+| Unsupported / invalid content | A calm CONTENT VERDICT through the existing findings envelope (`state: blocked`) — never an `AppError`, never a silent redirect: the refused file gets a VISIBLE recognition report. |
+
+Non-corruption (AC2, by construction): the analysis is PURE (zero mutation
+before `accept_artifact_import` — the unchanged two-phase flow); an intent
+arriving during an edit session lets the editor unmount through its normal
+flush; an intent arriving during a live flow is refused without touching
+that flow; the intent is consumed one-shot Rust-side (no double
+processing).

@@ -1,6 +1,6 @@
 use std::sync::Mutex;
 
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 
 pub mod application;
 pub mod commands;
@@ -131,11 +131,117 @@ fn collect_pending_transfer_outcomes(
         .map_err(|_| "boot_probe_collect")
 }
 
+/// Best-effort wake of the `main` window: a warm-channel OS-open intent
+/// must make the living instance visible ("s'ouvre ou se réveille") even
+/// when it sits minimized behind other windows. Every step is `let _ =`
+/// by contract — a wake failure must never break the intent delivery
+/// (the pull still serves the verdict).
+fn wake_main_window(app: &tauri::AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.unminimize();
+        let _ = window.show();
+        let _ = window.set_focus();
+    }
+}
+
+/// Opportunistic frontier normalization of one raw argv candidate: a
+/// UTF-8 string that parses as a `file://` URL becomes its filesystem
+/// path (some launchers hand `%U`-style URIs instead of plain paths);
+/// anything else — a plain path, a non-`file` URI, a non-UTF-8 byte
+/// sequence (which cannot be a URL) — travels RAW, so an unsupported
+/// input keeps producing its honest verdict instead of a mangled
+/// `<cwd>/file:...` pseudo-path.
+fn normalize_os_open_candidate(arg: std::ffi::OsString) -> std::ffi::OsString {
+    if let Some(utf8) = arg.to_str() {
+        if let Ok(url) = tauri::Url::parse(utf8) {
+            if url.scheme() == "file" {
+                if let Ok(path) = url.to_file_path() {
+                    return path.into_os_string();
+                }
+            }
+        }
+    }
+    arg
+}
+
+/// Warm-channel frontier glue shared by the single-instance relay and the
+/// macOS `RunEvent::Opened` arm: offer the OS-provided candidates to the
+/// intent state and, when an intent results, wake the window and signal
+/// the living frontend (`os-open:requested`, empty payload — the verdict
+/// is pulled by command). A FAILED emission is traced to the import log
+/// (the intent stays pending — the next library-mount pull serves it, but
+/// the lost wake-up must be diagnosable). Cold-start seeding does NOT go
+/// through here: there is no frontend to signal yet, the library-mount
+/// pull covers it.
+fn receive_os_open_candidates(
+    app: &tauri::AppHandle,
+    candidates: &[std::ffi::OsString],
+    cwd: &std::path::Path,
+) {
+    if application::import_export::OS_OPEN_STATE.offer(candidates, cwd) {
+        wake_main_window(app);
+        if app
+            .emit(
+                ipc::events::EVENT_OS_OPEN_REQUESTED,
+                ipc::events::OsOpenRequestedEvent {},
+            )
+            .is_err()
+        {
+            let _ = infrastructure::diagnostics::import_log::record_event(
+                app,
+                infrastructure::diagnostics::import_log::Event::OsOpenSignalEmitFailed,
+            );
+        }
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        // The single-instance plugin MUST be the first registered plugin
+        // (documented requirement) so a second launch is intercepted
+        // before anything else runs. Beyond the OS-open relay, it closes
+        // a real risk: two manual instances on the same app_data_dir
+        // would race the single-process recovery journals.
+        .plugin(tauri_plugin_single_instance::init(|app, argv, cwd| {
+            // argv is the SECOND instance's full argv (argv[0] = binary);
+            // relative paths must resolve against the second instance's
+            // OWN cwd — never this living process's. Known dependency
+            // limit, degraded controlled: the plugin's relay API is
+            // `Vec<String>` (UTF-8) — a non-UTF-8 argument would fail in
+            // the SECOND (throwaway) process before reaching this
+            // callback, so the living instance never panics; only the
+            // cold-start seed below (our own code, `args_os`-based) is
+            // guaranteed lossless.
+            let candidates: Vec<std::ffi::OsString> = argv
+                .get(1..)
+                .unwrap_or(&[])
+                .iter()
+                .map(|arg| normalize_os_open_candidate(std::ffi::OsString::from(arg)))
+                .collect();
+            receive_os_open_candidates(app, &candidates, std::path::Path::new(&cwd));
+        }))
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
+            // Cold-start OS-open seed: Windows/Linux hand the opened file
+            // as a raw process argument. `args_os` (never `args`): a Unix
+            // filename is a byte sequence — a legal non-UTF-8 path must
+            // seed an intent, not panic the boot. NO emission here — the
+            // frontend does not exist yet; the library-mount pull picks
+            // the intent up. Harmless on macOS (gestures arrive as
+            // RunEvent::Opened, never argv). A failed current_dir read
+            // degrades to an empty base: an absolute argument still
+            // resolves, a relative one will surface as the honest
+            // transport failure on analysis.
+            let cold_args: Vec<std::ffi::OsString> = std::env::args_os()
+                .skip(1)
+                .map(normalize_os_open_candidate)
+                .collect();
+            application::import_export::OS_OPEN_STATE.offer(
+                &cold_args,
+                &std::env::current_dir().unwrap_or_default(),
+            );
+
             let app_data_dir = infrastructure::filesystem::ensure_app_data_dir(app.handle())
                 .map_err(|err| err.to_string())?;
             let db_path = infrastructure::filesystem::resolve_db_path(&app_data_dir);
@@ -288,6 +394,7 @@ pub fn run() {
             commands::story::add_node_option,
             commands::story::add_story_node,
             commands::import_export::analyze_artifact_for_import,
+            commands::import_export::analyze_os_open_request,
             commands::import_export::analyze_structured_folder_for_creation,
             commands::story::apply_recovery,
             commands::story::attach_node_media,
@@ -295,6 +402,7 @@ pub fn run() {
             commands::story::delete_story_node,
             commands::story::discard_draft,
             commands::story::discard_node_draft,
+            commands::import_export::discard_os_open_request,
             commands::transfer::discard_transfer_outcome,
             commands::import_export::export_story_with_save_dialog,
             commands::import_export::fetch_rss_source_preview,
@@ -329,8 +437,38 @@ pub fn run() {
             commands::story::update_node_content,
             commands::story::update_story,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while running tauri application")
+        .run(|app_handle, event| {
+            // macOS delivers "open this file with Rustory" gestures as
+            // RunEvent::Opened { urls } — cold AND warm starts, never
+            // argv. The variant only exists under this cfg (docs.rs
+            // targets Linux and hides it), and the Linux CI can neither
+            // compile-check nor provoke it: the arm stays a THIN frontier
+            // (URL→path conversion + the shared receive glue, all of
+            // whose decisions are cross-platform unit-tested), documented
+            // here rather than simulated (the untestable-races pattern).
+            // A cold-start Opened lands before the frontend exists; the
+            // emitted signal is then simply unheard and the library-mount
+            // pull picks the seeded intent up.
+            #[cfg(target_os = "macos")]
+            if let tauri::RunEvent::Opened { urls } = &event {
+                let candidates: Vec<std::ffi::OsString> = urls
+                    .iter()
+                    .filter_map(|url| url.to_file_path().ok())
+                    .map(std::path::PathBuf::into_os_string)
+                    .collect();
+                receive_os_open_candidates(
+                    app_handle,
+                    &candidates,
+                    &std::env::current_dir().unwrap_or_default(),
+                );
+            }
+            // Every other event keeps the exact pre-existing `.run(ctx)`
+            // behavior — the callback observes and never intervenes.
+            #[cfg(not(target_os = "macos"))]
+            let _ = (app_handle, event);
+        });
 }
 
 #[cfg(test)]
@@ -404,5 +542,62 @@ mod tests {
         assert!(collect_pending_transfer_outcomes(&handle)
             .expect("probe")
             .is_empty());
+    }
+
+    // ---- OS-open argv candidate normalization (cold start AND the
+    // single-instance relay share this exact frontier function) ----
+
+    #[test]
+    fn normalize_converts_a_file_url_into_its_filesystem_path() {
+        let normalized =
+            normalize_os_open_candidate(std::ffi::OsString::from("file:///tmp/histoire.rustory"));
+        assert_eq!(
+            normalized,
+            std::ffi::OsString::from("/tmp/histoire.rustory")
+        );
+    }
+
+    #[test]
+    fn normalize_decodes_percent_encoded_file_urls() {
+        // `%20` in a `%U`-style URI must land as a real space in the path.
+        let normalized = normalize_os_open_candidate(std::ffi::OsString::from(
+            "file:///tmp/mon%20histoire.rustory",
+        ));
+        assert_eq!(
+            normalized,
+            std::ffi::OsString::from("/tmp/mon histoire.rustory")
+        );
+    }
+
+    #[test]
+    fn normalize_keeps_a_plain_path_raw() {
+        let raw = std::ffi::OsString::from("/tmp/histoire.rustory");
+        assert_eq!(normalize_os_open_candidate(raw.clone()), raw);
+        let relative = std::ffi::OsString::from("histoire.rustory");
+        assert_eq!(normalize_os_open_candidate(relative.clone()), relative);
+    }
+
+    #[test]
+    fn normalize_keeps_a_non_file_or_unparseable_uri_raw() {
+        // A non-file scheme stays raw — it becomes an honest verdict, never
+        // a mangled pseudo-path.
+        let https = std::ffi::OsString::from("https://exemple.fr/histoire.rustory");
+        assert_eq!(normalize_os_open_candidate(https.clone()), https);
+        // A file URL that cannot map to a local path stays raw too.
+        let remote_host = std::ffi::OsString::from("file://autre-machine/partage/h.rustory");
+        assert_eq!(
+            normalize_os_open_candidate(remote_host.clone()),
+            remote_host
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn normalize_passes_a_non_utf8_argument_through_untouched() {
+        use std::os::unix::ffi::OsStringExt;
+        // A byte sequence that is not UTF-8 cannot be a URL — it travels
+        // raw as a legal path candidate, never a panic, never a loss.
+        let raw = std::ffi::OsString::from_vec(vec![b'/', b't', 0xff, b'.', b'r']);
+        assert_eq!(normalize_os_open_candidate(raw.clone()), raw);
     }
 }

@@ -4,6 +4,7 @@ use std::time::Duration;
 use tauri::{async_runtime, AppHandle, Manager, State};
 use tauri_plugin_dialog::{DialogExt, FilePath};
 
+use crate::application::import_export::import::read_artifact_bounded;
 use crate::application::import_export::{
     self, import, rss_creation, structured_creation, ExportStoryInput, ImportAnalysis,
     RssAcceptPhase, RssCreationOutcome,
@@ -18,8 +19,9 @@ use crate::ipc::dto::import_export::state_db_tag;
 use crate::ipc::dto::import_export::ContentSourcePolicyDto;
 use crate::ipc::dto::{
     AcceptArtifactImportInputDto, AcceptStructuredCreationInputDto, ExportStoryDialogInputDto,
-    ExportStoryDialogOutcomeDto, ImportArtifactAnalysisDto, RssCreationOutcomeDto, RssItemRefDto,
-    RssPreviewDto, StoryCardDto, StructuredCreationAnalysisDto,
+    ExportStoryDialogOutcomeDto, ImportArtifactAnalysisDto, OsOpenAnalysisDto,
+    RssCreationOutcomeDto, RssItemRefDto, RssPreviewDto, StoryCardDto,
+    StructuredCreationAnalysisDto,
 };
 use crate::AppState;
 
@@ -33,11 +35,6 @@ const MAX_DESTINATION_PATH_LEN: usize = 4096;
 
 /// Dialog filter shown when picking a `.rustory` artifact to import.
 const IMPORT_DIALOG_FILTER_NAME: &str = "Artefact Rustory";
-
-/// Upper bound on the artifact bytes read into memory before parsing. A
-/// `.rustory` MVP file is < 100 kB; 8 MiB is a generous ceiling that still
-/// refuses an accidental giant file before loading it.
-const MAX_ARTIFACT_BYTES: u64 = 8 * 1024 * 1024;
 
 /// Persist the currently stored story as a `.rustory` artifact at a
 /// destination chosen by the user in a native save dialog.
@@ -411,6 +408,49 @@ pub async fn accept_artifact_import(
     .map_err(|_| import::spawn_blocking_join_error())?
 }
 
+/// Analyze the pending OS-open intent (phase 1, NO mutation, NO dialog —
+/// see `ui-states.md#OS Open Contract`). The frontend PULLS this once at
+/// library mount (cold start) and on each `os-open:requested` signal.
+///
+/// The whole decision logic lives in the testable application function
+/// [`import_export::analyze_pending_intent`]; this handler only drives it
+/// on a `spawn_blocking` worker (the bounded file read is disk I/O), the
+/// exact discipline of the dialog-import analysis. No pending intent
+/// resolves `{ kind: "none" }` (a total no-op — also the harmless second
+/// answer of a StrictMode double-effect); only a TRANSPORT failure (the
+/// file became unreadable) rejects, and the intent then STAYS pending so
+/// `Réessayer` replays it. A read failure is traced to the local import
+/// log (PII-free stage tokens — the PRD's "journalisation locale
+/// suffisante pour diagnostiquer les échecs d'ouverture") while the
+/// actionable `AppError` still crosses to the UI.
+#[tauri::command]
+pub async fn analyze_os_open_request(app: AppHandle) -> Result<OsOpenAnalysisDto, AppError> {
+    let outcome = async_runtime::spawn_blocking(|| {
+        import_export::analyze_pending_intent(&import_export::OS_OPEN_STATE)
+    })
+    .await
+    .map_err(|_| import::spawn_blocking_join_error())?;
+
+    if let Err(err) = &outcome {
+        let _ = import_log::record_event(
+            &app,
+            import_log::Event::OsOpenReadFailed {
+                source: error_detail(err, "source"),
+                stage: error_detail(err, "stage"),
+            },
+        );
+    }
+    outcome
+}
+
+/// Drop the pending OS-open intent, if any. Idempotent, infallible: called
+/// when the user closes a failed OS-open read (`Fermer`) or when the
+/// library declines an intent because a flow is already in flight.
+#[tauri::command]
+pub fn discard_os_open_request() {
+    import_export::OS_OPEN_STATE.discard();
+}
+
 /// Analyze a user-picked structured folder (phase 1, NO mutation).
 ///
 /// Opens a native FOLDER picker (same non-blocking callback + channel
@@ -688,27 +728,30 @@ fn rss_failure_log_host(feed_url: &str, err: &AppError) -> String {
     feed_url_host(feed_url).unwrap_or_default()
 }
 
+/// Extract one string detail from an `AppError`'s closed `details` set —
+/// the stable, PII-free tokens the diagnostic events carry.
+fn error_detail(err: &AppError, key: &str) -> String {
+    err.details
+        .as_ref()
+        .and_then(|details| details.get(key))
+        .and_then(|value| value.as_str())
+        .unwrap_or("unknown")
+        .to_string()
+}
+
 /// The (pure, unit-tested) category dispatch of a failure trace.
 fn rss_failure_event(host: String, err: &AppError) -> import_log::Event {
-    fn detail(err: &AppError, key: &str) -> String {
-        err.details
-            .as_ref()
-            .and_then(|details| details.get(key))
-            .and_then(|value| value.as_str())
-            .unwrap_or("unknown")
-            .to_string()
-    }
     if err.code == crate::domain::shared::AppErrorCode::RssSourceUnreachable {
         import_log::Event::RssSourceUnreachable {
             host,
-            stage: detail(err, "stage"),
+            stage: error_detail(err, "stage"),
         }
     } else if err.code == crate::domain::shared::AppErrorCode::ContentSourceUnavailable {
         // A POLICY refusal: kind only, and the host is deliberately
         // dropped — the refusal precedes any network dispatch, and a
         // distribution decision is neither a network nor a local failure.
         import_log::Event::ContentSourceBlocked {
-            kind: detail(err, "kind"),
+            kind: error_detail(err, "kind"),
         }
     } else {
         import_log::Event::RssCreationFailed {
@@ -717,59 +760,15 @@ fn rss_failure_event(host: String, err: &AppError) -> import_log::Event {
                 .ok()
                 .and_then(|value| value.as_str().map(str::to_string))
                 .unwrap_or_else(|| "UNKNOWN".to_string()),
-            source: detail(err, "source"),
+            source: error_detail(err, "source"),
         }
     }
-}
-
-/// Read an artifact file with a HARD upper bound, refusing non-regular files.
-///
-/// The file TYPE is gated BEFORE opening: `std::fs::metadata` (which follows
-/// symlinks to the real target) rejects a directory / device / FIFO so
-/// `File::open` only ever runs on a regular file. This matters on Linux,
-/// where opening a FIFO in `O_RDONLY` BLOCKS until a writer appears — a
-/// pre-open type check would never be reached if it lived on the opened
-/// handle, freezing the `spawn_blocking` worker. The opened handle is
-/// re-checked (defense in depth against a TOCTOU swap) and its own size +
-/// the capped `take(MAX_ARTIFACT_BYTES + 1)` read close the size window: a
-/// file that grows past the bound after the metadata check is still refused
-/// (the extra byte makes the overflow observable) instead of being loaded
-/// whole.
-fn read_artifact_bounded(path: &Path) -> Result<Vec<u8>, AppError> {
-    use std::io::Read;
-
-    // Pre-open type gate — refuses a FIFO/device/dir BEFORE the (potentially
-    // blocking) `O_RDONLY` open.
-    let pre = std::fs::metadata(path).map_err(|_| import::file_read_error("metadata"))?;
-    if !pre.is_file() {
-        return Err(import::file_read_error("not_regular_file"));
-    }
-
-    let file = std::fs::File::open(path).map_err(|_| import::file_read_error("open"))?;
-    let meta = file
-        .metadata()
-        .map_err(|_| import::file_read_error("metadata"))?;
-    // Re-check on the opened handle (TOCTOU defense) and read the size from
-    // the fd so a stale pre-open length cannot understate it.
-    if !meta.is_file() {
-        return Err(import::file_read_error("not_regular_file"));
-    }
-    if meta.len() > MAX_ARTIFACT_BYTES {
-        return Err(import::file_read_error("oversize"));
-    }
-    let mut bytes = Vec::new();
-    file.take(MAX_ARTIFACT_BYTES + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|_| import::file_read_error("read"))?;
-    if bytes.len() as u64 > MAX_ARTIFACT_BYTES {
-        return Err(import::file_read_error("oversize"));
-    }
-    Ok(bytes)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::application::import_export::import::MAX_ARTIFACT_BYTES;
     use crate::domain::shared::AppErrorCode;
 
     #[test]
@@ -825,6 +824,16 @@ mod tests {
             "exemple.fr"
         );
         assert_eq!(rss_failure_log_host("pas une adresse", &transport), "");
+    }
+
+    #[test]
+    fn os_open_read_failure_maps_to_its_diagnostic_stage_tokens() {
+        // The trace line carries exactly the closed tokens of the upstream
+        // transport error — never a path, never a basename.
+        let err = import::file_read_error("metadata");
+        assert_eq!(error_detail(&err, "source"), "file_read");
+        assert_eq!(error_detail(&err, "stage"), "metadata");
+        assert_eq!(error_detail(&err, "absent_key"), "unknown");
     }
 
     fn assert_invalid_path(err: &AppError, cause: &str) {

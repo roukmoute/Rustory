@@ -176,6 +176,80 @@ pub struct AcceptArtifactImportInputDto {
     pub artifact_checksum: String,
 }
 
+// ===== OS open channel (a file opened through the operating system) =====
+
+/// Frozen calm-limit copy when one OS gesture hands SEVERAL files at once
+/// (`product-language.md`): the intent is consumed, nothing is partially
+/// processed, and the frontend renders this Rust-carried copy VERBATIM
+/// (`role="status"` — never a toast, never an error).
+pub const OS_OPEN_MULTIPLE_FILES_MESSAGE: &str =
+    "Rustory ouvre un fichier à la fois. Rouvre chaque fichier séparément.";
+
+/// Tagged outcome of `analyze_os_open_request` (the OS open channel — see
+/// `ui-states.md#OS Open Contract`). `none` is the TOTAL silent no-op (no
+/// pending intent — also the StrictMode-safe second answer after a one-shot
+/// take); `multipleFiles` carries the frozen calm-limit copy; `analyzed`
+/// COMPOSES the exact field set of [`ImportArtifactAnalysisDto::Analyzed`]
+/// (same keys, same types — the review renders both identically) WITHOUT
+/// touching that locked contract. Only TRANSPORT failures (the file became
+/// unreadable) reject with `AppError` — the intent then STAYS pending so
+/// `Réessayer` can replay it.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum OsOpenAnalysisDto {
+    None,
+    #[serde(rename_all = "camelCase")]
+    MultipleFiles {
+        message: String,
+    },
+    #[serde(rename_all = "camelCase")]
+    Analyzed {
+        quality: ImportQualityDto,
+        state: ImportStateDto,
+        findings: Vec<ImportFindingDto>,
+        /// The validated canonical content — present iff importable
+        /// (`quality != unusable`). `None` ⇒ blocked (only `Abandonner`).
+        #[serde(skip_serializing_if = "Option::is_none")]
+        importable_content: Option<ImportableContentDto>,
+        source_name: String,
+        artifact_checksum: String,
+    },
+}
+
+impl OsOpenAnalysisDto {
+    /// The `multipleFiles` calm limit, carrying its frozen copy.
+    pub fn multiple_files() -> Self {
+        Self::MultipleFiles {
+            message: OS_OPEN_MULTIPLE_FILES_MESSAGE.to_string(),
+        }
+    }
+
+    /// Map a domain analysis + its provenance metadata to the `analyzed`
+    /// wire verdict — the SAME mapping as the dialog-import
+    /// [`ImportArtifactAnalysisDto::analyzed`], field for field.
+    pub fn analyzed(
+        analysis: &ArtifactAnalysis,
+        source_name: String,
+        artifact_checksum: String,
+    ) -> Self {
+        Self::Analyzed {
+            quality: quality_dto(analysis.quality),
+            state: state_dto(analysis.state),
+            findings: analysis
+                .findings
+                .iter()
+                .map(ImportFindingDto::from_domain)
+                .collect(),
+            importable_content: analysis
+                .importable
+                .as_ref()
+                .map(ImportableContentDto::from_domain),
+            source_name,
+            artifact_checksum,
+        }
+    }
+}
+
 // ===== Structured-folder creation (folder → new canonical story) =====
 
 /// The creatable-content summary carried by an `analyzed` folder verdict:

@@ -30,6 +30,19 @@ pub const EVENT_JOB_COMPLETED: &str = "job:completed";
 /// message immediately.
 pub const EVENT_JOB_FAILED: &str = "job:failed";
 
+/// Wire event name: an OS-open intent arrived while the app is ALREADY
+/// running (single-instance relay, macOS `Opened`). A pure SIGNAL — the
+/// frontend pulls the verdict through `analyze_os_open_request`, never from
+/// the event. Cold start emits nothing (the library-mount pull covers it).
+pub const EVENT_OS_OPEN_REQUESTED: &str = "os-open:requested";
+
+/// `os-open:requested` payload: an EMPTY versionable object (`{}`). The
+/// event carries no data by design — the absolute path never crosses the
+/// boundary, and the verdict is pulled by command.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct OsOpenRequestedEvent {}
+
 /// Stable `errorCode` carried by every preparation `job:failed` — both
 /// functional (`retryable`) and transport failures. The structured cause +
 /// blockers come from the authoritative re-read, not this label.
@@ -270,5 +283,12 @@ mod tests {
         assert_eq!(EVENT_JOB_PROGRESS, "job:progress");
         assert_eq!(EVENT_JOB_COMPLETED, "job:completed");
         assert_eq!(EVENT_JOB_FAILED, "job:failed");
+        assert_eq!(EVENT_OS_OPEN_REQUESTED, "os-open:requested");
+    }
+
+    #[test]
+    fn os_open_requested_payload_is_an_empty_versionable_object() {
+        let v = serde_json::to_value(OsOpenRequestedEvent {}).expect("ser");
+        assert_eq!(v, json!({}));
     }
 }

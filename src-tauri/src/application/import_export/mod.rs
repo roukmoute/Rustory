@@ -1,5 +1,6 @@
 pub mod export;
 pub mod import;
+pub mod os_open;
 pub mod rss_creation;
 pub mod structured_creation;
 
@@ -8,6 +9,7 @@ pub use import::{
     accept_import, analyze_artifact, read_local_import_provenance, ImportAnalysis,
     LocalImportProvenance,
 };
+pub use os_open::{analyze_pending_intent, OsOpenIntent, OsOpenState, OS_OPEN_STATE};
 pub use rss_creation::{
     accept_rss_story_creation, commit_rss_story_creation, prepare_rss_story_creation,
     preview_rss_source, PreparedRssCreation, RssAcceptPhase, RssCreationOutcome, RssPreviewOutcome,

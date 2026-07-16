@@ -20,6 +20,16 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 tauri = { version = "2", features = [] }
 tauri-plugin-dialog = "=2.7.0"
+# Added 2026-07-16 for the OS-open channel: relays a second launch's
+# (argv, cwd) to the living instance (Windows/Linux hand "open with
+# Rustory" gestures to a NEW process) and enforces the one-process-per-
+# app_data_dir invariant the recovery journals assume. Deliberately
+# WITHOUT the `deep-link` feature (URL schemes only — file associations
+# do not go through it), no npm companion package, no new capability
+# (the plugin exposes no JS API). Desktop-only; Linux rides the D-Bus
+# stack (zbus already in the tree), Windows rides windows-sys (already
+# present).
+tauri-plugin-single-instance = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 rusqlite = { version = "=0.32", features = ["bundled"] }

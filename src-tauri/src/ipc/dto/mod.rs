@@ -24,8 +24,8 @@ pub use import_export::{
     AcceptArtifactImportInputDto, AcceptStructuredCreationInputDto, CreatableSummaryDto,
     ExportStoryDialogInputDto, ExportStoryDialogOutcomeDto, ImportArtifactAnalysisDto,
     ImportAspectDto, ImportCategoryDto, ImportFindingDto, ImportQualityDto, ImportStateDto,
-    ImportableContentDto, RssCreationOutcomeDto, RssItemRefDto, RssPreviewDto, RssPreviewItemDto,
-    StructuredCreationAnalysisDto,
+    ImportableContentDto, OsOpenAnalysisDto, RssCreationOutcomeDto, RssItemRefDto, RssPreviewDto,
+    RssPreviewItemDto, StructuredCreationAnalysisDto, OS_OPEN_MULTIPLE_FILES_MESSAGE,
 };
 pub use library::{LibraryOverviewDto, StoryCardDto};
 pub use settings::{
