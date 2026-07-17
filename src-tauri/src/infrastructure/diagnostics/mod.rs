@@ -10,3 +10,4 @@ pub mod import_log;
 pub mod jsonl;
 pub mod recovery_log;
 pub mod transfer;
+pub mod update_log;

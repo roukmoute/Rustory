@@ -37,6 +37,7 @@ vi.mock("@tauri-apps/api/app", () => ({
 }));
 
 import { SettingsRoute } from "./SettingsRoute";
+import { useUpdateShell } from "../../shell/state/update-shell-store";
 
 /** Compact builder of the official profile payload (byte-for-byte
  *  literals are guarded by the contract tests; the route tests only
@@ -228,6 +229,7 @@ describe("<SettingsRoute />", () => {
     mockReadContentSourcePolicy.mockResolvedValue(officialPolicy());
     mockGetVersion.mockReset();
     mockGetVersion.mockResolvedValue("0.1.0");
+    useUpdateShell.setState({ availability: null });
   });
 
   it("renders the standalone screen: main landmark, h1, version header and the five sections", async () => {
@@ -382,5 +384,72 @@ describe("<SettingsRoute />", () => {
       "Sources de contenu",
       "Politique de distribution",
     ]);
+  });
+
+  it("renders the update status line UNDER the version line when a verdict exists", async () => {
+    useUpdateShell.setState({
+      availability: {
+        status: "updateAvailable",
+        headline: "Nouvelle version disponible : 9.9.9.",
+        notice:
+          "Ta version actuelle est 0.1.0. Récupère la nouvelle version depuis la page officielle des versions : github.com/roukmoute/Rustory/releases.",
+        currentVersion: "0.1.0",
+        latestVersion: "9.9.9",
+      },
+    });
+    renderSettings();
+    await waitFor(() => {
+      expect(screen.getByText("Version 0.1.0")).toBeInTheDocument();
+    });
+    const statusLine = screen
+      .getByText("Nouvelle version disponible : 9.9.9.")
+      .closest("[role='status']");
+    expect(statusLine).not.toBeNull();
+    // The status line lives in the SAME heading block, under the
+    // untouched `Version {version}` line — never an ambiguity about the
+    // installed version.
+    const heading = screen.getByText("Version 0.1.0").parentElement;
+    expect(heading).toContainElement(statusLine as HTMLElement);
+    expect(
+      screen
+        .getByText("Version 0.1.0")
+        .compareDocumentPosition(statusLine as HTMLElement) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+  });
+
+  it("renders no update status line while no verdict exists — never a waiting state", async () => {
+    renderSettings();
+    await waitFor(() => {
+      expect(screen.getByText("Version 0.1.0")).toBeInTheDocument();
+    });
+    expect(
+      document.querySelector(".update-status-line"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("renders the calm checkNotRun verdict without any chip or alarm", async () => {
+    useUpdateShell.setState({
+      availability: {
+        status: "checkNotRun",
+        headline:
+          "La vérification de version n'est pas exécutée pour cette copie.",
+        notice:
+          "Cette copie de Rustory ne provient pas d'un canal de distribution officiel : aucune vérification réseau n'est effectuée.",
+        currentVersion: "0.1.0",
+      },
+    });
+    renderSettings();
+    await waitFor(() => {
+      expect(
+        screen.getByText(
+          "La vérification de version n'est pas exécutée pour cette copie.",
+        ),
+      ).toBeInTheDocument();
+    });
+    const line = document.querySelector(".update-status-line");
+    expect(line).not.toBeNull();
+    expect(line?.querySelector(".ds-chip")).toBeNull();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
 });

@@ -5,6 +5,7 @@ import {
   isFileAssociation,
   isLocalArtifactLine,
   isSupportProfile,
+  isUpdateAvailability,
 } from "./settings";
 
 /** The EXACT official payload Rust serializes (mirror of the contract
@@ -553,6 +554,194 @@ describe("isLocalArtifactLine", () => {
   it("rejects a deferred line whose reason drifted", () => {
     expect(
       isLocalArtifactLine({ ...archiveLine(), reason: "Pas encore prête" }),
+    ).toBe(false);
+  });
+});
+
+describe("isUpdateAvailability", () => {
+  /** The EXACT `updateAvailable` payload Rust serializes (mirror of the
+   *  update-availability contract tests, example versions). */
+  function updateAvailablePayload() {
+    return {
+      status: "updateAvailable",
+      headline: "Nouvelle version disponible : 9.9.9.",
+      notice:
+        "Ta version actuelle est 0.1.0. Récupère la nouvelle version depuis la page officielle des versions : github.com/roukmoute/Rustory/releases.",
+      currentVersion: "0.1.0",
+      latestVersion: "9.9.9",
+    };
+  }
+
+  function upToDatePayload() {
+    return {
+      status: "upToDate",
+      headline: "Aucune version plus récente n'est publiée.",
+      notice: "Aucune action n'est nécessaire.",
+      currentVersion: "0.1.0",
+    };
+  }
+
+  it("accepts the four exact states Rust serializes", () => {
+    expect(isUpdateAvailability(updateAvailablePayload())).toBe(true);
+    expect(isUpdateAvailability(upToDatePayload())).toBe(true);
+    expect(
+      isUpdateAvailability({
+        status: "checkUnavailable",
+        headline: "La vérification de version n'a pas pu être faite.",
+        notice:
+          "Rustory reste pleinement utilisable. La vérification réessaiera au prochain lancement.",
+        currentVersion: "0.1.0",
+      }),
+    ).toBe(true);
+    expect(
+      isUpdateAvailability({
+        status: "checkNotRun",
+        headline:
+          "La vérification de version n'est pas exécutée pour cette copie.",
+        notice:
+          "Cette copie de Rustory ne provient pas d'un canal de distribution officiel : aucune vérification réseau n'est effectuée.",
+        currentVersion: "0.1.0",
+      }),
+    ).toBe(true);
+  });
+
+  it("rejects an unknown status and non-object payloads", () => {
+    expect(
+      isUpdateAvailability({ ...upToDatePayload(), status: "unknown" }),
+    ).toBe(false);
+    expect(isUpdateAvailability(null)).toBe(false);
+    expect(isUpdateAvailability("upToDate")).toBe(false);
+    expect(isUpdateAvailability(undefined)).toBe(false);
+  });
+
+  it("rejects a latestVersion outside the updateAvailable state", () => {
+    // Present IFF `updateAvailable` — a stray key is a drift.
+    expect(
+      isUpdateAvailability({ ...upToDatePayload(), latestVersion: "9.9.9" }),
+    ).toBe(false);
+  });
+
+  it("rejects an updateAvailable payload missing its latestVersion", () => {
+    const payload: Record<string, unknown> = updateAvailablePayload();
+    delete payload.latestVersion;
+    expect(isUpdateAvailability(payload)).toBe(false);
+  });
+
+  it("rejects unconventional versions", () => {
+    expect(
+      isUpdateAvailability({
+        ...updateAvailablePayload(),
+        latestVersion: "v9.9.9",
+      }),
+    ).toBe(false);
+    expect(
+      isUpdateAvailability({
+        ...upToDatePayload(),
+        currentVersion: "0.1",
+      }),
+    ).toBe(false);
+    expect(
+      isUpdateAvailability({
+        ...upToDatePayload(),
+        currentVersion: "01.1.0",
+      }),
+    ).toBe(false);
+  });
+
+  it("rejects a drifted constant copy", () => {
+    expect(
+      isUpdateAvailability({
+        ...upToDatePayload(),
+        headline: "Tu es à jour !",
+      }),
+    ).toBe(false);
+    expect(
+      isUpdateAvailability({
+        ...upToDatePayload(),
+        notice: "Tout va bien.",
+      }),
+    ).toBe(false);
+  });
+
+  it("rejects a composed copy that does not match the payload's own versions", () => {
+    // The headline names another version than the wire's latestVersion —
+    // a recomposition drift, never rendered as authoritative.
+    expect(
+      isUpdateAvailability({
+        ...updateAvailablePayload(),
+        headline: "Nouvelle version disponible : 8.8.8.",
+      }),
+    ).toBe(false);
+    expect(
+      isUpdateAvailability({
+        ...updateAvailablePayload(),
+        notice:
+          "Ta version actuelle est 9.9.9. Récupère la nouvelle version depuis la page officielle des versions : github.com/roukmoute/Rustory/releases.",
+      }),
+    ).toBe(false);
+  });
+
+  /** An updateAvailable payload whose versions AND recomposed copies are
+   *  coherent with each other — isolates the version-relation checks
+   *  from the copy-recomposition checks. */
+  function coherentUpdateAvailable(current: string, latest: string) {
+    return {
+      status: "updateAvailable",
+      headline: `Nouvelle version disponible : ${latest}.`,
+      notice: `Ta version actuelle est ${current}. Récupère la nouvelle version depuis la page officielle des versions : github.com/roukmoute/Rustory/releases.`,
+      currentVersion: current,
+      latestVersion: latest,
+    };
+  }
+
+  it("rejects an updateAvailable equal to the current version — the domain never signals equality", () => {
+    expect(isUpdateAvailability(coherentUpdateAvailable("0.1.0", "0.1.0"))).toBe(
+      false,
+    );
+  });
+
+  it("rejects an updateAvailable older than the current version — a downgrade never renders", () => {
+    expect(isUpdateAvailability(coherentUpdateAvailable("2.0.0", "1.9.9"))).toBe(
+      false,
+    );
+    expect(isUpdateAvailability(coherentUpdateAvailable("0.1.1", "0.1.0"))).toBe(
+      false,
+    );
+    expect(isUpdateAvailability(coherentUpdateAvailable("0.2.0", "0.1.9"))).toBe(
+      false,
+    );
+  });
+
+  it("accepts a strictly newer version on each component", () => {
+    expect(isUpdateAvailability(coherentUpdateAvailable("0.1.0", "1.0.0"))).toBe(
+      true,
+    );
+    expect(isUpdateAvailability(coherentUpdateAvailable("0.1.0", "0.2.0"))).toBe(
+      true,
+    );
+    expect(isUpdateAvailability(coherentUpdateAvailable("0.1.0", "0.1.1"))).toBe(
+      true,
+    );
+  });
+
+  it("rejects a version component beyond the Rust u64 domain", () => {
+    // u64::MAX itself parses (the exact bound of the binary's domain)…
+    expect(
+      isUpdateAvailability(
+        coherentUpdateAvailable("0.1.0", "18446744073709551615.0.0"),
+      ),
+    ).toBe(true);
+    // …one past it can never be emitted by the binary: a drift.
+    expect(
+      isUpdateAvailability(
+        coherentUpdateAvailable("0.1.0", "18446744073709551616.0.0"),
+      ),
+    ).toBe(false);
+    expect(
+      isUpdateAvailability({
+        ...upToDatePayload(),
+        currentVersion: "99999999999999999999.0.0",
+      }),
     ).toBe(false);
   });
 });

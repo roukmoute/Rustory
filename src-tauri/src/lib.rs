@@ -54,6 +54,18 @@ pub struct AppState {
     /// discipline; the production impl stages → promotes → fsyncs → updates `.pi`.
     /// Reached only AFTER the `WriteStory` capability gate passes.
     pub pack_writer: std::sync::Arc<dyn infrastructure::device::DevicePackWriter>,
+    /// Source of the latest published official release for the
+    /// once-per-launch update-availability read (`Update Availability
+    /// Contract`). Behind an `Arc` + `spawn_blocking` like the two other
+    /// networked sources (its deliberate neighbors). Networked, gated by
+    /// the pure per-launch decision, never required by the core flow.
+    pub update_release_source: std::sync::Arc<dyn infrastructure::updates::UpdateReleaseSource>,
+    /// Session memo of the launch's update-availability verdict — the
+    /// "one check per launch" bound, single-flight under concurrency
+    /// (concurrent readers park until the shared verdict settles; no
+    /// lock is ever held across the fetch). `Arc` so the
+    /// `spawn_blocking` worker can own a handle.
+    pub update_availability: std::sync::Arc<application::update::UpdateCheckMemo>,
 }
 
 /// Read every story id that still has a pending draft row. Ordered by
@@ -447,6 +459,12 @@ pub fn run() {
                 pack_writer: std::sync::Arc::new(
                     infrastructure::device::SystemDevicePackWriter,
                 ),
+                update_release_source: std::sync::Arc::new(
+                    infrastructure::updates::GithubHttpReleaseSource::default(),
+                ),
+                update_availability: std::sync::Arc::new(
+                    application::update::UpdateCheckMemo::new(),
+                ),
             });
             Ok(())
         })
@@ -496,6 +514,7 @@ pub fn run() {
             commands::transfer::read_transfer_outcome,
             commands::device::read_transfer_preview,
             commands::transfer::read_transfer_state,
+            commands::settings::read_update_availability,
             commands::catalog::refresh_official_catalog,
             commands::story::record_draft,
             commands::story::record_node_draft,

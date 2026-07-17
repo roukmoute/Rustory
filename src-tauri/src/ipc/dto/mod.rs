@@ -31,6 +31,7 @@ pub use import_export::{
 pub use library::{LibraryOverviewDto, StoryCardDto};
 pub use settings::{
     DeviceCapabilityDto, DeviceSupportLineDto, LocalArtifactLineDto, SupportProfileDto,
+    UpdateAvailabilityDto,
 };
 pub use story::{
     AddNodeOptionInputDto, AddStoryNodeInputDto, ApplyRecoveryInputDto, AttachNodeMediaOutcomeDto,

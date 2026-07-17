@@ -89,3 +89,6 @@ mod story_transfer;
 
 #[path = "integration/transfer_outcome.rs"]
 mod transfer_outcome;
+
+#[path = "integration/update_availability.rs"]
+mod update_availability;

@@ -40,6 +40,7 @@ import { useStoryImport } from "../../features/import-export/hooks/use-story-imp
 import { useStructuredCreation } from "../../features/import-export/hooks/use-structured-creation";
 import type { StoryPreparationBadge } from "../../features/library/components/StoryCard";
 import { StoryCollection } from "../../features/library/components/StoryCollection";
+import { UpdateAvailabilitySignal } from "../../features/settings/components/UpdateAvailabilitySignal";
 import {
   invalidateLibraryOverviewCache,
   useLibraryOverview,
@@ -1004,6 +1005,11 @@ export function LibraryRoute(): React.JSX.Element {
                 Profil de support
               </Button>
             </SurfacePanel>
+            {/* Discreet update signal at the FOOT of the navigation
+                column: autonomous (store + navigate), renders ONLY when
+                a newer official version is available — silence
+                otherwise (`Update Availability Contract`). */}
+            <UpdateAvailabilitySignal />
           </>
         }
         center={center}

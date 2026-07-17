@@ -1,0 +1,12 @@
+.update-availability-signal {
+  /* The FOOT anchor of the contract: the library's left navigation
+     column is a flex column — the auto top margin absorbs the free
+     space so the signal sits at the column's real bottom, not right
+     under the support-profile entry. */
+  margin-top: auto;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-1);
+  padding: var(--space-2);
+}

@@ -9,7 +9,7 @@ Ce document est la référence opérationnelle pour livrer des builds Rustory ta
 À cette étape :
 
 - **Aucun workflow GitHub Actions `build-release.yml`** et aucun `promote-release.yml` n'existent dans le repo. Seul [`.github/workflows/verify.yml`](../.github/workflows/verify.yml) tourne à chaque `push` / `pull_request` pour valider frontend + Rust.
-- **Aucun bloc `plugins.updater`** n'est déclaré dans [`src-tauri/tauri.conf.json`](../src-tauri/tauri.conf.json). Les clients existants ne cherchent pas de feed de mise à jour.
+- **Aucun bloc `plugins.updater`** n'est déclaré dans [`src-tauri/tauri.conf.json`](../src-tauri/tauri.conf.json). Les clients distribués CONSULTENT la disponibilité d'une version publiée — une lecture seule, bornée, de l'API publique des versions du repo (`releases/latest`), dont le résultat est AFFICHÉ sans aucune action (voir le contrat de disponibilité de mise à jour, [architecture/device-support-profile.md](architecture/device-support-profile.md)) ; AUCUN feed updater signé n'est consulté ni appliqué. La posture manuelle, les invariants ci-dessous et les critères de sortie restent inchangés.
 - **Aucune dépendance `tauri-plugin-updater`** n'est présente dans [`src-tauri/Cargo.toml`](../src-tauri/Cargo.toml). Aucune clé de signature n'est attendue par le binaire.
 
 Conséquence : publier un build = fournir un binaire produit localement à l'utilisateur final. Pas de mécanisme automatique de distribution ni de mise à jour.

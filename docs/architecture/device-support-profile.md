@@ -1015,3 +1015,65 @@ NO toggle exists: activation and acceptance belong to the OS gesture
 open with" dialog) — Rustory declares (packaging) and observes (screen), it
 never mutates the user's OS preferences (`xdg-mime default`, the Windows
 registry and Launch Services defaults stay untouched by construction).
+
+## Update Availability Contract
+
+Knowing that a newer OFFICIAL Rustory version exists is a CONSULTATION of
+public information — a bounded read of the latest published release on the
+official repository's releases page — and NOTHING else. This contract owns
+that consultation, its gate and its bounds. It is NOT an updater: no feed is
+consulted, no manifest is applied, no byte is downloaded beyond the single
+informational response, no installation ever starts. The release runbook's
+manual posture stays UNCHANGED ([release-runbook.md](../release-runbook.md)):
+its exit criteria (signing secrets, release workflows, the signed updater
+feed) belong to the update GESTURE, which is a separate capability this
+contract deliberately excludes.
+
+### Decision table — which installed copy checks
+
+The check is gated by a PURE decision fed by the existing Linux install
+probe (see `Honest visibility` above — the probe is REUSED as-is, never a
+second one). One decision per launch, decided BEFORE any network dispatch:
+
+| Installed copy | Check | Why |
+| --- | --- | --- |
+| Distributed copy — Linux system package, AppImage, Windows installer, macOS app — or a SILENT probe (Windows/macOS release, an indeterminable Linux executable) | ✅ executed | Consulting a public page CLAIMS nothing about the channel: the no-unprovable-claims rule governs claims, not public reads. A release copy whose channel cannot be proven is treated as distributed. |
+| PROVEN local build (`localBuild` probe verdict) | ❌ not executed | The copy does not come from an official distribution channel: no current channel exists to inform about. A frozen reason, rendered calmly — never an error state. |
+| Development build (`debug_assertions`) | ❌ not executed | A developer workstation must work offline without noise; the skip is decided before the probe is even consulted. |
+
+A skipped check is a CALM, DURABLE state of this copy (`checkNotRun` on the
+wire) — the same regime as a distribution limit, never a failure.
+
+### Engraved bounds
+
+- **ONE check per launch.** The verdict is memoized for the session; no
+  periodic re-check, no manual "check now" gesture, no persistence of the
+  verdict (a relaunch simply checks again).
+- **Wall-clock budget: 10 seconds** for the whole consultation, connection
+  to last body byte.
+- **Response cap: 1 MiB** (cap+1 bounded read — a hostile or runaway
+  response is refused, never buffered unboundedly).
+- **A single request, no redirection** (`Policy::none`): the endpoint is
+  canonical; any redirect is treated as a transport failure.
+- **No data leaves the machine beyond the standard HTTP request** (method,
+  path, standard headers including the product's `Rustory/{version}`
+  User-Agent). No telemetry, no identifier, no payload — the PRD's
+  no-telemetry posture holds byte-for-byte.
+- **Strictly newer only**: a verdict names an update IFF
+  `latest > current` under the strict `vMAJOR.MINOR.PATCH` convention.
+  Equality and downgrades NEVER surface as an available update; a tag
+  outside the convention yields NO verdict (fail-closed parsing) — the
+  check reports it as not doable, never as a guess.
+- **Absence of a published release is NOT a failure**: a repository with no
+  published release answers "no newer version is published" — logically
+  true, rendered with the same calm as "up to date".
+
+The four wire states are SEALED (the verdict ≠ transport ≠ policy regime):
+`updateAvailable` (a strictly newer published version exists) ≠ `upToDate`
+(no newer version is published — including the no-release-yet world) ≠
+`checkUnavailable` (the consultation could not be done: transport failure,
+hostile status, unparsable answer — retried at the next launch, never
+alarming) ≠ `checkNotRun` (this copy does not check — the decision table
+above). The user-facing rendering of these states belongs to
+[ui-states.md#Update Availability Contract](./ui-states.md); the frozen
+copies live in [product-language.md](./product-language.md).

@@ -8,7 +8,9 @@ import { invoke } from "@tauri-apps/api/core";
 
 import {
   SupportProfileContractDriftError,
+  UpdateAvailabilityContractDriftError,
   readSupportProfile,
+  readUpdateAvailability,
 } from "./settings";
 
 /** Compact builder of the EXACT official payload Rust serializes (the
@@ -194,6 +196,66 @@ describe("readSupportProfile", () => {
   it("normalizes an IPC rejection into an AppError (fail-closed upstream)", async () => {
     vi.mocked(invoke).mockRejectedValueOnce(new Error("ipc down"));
     const err = (await readSupportProfile().then(
+      () => {
+        throw new Error("expected rejection");
+      },
+      (e: unknown) => e,
+    )) as { code: string };
+    expect(err.code).toBe("UNKNOWN");
+  });
+});
+
+describe("readUpdateAvailability", () => {
+  beforeEach(() => {
+    vi.mocked(invoke).mockReset();
+  });
+
+  it("resolves the validated verdict from the infallible read", async () => {
+    vi.mocked(invoke).mockResolvedValueOnce({
+      status: "updateAvailable",
+      headline: "Nouvelle version disponible : 9.9.9.",
+      notice:
+        "Ta version actuelle est 0.1.0. Récupère la nouvelle version depuis la page officielle des versions : github.com/roukmoute/Rustory/releases.",
+      currentVersion: "0.1.0",
+      latestVersion: "9.9.9",
+    });
+    const verdict = await readUpdateAvailability();
+    expect(invoke).toHaveBeenCalledWith("read_update_availability");
+    expect(verdict.status).toBe("updateAvailable");
+    expect(verdict.latestVersion).toBe("9.9.9");
+  });
+
+  it("resolves the calm transport state as a STATE, never a rejection", async () => {
+    // The command is infallible: an offline launch answers
+    // `checkUnavailable`, the facade resolves it like any verdict.
+    vi.mocked(invoke).mockResolvedValueOnce({
+      status: "checkUnavailable",
+      headline: "La vérification de version n'a pas pu être faite.",
+      notice:
+        "Rustory reste pleinement utilisable. La vérification réessaiera au prochain lancement.",
+      currentVersion: "0.1.0",
+    });
+    const verdict = await readUpdateAvailability();
+    expect(verdict.status).toBe("checkUnavailable");
+    expect(verdict.latestVersion).toBeUndefined();
+  });
+
+  it("rejects with UpdateAvailabilityContractDriftError on a drifted payload", async () => {
+    const raw = { status: "updateAvailable", headline: "Mets à jour !" };
+    vi.mocked(invoke).mockResolvedValueOnce(raw);
+    const err = (await readUpdateAvailability().then(
+      () => {
+        throw new Error("expected rejection");
+      },
+      (e: unknown) => e,
+    )) as UpdateAvailabilityContractDriftError;
+    expect(err).toBeInstanceOf(UpdateAvailabilityContractDriftError);
+    expect(err.raw).toBe(raw);
+  });
+
+  it("normalizes an IPC rejection into an AppError (fail-closed upstream)", async () => {
+    vi.mocked(invoke).mockRejectedValueOnce(new Error("ipc down"));
+    const err = (await readUpdateAvailability().then(
       () => {
         throw new Error("expected rejection");
       },

@@ -17,6 +17,9 @@ mod content_source_policy;
 #[path = "contracts/support_profile.rs"]
 mod support_profile;
 
+#[path = "contracts/update_availability.rs"]
+mod update_availability;
+
 #[path = "contracts/file_association.rs"]
 mod file_association;
 

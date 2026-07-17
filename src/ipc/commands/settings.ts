@@ -1,8 +1,14 @@
 import { invoke } from "@tauri-apps/api/core";
 
 import { toAppError } from "../../shared/errors/app-error";
-import type { SupportProfile } from "../../shared/ipc-contracts/settings";
-import { isSupportProfile } from "../../shared/ipc-contracts/settings";
+import type {
+  SupportProfile,
+  UpdateAvailability,
+} from "../../shared/ipc-contracts/settings";
+import {
+  isSupportProfile,
+  isUpdateAvailability,
+} from "../../shared/ipc-contracts/settings";
 
 /**
  * Error thrown when `read_support_profile` returns a payload that does
@@ -43,6 +49,46 @@ export async function readSupportProfile(): Promise<SupportProfile> {
   }
   if (!isSupportProfile(raw)) {
     throw new SupportProfileContractDriftError(raw);
+  }
+  return raw;
+}
+
+/**
+ * Error thrown when `read_update_availability` returns a payload that
+ * does not match the wire contract. A payload outside the contract
+ * NEVER renders a surface — the raw response is attached for debugging.
+ */
+export class UpdateAvailabilityContractDriftError extends Error {
+  readonly raw: unknown;
+  constructor(raw: unknown) {
+    super(
+      "read_update_availability returned a payload that does not match the contract",
+    );
+    this.name = "UpdateAvailabilityContractDriftError";
+    this.raw = raw;
+  }
+}
+
+/**
+ * Read THE launch's update-availability verdict (`Update Availability
+ * Contract`). The command is INFAILLIBLE by contract: a transport
+ * failure arrives as the calm `checkUnavailable` STATE of the payload,
+ * never a rejection — the only rejections here are an IPC failure
+ * (normalized) and a contract drift. The caller treats ANY rejection as
+ * "no verdict exists": total silence, the app lives without it.
+ *
+ * Components MUST NOT call `invoke` directly — go through this facade
+ * so the wire contract stays owned by `src/ipc/`.
+ */
+export async function readUpdateAvailability(): Promise<UpdateAvailability> {
+  let raw: unknown;
+  try {
+    raw = await invoke<unknown>("read_update_availability");
+  } catch (err) {
+    throw toAppError(err);
+  }
+  if (!isUpdateAvailability(raw)) {
+    throw new UpdateAvailabilityContractDriftError(raw);
   }
   return raw;
 }

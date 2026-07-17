@@ -532,3 +532,144 @@ export function isSupportProfile(value: unknown): value is SupportProfile {
   // extension of the same pure read — same drift discipline).
   return isFileAssociation(c.fileAssociation);
 }
+
+// ===== Update availability (the `Update Availability Contract`) =====
+//
+// Mirror of the update-availability DTO of
+// `src-tauri/src/ipc/dto/settings.rs`. Rust alone decides the verdict
+// and carries the copies; the guard refuses a drifted wire shape so the
+// two calm surfaces never render against an arbitrary object. The
+// command is INFALLIBLE by contract: a transport failure arrives as the
+// `checkUnavailable` STATE, never a rejection — the only facade-side
+// rejection is a contract drift.
+
+/** Closed set of the four sealed verdict states. */
+export type UpdateAvailabilityStatus =
+  | "updateAvailable"
+  | "upToDate"
+  | "checkUnavailable"
+  | "checkNotRun";
+
+/** The read update-availability verdict: the closed status, the frozen
+ *  Rust-carried copies (rendered VERBATIM) and the versions in play.
+ *  `latestVersion` is present IFF a newer version was found. */
+export interface UpdateAvailability {
+  status: UpdateAvailabilityStatus;
+  headline: string;
+  notice: string;
+  currentVersion: string;
+  latestVersion?: string;
+}
+
+/** The strict `MAJOR.MINOR.PATCH` face of a wire version — the TS
+ *  mirror of the Rust domain parser's convention (no `v` prefix, no
+ *  leading zero, three components). */
+const RELEASE_VERSION_PATTERN = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
+
+/** The Rust domain's component bound: a version the binary can never
+ *  emit (a component beyond `u64`) is a drift, not a rendering. */
+const U64_MAX = 18446744073709551615n;
+
+/** Parse a wire version under the FULL Rust convention (shape AND the
+ *  `u64` bound on every component) — `null` refuses the drift. */
+function parseWireReleaseVersion(
+  value: unknown,
+): [bigint, bigint, bigint] | null {
+  if (typeof value !== "string" || !RELEASE_VERSION_PATTERN.test(value)) {
+    return null;
+  }
+  const [major, minor, patch] = value
+    .split(".")
+    .map((component) => BigInt(component));
+  if (major > U64_MAX || minor > U64_MAX || patch > U64_MAX) {
+    return null;
+  }
+  return [major, minor, patch];
+}
+
+/** The Rust domain's STRICT `latest > current` — lexicographic on
+ *  (major, minor, patch): equality and downgrades never surface as an
+ *  available update, so a payload claiming one is a drift. */
+function isStrictlyNewer(
+  latest: readonly [bigint, bigint, bigint],
+  current: readonly [bigint, bigint, bigint],
+): boolean {
+  if (latest[0] !== current[0]) return latest[0] > current[0];
+  if (latest[1] !== current[1]) return latest[1] > current[1];
+  return latest[2] > current[2];
+}
+
+/** The frozen status → headline couples of the CONSTANT states —
+ *  VALIDATION literals only (the rendering keeps the Rust-carried
+ *  values); the composed `updateAvailable` copies are validated
+ *  STRUCTURALLY below (their byte-for-byte authority lives in the Rust
+ *  contract tests). */
+const UPDATE_HEADLINES: Readonly<
+  Record<Exclude<UpdateAvailabilityStatus, "updateAvailable">, string>
+> = {
+  upToDate: "Aucune version plus récente n'est publiée.",
+  checkUnavailable: "La vérification de version n'a pas pu être faite.",
+  checkNotRun: "La vérification de version n'est pas exécutée pour cette copie.",
+};
+
+/** The frozen status → notice couples of the CONSTANT states. */
+const UPDATE_NOTICES: Readonly<
+  Record<Exclude<UpdateAvailabilityStatus, "updateAvailable">, string>
+> = {
+  upToDate: "Aucune action n'est nécessaire.",
+  checkUnavailable:
+    "Rustory reste pleinement utilisable. La vérification réessaiera au prochain lancement.",
+  checkNotRun:
+    "Cette copie de Rustory ne provient pas d'un canal de distribution officiel : aucune vérification réseau n'est effectuée.",
+};
+
+/**
+ * Runtime guard for an [`UpdateAvailability`] payload, both ways: a
+ * valid payload is accepted, a drift is refused — closed status set,
+ * versions under the FULL Rust convention (strict shape AND the `u64`
+ * component bound), `latestVersion` present IFF `updateAvailable` and
+ * STRICTLY newer than `currentVersion` (the domain never signals an
+ * equality or a downgrade — a payload claiming one never renders),
+ * constant copies locked on their frozen couples and composed copies
+ * locked on their structure (headline/notice recomposed from the
+ * payload's own versions must match byte-for-byte).
+ */
+export function isUpdateAvailability(
+  value: unknown,
+): value is UpdateAvailability {
+  if (typeof value !== "object" || value === null) return false;
+  const c = value as Record<string, unknown>;
+  const current = parseWireReleaseVersion(c.currentVersion);
+  if (current === null) return false;
+  if (c.status === "updateAvailable") {
+    // The positive state carries the found version — inside the Rust
+    // domain (u64 bound) and STRICTLY newer, exactly like the domain's
+    // resolution; its copies compose EXACTLY from the payload's own
+    // versions.
+    const latest = parseWireReleaseVersion(c.latestVersion);
+    if (latest === null || !isStrictlyNewer(latest, current)) {
+      return false;
+    }
+    if (c.headline !== `Nouvelle version disponible : ${c.latestVersion}.`) {
+      return false;
+    }
+    return (
+      c.notice ===
+      `Ta version actuelle est ${c.currentVersion}. Récupère la nouvelle version depuis la page officielle des versions : github.com/roukmoute/Rustory/releases.`
+    );
+  }
+  if (
+    c.status !== "upToDate" &&
+    c.status !== "checkUnavailable" &&
+    c.status !== "checkNotRun"
+  ) {
+    return false;
+  }
+  // `latestVersion` is present IFF `updateAvailable` — a stray key on a
+  // constant state is a drift.
+  if (c.latestVersion !== undefined) return false;
+  return (
+    c.headline === UPDATE_HEADLINES[c.status] &&
+    c.notice === UPDATE_NOTICES[c.status]
+  );
+}

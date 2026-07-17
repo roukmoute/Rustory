@@ -6,6 +6,7 @@ import { getVersion } from "@tauri-apps/api/app";
 
 import type { SectionRead } from "../../features/settings/components/SupportProfileView";
 import { SupportProfileView } from "../../features/settings/components/SupportProfileView";
+import { UpdateStatusLine } from "../../features/settings/components/UpdateStatusLine";
 import { readContentSourcePolicy } from "../../ipc/commands/import-export";
 import { readSupportProfile } from "../../ipc/commands/settings";
 import type { ContentSourcePolicy } from "../../shared/ipc-contracts/import-export";
@@ -103,6 +104,11 @@ export function SettingsRoute(): React.JSX.Element {
           {version !== null && (
             <p className="settings-route__version">Version {version}</p>
           )}
+          {/* The launch's update-availability verdict, UNDER the
+              installed-version line (which never moves): renders when a
+              verdict exists, NOTHING before (`Update Availability
+              Contract`). */}
+          <UpdateStatusLine />
         </div>
         <Button
           variant="secondary"

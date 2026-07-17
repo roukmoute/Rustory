@@ -2322,3 +2322,26 @@ navigation to the library); a drop arriving during a live flow is refused
 without touching that flow; the intent is consumed one-shot Rust-side (no
 double processing); a `Partiellement exploitable` verdict is named as such
 by the unchanged machines — never presented as a full success.
+
+## Update Availability Contract
+
+The calm, non-blocking visibility of "a newer official version exists" —
+the ONLY background network capability of the product (see
+[device-support-profile.md#Update Availability Contract](./device-support-profile.md)
+for the gate, the bounds and the sealed wire states). Information only:
+no download, no installation, no updater gesture lives on these surfaces.
+The verdict is read ONCE per launch through an infallible command
+(`read_update_availability` — transport failures are a DTO state, never a
+wire error) and relayed by a session store; the surfaces render what
+exists and stay silent otherwise.
+
+TWO read-only surfaces, nothing else:
+
+| Aspect | Value |
+| --- | --- |
+| (a) Settings status line | One line in the `/settings` header, UNDER the existing `Version {version}` line (which does not move — `getVersion()` and its omission-on-failure stay as they are; the status line gives the "your version / the published version" context and never creates ambiguity about the installed version). The support-profile screen contract and its FIVE sections stay INTACT. Renders the verdict WHEN IT EXISTS: a paragraph `role="status"` carrying the Rust-carried `headline` + `notice` VERBATIM; a `StateChip` tone `info` (glyph included) accompanies the `updateAvailable` state ONLY — the three other states render in a calm neutral tone with NO chip. Renders NOTHING while no verdict exists: never a spinner, never a theatrical waiting state (nobody waits for a background check). |
+| (b) Library discreet signal | A compact block at the FOOT of the library's left navigation column (below the filters block and the support-profile entry — the navigation zone, never the central surface nor the decision panel). Renders ONLY when the verdict is `updateAvailable` — every other state (including "check in flight") is INVISIBLE here: silence is the rule, the positive is the exception. `role="status"`, `StateChip` tone `info` + the Rust-carried `headline` verbatim + ONE text button `Voir les détails` (frontend-frozen literal, `aria-label` `Consulter les détails de la mise à jour`) that navigates IN-APP to `/settings` (the existing consultation-gesture pattern — no external browser, no outbound link). Keyboard-reachable, visible focus. |
+| States | The four sealed wire states render as: `updateAvailable` → both surfaces; `upToDate` / `checkUnavailable` / `checkNotRun` → settings status line only, calm neutral tone; no verdict yet → NOTHING renders anywhere. |
+| Copies | Rust-carried `headline` + `notice`, rendered VERBATIM (no TS content literal beyond the `Voir les détails` button and its aria-label) — frozen in [product-language.md](./product-language.md). |
+| Forbidden | `role="alert"`, toast, modal, any blocking element, chip tone `error`/`warning`, color alone carrying the distinction, a spinner or waiting state, a retry button, an external link, any coupling of the core flow to the verdict. |
+| Offline | A failed or impossible check leaves the app fully usable: `checkUnavailable` is a calm state of the settings line, never an alarm; the library signal simply does not exist. The core flow NEVER depends on the verdict. |

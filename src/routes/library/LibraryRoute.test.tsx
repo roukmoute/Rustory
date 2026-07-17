@@ -209,6 +209,7 @@ import type { ConnectedDeviceDto } from "../../shared/ipc-contracts/device";
 import { useDropShell } from "../../shell/state/drop-shell-store";
 import { useLibraryShell } from "../../shell/state/library-shell-store";
 import { useOsOpenShell } from "../../shell/state/os-open-shell-store";
+import { useUpdateShell } from "../../shell/state/update-shell-store";
 import {
   LibraryRoute,
   mapDeviceForPanel,
@@ -358,6 +359,7 @@ describe("<LibraryRoute />", () => {
     });
     useOsOpenShell.setState({ pendingSignal: false });
     useDropShell.setState({ hoverActive: false, pendingSignal: false });
+    useUpdateShell.setState({ availability: null });
   });
 
   it("shows the loading state before the IPC call resolves", () => {
@@ -1373,6 +1375,82 @@ describe("<LibraryRoute />", () => {
     const user = userEvent.setup();
     await user.click(
       within(nav).getByRole("button", { name: "Profil de support" }),
+    );
+    await waitFor(() => {
+      expect(screen.getByTestId("settings-stub")).toBeInTheDocument();
+    });
+  });
+
+  it("renders no update signal by default — silence while no update is available", async () => {
+    mockGet.mockResolvedValueOnce({ stories: [] });
+    renderLibrary();
+    await waitFor(() => {
+      expect(
+        screen.getByRole("navigation", { name: /navigation bibliothèque/i }),
+      ).toBeInTheDocument();
+    });
+    expect(
+      screen.queryByRole("button", {
+        name: "Consulter les détails de la mise à jour",
+      }),
+    ).not.toBeInTheDocument();
+    expect(document.querySelector(".update-availability-signal")).toBeNull();
+  });
+
+  it("renders the discreet update signal in the left navigation column on an updateAvailable verdict", async () => {
+    mockGet.mockResolvedValueOnce({ stories: [] });
+    useUpdateShell.setState({
+      availability: {
+        status: "updateAvailable",
+        headline: "Nouvelle version disponible : 9.9.9.",
+        notice:
+          "Ta version actuelle est 0.1.0. Récupère la nouvelle version depuis la page officielle des versions : github.com/roukmoute/Rustory/releases.",
+        currentVersion: "0.1.0",
+        latestVersion: "9.9.9",
+      },
+    });
+    renderLibrary();
+    const nav = screen.getByRole("navigation", {
+      name: /navigation bibliothèque/i,
+    });
+    // The signal lives in the NAVIGATION column — never the central
+    // surface, never the decision panel.
+    expect(
+      within(nav).getByText("Nouvelle version disponible : 9.9.9."),
+    ).toBeInTheDocument();
+    expect(
+      within(nav).getByRole("button", {
+        name: "Consulter les détails de la mise à jour",
+      }),
+    ).toBeInTheDocument();
+    // Foot anchoring contract: the signal is the LAST direct child of
+    // the flex column, carrying its anchor class (`margin-top: auto`
+    // pushes it to the column's real bottom).
+    const signal = within(nav).getByRole("status");
+    expect(signal).toHaveClass("update-availability-signal");
+    expect(signal.parentElement).toBe(nav);
+    expect(nav.lastElementChild).toBe(signal);
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("navigates to /settings through the update signal's Voir les détails gesture", async () => {
+    mockGet.mockResolvedValueOnce({ stories: [] });
+    useUpdateShell.setState({
+      availability: {
+        status: "updateAvailable",
+        headline: "Nouvelle version disponible : 9.9.9.",
+        notice:
+          "Ta version actuelle est 0.1.0. Récupère la nouvelle version depuis la page officielle des versions : github.com/roukmoute/Rustory/releases.",
+        currentVersion: "0.1.0",
+        latestVersion: "9.9.9",
+      },
+    });
+    renderLibrary();
+    const user = userEvent.setup();
+    await user.click(
+      screen.getByRole("button", {
+        name: "Consulter les détails de la mise à jour",
+      }),
     );
     await waitFor(() => {
       expect(screen.getByTestId("settings-stub")).toBeInTheDocument();

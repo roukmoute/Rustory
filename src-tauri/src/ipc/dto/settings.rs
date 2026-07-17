@@ -17,6 +17,9 @@ use crate::domain::import::{
     FileAssociationRegistration, LinuxInstallKind, LocalArtifactKind, LocalArtifactLine,
     LocalArtifactSupport,
 };
+use crate::domain::update::{
+    format_release_version, update_headline, update_notice, ReleaseVersion, UpdateAvailability,
+};
 
 /// The stable wire rendering order of the four operations of a device
 /// matrix line — the same closed set as `SupportedOperations`, in the
@@ -430,5 +433,71 @@ impl SupportProfileDto {
     pub fn with_linux_install(mut self, kind: Option<LinuxInstallKind>) -> Self {
         self.file_association.current_install = kind.map(CurrentInstallDto::from_kind);
         self
+    }
+}
+
+/// The serialized update-availability verdict (`Update Availability
+/// Contract`): the closed wire tag, the frozen Rust-carried copies and
+/// the versions in play. Transport failures are the `checkUnavailable`
+/// STATE of this DTO, never a wire error (the command is infallible by
+/// contract). `latestVersion` is present IFF a newer version was found —
+/// omitted otherwise, never `null` (the omission discipline of the whole
+/// settings wire).
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateAvailabilityDto {
+    pub status: &'static str,
+    pub headline: String,
+    pub notice: String,
+    pub current_version: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latest_version: Option<String>,
+}
+
+impl UpdateAvailabilityDto {
+    /// Map a settled verdict (+ the running version) to its wire face —
+    /// tags and copies all derive from the domain's pure composers: the
+    /// frontend renders them verbatim and never recomposes them.
+    pub fn from_availability(availability: UpdateAvailability, current: ReleaseVersion) -> Self {
+        Self {
+            status: availability.wire_tag(),
+            headline: update_headline(&availability),
+            notice: update_notice(&availability, current),
+            current_version: format_release_version(current),
+            latest_version: match availability {
+                UpdateAvailability::UpdateAvailable { latest } => {
+                    Some(format_release_version(latest))
+                }
+                _ => None,
+            },
+        }
+    }
+
+    /// The calm degradation of a binary whose OWN version escapes the
+    /// strict release convention (a semver-legal but out-of-convention
+    /// Cargo version in a locally-built binary): the `checkUnavailable`
+    /// couple with the RAW version string — `currentVersion` carries it
+    /// verbatim, the TS guard refuses this out-of-convention world and
+    /// the accepted drift-silence regime applies. Never a panic: the
+    /// domain tripwire and the three-manifest alignment lock stay the
+    /// CI guards of the convention.
+    pub fn check_unavailable_with_raw_version(raw_current: &str) -> Self {
+        let availability = UpdateAvailability::CheckUnavailable;
+        Self {
+            status: availability.wire_tag(),
+            headline: update_headline(&availability),
+            // The version argument only composes the `updateAvailable`
+            // notice — the constant `checkUnavailable` copy ignores it.
+            notice: update_notice(
+                &availability,
+                ReleaseVersion {
+                    major: 0,
+                    minor: 0,
+                    patch: 0,
+                },
+            ),
+            current_version: raw_current.to_string(),
+            latest_version: None,
+        }
     }
 }
