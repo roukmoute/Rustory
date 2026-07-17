@@ -12,7 +12,11 @@ use crate::domain::device::{
     DeviceFamily, DeviceSupportLine, FirmwareCohort, FlamFirmwareCohort, LuniiFirmwareCohort,
     SupportedOperation,
 };
-use crate::domain::import::{LocalArtifactKind, LocalArtifactLine, LocalArtifactSupport};
+use crate::domain::import::{
+    official_file_association_lines, FileAssociationChannel, FileAssociationLine,
+    FileAssociationRegistration, LinuxInstallKind, LocalArtifactKind, LocalArtifactLine,
+    LocalArtifactSupport,
+};
 
 /// The stable wire rendering order of the four operations of a device
 /// matrix line — the same closed set as `SupportedOperations`, in the
@@ -154,6 +158,66 @@ pub fn local_artifact_capabilities_label(support: LocalArtifactSupport) -> Optio
     }
 }
 
+/// The frozen extension label of the file-association section: the
+/// single associated type, rendered verbatim. The packaging contract
+/// test proves it stays coherent with `RUSTORY_ARTIFACT_EXTENSION` (the
+/// domain constant, dot-less by the save-dialog convention).
+pub const FILE_ASSOCIATION_EXTENSION_LABEL: &str = ".rustory";
+
+/// The frozen user-facing label of a file-association channel
+/// (`product-language.md`). Exhaustive match (tripwire).
+pub fn file_association_channel_label(channel: FileAssociationChannel) -> &'static str {
+    match channel {
+        FileAssociationChannel::LinuxSystemPackage => "Paquet Linux (.deb / .rpm)",
+        FileAssociationChannel::LinuxAppImage => "AppImage (Linux)",
+        FileAssociationChannel::WindowsInstaller => "Installeur Windows (.msi / .exe)",
+        FileAssociationChannel::MacosAppBundle => "Application macOS (.dmg)",
+    }
+}
+
+/// The frozen user-facing status label of a registration state — the
+/// calm chip wording (`product-language.md`: success on a registered
+/// channel, neutral on a non-registered one — the durable-limit
+/// regime, NEW literals). Exhaustive match (tripwire).
+pub fn file_association_status_label(registration: FileAssociationRegistration) -> &'static str {
+    match registration {
+        FileAssociationRegistration::InstalledWithPackage => "Enregistrée à l'installation",
+        FileAssociationRegistration::RegisteredBySystem => "Enregistrée par le système",
+        FileAssociationRegistration::NotRegisteredByDefault { .. } => "Non enregistrée d'office",
+    }
+}
+
+/// Stable camelCase wire tag of a Linux install kind (byte-identical
+/// to the TS mirror's closed set). Exhaustive match (tripwire).
+pub fn linux_install_kind_wire_tag(kind: LinuxInstallKind) -> &'static str {
+    match kind {
+        LinuxInstallKind::AppImage => "appImage",
+        LinuxInstallKind::SystemPackage => "systemPackage",
+        LinuxInstallKind::LocalBuild => "localBuild",
+    }
+}
+
+/// The frozen current-install notice of each probed Linux install kind
+/// (`product-language.md`) — rendered `role="status"` at the head of
+/// the section, NEVER invented: an unprobed install serializes no
+/// notice at all. Exhaustive match (tripwire).
+pub fn linux_install_notice(kind: LinuxInstallKind) -> &'static str {
+    match kind {
+        LinuxInstallKind::AppImage => {
+            "Ton installation actuelle est une AppImage : l'association n'est pas \
+             enregistrée d'office."
+        }
+        LinuxInstallKind::SystemPackage => {
+            "Ton installation actuelle provient d'un paquet système : l'association \
+             est enregistrée."
+        }
+        LinuxInstallKind::LocalBuild => {
+            "Cette version de Rustory n'a pas été installée par un paquet officiel : \
+             elle n'enregistre pas d'association d'office."
+        }
+    }
+}
+
 /// One serialized capability of a device matrix line: the closed wire
 /// tag, the frozen label, the availability and — on a non-available
 /// capability only — the frozen reason CARRIED BY THE LINE (`reason`
@@ -205,15 +269,99 @@ pub struct LocalArtifactLineDto {
     pub reason: Option<&'static str>,
 }
 
+/// One serialized line of the file-association registry: the closed
+/// wire tag, the frozen label, the registration flag with its frozen
+/// status wording, the frozen detail — and, on a non-registered channel
+/// only, the frozen reason CARRIED BY THE LINE (`reason` is OMITTED on
+/// a registered one; the closed `FileAssociationRegistration` shape
+/// guarantees the coherence).
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct FileAssociationChannelDto {
+    pub channel: &'static str,
+    pub label: &'static str,
+    pub registered: bool,
+    pub status_label: &'static str,
+    pub detail: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<&'static str>,
+}
+
+/// The serialized verdict of the Linux install probe: the closed wire
+/// tag and its frozen notice. Only ever present when the probe SPOKE
+/// (Linux, determinable executable) — the wire never invents a claim.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CurrentInstallDto {
+    pub kind: &'static str,
+    pub notice: &'static str,
+}
+
+impl CurrentInstallDto {
+    /// Map a probed install kind to its wire face (tag + frozen
+    /// notice) — the kind the probe decided is the single truth.
+    pub fn from_kind(kind: LinuxInstallKind) -> Self {
+        Self {
+            kind: linux_install_kind_wire_tag(kind),
+            notice: linux_install_notice(kind),
+        }
+    }
+}
+
+/// The serialized file-association block of the support profile: the
+/// frozen extension label, every channel line of the received registry
+/// in its stable order, and the current-install verdict (OMITTED when
+/// no probe spoke — Windows/macOS, an indeterminable executable).
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct FileAssociationDto {
+    pub extension_label: &'static str,
+    pub channels: Vec<FileAssociationChannelDto>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_install: Option<CurrentInstallDto>,
+}
+
+impl FileAssociationDto {
+    /// Map a file-association registry (+ the probe's verdict) to its
+    /// wire block — the received lines are the single truth: tags,
+    /// labels, statuses and reasons all derive from them.
+    pub fn from_registry(
+        lines: &[FileAssociationLine],
+        current_install: Option<LinuxInstallKind>,
+    ) -> Self {
+        Self {
+            extension_label: FILE_ASSOCIATION_EXTENSION_LABEL,
+            channels: lines
+                .iter()
+                .map(|line| FileAssociationChannelDto {
+                    channel: line.channel.wire_tag(),
+                    label: file_association_channel_label(line.channel),
+                    registered: line.registration.is_registered(),
+                    status_label: file_association_status_label(line.registration),
+                    detail: line.detail,
+                    // The reason travels ON the line: a non-registered
+                    // channel always carries one (the closed
+                    // FileAssociationRegistration shape guarantees it).
+                    reason: line.registration.reason(),
+                })
+                .collect(),
+            current_install: current_install.map(CurrentInstallDto::from_kind),
+        }
+    }
+}
+
 /// The serialized support profile: every line of the received device
 /// matrix and artifact registry, in their stable order
 /// (`read_support_profile` hands the official ones; tests may
-/// serialize custom distributions).
+/// serialize custom distributions), plus the file-association block
+/// (the OFFICIAL registry — an ADDITIVE extension of the profile; the
+/// Linux install probe attaches through [`Self::with_linux_install`]).
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct SupportProfileDto {
     pub devices: Vec<DeviceSupportLineDto>,
     pub local_artifacts: Vec<LocalArtifactLineDto>,
+    pub file_association: FileAssociationDto,
 }
 
 impl SupportProfileDto {
@@ -262,6 +410,25 @@ impl SupportProfileDto {
                     reason: line.support.reason(),
                 })
                 .collect(),
+            // The file-association block always carries the OFFICIAL
+            // registry: the channel table is a distribution fact, not
+            // a per-call input (custom registries serialize through
+            // `FileAssociationDto::from_registry` directly). No probe
+            // verdict here — the frontier attaches it explicitly.
+            file_association: FileAssociationDto::from_registry(
+                official_file_association_lines(),
+                None,
+            ),
         }
+    }
+
+    /// Attach the Linux install probe's verdict to the profile —
+    /// `None` (no probe spoke: Windows/macOS, an indeterminable
+    /// executable) leaves the notice ABSENT, never invented. Builder
+    /// shape so the existing `from_matrices` call sites stay intact
+    /// (the extension is additive).
+    pub fn with_linux_install(mut self, kind: Option<LinuxInstallKind>) -> Self {
+        self.file_association.current_install = kind.map(CurrentInstallDto::from_kind);
+        self
     }
 }

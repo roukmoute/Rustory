@@ -152,6 +152,62 @@ function officialProfile(): SupportProfile {
         reason: "Lecture d'archives non prise en charge",
       },
     ],
+    fileAssociation: {
+      extensionLabel: ".rustory",
+      channels: [
+        {
+          channel: "linuxSystemPackage",
+          label: "Paquet Linux (.deb / .rpm)",
+          registered: true,
+          statusLabel: "Enregistrée à l'installation",
+          detail:
+            "L'association est déclarée par le paquet et active dès l'installation.",
+        },
+        {
+          channel: "linuxAppImage",
+          label: "AppImage (Linux)",
+          registered: false,
+          statusLabel: "Non enregistrée d'office",
+          detail:
+            "Une AppImage ne modifie pas ton système : rien n'est enregistré automatiquement.",
+          reason:
+            "Tu peux ajouter l'association avec un outil d'intégration AppImage ou une entrée d'application manuelle.",
+        },
+        {
+          channel: "windowsInstaller",
+          label: "Installeur Windows (.msi / .exe)",
+          registered: true,
+          statusLabel: "Enregistrée à l'installation",
+          detail:
+            "L'installeur déclare l'association. Windows peut te demander de confirmer et respecte ton choix existant.",
+        },
+        {
+          channel: "macosAppBundle",
+          label: "Application macOS (.dmg)",
+          registered: true,
+          statusLabel: "Enregistrée par le système",
+          detail:
+            "macOS enregistre l'association quand l'application est déposée dans Applications.",
+        },
+      ],
+    },
+  };
+}
+
+/** The official profile with the Linux install probe's AppImage
+ *  verdict attached (the only case where the notice renders). */
+function profileWithCurrentInstall(): SupportProfile {
+  const profile = officialProfile();
+  return {
+    ...profile,
+    fileAssociation: {
+      ...profile.fileAssociation,
+      currentInstall: {
+        kind: "appImage",
+        notice:
+          "Ton installation actuelle est une AppImage : l'association n'est pas enregistrée d'office.",
+      },
+    },
   };
 }
 
@@ -196,7 +252,7 @@ function renderView(
 }
 
 describe("<SupportProfileView />", () => {
-  it("renders the four sections as h2 headings in the contract order", () => {
+  it("renders the five sections as h2 headings in the contract order", () => {
     renderView();
     const headings = screen
       .getAllByRole("heading", { level: 2 })
@@ -204,6 +260,7 @@ describe("<SupportProfileView />", () => {
     expect(headings).toEqual([
       "Appareils",
       "Artefacts locaux",
+      "Association de fichiers",
       "Sources de contenu",
       "Politique de distribution",
     ]);
@@ -340,9 +397,10 @@ describe("<SupportProfileView />", () => {
 
   it("fails closed per section: a failed profile read never takes down the sources or the posture", () => {
     renderView({ kind: "unavailable" }, loaded(officialPolicy()));
-    // Devices + artifacts render the calm honest copy, role="status".
+    // Devices + artifacts + file association render the calm honest
+    // copy, role="status".
     const statuses = screen.getAllByRole("status");
-    expect(statuses).toHaveLength(2);
+    expect(statuses).toHaveLength(3);
     for (const status of statuses) {
       expect(status).toHaveTextContent(
         "Le profil de support n'a pas pu être lu.",
@@ -379,13 +437,119 @@ describe("<SupportProfileView />", () => {
   it("marks loading sections with aria-busy and renders no invented content", () => {
     const { container } = renderView({ kind: "loading" }, { kind: "loading" });
     const busySections = container.querySelectorAll('[aria-busy="true"]');
-    expect(busySections).toHaveLength(3);
+    expect(busySections).toHaveLength(4);
     expect(screen.queryByText("Origine v1")).not.toBeInTheDocument();
     expect(screen.queryByText("Flux RSS")).not.toBeInTheDocument();
     // The static posture still renders (it depends on no read).
     expect(
       screen.getByText(/La distribution officielle autorise/),
     ).toBeInTheDocument();
+  });
+
+  it("renders the four file-association channel lines verbatim with the extension label", () => {
+    renderView();
+    expect(screen.getByText(".rustory")).toBeInTheDocument();
+    for (const label of [
+      "Paquet Linux (.deb / .rpm)",
+      "AppImage (Linux)",
+      "Installeur Windows (.msi / .exe)",
+      "Application macOS (.dmg)",
+    ]) {
+      expect(screen.getByText(label)).toBeInTheDocument();
+    }
+    // The Rust-carried details render verbatim under each line.
+    expect(
+      screen.getByText(
+        "L'association est déclarée par le paquet et active dès l'installation.",
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "Une AppImage ne modifie pas ton système : rien n'est enregistré automatiquement.",
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "L'installeur déclare l'association. Windows peut te demander de confirmer et respecte ton choix existant.",
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "macOS enregistre l'association quand l'application est déposée dans Applications.",
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("renders a registered channel as a success chip and the AppImage line as a neutral chip plus its frozen reason", () => {
+    renderView();
+    // The status labels are the chips themselves (Rust-carried).
+    expect(screen.getAllByText("Enregistrée à l'installation")).toHaveLength(
+      2,
+    );
+    expect(screen.getByText("Enregistrée par le système")).toBeInTheDocument();
+    expect(screen.getByText("Non enregistrée d'office")).toBeInTheDocument();
+    // Tone couples asserted on precise lines: a registered channel
+    // renders success, the non-registered one neutral + its reason.
+    const debLabel = screen.getByText("Paquet Linux (.deb / .rpm)");
+    const debItem = debLabel.closest("li") as HTMLElement;
+    const debChip = debItem.querySelector(".ds-chip");
+    expect(debChip).toHaveClass("ds-chip--success");
+    expect(debChip).toHaveTextContent("Enregistrée à l'installation");
+    const appImageLabel = screen.getByText("AppImage (Linux)");
+    const appImageItem = appImageLabel.closest("li") as HTMLElement;
+    const appImageChip = appImageItem.querySelector(".ds-chip");
+    expect(appImageChip).toHaveClass("ds-chip--neutral");
+    expect(appImageChip).toHaveTextContent("Non enregistrée d'office");
+    expect(
+      within(appImageItem).getByText(
+        "Tu peux ajouter l'association avec un outil d'intégration AppImage ou une entrée d'application manuelle.",
+      ),
+    ).toBeInTheDocument();
+    // Never an error tone, never an alert region.
+    expect(appImageItem.querySelector(".ds-chip--error")).toBeNull();
+    expect(appImageItem.querySelector(".ds-chip--warning")).toBeNull();
+  });
+
+  it("renders no current-install notice when the probe did not speak", () => {
+    renderView();
+    // The only status regions of a fully-loaded screen are none at
+    // all: the notice is ABSENT, never an invented claim.
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
+    expect(
+      screen.queryByText(/Ton installation actuelle/),
+    ).not.toBeInTheDocument();
+  });
+
+  it("renders the current-install notice first, role=status, when the probe spoke", () => {
+    renderView(loaded(profileWithCurrentInstall()), loaded(officialPolicy()));
+    const notice = screen.getByRole("status");
+    expect(notice).toHaveTextContent(
+      "Ton installation actuelle est une AppImage : l'association n'est pas enregistrée d'office.",
+    );
+    // Rendered at the head of the section body, before the channel
+    // list.
+    const body = notice.closest(".support-profile__section-body");
+    expect(body).not.toBeNull();
+    expect(
+      notice.compareDocumentPosition(
+        (body as HTMLElement).querySelector(
+          ".support-profile__associations",
+        ) as HTMLElement,
+      ) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+  });
+
+  it("adds no interactive element to the file-association section (read-only, no toggle)", () => {
+    renderView(loaded(profileWithCurrentInstall()), loaded(officialPolicy()));
+    const heading = screen.getByRole("heading", {
+      level: 2,
+      name: "Association de fichiers",
+    });
+    const section = heading.closest("section") as HTMLElement;
+    expect(section.querySelector("button")).toBeNull();
+    expect(section.querySelector("input")).toBeNull();
+    expect(section.querySelector("a")).toBeNull();
+    expect(section.querySelector('[role="switch"]')).toBeNull();
   });
 
   it("keeps the reason keyboard-reachable next to its capability line", () => {

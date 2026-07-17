@@ -111,6 +111,45 @@ function officialProfile() {
         reason: "Lecture d'archives non prise en charge",
       },
     ],
+    fileAssociation: {
+      extensionLabel: ".rustory",
+      channels: [
+        {
+          channel: "linuxSystemPackage",
+          label: "Paquet Linux (.deb / .rpm)",
+          registered: true,
+          statusLabel: "Enregistrée à l'installation",
+          detail:
+            "L'association est déclarée par le paquet et active dès l'installation.",
+        },
+        {
+          channel: "linuxAppImage",
+          label: "AppImage (Linux)",
+          registered: false,
+          statusLabel: "Non enregistrée d'office",
+          detail:
+            "Une AppImage ne modifie pas ton système : rien n'est enregistré automatiquement.",
+          reason:
+            "Tu peux ajouter l'association avec un outil d'intégration AppImage ou une entrée d'application manuelle.",
+        },
+        {
+          channel: "windowsInstaller",
+          label: "Installeur Windows (.msi / .exe)",
+          registered: true,
+          statusLabel: "Enregistrée à l'installation",
+          detail:
+            "L'installeur déclare l'association. Windows peut te demander de confirmer et respecte ton choix existant.",
+        },
+        {
+          channel: "macosAppBundle",
+          label: "Application macOS (.dmg)",
+          registered: true,
+          statusLabel: "Enregistrée par le système",
+          detail:
+            "macOS enregistre l'association quand l'application est déposée dans Applications.",
+        },
+      ],
+    },
   };
 }
 
@@ -132,6 +171,11 @@ describe("readSupportProfile", () => {
     expect(profile.localArtifacts[2].reason).toBe(
       "Lecture d'archives non prise en charge",
     );
+    expect(profile.fileAssociation.channels).toHaveLength(4);
+    expect(profile.fileAssociation.channels[1].reason).toBe(
+      "Tu peux ajouter l'association avec un outil d'intégration AppImage ou une entrée d'application manuelle.",
+    );
+    expect(profile.fileAssociation.currentInstall).toBeUndefined();
   });
 
   it("rejects with SupportProfileContractDriftError on a drifted payload", async () => {

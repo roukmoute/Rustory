@@ -9,14 +9,18 @@ use rustory_lib::domain::device::{
     FirmwareCohort, FlamFirmwareCohort, LuniiFirmwareCohort, OperationSupport, SupportedOperation,
     ALL_FIRMWARE_COHORTS,
 };
+use rustory_lib::domain::export::RUSTORY_ARTIFACT_EXTENSION;
 use rustory_lib::domain::import::{
-    official_local_artifacts, LocalArtifactKind, LocalArtifactLine, LocalArtifactSupport,
-    ALL_LOCAL_ARTIFACT_KINDS,
+    official_file_association_lines, official_local_artifacts, FileAssociationChannel,
+    FileAssociationRegistration, LinuxInstallKind, LocalArtifactKind, LocalArtifactLine,
+    LocalArtifactSupport, ALL_FILE_ASSOCIATION_CHANNELS, ALL_LOCAL_ARTIFACT_KINDS,
 };
 use rustory_lib::ipc::dto::settings::{
-    device_capability_label, device_family_label, device_family_wire_tag, firmware_cohort_label,
-    firmware_cohort_wire_tag, local_artifact_capabilities_label, local_artifact_format_label,
-    local_artifact_label, metadata_format_label, operation_wire_tag, SupportProfileDto,
+    device_capability_label, device_family_label, device_family_wire_tag,
+    file_association_channel_label, file_association_status_label, firmware_cohort_label,
+    firmware_cohort_wire_tag, linux_install_kind_wire_tag, linux_install_notice,
+    local_artifact_capabilities_label, local_artifact_format_label, local_artifact_label,
+    metadata_format_label, operation_wire_tag, SupportProfileDto, FILE_ASSOCIATION_EXTENSION_LABEL,
 };
 
 const ALL_OPERATIONS: [SupportedOperation; 4] = [
@@ -618,4 +622,287 @@ fn wire_tags_stay_byte_identical_to_the_existing_device_wire() {
         operation_wire_tag(SupportedOperation::WriteStory),
         "writeStory"
     );
+}
+
+// ===== File association — frozen copies (product-language.md,
+// byte-for-byte) =====
+
+#[test]
+fn file_association_channel_labels_are_frozen() {
+    assert_eq!(
+        file_association_channel_label(FileAssociationChannel::LinuxSystemPackage),
+        "Paquet Linux (.deb / .rpm)"
+    );
+    assert_eq!(
+        file_association_channel_label(FileAssociationChannel::LinuxAppImage),
+        "AppImage (Linux)"
+    );
+    assert_eq!(
+        file_association_channel_label(FileAssociationChannel::WindowsInstaller),
+        "Installeur Windows (.msi / .exe)"
+    );
+    assert_eq!(
+        file_association_channel_label(FileAssociationChannel::MacosAppBundle),
+        "Application macOS (.dmg)"
+    );
+}
+
+#[test]
+fn file_association_status_labels_are_frozen() {
+    assert_eq!(
+        file_association_status_label(FileAssociationRegistration::InstalledWithPackage),
+        "Enregistrée à l'installation"
+    );
+    assert_eq!(
+        file_association_status_label(FileAssociationRegistration::RegisteredBySystem),
+        "Enregistrée par le système"
+    );
+    assert_eq!(
+        file_association_status_label(FileAssociationRegistration::NotRegisteredByDefault {
+            reason: "why"
+        }),
+        "Non enregistrée d'office"
+    );
+}
+
+#[test]
+fn the_appimage_limit_reason_is_frozen_on_the_official_line() {
+    // The reason lives ON the registry line (the closed
+    // FileAssociationRegistration shape) — asserted byte-for-byte on
+    // the official distribution.
+    let appimage = official_file_association_lines()
+        .iter()
+        .find(|line| line.channel == FileAssociationChannel::LinuxAppImage)
+        .expect("appimage line");
+    assert_eq!(
+        appimage.registration.reason(),
+        Some(
+            "Tu peux ajouter l'association avec un outil d'intégration AppImage \
+             ou une entrée d'application manuelle."
+        )
+    );
+}
+
+#[test]
+fn linux_install_notices_are_frozen_per_kind_and_tags_are_stable() {
+    assert_eq!(
+        linux_install_kind_wire_tag(LinuxInstallKind::AppImage),
+        "appImage"
+    );
+    assert_eq!(
+        linux_install_kind_wire_tag(LinuxInstallKind::SystemPackage),
+        "systemPackage"
+    );
+    assert_eq!(
+        linux_install_kind_wire_tag(LinuxInstallKind::LocalBuild),
+        "localBuild"
+    );
+    assert_eq!(
+        linux_install_notice(LinuxInstallKind::AppImage),
+        "Ton installation actuelle est une AppImage : l'association n'est pas \
+         enregistrée d'office."
+    );
+    assert_eq!(
+        linux_install_notice(LinuxInstallKind::SystemPackage),
+        "Ton installation actuelle provient d'un paquet système : l'association \
+         est enregistrée."
+    );
+    assert_eq!(
+        linux_install_notice(LinuxInstallKind::LocalBuild),
+        "Cette version de Rustory n'a pas été installée par un paquet officiel : \
+         elle n'enregistre pas d'association d'office."
+    );
+}
+
+#[test]
+fn the_extension_label_stays_coherent_with_the_domain_extension_constant() {
+    // The wire label is a frozen literal (never composed at runtime);
+    // this tripwire proves it can never silently diverge from the
+    // domain's single extension truth.
+    assert_eq!(
+        FILE_ASSOCIATION_EXTENSION_LABEL,
+        format!(".{RUSTORY_ARTIFACT_EXTENSION}")
+    );
+}
+
+// ===== File association — the CURRENT official block, serialized
+// EXACTLY (one registry line = one assertion) =====
+
+#[test]
+fn the_official_file_association_block_serializes_exactly() {
+    let dto = SupportProfileDto::from_matrices(
+        official_device_support_matrix(),
+        official_local_artifacts(),
+    );
+    let v = serde_json::to_value(&dto).expect("ser");
+    assert_eq!(v["fileAssociation"]["extensionLabel"], ".rustory");
+    let channels = v["fileAssociation"]["channels"]
+        .as_array()
+        .expect("channels");
+    assert_eq!(channels.len(), 4);
+    assert_eq!(
+        channels[0],
+        serde_json::json!({
+            "channel": "linuxSystemPackage",
+            "label": "Paquet Linux (.deb / .rpm)",
+            "registered": true,
+            "statusLabel": "Enregistrée à l'installation",
+            "detail": "L'association est déclarée par le paquet et active dès l'installation.",
+        })
+    );
+    assert_eq!(
+        channels[1],
+        serde_json::json!({
+            "channel": "linuxAppImage",
+            "label": "AppImage (Linux)",
+            "registered": false,
+            "statusLabel": "Non enregistrée d'office",
+            "detail": "Une AppImage ne modifie pas ton système : rien n'est enregistré automatiquement.",
+            "reason": "Tu peux ajouter l'association avec un outil d'intégration AppImage ou une entrée d'application manuelle.",
+        })
+    );
+    assert_eq!(
+        channels[2],
+        serde_json::json!({
+            "channel": "windowsInstaller",
+            "label": "Installeur Windows (.msi / .exe)",
+            "registered": true,
+            "statusLabel": "Enregistrée à l'installation",
+            "detail": "L'installeur déclare l'association. Windows peut te demander de confirmer et respecte ton choix existant.",
+        })
+    );
+    assert_eq!(
+        channels[3],
+        serde_json::json!({
+            "channel": "macosAppBundle",
+            "label": "Application macOS (.dmg)",
+            "registered": true,
+            "statusLabel": "Enregistrée par le système",
+            "detail": "macOS enregistre l'association quand l'application est déposée dans Applications.",
+        })
+    );
+}
+
+#[test]
+fn a_registered_channel_omits_the_reason_key_and_a_non_registered_one_carries_it() {
+    let dto = SupportProfileDto::from_matrices(
+        official_device_support_matrix(),
+        official_local_artifacts(),
+    );
+    let v = serde_json::to_value(&dto).expect("ser");
+    for channel in v["fileAssociation"]["channels"].as_array().expect("chs") {
+        if channel["registered"] == true {
+            assert!(
+                channel.get("reason").is_none(),
+                "a registered channel carries NO reason key (the status replaces it)"
+            );
+        } else {
+            let reason = channel["reason"].as_str().expect("limit reason");
+            assert!(!reason.is_empty(), "a limit never renders as a bare ✗");
+        }
+    }
+}
+
+#[test]
+fn the_profile_without_a_probe_verdict_omits_the_current_install_key_entirely() {
+    // Windows/macOS and an indeterminable executable: NO claim is ever
+    // serialized — the key is ABSENT, never null, never invented.
+    let dto = SupportProfileDto::from_matrices(
+        official_device_support_matrix(),
+        official_local_artifacts(),
+    );
+    let v = serde_json::to_value(&dto).expect("ser");
+    assert!(
+        v["fileAssociation"]
+            .as_object()
+            .expect("object")
+            .get("currentInstall")
+            .is_none(),
+        "currentInstall must be omitted when no probe spoke"
+    );
+    // The explicit no-verdict attach keeps the same shape.
+    let dto = SupportProfileDto::from_matrices(
+        official_device_support_matrix(),
+        official_local_artifacts(),
+    )
+    .with_linux_install(None);
+    let v = serde_json::to_value(&dto).expect("ser");
+    assert!(v["fileAssociation"]
+        .as_object()
+        .expect("object")
+        .get("currentInstall")
+        .is_none());
+}
+
+#[test]
+fn each_probed_install_kind_serializes_its_frozen_tag_and_notice() {
+    for (kind, tag, notice) in [
+        (
+            LinuxInstallKind::AppImage,
+            "appImage",
+            "Ton installation actuelle est une AppImage : l'association n'est pas enregistrée d'office.",
+        ),
+        (
+            LinuxInstallKind::SystemPackage,
+            "systemPackage",
+            "Ton installation actuelle provient d'un paquet système : l'association est enregistrée.",
+        ),
+        (
+            LinuxInstallKind::LocalBuild,
+            "localBuild",
+            "Cette version de Rustory n'a pas été installée par un paquet officiel : elle n'enregistre pas d'association d'office.",
+        ),
+    ] {
+        let dto = SupportProfileDto::from_matrices(
+            official_device_support_matrix(),
+            official_local_artifacts(),
+        )
+        .with_linux_install(Some(kind));
+        let v = serde_json::to_value(&dto).expect("ser");
+        assert_eq!(
+            v["fileAssociation"]["currentInstall"],
+            serde_json::json!({ "kind": tag, "notice": notice }),
+            "kind {kind:?}"
+        );
+    }
+}
+
+// ===== File association — exhaustiveness (tripwire round-trip) =====
+
+#[test]
+fn every_channel_serializes_a_tag_a_label_and_a_status_face() {
+    for channel in ALL_FILE_ASSOCIATION_CHANNELS {
+        assert!(!channel.wire_tag().is_empty());
+        assert!(!file_association_channel_label(channel).is_empty());
+    }
+    // Status wording present for every registration shape (the status
+    // label never depends on the carried reason).
+    for registration in [
+        FileAssociationRegistration::InstalledWithPackage,
+        FileAssociationRegistration::RegisteredBySystem,
+        FileAssociationRegistration::NotRegisteredByDefault { reason: "why" },
+    ] {
+        assert!(!file_association_status_label(registration).is_empty());
+    }
+}
+
+#[test]
+fn every_official_channel_reason_is_coherent_with_its_registration() {
+    // Reason present IFF the official line does NOT register — carried
+    // by the line itself (the FileAssociationRegistration shape), so
+    // the wire can never render a bare ✗ nor justify a registered
+    // channel.
+    for line in official_file_association_lines() {
+        assert_eq!(
+            line.registration.reason().is_none(),
+            line.registration.is_registered(),
+            "channel {:?}: reason present IFF not registered",
+            line.channel
+        );
+        assert!(
+            !line.detail.is_empty(),
+            "channel {:?}: every line carries its detail",
+            line.channel
+        );
+    }
 }

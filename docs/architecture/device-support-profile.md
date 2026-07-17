@@ -710,7 +710,7 @@ deferred), gated by the same `is_supported_artifact_source_name` authority and
 producing the same verdicts and copies. The declarative REGISTRATION of Rustory
 as an OS handler for its file types (`bundle.fileAssociations`, macOS
 `exportedType`, Linux MIME) stays OUTSIDE this channel — it belongs to the
-file-association contract of its own dedicated story.
+[File Association Contract](#file-association-contract) below.
 
 The **drop channel** (a file or folder dropped on the window, see
 [ui-states.md#Drop Intent Contract](./ui-states.md)) routes into the SAME
@@ -901,3 +901,117 @@ that turned blocking refuses and creates nothing.
 Bounds & safety: offline, zero dependency, never writes a device, analysis is
 strictly read-only (no row, no promoted file), and the commit is atomic (a
 failure leaves the previous library state intact, media files compensated).
+
+## File Association Contract
+
+Registering Rustory as the OS handler for its supported file types is a
+DECLARATIVE, packaging-time fact — never a runtime mutation. This contract
+owns that declaration and its honest visibility. The RECEPTION of an opened
+file stays entirely in the OS Open Contract (see
+[ui-states.md#OS Open Contract](./ui-states.md)): registration makes the OS
+PROPOSE Rustory, reception makes Rustory HANDLE the gesture — two contracts,
+one channel.
+
+### Associated types
+
+The `.rustory` story artifact is the ONLY associated type — the single
+double-clickable file of the local-artifact registry above:
+
+- a structured folder is not a file (nothing to associate);
+- the structured archive is deferred (no reader ships — associating it would
+  advertise a capability the distribution does not offer);
+- media files (PNG/JPEG/MP3/WAV/OGG) are node-media SOURCE formats — an
+  EDITING contract (see `Node Media Source Formats`), never import
+  artifacts: claiming them would make Rustory an invasive default candidate
+  for every image and sound on the machine.
+
+Exactly ONE `bundle.fileAssociations` entry therefore exists:
+`ext ["rustory"]`; `name "RustoryStory"` (it becomes the Windows registry
+ProgId — no space — AND the macOS `CFBundleTypeName`); `description
+"Histoire Rustory"` (Windows-only, VISIBLE in the Explorer `Type` column and
+the "Open with" dialog — a presentable label, not an internal code);
+`mimeType "application/x-rustory"` (Linux `MimeType=` of the desktop entry;
+macOS UTI tag); `role "Editor"`; `rank "Owner"` (Rustory creates this type);
+`exportedType { identifier fr.roukmoute.rustory.story, conformsTo
+[public.json] }` (a `.rustory` v1 IS a UTF-8 JSON file — the format contract
+above). The `RUSTORY_ARTIFACT_EXTENSION` domain constant stays the single
+truth of the extension literal.
+
+### What each official channel does
+
+The four official distribution channels of the release runbook
+([release-runbook.md](../release-runbook.md)), decided line by line — the
+device support-matrix pattern: every line carries its own justification. The
+registry lives in pure domain (`file_association` module), is serialized by
+the support-profile wire and renders on the support-profile screen:
+
+| Channel | Registration | Why |
+| --- | --- | --- |
+| Linux system package (`.deb` / `.rpm`) | ✅ registered at install time | The package installs the desktop entry (custom template carrying `Exec={{exec}} %F`) plus the shared-mime-info XML under `/usr/share/mime/packages/`; the `shared-mime-info` / `desktop-file-utils` package triggers run the database updates — no maintainer script of our own. |
+| Linux AppImage | ❌ not registered by default | An AppImage installs NOTHING into the system at launch; integration belongs to an external tool (AppImageLauncher, appimaged) or a manual desktop entry — the documented honest limit of this channel. To make that integration OPERATIVE, the AppDir embeds the same desktop entry (`%F` template) and the same shared-mime-info XML as the system packages (`appimage.files`): a tool extracting them has real material to register (desktop entry + MIME declaration), the manual path being the same two files plus `update-mime-database`. |
+| Windows installer (`.msi` / `.exe`) | ✅ registered at install time | NSIS `APP_ASSOCIATE` / WiX `ProgId` declare the type at install; Rustory becomes a CANDIDATE handler. Windows PROTECTS an existing user default (`UserChoice`, hash-sealed): the user confirms through the OS dialog — respected, never fought. The generated NSIS installer does not call `SHChangeNotify` (the `UPDATEFILEASSOC` macro): Explorer may show the `.rustory` icon and type with a delay right after install — a cosmetic, documented fact, never worked around (no false bug report on a first Windows install). |
+| macOS app (`.dmg`) | ✅ registered by the system | The bundler injects `CFBundleDocumentTypes` + `UTExportedTypeDeclarations` into the app's `Info.plist`; Launch Services registers the app when it lands in Applications (the DMG itself plays no role). |
+
+A local/dev build (a bare `cargo` run, the dev server, an unbundled binary)
+registers NOTHING on any platform — there is no package, no installer, no
+bundle copy for the system to index.
+
+### Packaging mechanics (the two Linux pitfalls)
+
+- The bundler generates the desktop entry from an embedded template that has
+  NO field code: without a custom `desktopTemplate` adding `%F`, the
+  launcher would never pass the opened file to the app (it would open bare).
+  The custom template (`src-tauri/bundle/linux/rustory.desktop`) reproduces
+  the embedded skeleton EXACTLY, plus `%F`.
+- The bundler generates NO shared-mime-info XML: without one shipped through
+  the deb/rpm `files` map (target
+  `/usr/share/mime/packages/fr.roukmoute.rustory.xml`), Linux never
+  recognizes the `.rustory` extension at all. The XML declares
+  `application/x-rustory`, `glob *.rustory` and `sub-class-of
+  application/json`. The SAME XML is embedded into the AppImage's AppDir
+  (`appimage.files`, same target path) so the not-registered-by-default
+  channel keeps an operative integration path (see the channel table).
+- `%F` (paths) rather than `%U` (URIs): the receiver treats raw paths
+  natively, and its frontier normalization already covers `%U`-style
+  launchers handing `file://` URIs (see the OS Open Contract reception).
+- A packaging-contract test locks `tauri.conf.json` and the bundle files
+  coherent with each other (the verify pipeline never bundles — this guard
+  is the only net against a silent packaging regression).
+
+### Honest visibility (the support-profile screen)
+
+The support-profile screen renders a fifth read-only section, `Association
+de fichiers` (see
+[ui-states.md#Support Profile Screen Contract](./ui-states.md)): the four
+channel lines above with their frozen labels, status and details — the
+AppImage line carrying its frozen reason — plus, on Linux ONLY, a
+current-install notice derived from a PURE probe whose every claim needs
+CORROBORATION: the `APPIMAGE` variable handed by the AppImage runtime,
+corroborated by an executable inside an AppImage mount point (`.mount_*`
+component — an inherited/polluted marker contradicted by the executable, or
+an executable that cannot corroborate it, yields NO claim) → AppImage; an
+executable under `/usr/` — excluding `/usr/local`, which the FHS reserves
+for local, non-packaged installs — AND the package's own shared-mime-info
+XML installed (the package artifact witnessing the declared association — a
+bare `/usr` path proves nothing, a hand-copied binary lands there too, and
+a `/usr/local` copy is never package-provided even when the official
+package is independently installed elsewhere) →
+system package; any other known executable → local build (its notice speaks
+only of what THIS copy provides — it never denies an association added
+manually); an indeterminable executable → NO claim (the notice is simply
+absent). Windows and macOS carry NO runtime claim: their lines document the
+channel, the probe stays silent — the screen never asserts a state it
+cannot prove.
+
+The wire of this section follows the OMISSION discipline of the whole
+support-profile wire — keys are omitted, never `null`: `reason` is present
+IFF a channel does not register by default, `currentInstall` is ABSENT
+whenever the probe made no claim. The Rust serializer, the TS guard and the
+contract tests all lock this shape (a `null` there is a drift, not a
+compatible spelling).
+
+NO toggle exists: activation and acceptance belong to the OS gesture
+(installing the official package, answering the OS "Open with" / "Always
+open with" dialog) — Rustory declares (packaging) and observes (screen), it
+never mutates the user's OS preferences (`xdg-mime default`, the Windows
+registry and Launch Services defaults stay untouched by construction).

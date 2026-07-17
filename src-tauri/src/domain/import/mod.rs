@@ -4,6 +4,7 @@
 
 pub mod artifact;
 pub mod content_source;
+pub mod file_association;
 pub mod local_artifact;
 pub mod recognition;
 pub mod rss;
@@ -16,6 +17,11 @@ pub use artifact::{
 pub use content_source::{
     content_source_activation, official_content_sources, ContentSourceActivation,
     ContentSourceKind, ContentSourceLine, ALL_CONTENT_SOURCE_ACTIVATIONS, ALL_CONTENT_SOURCE_KINDS,
+};
+pub use file_association::{
+    classify_linux_install, official_file_association_lines, FileAssociationChannel,
+    FileAssociationLine, FileAssociationRegistration, LinuxInstallKind,
+    ALL_FILE_ASSOCIATION_CHANNELS, LINUX_PACKAGE_MIME_XML,
 };
 pub use local_artifact::{
     official_local_artifacts, LocalArtifactCapabilities, LocalArtifactKind, LocalArtifactLine,

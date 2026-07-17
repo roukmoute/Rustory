@@ -64,11 +64,54 @@ export interface LocalArtifactLine {
   reason?: string;
 }
 
+/** Closed set of the official distribution channels of the
+ *  file-association registry. */
+export type FileAssociationChannelTag =
+  | "linuxSystemPackage"
+  | "linuxAppImage"
+  | "windowsInstaller"
+  | "macosAppBundle";
+
+/** Closed set of the Linux install kinds the pure probe can decide. */
+export type LinuxInstallKind = "appImage" | "systemPackage" | "localBuild";
+
+/** One line of the file-association registry: the closed tag, the
+ *  frozen label, the registration flag with its frozen status wording,
+ *  the frozen detail and — on a non-registered channel ONLY — the
+ *  frozen reason (the guard refuses incoherence). */
+export interface FileAssociationChannelLine {
+  channel: FileAssociationChannelTag;
+  label: string;
+  registered: boolean;
+  statusLabel: string;
+  detail: string;
+  /** Present IFF the channel does not register by default. */
+  reason?: string;
+}
+
+/** The Linux install probe's verdict: the closed kind and its frozen
+ *  notice — only ever present when the probe SPOKE. */
+export interface CurrentInstall {
+  kind: LinuxInstallKind;
+  notice: string;
+}
+
+/** The file-association block of the support profile: the frozen
+ *  extension label, the four channel lines in the canonical wire
+ *  order, and the current-install verdict (ABSENT when no probe spoke
+ *  — Windows/macOS, an indeterminable executable: never invented). */
+export interface FileAssociation {
+  extensionLabel: string;
+  channels: FileAssociationChannelLine[];
+  currentInstall?: CurrentInstall;
+}
+
 /** The read support profile: every line of the distribution's device
- *  matrix and artifact registry. */
+ *  matrix, artifact registry and file-association registry. */
 export interface SupportProfile {
   devices: DeviceSupportLine[];
   localArtifacts: LocalArtifactLine[];
+  fileAssociation: FileAssociation;
 }
 
 /** The frozen family → label couples, exactly as Rust serializes them.
@@ -208,8 +251,154 @@ const ARTIFACT_LIMIT_REASONS: Readonly<
   structuredArchive: "Lecture d'archives non prise en charge",
 };
 
+/** The frozen extension label of the file-association block (the
+ *  single associated type). */
+const FILE_ASSOCIATION_EXTENSION_LABEL = ".rustory";
+
+/** The canonical wire order of the four file-association channels. */
+const FILE_ASSOCIATION_CHANNEL_ORDER: readonly FileAssociationChannelTag[] = [
+  "linuxSystemPackage",
+  "linuxAppImage",
+  "windowsInstaller",
+  "macosAppBundle",
+];
+
+/** The frozen channel → label couples. */
+const FILE_ASSOCIATION_CHANNEL_LABELS: Readonly<
+  Record<FileAssociationChannelTag, string>
+> = {
+  linuxSystemPackage: "Paquet Linux (.deb / .rpm)",
+  linuxAppImage: "AppImage (Linux)",
+  windowsInstaller: "Installeur Windows (.msi / .exe)",
+  macosAppBundle: "Application macOS (.dmg)",
+};
+
+/** The frozen per-channel couples of the OFFICIAL registry: BOTH
+ *  branches locked (registration, status wording, detail, reason) —
+ *  the registration itself is a frozen distribution decision, exactly
+ *  like `DEVICE_SUPPORT_COUPLES`. `reason: null` = the channel is
+ *  registered (and must carry NO reason key). */
+const FILE_ASSOCIATION_COUPLES: Readonly<
+  Record<
+    FileAssociationChannelTag,
+    Readonly<{
+      registered: boolean;
+      statusLabel: string;
+      detail: string;
+      reason: string | null;
+    }>
+  >
+> = {
+  linuxSystemPackage: {
+    registered: true,
+    statusLabel: "Enregistrée à l'installation",
+    detail:
+      "L'association est déclarée par le paquet et active dès l'installation.",
+    reason: null,
+  },
+  linuxAppImage: {
+    registered: false,
+    statusLabel: "Non enregistrée d'office",
+    detail:
+      "Une AppImage ne modifie pas ton système : rien n'est enregistré automatiquement.",
+    reason:
+      "Tu peux ajouter l'association avec un outil d'intégration AppImage ou une entrée d'application manuelle.",
+  },
+  windowsInstaller: {
+    registered: true,
+    statusLabel: "Enregistrée à l'installation",
+    detail:
+      "L'installeur déclare l'association. Windows peut te demander de confirmer et respecte ton choix existant.",
+    reason: null,
+  },
+  macosAppBundle: {
+    registered: true,
+    statusLabel: "Enregistrée par le système",
+    detail:
+      "macOS enregistre l'association quand l'application est déposée dans Applications.",
+    reason: null,
+  },
+};
+
+/** The frozen install-kind → notice couples of the Linux probe. */
+const CURRENT_INSTALL_NOTICES: Readonly<Record<LinuxInstallKind, string>> = {
+  appImage:
+    "Ton installation actuelle est une AppImage : l'association n'est pas enregistrée d'office.",
+  systemPackage:
+    "Ton installation actuelle provient d'un paquet système : l'association est enregistrée.",
+  localBuild:
+    "Cette version de Rustory n'a pas été installée par un paquet officiel : elle n'enregistre pas d'association d'office.",
+};
+
 function isDeviceFirmwareCohort(value: unknown): value is DeviceFirmwareCohort {
   return typeof value === "string" && value in COHORT_LABELS;
+}
+
+function isLinuxInstallKind(value: unknown): value is LinuxInstallKind {
+  return typeof value === "string" && value in CURRENT_INSTALL_NOTICES;
+}
+
+function isFileAssociationChannelLine(
+  value: unknown,
+  expectedChannel: FileAssociationChannelTag,
+): value is FileAssociationChannelLine {
+  if (typeof value !== "object" || value === null) return false;
+  const c = value as Record<string, unknown>;
+  // The four channels arrive in the canonical wire order — a shuffled
+  // or duplicated line is a drift.
+  if (c.channel !== expectedChannel) return false;
+  if (c.label !== FILE_ASSOCIATION_CHANNEL_LABELS[expectedChannel]) {
+    return false;
+  }
+  // BOTH branches are locked on the official couple: the registration
+  // itself is a frozen distribution decision, not just its wording.
+  const couple = FILE_ASSOCIATION_COUPLES[expectedChannel];
+  if (c.registered !== couple.registered) return false;
+  if (c.statusLabel !== couple.statusLabel) return false;
+  if (c.detail !== couple.detail) return false;
+  if (couple.reason === null) {
+    // An officially REGISTERED channel must arrive with NO reason key
+    // (the status replaces it) — a justified registration is a drift.
+    return c.reason === undefined;
+  }
+  // An officially NON-registered channel must carry EXACTLY its frozen
+  // reason — a bare ✗ (or a drifted copy) never renders.
+  return c.reason === couple.reason;
+}
+
+function isCurrentInstall(value: unknown): value is CurrentInstall {
+  if (typeof value !== "object" || value === null) return false;
+  const c = value as Record<string, unknown>;
+  if (!isLinuxInstallKind(c.kind)) return false;
+  // The notice is the frozen couple of the kind — a drifted copy is
+  // never rendered as authoritative.
+  return c.notice === CURRENT_INSTALL_NOTICES[c.kind];
+}
+
+export function isFileAssociation(value: unknown): value is FileAssociation {
+  if (typeof value !== "object" || value === null) return false;
+  const c = value as Record<string, unknown>;
+  if (c.extensionLabel !== FILE_ASSOCIATION_EXTENSION_LABEL) return false;
+  if (!Array.isArray(c.channels)) return false;
+  // Exactly the four official channels, in the canonical wire order —
+  // a missing line is a drift too: the contract promises the
+  // non-registered lines stay VISIBLE with their reasons.
+  if (c.channels.length !== FILE_ASSOCIATION_CHANNEL_ORDER.length) {
+    return false;
+  }
+  if (
+    !c.channels.every((channel, index) =>
+      isFileAssociationChannelLine(
+        channel,
+        FILE_ASSOCIATION_CHANNEL_ORDER[index],
+      ),
+    )
+  ) {
+    return false;
+  }
+  // The current-install verdict is optional (ABSENT when no probe
+  // spoke); when present it must be a frozen couple.
+  return c.currentInstall === undefined || isCurrentInstall(c.currentInstall);
 }
 
 function isLocalArtifactKind(value: unknown): value is LocalArtifactKind {
@@ -298,9 +487,10 @@ export function isLocalArtifactLine(
 
 /**
  * Runtime guard for a [`SupportProfile`] payload: EXACTLY one device
- * line per known cohort and one artifact line per known kind, each
- * locked on its frozen couples. A partial profile (a known cohort or
- * kind missing) is a drift too: the contract promises that the
+ * line per known cohort, one artifact line per known kind and one
+ * channel line per known file-association channel, each locked on its
+ * frozen couples. A partial profile (a known cohort, kind or channel
+ * missing) is a drift too: the contract promises that the
  * non-available lines stay VISIBLE with their reasons, so their silent
  * disappearance must never render. A refused payload surfaces as a
  * drift error, which the screen treats as a failed profile read —
@@ -332,8 +522,13 @@ export function isSupportProfile(value: unknown): value is SupportProfile {
     kinds.add(line.kind);
   }
   // Exactly the current closed set — nothing missing, nothing extra.
-  return (
-    kinds.size === Object.keys(ARTIFACT_LABELS).length &&
-    Object.keys(ARTIFACT_LABELS).every((kind) => kinds.has(kind))
-  );
+  if (
+    kinds.size !== Object.keys(ARTIFACT_LABELS).length ||
+    !Object.keys(ARTIFACT_LABELS).every((kind) => kinds.has(kind))
+  ) {
+    return false;
+  }
+  // The file-association block travels with the profile (an additive
+  // extension of the same pure read — same drift discipline).
+  return isFileAssociation(c.fileAssociation);
 }

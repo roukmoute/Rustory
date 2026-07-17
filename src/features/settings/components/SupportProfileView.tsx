@@ -21,10 +21,12 @@ export interface SupportProfileViewProps {
 }
 
 // Frontend-frozen literals of the screen (product-language.md). The
-// matrix CONTENT (families, cohorts, kinds, labels, reasons) is never
-// composed here — it renders verbatim from the Rust-carried DTOs.
+// matrix CONTENT (families, cohorts, kinds, channels, labels, reasons)
+// is never composed here — it renders verbatim from the Rust-carried
+// DTOs.
 const SECTION_DEVICES = "Appareils";
 const SECTION_ARTIFACTS = "Artefacts locaux";
+const SECTION_FILE_ASSOCIATION = "Association de fichiers";
 const SECTION_SOURCES = "Sources de contenu";
 const SECTION_POSTURE = "Politique de distribution";
 /** Calm chip labels of the FOURTH vocabulary — a durable distribution
@@ -80,7 +82,7 @@ function SectionUnavailable({ copy }: { copy: string }): React.JSX.Element {
 }
 
 /**
- * The four read-only sections of the `Profil de support` screen
+ * The five read-only sections of the `Profil de support` screen
  * (`Support Profile Screen Contract`). Everything the matrix says
  * renders VERBATIM from the DTOs; a non-available capability renders
  * the calm neutral chip plus its frozen reason — never a bare ✗, never
@@ -207,6 +209,66 @@ export function SupportProfileView({
               <p className="support-profile__media-formats">
                 {NODE_MEDIA_FORMATS}
               </p>
+            </>
+          )}
+        </div>
+      </SurfacePanel>
+
+      <SurfacePanel
+        as="section"
+        elevation={1}
+        className="support-profile__section"
+      >
+        <h2 className="support-profile__section-title">
+          {SECTION_FILE_ASSOCIATION}
+        </h2>
+        <div
+          className="support-profile__section-body"
+          aria-busy={profileRead.kind === "loading" || undefined}
+        >
+          {profileRead.kind === "unavailable" && (
+            <SectionUnavailable copy={PROFILE_UNAVAILABLE} />
+          )}
+          {profileRead.kind === "loaded" && (
+            <>
+              {profileRead.data.fileAssociation.currentInstall !==
+                undefined && (
+                <p
+                  className="support-profile__association-notice"
+                  role="status"
+                >
+                  {profileRead.data.fileAssociation.currentInstall.notice}
+                </p>
+              )}
+              <p className="support-profile__association-extension">
+                {profileRead.data.fileAssociation.extensionLabel}
+              </p>
+              <ul className="support-profile__associations">
+                {profileRead.data.fileAssociation.channels.map((channel) => (
+                  <li
+                    key={channel.channel}
+                    className="support-profile__association"
+                  >
+                    <span className="support-profile__association-label">
+                      {channel.label}
+                    </span>
+                    <div className="support-profile__association-state">
+                      <StateChip
+                        tone={channel.registered ? "success" : "neutral"}
+                        label={channel.statusLabel}
+                      />
+                      {channel.reason !== undefined && (
+                        <span className="support-profile__reason">
+                          {channel.reason}
+                        </span>
+                      )}
+                    </div>
+                    <p className="support-profile__association-detail">
+                      {channel.detail}
+                    </p>
+                  </li>
+                ))}
+              </ul>
             </>
           )}
         </div>

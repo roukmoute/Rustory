@@ -263,6 +263,16 @@ pub fn run() {
         // a real risk: two manual instances on the same app_data_dir
         // would race the single-process recovery journals.
         .plugin(tauri_plugin_single_instance::init(|app, argv, cwd| {
+            // A second launch must make the living instance visible even
+            // when it carries NO file: a bare relaunch (double-clicking
+            // the app icon) is the generic single-instance expectation —
+            // "I relaunch, the app appears". Unconditional and
+            // best-effort, BEFORE the candidate offer; the offer-driven
+            // wake inside `receive_os_open_candidates` stays as the
+            // warm-channel contract for the OTHER reception arms. Not
+            // unit-testable (a real second process cannot be provoked in
+            // headless CI — the untestable-races pattern).
+            wake_main_window(app);
             // argv is the SECOND instance's full argv (argv[0] = binary);
             // relative paths must resolve against the second instance's
             // OWN cwd — never this living process's. Known dependency
@@ -512,12 +522,23 @@ pub fn run() {
             // A cold-start Opened lands before the frontend exists; the
             // emitted signal is then simply unheard and the library-mount
             // pull picks the seeded intent up.
+            //
+            // The raw-travels discipline of the argv frontier applies
+            // here too: every convertible URL becomes its filesystem
+            // path, every non-convertible one travels RAW (its full URL
+            // text) toward its honest downstream verdict — two URLs with
+            // one rotten still form an honest multi-file intent, a
+            // single rotten one becomes an artifact intent whose
+            // analysis names the refusal. No silent filter_map: a muted
+            // no-op would hide the user's gesture.
             #[cfg(target_os = "macos")]
             if let tauri::RunEvent::Opened { urls } = &event {
                 let candidates: Vec<std::ffi::OsString> = urls
                     .iter()
-                    .filter_map(|url| url.to_file_path().ok())
-                    .map(std::path::PathBuf::into_os_string)
+                    .map(|url| match url.to_file_path() {
+                        Ok(path) => path.into_os_string(),
+                        Err(()) => std::ffi::OsString::from(url.to_string()),
+                    })
                     .collect();
                 receive_os_open_candidates(
                     app_handle,

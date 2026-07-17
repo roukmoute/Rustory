@@ -26,7 +26,7 @@ pnpm tauri build
 
 Les artefacts sortent dans `src-tauri/target/release/bundle/` :
 
-- Linux : AppImage dans `bundle/appimage/`, `.deb` dans `bundle/deb/`
+- Linux : AppImage dans `bundle/appimage/`, `.deb` dans `bundle/deb/`, `.rpm` dans `bundle/rpm/`
 - macOS : `.app` dans `bundle/macos/`, `.dmg` dans `bundle/dmg/`
 - Windows : `.msi` dans `bundle/msi/`, `.exe` dans `bundle/nsis/`
 

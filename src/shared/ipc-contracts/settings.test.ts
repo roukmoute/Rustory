@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   isDeviceSupportLine,
+  isFileAssociation,
   isLocalArtifactLine,
   isSupportProfile,
 } from "./settings";
@@ -152,6 +153,53 @@ function officialProfile() {
         reason: "Lecture d'archives non prise en charge",
       },
     ],
+    fileAssociation: officialFileAssociation(),
+  };
+}
+
+/** The EXACT official file-association block Rust serializes (mirror
+ *  of the contract test
+ *  `the_official_file_association_block_serializes_exactly`) — no
+ *  `currentInstall`: the probe spoke on no platform by default. */
+function officialFileAssociation() {
+  return {
+    extensionLabel: ".rustory",
+    channels: [
+      {
+        channel: "linuxSystemPackage",
+        label: "Paquet Linux (.deb / .rpm)",
+        registered: true,
+        statusLabel: "Enregistrée à l'installation",
+        detail:
+          "L'association est déclarée par le paquet et active dès l'installation.",
+      },
+      {
+        channel: "linuxAppImage",
+        label: "AppImage (Linux)",
+        registered: false,
+        statusLabel: "Non enregistrée d'office",
+        detail:
+          "Une AppImage ne modifie pas ton système : rien n'est enregistré automatiquement.",
+        reason:
+          "Tu peux ajouter l'association avec un outil d'intégration AppImage ou une entrée d'application manuelle.",
+      },
+      {
+        channel: "windowsInstaller",
+        label: "Installeur Windows (.msi / .exe)",
+        registered: true,
+        statusLabel: "Enregistrée à l'installation",
+        detail:
+          "L'installeur déclare l'association. Windows peut te demander de confirmer et respecte ton choix existant.",
+      },
+      {
+        channel: "macosAppBundle",
+        label: "Application macOS (.dmg)",
+        registered: true,
+        statusLabel: "Enregistrée par le système",
+        detail:
+          "macOS enregistre l'association quand l'application est déposée dans Applications.",
+      },
+    ],
   };
 }
 
@@ -182,6 +230,142 @@ describe("isSupportProfile", () => {
     expect(isSupportProfile(null)).toBe(false);
     expect(isSupportProfile("profile")).toBe(false);
     expect(isSupportProfile({ devices: [] })).toBe(false);
+  });
+
+  it("rejects a profile missing its file-association block", () => {
+    const profile = officialProfile() as Record<string, unknown>;
+    delete profile.fileAssociation;
+    expect(isSupportProfile(profile)).toBe(false);
+  });
+
+  it("accepts a profile whose probe spoke (a valid currentInstall)", () => {
+    const profile = officialProfile();
+    (profile.fileAssociation as Record<string, unknown>).currentInstall = {
+      kind: "appImage",
+      notice:
+        "Ton installation actuelle est une AppImage : l'association n'est pas enregistrée d'office.",
+    };
+    expect(isSupportProfile(profile)).toBe(true);
+  });
+});
+
+describe("isFileAssociation", () => {
+  it("accepts the exact official block Rust serializes (no probe verdict)", () => {
+    expect(isFileAssociation(officialFileAssociation())).toBe(true);
+  });
+
+  it("accepts each frozen current-install couple", () => {
+    for (const [kind, notice] of [
+      [
+        "appImage",
+        "Ton installation actuelle est une AppImage : l'association n'est pas enregistrée d'office.",
+      ],
+      [
+        "systemPackage",
+        "Ton installation actuelle provient d'un paquet système : l'association est enregistrée.",
+      ],
+      [
+        "localBuild",
+        "Cette version de Rustory n'a pas été installée par un paquet officiel : elle n'enregistre pas d'association d'office.",
+      ],
+    ]) {
+      const block = officialFileAssociation() as Record<string, unknown>;
+      block.currentInstall = { kind, notice };
+      expect(isFileAssociation(block)).toBe(true);
+    }
+  });
+
+  it("rejects a drifted extension label", () => {
+    expect(
+      isFileAssociation({
+        ...officialFileAssociation(),
+        extensionLabel: ".zip",
+      }),
+    ).toBe(false);
+  });
+
+  it("rejects a channel line missing (non-registered lines stay visible)", () => {
+    const block = officialFileAssociation();
+    block.channels.splice(1, 1); // drop the AppImage line
+    expect(isFileAssociation(block)).toBe(false);
+  });
+
+  it("rejects shuffled channels (canonical wire order required)", () => {
+    const block = officialFileAssociation();
+    block.channels.reverse();
+    expect(isFileAssociation(block)).toBe(false);
+  });
+
+  it("rejects an unknown channel and a drifted channel label", () => {
+    const block = officialFileAssociation();
+    (block.channels[0] as Record<string, unknown>).channel = "flatpak";
+    expect(isFileAssociation(block)).toBe(false);
+
+    const drifted = officialFileAssociation();
+    (drifted.channels[0] as Record<string, unknown>).label = "Paquet Linux";
+    expect(isFileAssociation(drifted)).toBe(false);
+  });
+
+  it("rejects an officially REGISTERED channel arriving non-registered (the decision is locked)", () => {
+    const block = officialFileAssociation();
+    block.channels[0] = {
+      ...block.channels[0],
+      registered: false,
+      statusLabel: "Non enregistrée d'office",
+      reason:
+        "Tu peux ajouter l'association avec un outil d'intégration AppImage ou une entrée d'application manuelle.",
+    };
+    expect(isFileAssociation(block)).toBe(false);
+  });
+
+  it("rejects the AppImage channel arriving registered", () => {
+    const block = officialFileAssociation();
+    const appimage = block.channels[1] as Record<string, unknown>;
+    appimage.registered = true;
+    appimage.statusLabel = "Enregistrée à l'installation";
+    delete appimage.reason;
+    expect(isFileAssociation(block)).toBe(false);
+  });
+
+  it("rejects a drifted status label and a drifted detail", () => {
+    const status = officialFileAssociation();
+    (status.channels[0] as Record<string, unknown>).statusLabel = "Activée";
+    expect(isFileAssociation(status)).toBe(false);
+
+    const detail = officialFileAssociation();
+    (detail.channels[3] as Record<string, unknown>).detail =
+      "macOS fait le nécessaire.";
+    expect(isFileAssociation(detail)).toBe(false);
+  });
+
+  it("rejects a registered channel that carries a reason", () => {
+    const block = officialFileAssociation();
+    (block.channels[0] as Record<string, unknown>).reason = "superflu";
+    expect(isFileAssociation(block)).toBe(false);
+  });
+
+  it("rejects a non-registered channel with a drifted or missing reason (bare ✗ never renders)", () => {
+    const drifted = officialFileAssociation();
+    (drifted.channels[1] as Record<string, unknown>).reason =
+      "Utilise un autre canal.";
+    expect(isFileAssociation(drifted)).toBe(false);
+
+    const missing = officialFileAssociation();
+    delete (missing.channels[1] as Record<string, unknown>).reason;
+    expect(isFileAssociation(missing)).toBe(false);
+  });
+
+  it("rejects an unknown install kind and a drifted notice", () => {
+    const unknown = officialFileAssociation() as Record<string, unknown>;
+    unknown.currentInstall = { kind: "flatpak", notice: "peu importe" };
+    expect(isFileAssociation(unknown)).toBe(false);
+
+    const drifted = officialFileAssociation() as Record<string, unknown>;
+    drifted.currentInstall = {
+      kind: "appImage",
+      notice: "Tu utilises une AppImage.",
+    };
+    expect(isFileAssociation(drifted)).toBe(false);
   });
 });
 
