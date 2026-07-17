@@ -73,6 +73,15 @@ pub enum Event {
     /// stays pending (the next library-mount pull serves it) — this line
     /// makes the otherwise-invisible lost wake-up diagnosable.
     OsOpenSignalEmitFailed,
+    /// A drop intent's element read failed at analysis time (the same
+    /// transport regime as [`Event::OsOpenReadFailed`], drop channel):
+    /// `source` / `stage` mirror the upstream `AppError` details closed
+    /// sets. STRICTLY PII-free — never a path, never a basename.
+    DropReadFailed { source: String, stage: String },
+    /// A drop produced a pending intent but the `drop:requested` signal
+    /// FAILED to emit. The intent stays pending (the next library-mount
+    /// pull serves it) — this line makes the lost wake-up diagnosable.
+    DropSignalEmitFailed,
 }
 
 /// Append a single event to the import log. Production entry point —
@@ -203,5 +212,36 @@ mod tests {
         record_event_at_path(&log, Event::OsOpenSignalEmitFailed).expect("write");
         let content = std::fs::read_to_string(&log).expect("read");
         assert!(content.contains("\"category\":\"os_open_signal_emit_failed\""));
+    }
+
+    #[test]
+    fn drop_read_failed_serializes_stage_tokens_and_never_a_file_identity() {
+        let dir = TempDir::new().expect("tempdir");
+        let log = dir.path().join("import.jsonl");
+        record_event_at_path(
+            &log,
+            Event::DropReadFailed {
+                source: "file_read".into(),
+                stage: "metadata".into(),
+            },
+        )
+        .expect("write");
+        let content = std::fs::read_to_string(&log).expect("read");
+        assert!(content.contains("\"category\":\"drop_read_failed\""));
+        assert!(content.contains("\"source\":\"file_read\""));
+        assert!(content.contains("\"stage\":\"metadata\""));
+        // PII discipline: the line carries stage tokens only — never a
+        // path, a basename or any file identity.
+        assert!(!content.contains("path"));
+        assert!(!content.contains(".rustory"));
+    }
+
+    #[test]
+    fn drop_signal_emit_failed_serializes_its_bare_category() {
+        let dir = TempDir::new().expect("tempdir");
+        let log = dir.path().join("import.jsonl");
+        record_event_at_path(&log, Event::DropSignalEmitFailed).expect("write");
+        let content = std::fs::read_to_string(&log).expect("read");
+        assert!(content.contains("\"category\":\"drop_signal_emit_failed\""));
     }
 }

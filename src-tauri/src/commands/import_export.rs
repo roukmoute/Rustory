@@ -18,9 +18,9 @@ use crate::infrastructure::diagnostics::import_log;
 use crate::ipc::dto::import_export::state_db_tag;
 use crate::ipc::dto::import_export::ContentSourcePolicyDto;
 use crate::ipc::dto::{
-    AcceptArtifactImportInputDto, AcceptStructuredCreationInputDto, ExportStoryDialogInputDto,
-    ExportStoryDialogOutcomeDto, ImportArtifactAnalysisDto, OsOpenAnalysisDto,
-    RssCreationOutcomeDto, RssItemRefDto, RssPreviewDto, StoryCardDto,
+    AcceptArtifactImportInputDto, AcceptStructuredCreationInputDto, DropAnalysisDto,
+    ExportStoryDialogInputDto, ExportStoryDialogOutcomeDto, ImportArtifactAnalysisDto,
+    OsOpenAnalysisDto, RssCreationOutcomeDto, RssItemRefDto, RssPreviewDto, StoryCardDto,
     StructuredCreationAnalysisDto,
 };
 use crate::AppState;
@@ -449,6 +449,50 @@ pub async fn analyze_os_open_request(app: AppHandle) -> Result<OsOpenAnalysisDto
 #[tauri::command]
 pub fn discard_os_open_request() {
     import_export::OS_OPEN_STATE.discard();
+}
+
+/// Analyze the pending drop intent (phase 1, NO mutation, NO dialog — see
+/// `ui-states.md#Drop Intent Contract`). The frontend PULLS this once at
+/// library mount (a dormant intent) and on each `drop:requested` signal.
+///
+/// The whole decision logic (classification, bounded reads, verdicts,
+/// races) lives in the testable application function
+/// [`import_export::analyze_pending_drop`]; this handler only drives it on
+/// a `spawn_blocking` worker (the classification and reads are disk I/O),
+/// the exact discipline of `analyze_os_open_request`. No pending intent
+/// resolves `{ kind: "none" }` (a total no-op — also the harmless second
+/// answer of a StrictMode double-effect); only a TRANSPORT failure (the
+/// element became unreadable) rejects, and the intent then STAYS pending
+/// so `Réessayer` replays it. A failure is traced to the local import log
+/// (PII-free stage tokens) while the actionable `AppError` still crosses
+/// to the UI.
+#[tauri::command]
+pub async fn analyze_drop_request(app: AppHandle) -> Result<DropAnalysisDto, AppError> {
+    let outcome = async_runtime::spawn_blocking(|| {
+        import_export::analyze_pending_drop(&import_export::DROP_INTENT_STATE)
+    })
+    .await
+    .map_err(|_| import::spawn_blocking_join_error())?;
+
+    if let Err(err) = &outcome {
+        let _ = import_log::record_event(
+            &app,
+            import_log::Event::DropReadFailed {
+                source: error_detail(err, "source"),
+                stage: error_detail(err, "stage"),
+            },
+        );
+    }
+    outcome
+}
+
+/// Drop the pending drop intent, if any. Idempotent, infallible: called
+/// when the user closes a failed drop read (`Fermer`), abandons a dropped
+/// element's review, or when the library declines an intent because a
+/// flow is already in flight.
+#[tauri::command]
+pub fn discard_drop_request() {
+    import_export::DROP_INTENT_STATE.discard();
 }
 
 /// Analyze a user-picked structured folder (phase 1, NO mutation).

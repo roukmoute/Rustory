@@ -24,10 +24,13 @@ const mockReadTransfer = vi.fn();
 const mockReadTransferOutcome = vi.fn();
 const mockDiscardTransferOutcome = vi.fn();
 const mockAnalyzeFolder = vi.fn();
+const mockAcceptFolder = vi.fn();
 const mockAnalyzeArtifact = vi.fn();
 const mockAcceptArtifact = vi.fn();
 const mockAnalyzeOsOpen = vi.fn();
 const mockDiscardOsOpen = vi.fn();
+const mockAnalyzeDrop = vi.fn();
+const mockDiscardDrop = vi.fn();
 const mockCreateStory = vi.fn();
 const mockFetchRssPreview = vi.fn();
 const mockAcceptRssCreation = vi.fn();
@@ -185,10 +188,13 @@ vi.mock("../../ipc/commands/import-export", async () => {
   return {
     ...actual,
     analyzeStructuredFolderForCreation: () => mockAnalyzeFolder(),
+    acceptStructuredCreation: (input: unknown) => mockAcceptFolder(input),
     analyzeArtifactForImport: () => mockAnalyzeArtifact(),
     acceptArtifactImport: (input: unknown) => mockAcceptArtifact(input),
     analyzeOsOpenRequest: () => mockAnalyzeOsOpen(),
     discardOsOpenRequest: () => mockDiscardOsOpen(),
+    analyzeDropRequest: () => mockAnalyzeDrop(),
+    discardDropRequest: () => mockDiscardDrop(),
     fetchRssSourcePreview: (url: string) => mockFetchRssPreview(url),
     acceptRssStoryCreation: (url: string, ref: unknown) =>
       mockAcceptRssCreation(url, ref),
@@ -200,6 +206,7 @@ import { invalidateConnectedLuniiCache } from "../../features/device/hooks/use-c
 import { invalidateDeviceLibraryCache } from "../../features/device/hooks/use-device-library";
 import { invalidateLibraryOverviewCache } from "../../features/library/hooks/use-library-overview";
 import type { ConnectedDeviceDto } from "../../shared/ipc-contracts/device";
+import { useDropShell } from "../../shell/state/drop-shell-store";
 import { useLibraryShell } from "../../shell/state/library-shell-store";
 import { useOsOpenShell } from "../../shell/state/os-open-shell-store";
 import {
@@ -292,6 +299,14 @@ describe("<LibraryRoute />", () => {
     // the safe default. Tests exercising the folder flow override this.
     mockAnalyzeFolder.mockReset();
     mockAnalyzeFolder.mockResolvedValue({ kind: "cancelled" });
+    // Default: the folder accept settles into a fresh card. Tests that
+    // exercise a commit failure override it.
+    mockAcceptFolder.mockReset();
+    mockAcceptFolder.mockResolvedValue({
+      id: "0197a5d0-0000-7000-8000-0000000000dd",
+      title: "Le voyage de Nour",
+      importState: "recognized",
+    });
     // Default: the artifact import analysis is user-triggered too.
     mockAnalyzeArtifact.mockReset();
     mockAnalyzeArtifact.mockResolvedValue({ kind: "cancelled" });
@@ -309,6 +324,11 @@ describe("<LibraryRoute />", () => {
     mockAnalyzeOsOpen.mockResolvedValue({ kind: "none" });
     mockDiscardOsOpen.mockReset();
     mockDiscardOsOpen.mockResolvedValue(undefined);
+    // Default: no pending drop intent either — same silent no-op.
+    mockAnalyzeDrop.mockReset();
+    mockAnalyzeDrop.mockResolvedValue({ kind: "none" });
+    mockDiscardDrop.mockReset();
+    mockDiscardDrop.mockResolvedValue(undefined);
     // Default: the primary title creation never settles unless a test
     // drives it explicitly.
     mockCreateStory.mockReset();
@@ -337,6 +357,7 @@ describe("<LibraryRoute />", () => {
       sort: "titre-asc",
     });
     useOsOpenShell.setState({ pendingSignal: false });
+    useDropShell.setState({ hoverActive: false, pendingSignal: false });
   });
 
   it("shows the loading state before the IPC call resolves", () => {
@@ -4222,6 +4243,645 @@ describe("<LibraryRoute />", () => {
 
     // Silent for the user (no surface, no alert)… but the import CTA is
     // gated: no sibling flow may start under a live OS read.
+    expect(
+      screen.queryByRole("region", { name: "Import d'une histoire" }),
+    ).not.toBeInTheDocument();
+    const importCta = screen.getByRole("button", {
+      name: "Importer une histoire",
+    });
+    expect(importCta).toBeDisabled();
+
+    await act(async () => {
+      settlePull({ kind: "none" });
+    });
+    await waitFor(() => {
+      expect(
+        screen.getByRole("button", { name: "Importer une histoire" }),
+      ).not.toBeDisabled();
+    });
+  });
+
+  // ===== Drop intent reaction (`Drop Intent Contract`) =====
+
+  const DROP_ARTIFACT_VERDICT = {
+    kind: "artifact" as const,
+    quality: "partial" as const,
+    state: "needsReview" as const,
+    findings: [
+      {
+        aspect: "title" as const,
+        category: "ambiguous" as const,
+        message: "Le titre a été normalisé à l'import.",
+      },
+    ],
+    importableContent: {
+      title: "Le Soleil",
+      structureJson: '{"schemaVersion":1,"nodes":[]}',
+      contentChecksum: "a".repeat(64),
+      createdAt: "2026-06-20T10:00:00.000Z",
+      updatedAt: "2026-06-24T14:15:00.000Z",
+    },
+    sourceName: "histoire.rustory",
+    artifactChecksum: "b".repeat(64),
+  };
+
+  // The REAL wire shape of a creatable drop verdict: exactly the five
+  // folder aspects (the facade guard refuses anything less — a route test
+  // must never accept a form the IPC facade would reject).
+  const DROP_FOLDER_VERDICT = {
+    kind: "folder" as const,
+    quality: "clean" as const,
+    state: "recognized" as const,
+    findings: [
+      {
+        aspect: "envelope" as const,
+        category: "recognized" as const,
+        message: "Le manifest histoire.json est présent et lisible.",
+      },
+      {
+        aspect: "formatVersion" as const,
+        category: "recognized" as const,
+        message: "La version de format du manifest est prise en charge.",
+      },
+      {
+        aspect: "title" as const,
+        category: "recognized" as const,
+        message: "Le titre de l'histoire est valide.",
+      },
+      {
+        aspect: "structure" as const,
+        category: "recognized" as const,
+        message: "La structure de l'histoire est reconnue.",
+      },
+      {
+        aspect: "media" as const,
+        category: "recognized" as const,
+        message:
+          "Tous les fichiers audio et image référencés par le dossier sont présents et reconnus.",
+      },
+    ],
+    creatableSummary: {
+      title: "Le voyage de Nour",
+      nodeCount: 2,
+      retainedMedia: ["couverture.png"],
+      discardedMedia: [],
+    },
+    folderName: "mon-dossier",
+    folderPath: "/home/user/mon-dossier",
+  };
+
+  const DROP_MULTIPLE_ITEMS_COPY =
+    "Rustory traite un seul élément déposé à la fois. Dépose chaque élément séparément.";
+  const DROP_BUSY_COPY =
+    "Une opération est déjà en cours dans la bibliothèque. Termine-la, puis dépose à nouveau ton fichier ou ton dossier.";
+
+  it("pulls the drop intent once at mount and renders NOTHING on none (total no-op)", async () => {
+    mockGet.mockResolvedValueOnce({ stories: [] });
+    renderLibrary();
+
+    await screen.findByRole("heading", { name: /ta bibliothèque est vide/i });
+    await waitFor(() => {
+      expect(mockAnalyzeDrop).toHaveBeenCalledTimes(1);
+    });
+    expect(
+      screen.queryByRole("region", { name: "Import d'une histoire" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByText(DROP_MULTIPLE_ITEMS_COPY),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByText(DROP_BUSY_COPY)).not.toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("opens the EXISTING import review from a dormant dropped FILE (mount pull → artifact)", async () => {
+    mockGet.mockResolvedValueOnce({ stories: [] });
+    mockAnalyzeDrop.mockResolvedValueOnce(DROP_ARTIFACT_VERDICT);
+    renderLibrary();
+
+    // The verdict (sourceName + findings) feeds the SAME review surface as
+    // the dialog import — quality chip + report, no new component.
+    expect(
+      await screen.findByText("Partiellement exploitable"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("Le titre a été normalisé à l'import."),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Importer ce qui est reconnu" }),
+    ).toBeInTheDocument();
+    // Neither picker was ever opened — the intent came from the drop.
+    expect(mockAnalyzeArtifact).not.toHaveBeenCalled();
+    expect(mockAnalyzeFolder).not.toHaveBeenCalled();
+  });
+
+  it("opens the EXISTING folder-creation review from a dropped FOLDER (the drop replaces the picker)", async () => {
+    mockGet.mockResolvedValueOnce({ stories: [] });
+    mockAnalyzeDrop.mockResolvedValueOnce(DROP_FOLDER_VERDICT);
+    renderLibrary();
+
+    // The verdict feeds the SAME `Création depuis un dossier` surface —
+    // the report names what will be created, exactly like the picker path.
+    expect(
+      await screen.findByRole("region", { name: "Création depuis un dossier" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Créer l'histoire" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/Le voyage de Nour/)).toBeInTheDocument();
+    // The folder picker was never opened.
+    expect(mockAnalyzeFolder).not.toHaveBeenCalled();
+  });
+
+  it("reacts to a warm drop signal: consumes it and opens the review", async () => {
+    mockGet.mockResolvedValueOnce({ stories: [] });
+    renderLibrary();
+    await screen.findByRole("heading", { name: /ta bibliothèque est vide/i });
+    await waitFor(() => {
+      expect(mockAnalyzeDrop).toHaveBeenCalledTimes(1);
+    });
+
+    mockAnalyzeDrop.mockResolvedValueOnce(DROP_ARTIFACT_VERDICT);
+    act(() => {
+      useDropShell.getState().raiseSignal();
+    });
+
+    expect(
+      await screen.findByText("Partiellement exploitable"),
+    ).toBeInTheDocument();
+    // The signal was consumed (a boolean relay, not a queue).
+    expect(useDropShell.getState().pendingSignal).toBe(false);
+    expect(mockAnalyzeDrop).toHaveBeenCalledTimes(2);
+  });
+
+  it("accepts a dropped folder through the UNCHANGED accept phase (folderPath round-trip)", async () => {
+    mockGet.mockResolvedValue({ stories: [] });
+    mockAnalyzeDrop.mockResolvedValueOnce(DROP_FOLDER_VERDICT);
+    renderLibrary();
+
+    await screen.findByRole("region", { name: "Création depuis un dossier" });
+    await userEvent.click(
+      screen.getByRole("button", { name: "Créer l'histoire" }),
+    );
+    expect(
+      (await screen.findAllByText("Histoire créée dans ta bibliothèque"))
+        .length,
+    ).toBeGreaterThanOrEqual(1);
+    // The accept is the EXISTING phase 2, fed the DTO's folderPath.
+    expect(mockAcceptFolder).toHaveBeenCalledWith({
+      folderPath: "/home/user/mon-dossier",
+    });
+  });
+
+  it("Réessayer after a FAILED folder accept re-commits the preserved verdict — never a re-pull", async () => {
+    mockGet.mockResolvedValue({ stories: [] });
+    mockAnalyzeDrop.mockResolvedValueOnce(DROP_FOLDER_VERDICT);
+    mockAcceptFolder
+      .mockRejectedValueOnce({
+        code: "IMPORT_FAILED",
+        message: "Création impossible: enregistrement local refusé.",
+        userAction: "Réessaie.",
+        details: { source: "db_commit" },
+      })
+      .mockResolvedValueOnce({
+        id: "0197a5d0-0000-7000-8000-0000000000dd",
+        title: "Le voyage de Nour",
+        importState: "recognized",
+      });
+    renderLibrary();
+    await screen.findByRole("region", { name: "Création depuis un dossier" });
+
+    await userEvent.click(
+      screen.getByRole("button", { name: "Créer l'histoire" }),
+    );
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent(
+      "Création impossible: enregistrement local refusé.",
+    );
+
+    await userEvent.click(screen.getByRole("button", { name: "Réessayer" }));
+    expect(
+      (await screen.findAllByText("Histoire créée dans ta bibliothèque"))
+        .length,
+    ).toBeGreaterThanOrEqual(1);
+    // The retry re-ran the COMMIT with the preserved verdict (folderPath)…
+    expect(mockAcceptFolder).toHaveBeenCalledTimes(2);
+    expect(mockAcceptFolder).toHaveBeenLastCalledWith({
+      folderPath: "/home/user/mon-dossier",
+    });
+    // …and never re-pulled the long-consumed intent, never the picker.
+    expect(mockAnalyzeDrop).toHaveBeenCalledTimes(1);
+    expect(mockAnalyzeFolder).not.toHaveBeenCalled();
+  });
+
+  it("renders the multipleItems calm limit VERBATIM through the PERSISTENT drop live region", async () => {
+    mockGet.mockResolvedValueOnce({ stories: [] });
+    renderLibrary();
+    await screen.findByRole("heading", { name: /ta bibliothèque est vide/i });
+    await waitFor(() => {
+      expect(mockAnalyzeDrop).toHaveBeenCalledTimes(1);
+    });
+
+    // The DEDICATED region EXISTS (empty) before any copy lands: only
+    // CHANGES of an existing live region are reliably announced.
+    const liveRegion = () =>
+      screen
+        .getAllByRole("status")
+        .find((el) => el.className.includes("library-route__drop-live"));
+    expect(liveRegion()).toBeDefined();
+    expect(liveRegion()).toHaveTextContent("");
+
+    mockAnalyzeDrop.mockResolvedValueOnce({
+      kind: "multipleItems",
+      message: DROP_MULTIPLE_ITEMS_COPY,
+    });
+    act(() => {
+      useDropShell.getState().raiseSignal();
+    });
+
+    // Present twice by design: the persistent status region + the visual
+    // calm-limit block. NOTHING was processed — no review opened.
+    const occurrences = await screen.findAllByText(DROP_MULTIPLE_ITEMS_COPY);
+    expect(occurrences).toHaveLength(2);
+    expect(
+      occurrences.some((el) => el.getAttribute("role") === "status"),
+    ).toBe(true);
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("region", { name: "Import d'une histoire" }),
+    ).not.toBeInTheDocument();
+    await waitFor(() => {
+      expect(liveRegion()).toHaveTextContent(DROP_MULTIPLE_ITEMS_COPY);
+    });
+    // Dismissable explicitly — the block leaves AND the region empties.
+    await userEvent.click(screen.getByRole("button", { name: "Fermer" }));
+    expect(
+      screen.queryByText(DROP_MULTIPLE_ITEMS_COPY),
+    ).not.toBeInTheDocument();
+  });
+
+  it("declines a drop while an import is busy: discard + busy copy VERBATIM, the living flow INTACT", async () => {
+    mockGet.mockResolvedValueOnce({ stories: [] });
+    // A dialog-import analysis that never settles keeps the flow busy.
+    mockAnalyzeArtifact.mockImplementation(() => new Promise(() => {}));
+    renderLibrary();
+    await screen.findByRole("heading", { name: /ta bibliothèque est vide/i });
+    await waitFor(() => {
+      expect(mockAnalyzeDrop).toHaveBeenCalledTimes(1);
+    });
+
+    await userEvent.click(
+      screen.getByRole("button", { name: "Importer une histoire" }),
+    );
+    expect(screen.getByText("Analyse de l'artefact…")).toBeInTheDocument();
+
+    act(() => {
+      useDropShell.getState().raiseSignal();
+    });
+
+    // Twice by design: the persistent status region + the visual block.
+    const occurrences = await screen.findAllByText(DROP_BUSY_COPY);
+    expect(occurrences).toHaveLength(2);
+    expect(
+      occurrences.some((el) => el.getAttribute("role") === "status"),
+    ).toBe(true);
+    await waitFor(() => {
+      expect(mockDiscardDrop).toHaveBeenCalledTimes(1);
+    });
+    // The intent was NOT analyzed (the busy gate consumed it calmly)…
+    expect(mockAnalyzeDrop).toHaveBeenCalledTimes(1);
+    // …and the LIVING flow was never interrupted.
+    expect(screen.getByText("Analyse de l'artefact…")).toBeInTheDocument();
+  });
+
+  it("declines a drop while an OS-open read settles (cross-channel gate, drop side)", async () => {
+    mockGet.mockResolvedValueOnce({ stories: [] });
+    // The OS-open mount pull hangs: a live OS read is in flight. The drop
+    // MOUNT pull serializes behind it (the two channels' runs never write
+    // the machine concurrently), so it has not reached the wire yet.
+    let settleOsOpen!: (value: unknown) => void;
+    mockAnalyzeOsOpen.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          settleOsOpen = resolve;
+        }),
+    );
+    renderLibrary();
+    await screen.findByRole("heading", { name: /ta bibliothèque est vide/i });
+    expect(mockAnalyzeDrop).not.toHaveBeenCalled();
+
+    act(() => {
+      useDropShell.getState().raiseSignal();
+    });
+
+    // The WARM intent is declined calmly: busy copy + discard — never an
+    // interleave with the live OS read.
+    const occurrences = await screen.findAllByText(DROP_BUSY_COPY);
+    expect(occurrences).toHaveLength(2);
+    await waitFor(() => {
+      expect(mockDiscardDrop).toHaveBeenCalledTimes(1);
+    });
+    expect(mockAnalyzeDrop).not.toHaveBeenCalled();
+
+    // Once the OS read settles, the queued MOUNT pull serves the channel
+    // (a `none` answer — the warm intent was discarded).
+    await act(async () => {
+      settleOsOpen({ kind: "none" });
+    });
+    await waitFor(() => {
+      expect(mockAnalyzeDrop).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it("declines an OS-open intent while a DROP review is displayed (cross-channel gate, os-open side)", async () => {
+    mockGet.mockResolvedValueOnce({ stories: [] });
+    mockAnalyzeDrop.mockResolvedValueOnce(DROP_ARTIFACT_VERDICT);
+    renderLibrary();
+
+    // The drop-fed review is on screen (a consumed one-shot verdict).
+    await screen.findByText("Partiellement exploitable");
+    const pullsSoFar = mockAnalyzeOsOpen.mock.calls.length;
+
+    act(() => {
+      useOsOpenShell.getState().raise();
+    });
+
+    // The OS-open intent is declined calmly (its OWN busy copy) and the
+    // drop review stays INTACT — never silently replaced.
+    const occurrences = await screen.findAllByText(OS_OPEN_BUSY_COPY);
+    expect(occurrences).toHaveLength(2);
+    await waitFor(() => {
+      expect(mockDiscardOsOpen).toHaveBeenCalledTimes(1);
+    });
+    expect(mockAnalyzeOsOpen).toHaveBeenCalledTimes(pullsSoFar);
+    expect(screen.getByText("Partiellement exploitable")).toBeInTheDocument();
+  });
+
+  it("surfaces an unreadable dropped element as the failed state; Réessayer replays the SAME intent", async () => {
+    mockGet.mockResolvedValueOnce({ stories: [] });
+    mockAnalyzeDrop.mockRejectedValueOnce({
+      code: "IMPORT_FAILED",
+      message: "Import impossible: fichier illisible.",
+      userAction:
+        "Vérifie que le fichier existe, qu'il s'agit bien d'un artefact Rustory, puis réessaie.",
+      details: { source: "file_read", stage: "metadata" },
+    });
+    renderLibrary();
+
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("Import impossible: fichier illisible.");
+
+    // `Réessayer` replays the still-pending intent — never a picker.
+    mockAnalyzeDrop.mockResolvedValueOnce(DROP_ARTIFACT_VERDICT);
+    await userEvent.click(screen.getByRole("button", { name: "Réessayer" }));
+    expect(
+      await screen.findByText("Partiellement exploitable"),
+    ).toBeInTheDocument();
+    expect(mockAnalyzeDrop).toHaveBeenCalledTimes(2);
+    expect(mockAnalyzeArtifact).not.toHaveBeenCalled();
+  });
+
+  it("Fermer on a drop read failure abandons the pending intent (discard) and returns to idle", async () => {
+    mockGet.mockResolvedValueOnce({ stories: [] });
+    mockAnalyzeDrop.mockRejectedValueOnce({
+      code: "IMPORT_FAILED",
+      message: "Import impossible: fichier illisible.",
+      userAction: "Réessaie.",
+      details: { source: "file_read", stage: "open" },
+    });
+    renderLibrary();
+
+    await screen.findByRole("alert");
+    await userEvent.click(screen.getByRole("button", { name: "Fermer" }));
+
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    await waitFor(() => {
+      expect(mockDiscardDrop).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it("Abandonner on a drop-fed review also discards the pending Rust intent", async () => {
+    mockGet.mockResolvedValueOnce({ stories: [] });
+    mockAnalyzeDrop.mockResolvedValueOnce(DROP_ARTIFACT_VERDICT);
+    renderLibrary();
+
+    await screen.findByText("Partiellement exploitable");
+    await userEvent.click(screen.getByRole("button", { name: "Abandonner" }));
+
+    expect(
+      screen.queryByText("Partiellement exploitable"),
+    ).not.toBeInTheDocument();
+    await waitFor(() => {
+      expect(mockDiscardDrop).toHaveBeenCalledTimes(1);
+    });
+    // Pure frontend reset otherwise: nothing was created.
+    expect(mockAcceptArtifact).not.toHaveBeenCalled();
+  });
+
+  it("a folder verdict settling DURING a folder commit is declined: busy copy, the commit intact", async () => {
+    mockGet.mockResolvedValue({ stories: [] });
+    mockAnalyzeDrop.mockResolvedValueOnce(DROP_FOLDER_VERDICT);
+    // The commit hangs so the settlement window is deterministic.
+    let resolveCommit!: (value: unknown) => void;
+    mockAcceptFolder.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveCommit = resolve;
+        }),
+    );
+    renderLibrary();
+    await screen.findByRole("region", { name: "Création depuis un dossier" });
+
+    // The user drops a SECOND folder (its pull starts — the busy gate does
+    // not fire: only a review is displayed, no live flow yet)…
+    let settleSecond!: (value: unknown) => void;
+    mockAnalyzeDrop.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          settleSecond = resolve;
+        }),
+    );
+    act(() => {
+      useDropShell.getState().raiseSignal();
+    });
+    await waitFor(() => {
+      expect(mockAnalyzeDrop).toHaveBeenCalledTimes(2);
+    });
+    // …then clicks `Créer l'histoire` on the displayed review: the commit
+    // starts while the second pull is still reading.
+    await userEvent.click(
+      screen.getByRole("button", { name: "Créer l'histoire" }),
+    );
+    expect(screen.getByText("Création en cours…")).toBeInTheDocument();
+
+    // The second verdict settles MID-COMMIT: the injection is declined —
+    // the frozen busy copy renders, the commit screen is never rewritten.
+    await act(async () => {
+      settleSecond({
+        ...DROP_FOLDER_VERDICT,
+        folderName: "second-dossier",
+        folderPath: "/home/user/second-dossier",
+      });
+    });
+    const occurrences = await screen.findAllByText(DROP_BUSY_COPY);
+    expect(occurrences).toHaveLength(2);
+    expect(screen.getByText("Création en cours…")).toBeInTheDocument();
+
+    // The living commit finishes normally.
+    await act(async () => {
+      resolveCommit({
+        id: "0197a5d0-0000-7000-8000-0000000000dd",
+        title: "Le voyage de Nour",
+        importState: "recognized",
+      });
+    });
+    expect(
+      (await screen.findAllByText("Histoire créée dans ta bibliothèque"))
+        .length,
+    ).toBeGreaterThanOrEqual(1);
+  });
+
+  it("Abandonner on a drop-fed FOLDER review drops a late settlement — nothing reopens", async () => {
+    mockGet.mockResolvedValue({ stories: [] });
+    mockAnalyzeDrop.mockResolvedValueOnce(DROP_FOLDER_VERDICT);
+    renderLibrary();
+    await screen.findByRole("region", { name: "Création depuis un dossier" });
+
+    // A newer drop lands; its pull hangs while the user closes the review.
+    let settleLate!: (value: unknown) => void;
+    mockAnalyzeDrop.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          settleLate = resolve;
+        }),
+    );
+    act(() => {
+      useDropShell.getState().raiseSignal();
+    });
+    await waitFor(() => {
+      expect(mockAnalyzeDrop).toHaveBeenCalledTimes(2);
+    });
+    await userEvent.click(screen.getByRole("button", { name: "Abandonner" }));
+    expect(
+      screen.queryByRole("region", { name: "Création depuis un dossier" }),
+    ).not.toBeInTheDocument();
+    await waitFor(() => {
+      expect(mockDiscardDrop).toHaveBeenCalledTimes(1);
+    });
+
+    // The LATE folder settlement lands AFTER the terminal gesture: it is
+    // dropped — the review the user just closed never reopens.
+    await act(async () => {
+      settleLate(DROP_FOLDER_VERDICT);
+    });
+    expect(
+      screen.queryByRole("region", { name: "Création depuis un dossier" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("queues a signal landing DURING a drop settlement — the DEDICATED mono-slot, the last verdict alone displayed", async () => {
+    mockGet.mockResolvedValue({ stories: [] });
+    const DROP_ARTIFACT_B = {
+      ...DROP_ARTIFACT_VERDICT,
+      sourceName: "b.rustory",
+      findings: [
+        {
+          aspect: "title" as const,
+          category: "ambiguous" as const,
+          message: "Le titre du second élément a été normalisé.",
+        },
+      ],
+    };
+    let settleFirst!: (value: unknown) => void;
+    mockAnalyzeDrop
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            settleFirst = resolve;
+          }),
+      )
+      .mockResolvedValueOnce(DROP_ARTIFACT_B);
+    renderLibrary();
+    await screen.findByRole("heading", { name: /ta bibliothèque est vide/i });
+
+    // The user drops B while A's read settles.
+    act(() => {
+      useDropShell.getState().raiseSignal();
+    });
+
+    // NEVER the busy refusal for the channel's own settling: no discard,
+    // no lying busy copy — the pull QUEUES.
+    expect(mockDiscardDrop).not.toHaveBeenCalled();
+    expect(screen.queryByText(DROP_BUSY_COPY)).not.toBeInTheDocument();
+    expect(mockAnalyzeDrop).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      settleFirst(DROP_ARTIFACT_VERDICT);
+    });
+    await waitFor(() => {
+      expect(mockAnalyzeDrop).toHaveBeenCalledTimes(2);
+    });
+    // The LAST verdict alone is displayed — the newest gesture wins.
+    expect(
+      await screen.findByText("Le titre du second élément a été normalisé."),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText("Le titre a été normalisé à l'import."),
+    ).not.toBeInTheDocument();
+    expect(mockDiscardDrop).not.toHaveBeenCalled();
+  });
+
+  it("a dropped FOLDER after a dropped FILE leaves the folder review ALONE displayed", async () => {
+    mockGet.mockResolvedValue({ stories: [] });
+    mockAnalyzeDrop.mockResolvedValueOnce(DROP_ARTIFACT_VERDICT);
+    renderLibrary();
+    await screen.findByText("Partiellement exploitable");
+
+    mockAnalyzeDrop.mockResolvedValueOnce(DROP_FOLDER_VERDICT);
+    act(() => {
+      useDropShell.getState().raiseSignal();
+    });
+
+    // The channel's newest settlement is the ONLY one displayed: the
+    // folder review opens, the earlier drop-fed import review closes.
+    expect(
+      await screen.findByRole("region", { name: "Création depuis un dossier" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText("Partiellement exploitable"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("keeps the StrictMode double-effect harmless: one review, the second pull answers none", async () => {
+    mockGet.mockResolvedValue({ stories: [] });
+    // The Rust-side one-shot take: the FIRST pull carries the verdict,
+    // every later pull answers `none` (the default).
+    mockAnalyzeDrop.mockResolvedValueOnce(DROP_ARTIFACT_VERDICT);
+    renderLibrary({ strict: true });
+
+    expect(
+      await screen.findByText("Partiellement exploitable"),
+    ).toBeInTheDocument();
+    // Exactly ONE review region — never a doubled surface.
+    expect(
+      screen.getAllByRole("region", { name: "Import d'une histoire" }),
+    ).toHaveLength(1);
+  });
+
+  it("gates the sibling flow CTAs while a silent drop pull is in flight", async () => {
+    mockGet.mockResolvedValueOnce({ stories: [] });
+    // The mount pull hangs: the drop read is in flight, silently.
+    let settlePull!: (value: unknown) => void;
+    mockAnalyzeDrop.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          settlePull = resolve;
+        }),
+    );
+    renderLibrary();
+    await screen.findByRole("heading", { name: /ta bibliothèque est vide/i });
+
+    // Silent for the user… but the import CTA is gated: no sibling flow
+    // may start under a live drop read.
     expect(
       screen.queryByRole("region", { name: "Import d'une histoire" }),
     ).not.toBeInTheDocument();

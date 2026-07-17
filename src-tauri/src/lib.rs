@@ -195,6 +195,65 @@ fn receive_os_open_candidates(
     }
 }
 
+/// Drop-channel frontier glue (see `ui-states.md#Drop Intent Contract`):
+/// relay the window drag-drop lifecycle as EMPTY signals and, on a drop,
+/// offer the paths to the DEDICATED drop intent state. Every decision
+/// (filtering, replacement, generations, classification, verdicts) lives
+/// in the pure application module — this glue only emits and offers.
+///
+/// - `Enter` with paths → `drop:hover` (the decorative overlay); an empty
+///   `Enter` (an exotic non-file drag) signals nothing.
+/// - `Leave` → `drop:hover-ended`.
+/// - `Drop` → `drop:hover-ended` FIRST (`Leave` is not guaranteed after a
+///   `Drop` on every platform), then the offer; if an intent results,
+///   `drop:requested`. A FAILED emission is traced to the import log (the
+///   intent stays pending — the next library-mount pull serves it).
+/// - `Over` → NOTHING (a high-frequency stream, never relayed).
+///
+/// Hover emissions are best-effort (`let _ =`): a lost hover signal only
+/// costs the decorative overlay. NO window wake, unlike the OS-open glue:
+/// a drop lands on a window that is visible and frontal by definition of
+/// the gesture.
+fn receive_drop_event(app: &tauri::AppHandle, event: &tauri::DragDropEvent) {
+    match event {
+        tauri::DragDropEvent::Enter { paths, .. } if !paths.is_empty() => {
+            let _ = app.emit(
+                ipc::events::EVENT_DROP_HOVER,
+                ipc::events::DropHoverEvent {},
+            );
+        }
+        tauri::DragDropEvent::Leave => {
+            let _ = app.emit(
+                ipc::events::EVENT_DROP_HOVER_ENDED,
+                ipc::events::DropHoverEndedEvent {},
+            );
+        }
+        tauri::DragDropEvent::Drop { paths, .. } => {
+            let _ = app.emit(
+                ipc::events::EVENT_DROP_HOVER_ENDED,
+                ipc::events::DropHoverEndedEvent {},
+            );
+            if application::import_export::DROP_INTENT_STATE.offer_dropped(paths.clone())
+                && app
+                    .emit(
+                        ipc::events::EVENT_DROP_REQUESTED,
+                        ipc::events::DropRequestedEvent {},
+                    )
+                    .is_err()
+            {
+                let _ = infrastructure::diagnostics::import_log::record_event(
+                    app,
+                    infrastructure::diagnostics::import_log::Event::DropSignalEmitFailed,
+                );
+            }
+        }
+        // `Over` floods at pointer frequency; an empty `Enter` (an exotic
+        // non-file drag) has nothing to hover for; the enum is
+        // non_exhaustive.
+        _ => {}
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -394,6 +453,7 @@ pub fn run() {
             commands::story::add_node_option,
             commands::story::add_story_node,
             commands::import_export::analyze_artifact_for_import,
+            commands::import_export::analyze_drop_request,
             commands::import_export::analyze_os_open_request,
             commands::import_export::analyze_structured_folder_for_creation,
             commands::story::apply_recovery,
@@ -401,6 +461,7 @@ pub fn run() {
             commands::story::create_story,
             commands::story::delete_story_node,
             commands::story::discard_draft,
+            commands::import_export::discard_drop_request,
             commands::story::discard_node_draft,
             commands::import_export::discard_os_open_request,
             commands::transfer::discard_transfer_outcome,
@@ -464,10 +525,27 @@ pub fn run() {
                     &std::env::current_dir().unwrap_or_default(),
                 );
             }
-            // Every other event keeps the exact pre-existing `.run(ctx)`
-            // behavior — the callback observes and never intervenes.
-            #[cfg(not(target_os = "macos"))]
-            let _ = (app_handle, event);
+            // Window drag-drop, all platforms. For a `WindowContent`
+            // webview (this project's single full-frame window), wry
+            // SYNTHESIZES the webview drag-drop at the WINDOW level
+            // (vendored tauri-runtime-wry 2.10.1, fn `create_webview`:
+            // `WebviewKind::WindowContent → SynthesizedWindowEvent::DragDrop`)
+            // — so this arm is the ONLY reception point; the
+            // `RunEvent::WebviewEvent` arm concerns child webviews that
+            // do not exist here and is deliberately not matched. If a
+            // platform ever emitted both, the one-shot generational take
+            // in the intent state would absorb the duplicate (a property
+            // already covered by the take_if tests). The physical drag
+            // cannot be provoked in headless CI — every decision lives in
+            // the unit-tested application module; this arm stays a thin
+            // observe-and-relay (the untestable-races pattern).
+            if let tauri::RunEvent::WindowEvent {
+                event: tauri::WindowEvent::DragDrop(drag_drop),
+                ..
+            } = &event
+            {
+                receive_drop_event(app_handle, drag_drop);
+            }
         });
 }
 

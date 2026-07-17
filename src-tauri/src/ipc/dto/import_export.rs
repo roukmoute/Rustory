@@ -342,6 +342,132 @@ pub struct AcceptStructuredCreationInputDto {
     pub folder_path: String,
 }
 
+// ===== Drop channel (a file or folder dropped on the window) =====
+
+/// Frozen calm-limit copy when one drop gesture hands SEVERAL elements at
+/// once (`product-language.md`): the intent is consumed, NOTHING is
+/// processed (neither the first element nor the rest), and the frontend
+/// renders this Rust-carried copy VERBATIM (`role="status"` — never a
+/// toast, never an error). A SISTER literal of the OS-open multi-file
+/// copy, deliberately distinct (reopening ≠ dropping).
+pub const DROP_MULTIPLE_ITEMS_MESSAGE: &str =
+    "Rustory traite un seul élément déposé à la fois. Dépose chaque élément séparément.";
+
+/// Tagged outcome of `analyze_drop_request` (the drop channel — see
+/// `ui-states.md#Drop Intent Contract`). `none` is the TOTAL silent no-op
+/// (no pending intent — also the StrictMode-safe second answer after a
+/// one-shot take); `multipleItems` carries the frozen calm-limit copy;
+/// `artifact` COMPOSES the exact field set of
+/// [`ImportArtifactAnalysisDto::Analyzed`] (a dropped FILE feeds the same
+/// import review, same keys, same types) and `folder` the exact field set
+/// of [`StructuredCreationAnalysisDto::Analyzed`] (a dropped FOLDER feeds
+/// the same creation review, `folderPath` doctrine included) — WITHOUT
+/// touching those locked contracts. Only TRANSPORT failures (the element
+/// became unreadable) reject with `AppError` — the intent then STAYS
+/// pending so `Réessayer` can replay it.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum DropAnalysisDto {
+    None,
+    #[serde(rename_all = "camelCase")]
+    MultipleItems {
+        message: String,
+    },
+    #[serde(rename_all = "camelCase")]
+    Artifact {
+        quality: ImportQualityDto,
+        state: ImportStateDto,
+        findings: Vec<ImportFindingDto>,
+        /// The validated canonical content — present iff importable
+        /// (`quality != unusable`). `None` ⇒ blocked (only `Abandonner`).
+        #[serde(skip_serializing_if = "Option::is_none")]
+        importable_content: Option<ImportableContentDto>,
+        source_name: String,
+        artifact_checksum: String,
+    },
+    #[serde(rename_all = "camelCase")]
+    Folder {
+        quality: ImportQualityDto,
+        state: ImportStateDto,
+        findings: Vec<ImportFindingDto>,
+        /// Present iff creatable (`quality != unusable`). `None` ⇒ blocked
+        /// (only `Abandonner`).
+        #[serde(skip_serializing_if = "Option::is_none")]
+        creatable_summary: Option<CreatableSummaryDto>,
+        /// The folder's basename — the only name the surface renders.
+        folder_name: String,
+        /// The absolute path of the dropped folder, carried ONLY to be
+        /// passed back to `accept_structured_creation` — the unchanged
+        /// folder-creation doctrine: NEVER rendered, NEVER persisted,
+        /// NEVER logged (PII); the accept phase grants it no authority
+        /// (re-analyzes from zero).
+        folder_path: String,
+    },
+}
+
+impl DropAnalysisDto {
+    /// The `multipleItems` calm limit, carrying its frozen copy.
+    pub fn multiple_items() -> Self {
+        Self::MultipleItems {
+            message: DROP_MULTIPLE_ITEMS_MESSAGE.to_string(),
+        }
+    }
+
+    /// Map a domain artifact analysis + its provenance metadata to the
+    /// `artifact` wire verdict — the SAME mapping as the dialog-import
+    /// [`ImportArtifactAnalysisDto::analyzed`], field for field.
+    pub fn artifact(
+        analysis: &ArtifactAnalysis,
+        source_name: String,
+        artifact_checksum: String,
+    ) -> Self {
+        Self::Artifact {
+            quality: quality_dto(analysis.quality),
+            state: state_dto(analysis.state),
+            findings: analysis
+                .findings
+                .iter()
+                .map(ImportFindingDto::from_domain)
+                .collect(),
+            importable_content: analysis
+                .importable
+                .as_ref()
+                .map(ImportableContentDto::from_domain),
+            source_name,
+            artifact_checksum,
+        }
+    }
+
+    /// Map a domain folder analysis + the drop facts to the `folder` wire
+    /// verdict — the SAME mapping as the picker
+    /// [`StructuredCreationAnalysisDto::analyzed`], field for field.
+    pub fn folder(
+        analysis: &StructuredFolderAnalysis,
+        folder_name: String,
+        folder_path: String,
+    ) -> Self {
+        let StructuredCreationAnalysisDto::Analyzed {
+            quality,
+            state,
+            findings,
+            creatable_summary,
+            folder_name,
+            folder_path,
+        } = StructuredCreationAnalysisDto::analyzed(analysis, folder_name, folder_path)
+        else {
+            unreachable!("StructuredCreationAnalysisDto::analyzed always returns Analyzed");
+        };
+        Self::Folder {
+            quality,
+            state,
+            findings,
+            creatable_summary,
+            folder_name,
+            folder_path,
+        }
+    }
+}
+
 // ===== RSS external-source creation (feed → new canonical story) =====
 
 /// Ceiling on one previewed item's `summary`, in Unicode scalar values —

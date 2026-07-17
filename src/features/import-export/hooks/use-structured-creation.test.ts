@@ -322,4 +322,292 @@ describe("useStructuredCreation", () => {
       verdict: FOLDER_ANALYZED_CLEAN,
     });
   });
+
+  // ===== Drop entry point (verdict injection, no picker, no dialog) =====
+
+  const { kind: _cleanTag, ...CLEAN_FIELDS } = FOLDER_ANALYZED_CLEAN;
+  const DROP_FOLDER_VERDICT = { kind: "folder" as const, ...CLEAN_FIELDS };
+
+  it("starts on the picker origin", () => {
+    const { result } = renderHook(() => useStructuredCreation());
+    expect(result.current.origin).toBe("picker");
+  });
+
+  it("injectDropVerdict lands DIRECTLY in review (silent pull — no analyzing state)", () => {
+    const { result } = renderHook(() => useStructuredCreation());
+    act(() => {
+      result.current.injectDropVerdict(DROP_FOLDER_VERDICT);
+    });
+    // The wire `folder` tag is re-tagged into the machine's verdict shape.
+    expect(result.current.status).toEqual({
+      kind: "review",
+      verdict: FOLDER_ANALYZED_CLEAN,
+    });
+    expect(result.current.origin).toBe("drop");
+    // Injection carries an already-pure verdict: zero mutation, zero IPC.
+    expect(acceptStructuredCreation).not.toHaveBeenCalled();
+    expect(invalidateLibraryOverviewCache).not.toHaveBeenCalled();
+  });
+
+  it("accepts an injected drop verdict through the UNCHANGED accept phase (folderPath from the DTO)", async () => {
+    vi.mocked(acceptStructuredCreation).mockResolvedValueOnce(CREATED_CARD);
+    const { result } = renderHook(() => useStructuredCreation());
+    act(() => {
+      result.current.injectDropVerdict(DROP_FOLDER_VERDICT);
+    });
+    await act(async () => {
+      await result.current.acceptCreation();
+    });
+    expect(acceptStructuredCreation).toHaveBeenCalledWith({
+      folderPath: "/home/user/mon-dossier",
+    });
+    expect(result.current.status).toEqual({
+      kind: "created",
+      story: CREATED_CARD,
+    });
+    expect(invalidateLibraryOverviewCache).toHaveBeenCalledTimes(1);
+  });
+
+  it("retries a failed drop accept with the PRESERVED verdict — never a re-pick", async () => {
+    const commitError = {
+      code: "IMPORT_FAILED",
+      message: "Création impossible: enregistrement local refusé.",
+      userAction: "Réessaie.",
+      details: { source: "db_commit" },
+    };
+    vi.mocked(acceptStructuredCreation)
+      .mockRejectedValueOnce(commitError)
+      .mockResolvedValueOnce(CREATED_CARD);
+    const { result } = renderHook(() => useStructuredCreation());
+    act(() => {
+      result.current.injectDropVerdict(DROP_FOLDER_VERDICT);
+    });
+    await act(async () => {
+      await result.current.acceptCreation();
+    });
+    // The failed COMMIT is tagged as the accept phase — the one-shot drop
+    // intent is long consumed, a re-pull would answer `none`.
+    expect(result.current.status.kind).toBe("failed");
+    expect(result.current.failedPhase).toBe("accept");
+    expect(result.current.origin).toBe("drop");
+
+    await act(async () => {
+      await result.current.retryAccept();
+    });
+    expect(acceptStructuredCreation).toHaveBeenCalledTimes(2);
+    expect(acceptStructuredCreation).toHaveBeenLastCalledWith({
+      folderPath: "/home/user/mon-dossier",
+    });
+    expect(result.current.status).toEqual({
+      kind: "created",
+      story: CREATED_CARD,
+    });
+    // The picker was NEVER opened along the way.
+    expect(analyzeStructuredFolderForCreation).not.toHaveBeenCalled();
+  });
+
+  it("retryAccept is a strict no-op outside a failed accept", async () => {
+    const { result } = renderHook(() => useStructuredCreation());
+    act(() => {
+      result.current.injectDropVerdict(DROP_FOLDER_VERDICT);
+    });
+    await act(async () => {
+      await result.current.retryAccept();
+    });
+    expect(acceptStructuredCreation).not.toHaveBeenCalled();
+    expect(result.current.status.kind).toBe("review");
+  });
+
+  it("a newer injection replaces the displayed review (last gesture wins)", () => {
+    const NEWER = {
+      ...DROP_FOLDER_VERDICT,
+      folderName: "second-dossier",
+      folderPath: "/home/user/second-dossier",
+    };
+    const { result } = renderHook(() => useStructuredCreation());
+    act(() => {
+      result.current.injectDropVerdict(DROP_FOLDER_VERDICT);
+    });
+    act(() => {
+      result.current.injectDropVerdict(NEWER);
+    });
+    expect(result.current.status).toEqual({
+      kind: "review",
+      verdict: { ...NEWER, kind: "analyzed" },
+    });
+  });
+
+  it("clearDropReview resets a DROP-origin surface only", () => {
+    const { result } = renderHook(() => useStructuredCreation());
+    act(() => {
+      result.current.injectDropVerdict(DROP_FOLDER_VERDICT);
+    });
+    act(() => {
+      result.current.clearDropReview();
+    });
+    expect(result.current.status).toEqual({ kind: "idle" });
+  });
+
+  it("DECLINES an injection while a commit is in flight — the commit and its retry survive", async () => {
+    // A drop-fed review A is displayed; the user drops B (its pull is
+    // reading) then clicks `Créer l'histoire` on A. B's verdict settles
+    // while A's commit is in flight: injecting would overwrite the
+    // `creating` screen AND wipe the verdict preserved for retryAccept.
+    const commitError = {
+      code: "IMPORT_FAILED",
+      message: "Création impossible: enregistrement local refusé.",
+      userAction: "Réessaie.",
+      details: { source: "db_commit" },
+    };
+    let rejectCommit!: (error: unknown) => void;
+    vi.mocked(acceptStructuredCreation)
+      .mockImplementationOnce(
+        () =>
+          new Promise((_resolve, reject) => {
+            rejectCommit = reject;
+          }),
+      )
+      .mockResolvedValueOnce(CREATED_CARD);
+    const { result } = renderHook(() => useStructuredCreation());
+    act(() => {
+      result.current.injectDropVerdict(DROP_FOLDER_VERDICT);
+    });
+    let pendingCommit!: Promise<void>;
+    act(() => {
+      pendingCommit = result.current.acceptCreation();
+    });
+    expect(result.current.status).toEqual({ kind: "creating" });
+
+    // B's verdict settles mid-commit: DECLINED, nothing touched.
+    const NEWER = {
+      ...DROP_FOLDER_VERDICT,
+      folderName: "second-dossier",
+      folderPath: "/home/user/second-dossier",
+    };
+    let accepted!: boolean;
+    act(() => {
+      accepted = result.current.injectDropVerdict(NEWER);
+    });
+    expect(accepted).toBe(false);
+    expect(result.current.status).toEqual({ kind: "creating" });
+
+    // The commit FAILS: the preserved verdict must still drive retryAccept
+    // (never a silent no-op — "Errors must preserve dignity").
+    await act(async () => {
+      rejectCommit(commitError);
+      await pendingCommit;
+    });
+    expect(result.current.status.kind).toBe("failed");
+    expect(result.current.failedPhase).toBe("accept");
+
+    await act(async () => {
+      await result.current.retryAccept();
+    });
+    expect(acceptStructuredCreation).toHaveBeenCalledTimes(2);
+    expect(acceptStructuredCreation).toHaveBeenLastCalledWith({
+      folderPath: "/home/user/mon-dossier",
+    });
+    expect(result.current.status).toEqual({
+      kind: "created",
+      story: CREATED_CARD,
+    });
+  });
+
+  it("clearDropReview never touches a machine mid-commit (same in-flight guard)", async () => {
+    // A dropped FILE settles while a drop-fed folder commit is in flight:
+    // the route's supersede must not reset the `creating` machine.
+    let resolveCommit!: (value: typeof CREATED_CARD) => void;
+    vi.mocked(acceptStructuredCreation).mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveCommit = resolve;
+        }),
+    );
+    const { result } = renderHook(() => useStructuredCreation());
+    act(() => {
+      result.current.injectDropVerdict(DROP_FOLDER_VERDICT);
+    });
+    let pendingCommit!: Promise<void>;
+    act(() => {
+      pendingCommit = result.current.acceptCreation();
+    });
+    act(() => {
+      result.current.clearDropReview();
+    });
+    // The commit screen survives; its settlement lands normally.
+    expect(result.current.status).toEqual({ kind: "creating" });
+    await act(async () => {
+      resolveCommit(CREATED_CARD);
+      await pendingCommit;
+    });
+    expect(result.current.status).toEqual({
+      kind: "created",
+      story: CREATED_CARD,
+    });
+  });
+
+  it("clearDropReview never touches a PICKER-origin review", async () => {
+    vi.mocked(analyzeStructuredFolderForCreation).mockResolvedValueOnce(
+      FOLDER_ANALYZED_CLEAN,
+    );
+    const { result } = renderHook(() => useStructuredCreation());
+    await act(async () => {
+      await result.current.pickAndAnalyze();
+    });
+    act(() => {
+      result.current.clearDropReview();
+    });
+    // A picker-fed review is another gesture — the drop supersede must
+    // leave it exactly as the user left it.
+    expect(result.current.status).toEqual({
+      kind: "review",
+      verdict: FOLDER_ANALYZED_CLEAN,
+    });
+    expect(result.current.origin).toBe("picker");
+  });
+
+  it("abandoning an injected review is a pure frontend reset", () => {
+    const { result } = renderHook(() => useStructuredCreation());
+    act(() => {
+      result.current.injectDropVerdict(DROP_FOLDER_VERDICT);
+    });
+    act(() => {
+      result.current.abandon();
+    });
+    expect(result.current.status).toEqual({ kind: "idle" });
+    expect(acceptStructuredCreation).not.toHaveBeenCalled();
+    expect(invalidateLibraryOverviewCache).not.toHaveBeenCalled();
+  });
+
+  it("a picker pick after a drop flow resets the origin to picker", async () => {
+    vi.mocked(analyzeStructuredFolderForCreation).mockResolvedValueOnce(
+      FOLDER_ANALYZED_CLEAN,
+    );
+    const { result } = renderHook(() => useStructuredCreation());
+    act(() => {
+      result.current.injectDropVerdict(DROP_FOLDER_VERDICT);
+    });
+    await act(async () => {
+      await result.current.pickAndAnalyze();
+    });
+    expect(result.current.origin).toBe("picker");
+  });
+
+  it("a cancelled pick restores BOTH the injected review and its drop origin", async () => {
+    vi.mocked(analyzeStructuredFolderForCreation).mockResolvedValueOnce({
+      kind: "cancelled",
+    });
+    const { result } = renderHook(() => useStructuredCreation());
+    act(() => {
+      result.current.injectDropVerdict(DROP_FOLDER_VERDICT);
+    });
+    await act(async () => {
+      await result.current.pickAndAnalyze();
+    });
+    expect(result.current.status).toEqual({
+      kind: "review",
+      verdict: FOLDER_ANALYZED_CLEAN,
+    });
+    expect(result.current.origin).toBe("drop");
+  });
 });

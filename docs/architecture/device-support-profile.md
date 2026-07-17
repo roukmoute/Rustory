@@ -666,6 +666,14 @@ own local files; the editor stores them as-is and **never transcodes** them.
   block (`MEDIA_INVALID`, surfaced inline at the media slot), never written.
 - Each file is read **bounded** by a byte ceiling; an oversize or unreadable file
   is refused the same way.
+- **This is an EDITING contract, never an import one**: the attach is
+  slot-directed and single-phase (the `Ajouter`/`Remplacer` gesture ON the slot
+  is the consent, the filtered picker is the selection, the mutation is
+  direct). A media file dropped on the WINDOW is therefore NOT a supported
+  import artifact — it receives the calm envelope verdict of the file-import
+  flow (see [ui-states.md#Drop Intent Contract](./ui-states.md)); dropping a
+  media ON A NODE SLOT would need slot inference plus a "visible before
+  mutation" confirmation surface and stays a dedicated deferred workstream.
 - **No transcoding happens here.** Converting a source media to a device-format
   pack (`rf/` images, `sf/` sounds) remains a transfer/preparation concern — the
   media transformer stays declared but not implemented (no story type requires
@@ -703,6 +711,21 @@ producing the same verdicts and copies. The declarative REGISTRATION of Rustory
 as an OS handler for its file types (`bundle.fileAssociations`, macOS
 `exportedType`, Linux MIME) stays OUTSIDE this channel — it belongs to the
 file-association contract of its own dedicated story.
+
+The **drop channel** (a file or folder dropped on the window, see
+[ui-states.md#Drop Intent Contract](./ui-states.md)) routes into the SAME
+registry flows, with the same authorities and the same verdicts: a dropped
+`.rustory` FILE feeds the import review above (same
+`is_supported_artifact_source_name` gate, same findings); a dropped
+STRUCTURED FOLDER feeds the folder-creation review (the drop replaces the
+picker — the folder is the drop channel's added value, since a folder is
+not double-clickable); a dropped archive receives the honest deferred
+verdict of the registry (no archive reader). The channel grants the
+registry NO new capability — same types, new gesture. Media files
+(PNG/JPEG/MP3/WAV/OGG) remain **Node Media Source Formats** (see that
+section): an EDITING contract (slot-directed attach), never an import
+artifact — a dropped media receives the calm envelope verdict of the file
+flow; the "drop on a node slot" gesture is a dedicated deferred workstream.
 
 ### Supported local artifact types
 

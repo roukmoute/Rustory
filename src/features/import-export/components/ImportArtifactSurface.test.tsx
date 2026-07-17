@@ -90,9 +90,18 @@ describe("ImportArtifactSurface", () => {
     ).toBeInTheDocument();
   });
 
+  it("names the analyzed source in the report — sourceName + verdict", () => {
+    // The report NAMES the file it speaks about (basename only, the PII
+    // discipline) — the contract's "sourceName + verdict", the exact
+    // mirror of the folder review's folderName line.
+    renderSurface(REVIEW_PARTIAL);
+    expect(screen.getByText("histoire.rustory")).toBeInTheDocument();
+  });
+
   it("renders a blocked verdict as an alert with only Abandonner", () => {
     renderSurface(REVIEW_BLOCKED);
     expect(screen.getByText("Inexploitable")).toBeInTheDocument();
+    expect(screen.getByText("corrompu.rustory")).toBeInTheDocument();
     expect(screen.getByRole("alert")).toBeInTheDocument();
     expect(
       screen.queryByRole("button", { name: "Importer ce qui est reconnu" }),

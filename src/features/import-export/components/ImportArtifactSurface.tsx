@@ -149,6 +149,10 @@ function ReviewReport({
         tone={qualityTone(verdict.quality)}
         label={qualityLabel(verdict.quality)}
       />
+      {/* The report NAMES its source (basename only — the PII discipline):
+          "sourceName + verdict", the exact mirror of the folder review's
+          folderName line. */}
+      <p className="import-artifact__source-name">{verdict.sourceName}</p>
 
       {recognized.length > 0 ? (
         <section className="import-artifact__group">

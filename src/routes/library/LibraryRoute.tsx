@@ -31,6 +31,7 @@ import { CreateFromFolderSurface } from "../../features/import-export/components
 import { CreateFromRssSurface } from "../../features/import-export/components/CreateFromRssSurface";
 import { ImportArtifactSurface } from "../../features/import-export/components/ImportArtifactSurface";
 import {
+  discardDropRequest,
   discardOsOpenRequest,
   readContentSourcePolicy,
 } from "../../ipc/commands/import-export";
@@ -54,6 +55,7 @@ import type { ContentSourcePolicy } from "../../shared/ipc-contracts/import-expo
 import type { StoryCardDto } from "../../shared/ipc-contracts/library";
 import { Button, SurfacePanel } from "../../shared/ui";
 import { LibraryLayout } from "../../shell/layout/LibraryLayout";
+import { useDropShell } from "../../shell/state/drop-shell-store";
 import { useLibraryShell } from "../../shell/state/library-shell-store";
 import { useOsOpenShell } from "../../shell/state/os-open-shell-store";
 
@@ -67,6 +69,16 @@ import "./LibraryRoute.css";
  */
 const OS_OPEN_BUSY_NOTICE =
   "Une opération est déjà en cours dans la bibliothèque. Termine-la, puis rouvre le fichier.";
+
+/**
+ * Frozen calm-limit copy when a drop intent arrives while a library flow
+ * is in flight (`product-language.md`). The OS-open busy copy's SISTER
+ * literal — same family, deliberately distinct words (reopening ≠
+ * dropping): the living flow is never interrupted, the intent is
+ * discarded, the user drops the element again afterwards.
+ */
+const DROP_BUSY_NOTICE =
+  "Une opération est déjà en cours dans la bibliothèque. Termine-la, puis dépose à nouveau ton fichier ou ton dossier.";
 
 export function LibraryRoute(): React.JSX.Element {
   const { state, retry, invalidate } = useLibraryOverview();
@@ -186,14 +198,15 @@ export function LibraryRoute(): React.JSX.Element {
   // AC1: analysis never mutates; the overview is re-read only after a
   // successful commit (the hook already dropped the module cache; the effect
   // below reloads THIS route so the fresh card appears).
-  // `isOsOpenSettling` joins the busy set: the OS-open pull renders no
-  // transient state (silent by contract) but IS an in-flight operation —
-  // no sibling flow may start under a live OS read.
+  // `isOsOpenSettling` / `isDropSettling` join the busy set: those pulls
+  // render no transient state (silent by contract) but ARE in-flight
+  // operations — no sibling flow may start under a live channel read.
   const storyImport = useStoryImport();
   const isImportBusy =
     storyImport.status.kind === "analyzing" ||
     storyImport.status.kind === "importing" ||
-    storyImport.isOsOpenSettling;
+    storyImport.isOsOpenSettling ||
+    storyImport.isDropSettling;
   const importStatusKind = storyImport.status.kind;
   useEffect(() => {
     if (importStatusKind === "imported") {
@@ -483,13 +496,31 @@ export function LibraryRoute(): React.JSX.Element {
   // render a busy copy while no visible operation exists. The sibling-CTA
   // gates (`isImportBusy` & co) DO keep the settling flag — starting a
   // sibling flow under a live OS read stays refused.
+  //
+  // The DROP channel joins the gate (announced re-scope of the OS-open
+  // gate: cases ADDED, none removed): an OS-open intent arriving while
+  // the drop channel is ACTIVE — a drop settlement in flight, or a
+  // displayed drop surface (review/failed in either machine) — is
+  // declined calmly. A drop-fed review is a consumed one-shot verdict (a
+  // dropped folder has no reopenable file); letting an OS-open verdict
+  // replace it would destroy it silently. The dialog/picker surfaces stay
+  // replaceable (the OS Open Contract behavior, unchanged).
+  const isDropChannelActive =
+    storyImport.isDropSettling ||
+    (storyImport.origin === "drop" &&
+      (storyImport.status.kind === "review" ||
+        storyImport.status.kind === "failed")) ||
+    (structuredCreation.origin === "drop" &&
+      (structuredCreation.status.kind === "review" ||
+        structuredCreation.status.kind === "failed"));
   const isOsOpenBlockedByLiveFlow =
     storyImport.status.kind === "analyzing" ||
     storyImport.status.kind === "importing" ||
     isCreateFromFolderBusy ||
     isRssCreationActive ||
     isCreateSubmitting ||
-    storyTransfer.state.kind === "transferring";
+    storyTransfer.state.kind === "transferring" ||
+    isDropChannelActive;
 
   useEffect(() => {
     if (!osOpenSignal) return;
@@ -510,6 +541,105 @@ export function LibraryRoute(): React.JSX.Element {
     handleOsOpenIntent,
   ]);
 
+  // ===== Drop intent reaction (`Drop Intent Contract`) =====
+  //
+  // The library is the landing context of every drop intent — the exact
+  // sibling of the OS-open block above: one pull at mount (a dormant
+  // intent — cold-start regime), plus one pull per `drop:requested`
+  // signal relayed by the bootstrap. A dropped FILE feeds the SAME import
+  // machine; a dropped FOLDER feeds the SAME folder-creation machine (the
+  // drop replaces the picker); the two calm limits (several elements /
+  // busy flow) render inline `role="status"` and never touch a machine.
+  const dropSignal = useDropShell((s) => s.pendingSignal);
+  const clearDropSignal = useDropShell((s) => s.clearSignal);
+  const [dropNotice, setDropNotice] = useState<string | null>(null);
+
+  // StrictMode-safe mount flag, DEDICATED to the drop settlements (its own
+  // channel, its own token — never shared with the OS-open one).
+  const dropMountedRef = useRef(true);
+  useEffect(() => {
+    dropMountedRef.current = true;
+    return () => {
+      dropMountedRef.current = false;
+    };
+  }, []);
+
+  const analyzeFromDrop = storyImport.analyzeFromDrop;
+  const injectDropFolderVerdict = structuredCreation.injectDropVerdict;
+  const clearDropFolderReview = structuredCreation.clearDropReview;
+  const handleDropIntent = useCallback(async (): Promise<void> => {
+    const outcome = await analyzeFromDrop();
+    if (!dropMountedRef.current) return;
+    if (outcome.kind === "none") return;
+    if (outcome.kind === "multipleItems") {
+      // Rendered VERBATIM — the copy travels in the Rust DTO. NOTHING was
+      // processed; an earlier review (if any) stays valid and displayed.
+      setDropNotice(outcome.message);
+      return;
+    }
+    // A settled newest gesture replaces a lingering calm limit…
+    setDropNotice(null);
+    if (outcome.kind === "folder") {
+      // …and lands in the folder-creation machine (the import machine
+      // already stepped aside inside the hook if it showed an earlier
+      // drop surface). A commit in flight on that machine DECLINES the
+      // injection (it may not be rewritten mid-commit): render the frozen
+      // busy copy — the calm refusal the signal gate would have rendered
+      // had the commit been visible when the signal arrived (the one-shot
+      // verdict cannot be re-served; the user re-drops afterwards).
+      if (!injectDropFolderVerdict(outcome.verdict)) {
+        setDropNotice(DROP_BUSY_NOTICE);
+      }
+      return;
+    }
+    // `review` / `failed` landed in the import machine. The drop
+    // channel's newest settlement is the only one displayed: a folder
+    // surface fed by an EARLIER drop steps aside (a picker-origin one is
+    // never touched).
+    clearDropFolderReview();
+  }, [analyzeFromDrop, injectDropFolderVerdict, clearDropFolderReview]);
+
+  // One-shot pull at mount. The Rust-side one-shot take makes the
+  // StrictMode double-effect harmless by construction: the second pull
+  // answers `none` (total no-op).
+  useEffect(() => {
+    void handleDropIntent();
+  }, [handleDropIntent]);
+
+  // A live flow has priority over an arriving drop intent — the exact
+  // mirror of the OS-open gate: decline calmly, consume the intent, NEVER
+  // interrupt. `isOsOpenSettling` DOES gate here (a live OS read is a real
+  // in-flight operation this channel must not interleave with); the drop
+  // channel's OWN settling is deliberately absent — a channel never gates
+  // on its own settling, it serializes through its own mono-slot queue.
+  const isDropBlockedByLiveFlow =
+    storyImport.status.kind === "analyzing" ||
+    storyImport.status.kind === "importing" ||
+    storyImport.isOsOpenSettling ||
+    isCreateFromFolderBusy ||
+    isRssCreationActive ||
+    isCreateSubmitting ||
+    storyTransfer.state.kind === "transferring";
+
+  useEffect(() => {
+    if (!dropSignal) return;
+    clearDropSignal();
+    if (isDropBlockedByLiveFlow) {
+      void discardDropRequest().catch(() => {
+        // Best-effort: a failed discard leaves a pending intent the next
+        // pull will surface — never a broken living flow.
+      });
+      setDropNotice(DROP_BUSY_NOTICE);
+      return;
+    }
+    void handleDropIntent();
+  }, [
+    dropSignal,
+    clearDropSignal,
+    isDropBlockedByLiveFlow,
+    handleDropIntent,
+  ]);
+
   const handleImportRetry = (): void => {
     if (storyImport.origin === "osOpen") {
       if (storyImport.failedPhase === "accept") {
@@ -522,9 +652,27 @@ export function LibraryRoute(): React.JSX.Element {
         // replays the SAME intent — never the file picker.
         void handleOsOpenIntent();
       }
+    } else if (storyImport.origin === "drop") {
+      // Same two-phase semantics as the OS-open origin, on the drop
+      // channel's own pull.
+      if (storyImport.failedPhase === "accept") {
+        void storyImport.retryAccept();
+      } else {
+        void handleDropIntent();
+      }
     } else {
       void storyImport.pickAndAnalyze();
     }
+  };
+
+  const handleImportAbandon = (): void => {
+    if (storyImport.origin === "drop") {
+      // A terminal gesture on a drop-fed review also drops any pending
+      // Rust intent (idempotent — the reviewed verdict was consumed
+      // one-shot; this only clears a newer, not-yet-pulled gesture).
+      void discardDropRequest().catch(() => {});
+    }
+    storyImport.abandon();
   };
 
   const handleImportDismiss = (): void => {
@@ -536,7 +684,51 @@ export function LibraryRoute(): React.JSX.Element {
       // intent (idempotent — a post-accept failure has nothing left).
       void discardOsOpenRequest().catch(() => {});
     }
+    if (storyImport.origin === "drop") {
+      // `Fermer` on a drop failure abandons the still-pending intent
+      // (idempotent on the other terminals).
+      void discardDropRequest().catch(() => {});
+    }
     storyImport.dismiss();
+  };
+
+  // Folder-creation gestures, branched by origin (`Drop Intent Contract`):
+  // a picker-origin retry re-opens the picker (the Structured Folder
+  // Creation Contract behavior, unchanged); a drop-origin retry
+  // re-commits the PRESERVED verdict after a failed accept (a re-pull
+  // would answer `none`) or replays the pending intent after a read
+  // failure. Terminal gestures on a drop-fed surface also discard the
+  // pending Rust intent (idempotent).
+  const handleFolderRetry = (): void => {
+    if (structuredCreation.origin === "drop") {
+      if (structuredCreation.failedPhase === "accept") {
+        void structuredCreation.retryAccept();
+      } else {
+        void handleDropIntent();
+      }
+    } else {
+      void structuredCreation.pickAndAnalyze();
+    }
+  };
+
+  const handleFolderAbandon = (): void => {
+    if (structuredCreation.origin === "drop") {
+      // Terminal channel-wide: drop the pending Rust intent AND
+      // invalidate any drop settlement still in flight — a late `folder`
+      // verdict must never reopen the review the user just closed
+      // (exactly what the import machine's own terminal gestures do).
+      storyImport.invalidateDropSettlements();
+      void discardDropRequest().catch(() => {});
+    }
+    structuredCreation.abandon();
+  };
+
+  const handleFolderDismiss = (): void => {
+    if (structuredCreation.origin === "drop") {
+      storyImport.invalidateDropSettlements();
+      void discardDropRequest().catch(() => {});
+    }
+    structuredCreation.dismiss();
   };
 
   // Reflect the in-flight / failed preparation as a discreet card badge (AC2),
@@ -726,19 +918,37 @@ export function LibraryRoute(): React.JSX.Element {
           </Button>
         </SurfacePanel>
       ) : null}
+      {/* Persistent status region of the DROP calm-limit copies
+          (`Drop Intent Contract`) — its own region, mounted empty for the
+          same AT-announcement reason as the OS-open one above. */}
+      <div
+        className="library-route__drop-live"
+        role="status"
+        aria-atomic="true"
+      >
+        {dropNotice ?? ""}
+      </div>
+      {dropNotice ? (
+        <SurfacePanel elevation={0}>
+          <p>{dropNotice}</p>
+          <Button variant="quiet" onClick={() => setDropNotice(null)}>
+            Fermer
+          </Button>
+        </SurfacePanel>
+      ) : null}
       <ImportArtifactSurface
         status={storyImport.status}
         onAccept={storyImport.acceptRecognized}
-        onAbandon={storyImport.abandon}
+        onAbandon={handleImportAbandon}
         onRetry={handleImportRetry}
         onDismiss={handleImportDismiss}
       />
       <CreateFromFolderSurface
         status={structuredCreation.status}
         onAccept={structuredCreation.acceptCreation}
-        onAbandon={structuredCreation.abandon}
-        onRetry={structuredCreation.pickAndAnalyze}
-        onDismiss={structuredCreation.dismiss}
+        onAbandon={handleFolderAbandon}
+        onRetry={handleFolderRetry}
+        onDismiss={handleFolderDismiss}
       />
       <CreateFromRssSurface
         open={isRssCreationOpen}
@@ -859,7 +1069,9 @@ export function LibraryRoute(): React.JSX.Element {
         isCreateFromRssUnavailable={
           isImportBusy || isCreateFromFolderBusy || isRssCreationActive
         }
-        isSubmitUnavailable={storyImport.isOsOpenSettling}
+        isSubmitUnavailable={
+          storyImport.isOsOpenSettling || storyImport.isDropSettling
+        }
         onSubmittingChange={setIsCreateSubmitting}
         contentSourcePolicy={contentSourcePolicy}
       />

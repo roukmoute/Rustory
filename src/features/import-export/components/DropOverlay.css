@@ -1,0 +1,31 @@
+/*
+ * Global hover overlay of the drop channel — purely decorative feedback
+ * of a drag in progress (Drop Intent Contract). `pointer-events: none` is
+ * LOAD-BEARING: the native webview handler must keep receiving the drag
+ * events; the overlay never intercepts anything.
+ */
+
+.drop-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--space-4);
+  background: color-mix(in srgb, var(--color-surface-base) 82%, transparent);
+  pointer-events: none;
+}
+
+.drop-overlay__copy {
+  margin: 0;
+  padding: var(--space-4) var(--space-5);
+  border: 2px dashed var(--color-action-primary);
+  border-radius: var(--radius-lg);
+  background: var(--color-surface-raised);
+  color: var(--color-text-primary);
+  font-size: var(--font-size-h3);
+  font-weight: var(--font-weight-medium);
+  line-height: var(--line-height-tight);
+  text-align: center;
+}

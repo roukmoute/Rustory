@@ -3,6 +3,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import {
   acceptArtifactImport,
   analyzeArtifactForImport,
+  analyzeDropRequest,
   analyzeOsOpenRequest,
 } from "../../../ipc/commands/import-export";
 import { invalidateLibraryOverviewCache } from "../../library/hooks/use-library-overview";
@@ -10,10 +11,12 @@ import type { AppError } from "../../../shared/errors/app-error";
 import { toAppError } from "../../../shared/errors/app-error";
 import type {
   AcceptArtifactImportInput,
+  DropAnalysis,
   ImportArtifactAnalysis,
   OsOpenAnalysis,
 } from "../../../shared/ipc-contracts/import-export";
 import type { StoryCardDto } from "../../../shared/ipc-contracts/library";
+import type { DropFolderVerdict } from "./use-structured-creation";
 
 /** The `analyzed` verdict variant — what the `review` state renders. */
 export type AnalyzedVerdict = Extract<
@@ -29,11 +32,11 @@ export type StoryImportStatus =
   | { kind: "imported"; story: StoryCardDto }
   | { kind: "failed"; error: AppError };
 
-/** Which entry point fed the CURRENT flow: the native picker (`dialog`) or
- *  the OS-open channel (`osOpen`). The route branches `Réessayer` /
- *  `Fermer` on it — an OS-open retry replays the pending intent instead of
- *  re-opening the picker. */
-export type StoryImportOrigin = "dialog" | "osOpen";
+/** Which entry point fed the CURRENT flow: the native picker (`dialog`),
+ *  the OS-open channel (`osOpen`) or the drop channel (`drop`). The route
+ *  branches `Réessayer` / `Fermer` on it — an OS-open or drop retry
+ *  replays the pending intent instead of re-opening the picker. */
+export type StoryImportOrigin = "dialog" | "osOpen" | "drop";
 
 /** Which phase a `failed` status came from: the analysis read
  *  (`analyze` — retrying re-pulls the still-pending Rust intent) or the
@@ -51,6 +54,24 @@ export type OsOpenAnalyzeOutcome =
   | { kind: "review" }
   | { kind: "failed" };
 
+/** What a drop analysis produced, for the caller: the calm cases the
+ *  MACHINE does not carry (`none`; `multipleItems` — the library renders
+ *  the Rust copy `role="status"`), the import-machine states it fed
+ *  (`review` / `failed` — a dropped FILE), or a settled `folder` verdict
+ *  the library injects into the SIBLING folder-creation machine (a
+ *  dropped FOLDER — this machine never carries it; the injection itself
+ *  may be DECLINED by that machine's in-flight commit — its boolean
+ *  return tells the library to render the frozen busy copy). This
+ *  machine's own commits can never race a pull: both sides share the
+ *  same synchronous in-flight guard, so each declines while the other
+ *  runs. */
+export type DropAnalyzeOutcome =
+  | { kind: "none" }
+  | { kind: "multipleItems"; message: string }
+  | { kind: "review" }
+  | { kind: "folder"; verdict: DropFolderVerdict }
+  | { kind: "failed" };
+
 export interface UseStoryImport {
   status: StoryImportStatus;
   /** Origin of the current flow (meaningful while `status` is not idle). */
@@ -62,6 +83,11 @@ export interface UseStoryImport {
    *  busy the flows' mutual exclusion consumes so no sibling flow starts
    *  under a live OS read. */
   isOsOpenSettling: boolean;
+  /** True while a drop settlement is in flight — the drop channel's
+   *  sibling of `isOsOpenSettling`, consumed by the same mutual
+   *  exclusion (the channel itself never gates on it: it serializes
+   *  through its own queue). */
+  isDropSettling: boolean;
   /** Open the native file picker (owned by Rust) and analyze the chosen
    *  `.rustory`. A cancelled dialog is a silent no-op. Resolves when the
    *  analysis has settled so callers/tests can chain a step. */
@@ -74,6 +100,23 @@ export interface UseStoryImport {
    *  a pull landing while another settlement is in flight waits for it,
    *  then pulls — a signal is never dropped as a fake `none`. */
   analyzeFromOsOpen(): Promise<OsOpenAnalyzeOutcome>;
+  /** Analyze the pending drop intent (NO dialog) — the drop channel's
+   *  sibling of `analyzeFromOsOpen`, serialized through its OWN dedicated
+   *  mono-slot queue. A dropped FILE feeds this SAME machine (`artifact`
+   *  verdict → `review`, read failure → `failed` with the intent pending
+   *  Rust-side); a dropped FOLDER settles as the returned `folder`
+   *  outcome for the library to inject into the folder-creation machine
+   *  (this machine steps aside if it was showing an earlier drop surface
+   *  — the channel's newest settlement is the only one displayed);
+   *  `none` / `multipleItems` leave the current status untouched. */
+  analyzeFromDrop(): Promise<DropAnalyzeOutcome>;
+  /** Invalidate any drop settlement still in flight (epoch bump). The
+   *  drop channel's terminal gestures on THIS machine already invalidate
+   *  through `dismiss`/`abandon`; the SIBLING folder machine's terminal
+   *  gestures (`Fermer`/`Abandonner` on a drop-fed folder review) call
+   *  this so a late `folder` settlement can never reopen a review the
+   *  user just closed — a terminal gesture is terminal, channel-wide. */
+  invalidateDropSettlements(): void;
   /** Commit the recognized story from a `review` state. No-op outside
    *  `review`, or when the verdict is blocked (no importable content). */
   acceptRecognized(): Promise<void>;
@@ -86,8 +129,9 @@ export interface UseStoryImport {
   /** Dismiss a terminal status (`imported` / `failed`) back to idle. The
    *  `failed` alert is never wiped implicitly, but its explicit `Fermer`
    *  must work — exactly like `Réessayer`. Dismissing (like abandoning)
-   *  INVALIDATES any in-flight OS-open settlement: an explicit terminal
-   *  gesture is terminal — a late settlement never resurrects the flow. */
+   *  INVALIDATES any in-flight OS-open or drop settlement: an explicit
+   *  terminal gesture is terminal — a late settlement never resurrects
+   *  the flow. */
   dismiss(): void;
 }
 
@@ -107,6 +151,7 @@ export function useStoryImport(): UseStoryImport {
   const [failedPhase, setFailedPhase] =
     useState<StoryImportFailedPhase | null>(null);
   const [isOsOpenSettling, setIsOsOpenSettling] = useState(false);
+  const [isDropSettling, setIsDropSettling] = useState(false);
 
   const statusRef = useRef<StoryImportStatus>(status);
   statusRef.current = status;
@@ -242,15 +287,117 @@ export function useStoryImport(): UseStoryImport {
   // previous settlement, then pulls. Combined with the Rust-side
   // compare-and-take, the LAST settling pull serves the NEWEST intent —
   // a signal landing mid-pull is queued, never dropped as a fake `none`.
+  //
+  // Each channel keeps its OWN queue (per-channel order, never gated by
+  // the sibling's signals), but a run also WAITS for the sibling queue's
+  // current tail: the library mount fires BOTH pulls in one commit, and
+  // two pulls writing this machine concurrently would trip the shared
+  // in-flight guard — silently declining one channel's dormant intent.
+  // `allSettled` (never `all`): a failed sibling settlement must not
+  // swallow this channel's pull.
   const osOpenChainRef = useRef<Promise<unknown>>(Promise.resolve());
+  const dropChainRef = useRef<Promise<unknown>>(Promise.resolve());
   const analyzeFromOsOpen = useCallback((): Promise<OsOpenAnalyzeOutcome> => {
-    const run = osOpenChainRef.current.then(
-      runOsOpenAnalysis,
-      runOsOpenAnalysis,
-    );
+    const run = Promise.allSettled([
+      osOpenChainRef.current,
+      dropChainRef.current,
+    ]).then(runOsOpenAnalysis);
     osOpenChainRef.current = run;
     return run;
   }, [runOsOpenAnalysis]);
+
+  const runDropAnalysis =
+    useCallback(async (): Promise<DropAnalyzeOutcome> => {
+      // Same ultimate guard as the OS-open pull: a picker/commit racing in
+      // the same tick is declined without touching the Rust intent — the
+      // next pull still serves it, nothing is lost.
+      if (inFlightRef.current) return { kind: "none" };
+      inFlightRef.current = true;
+      const epoch = epochRef.current;
+      if (mountedRef.current) setIsDropSettling(true);
+      try {
+        // The pull is SILENT by contract (most pulls — every library
+        // mount — answer `none`, zero visual trace): the machine is only
+        // touched once a verdict actually exists. A dropped FILE lands
+        // directly in `review`/`failed` here; a dropped FOLDER is handed
+        // back for the sibling folder-creation machine.
+        let verdict: DropAnalysis;
+        try {
+          verdict = await analyzeDropRequest();
+        } catch (err) {
+          // Transport failure (unreadable element): the intent STAYS
+          // pending Rust-side — `Réessayer` replays it, `Fermer` discards
+          // it. A settlement arriving after an explicit terminal gesture
+          // (epoch moved) is dropped — never a resurrected alert.
+          if (!mountedRef.current || epochRef.current !== epoch) {
+            return { kind: "none" };
+          }
+          setOrigin("drop");
+          setStatus({ kind: "failed", error: toAppError(err) });
+          setFailedPhase("analyze");
+          return { kind: "failed" };
+        }
+        if (!mountedRef.current || epochRef.current !== epoch) {
+          return { kind: "none" };
+        }
+        if (verdict.kind === "none") {
+          // Total silent no-op — whatever the user was looking at stays.
+          return { kind: "none" };
+        }
+        if (verdict.kind === "multipleItems") {
+          // A calm limit the LIBRARY renders (`role="status"`) — never a
+          // machine state: the current status survives untouched.
+          return { kind: "multipleItems", message: verdict.message };
+        }
+        if (verdict.kind === "folder") {
+          // The folder verdict belongs to the SIBLING machine (the route
+          // injects it). The drop channel's newest settlement is the only
+          // one displayed: an import surface fed by an EARLIER drop steps
+          // aside; a dialog/OS-open surface is untouched (other gestures).
+          if (
+            originRef.current === "drop" &&
+            statusRef.current.kind !== "idle"
+          ) {
+            reviewVerdictRef.current = null;
+            setStatus({ kind: "idle" });
+            setFailedPhase(null);
+          }
+          return { kind: "folder", verdict };
+        }
+        // A dropped FILE: the exact field set of the dialog verdict under
+        // its own tag — re-tagged into the SAME review machine.
+        const analyzed: AnalyzedVerdict = { ...verdict, kind: "analyzed" };
+        setOrigin("drop");
+        setStatus({ kind: "review", verdict: analyzed });
+        setFailedPhase(null);
+        return { kind: "review" };
+      } finally {
+        inFlightRef.current = false;
+        if (mountedRef.current) setIsDropSettling(false);
+      }
+    }, []);
+
+  // The drop channel's OWN mono-slot queue — separate per-channel order
+  // and identity (a drop signal never queues an OS-open pull and vice
+  // versa), with the same cross-lane wait as above so the two channels'
+  // runs never write the machine concurrently.
+  const analyzeFromDrop = useCallback((): Promise<DropAnalyzeOutcome> => {
+    const run = Promise.allSettled([
+      dropChainRef.current,
+      osOpenChainRef.current,
+    ]).then(runDropAnalysis);
+    dropChainRef.current = run;
+    return run;
+  }, [runDropAnalysis]);
+
+  const invalidateDropSettlements = useCallback((): void => {
+    // A terminal gesture is TERMINAL, channel-wide: a settlement still in
+    // flight at this moment is dropped on arrival — exactly what this
+    // machine's own `dismiss`/`abandon` do, exposed for the sibling
+    // folder machine's drop-fed terminal gestures (a late `folder`
+    // settlement must never reopen what the user just closed).
+    epochRef.current += 1;
+  }, []);
 
   /** Shared commit path of `acceptRecognized` and `retryAccept`: preserve
    *  the verdict for a later retry, run the UNCHANGED accept phase, tag a
@@ -339,8 +486,11 @@ export function useStoryImport(): UseStoryImport {
     origin,
     failedPhase,
     isOsOpenSettling,
+    isDropSettling,
     pickAndAnalyze,
     analyzeFromOsOpen,
+    analyzeFromDrop,
+    invalidateDropSettlements,
     acceptRecognized,
     retryAccept,
     abandon,

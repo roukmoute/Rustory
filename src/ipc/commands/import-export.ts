@@ -5,6 +5,7 @@ import type {
   AcceptArtifactImportInput,
   AcceptStructuredCreationInput,
   ContentSourcePolicy,
+  DropAnalysis,
   ExportStoryDialogInput,
   ExportStoryDialogOutcome,
   ImportArtifactAnalysis,
@@ -16,6 +17,7 @@ import type {
 } from "../../shared/ipc-contracts/import-export";
 import {
   isContentSourcePolicy,
+  isDropAnalysis,
   isExportStoryDialogOutcome,
   isImportArtifactAnalysis,
   isImportFinding,
@@ -190,6 +192,69 @@ export async function analyzeOsOpenRequest(): Promise<OsOpenAnalysis> {
 export async function discardOsOpenRequest(): Promise<void> {
   try {
     await invoke<unknown>("discard_os_open_request");
+  } catch (err) {
+    throw toAppError(err);
+  }
+}
+
+/**
+ * Error thrown when a drop-channel command returns a payload that does not
+ * match the wire contract. A payload outside the contract NEVER renders a
+ * screen — the raw response is attached for debugging.
+ */
+export class DropContractDriftError extends Error {
+  readonly raw: unknown;
+  constructor(command: string, raw: unknown) {
+    super(`${command} returned a payload that does not match the contract`);
+    this.name = "DropContractDriftError";
+    this.raw = raw;
+  }
+}
+
+/**
+ * Analyze the pending drop intent (phase 1, NO mutation, NO dialog —
+ * `ui-states.md#Drop Intent Contract`). Called once at library mount (a
+ * dormant intent) and on each `drop:requested` signal. Rust owns the
+ * intent, the classification (file vs folder), the bounded reads and the
+ * recognition verdicts — the frontend never sees the absolute filesystem
+ * path (the `folder` kind's `folderPath` is the folder-creation
+ * round-trip pointer, never rendered).
+ *
+ * `{ kind: "none" }` is a TOTAL silent no-op (no pending intent — also the
+ * harmless second answer of a StrictMode double-effect, the intent being
+ * consumed one-shot Rust-side). `{ kind: "multipleItems" }` carries the
+ * Rust-frozen calm-limit copy to render verbatim. An `artifact` verdict
+ * feeds the import review machine, a `folder` verdict the folder-creation
+ * one. A TRANSPORT failure (the element became unreadable) rejects with a
+ * normalized `AppError` and the intent STAYS pending Rust-side — a retry
+ * replays it. A drifted payload rejects with [`DropContractDriftError`].
+ *
+ * Components MUST NOT call `invoke` directly — go through this facade so
+ * the wire contract stays owned by `src/ipc/`.
+ */
+export async function analyzeDropRequest(): Promise<DropAnalysis> {
+  let raw: unknown;
+  try {
+    raw = await invoke<unknown>("analyze_drop_request");
+  } catch (err) {
+    throw toAppError(err);
+  }
+  if (!isDropAnalysis(raw)) {
+    throw new DropContractDriftError("analyze_drop_request", raw);
+  }
+  return raw;
+}
+
+/**
+ * Drop the pending drop intent, if any (idempotent). Called when the user
+ * closes a failed drop read (`Fermer`), abandons a dropped element's
+ * review, or when the library declines an intent because a flow is already
+ * in flight. A transport failure rejects with a normalized `AppError`; the
+ * callers treat it best-effort.
+ */
+export async function discardDropRequest(): Promise<void> {
+  try {
+    await invoke<unknown>("discard_drop_request");
   } catch (err) {
     throw toAppError(err);
   }

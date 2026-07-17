@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   isContentSourceEntry,
   isContentSourcePolicy,
+  isDropAnalysis,
   isExportStoryDialogOutcome,
   isImportArtifactAnalysis,
   isImportFinding,
@@ -11,6 +12,7 @@ import {
   isRssPreview,
   isStructuredCreationAnalysis,
   type ContentSourcePolicy,
+  type DropAnalysis,
   type ExportStoryDialogOutcome,
   type ImportArtifactAnalysis,
   type OsOpenAnalysis,
@@ -1079,4 +1081,104 @@ describe("isContentSourcePolicy", () => {
       }),
     ).toBe(false);
   });
+});
+
+// ===== Drop channel =====
+
+const DROP_ARTIFACT: DropAnalysis = {
+  ...ANALYZED_PARTIAL,
+  kind: "artifact",
+} as DropAnalysis;
+
+const DROP_ARTIFACT_BLOCKED: DropAnalysis = {
+  ...ANALYZED_BLOCKED,
+  kind: "artifact",
+} as DropAnalysis;
+
+const DROP_FOLDER: DropAnalysis = {
+  ...FOLDER_ANALYZED_CLEAN,
+  kind: "folder",
+} as DropAnalysis;
+
+const DROP_FOLDER_BLOCKED: DropAnalysis = {
+  ...FOLDER_ANALYZED_BLOCKED,
+  kind: "folder",
+} as DropAnalysis;
+
+const DROP_MULTIPLE_ITEMS: DropAnalysis = {
+  kind: "multipleItems",
+  message:
+    "Rustory traite un seul élément déposé à la fois. Dépose chaque élément séparément.",
+};
+
+describe("isDropAnalysis", () => {
+  it("accepts the silent none with only the kind discriminant", () => {
+    expect(isDropAnalysis({ kind: "none" })).toBe(true);
+  });
+
+  it("rejects a none payload with extra fields", () => {
+    expect(isDropAnalysis({ kind: "none", leaked: 1 })).toBe(false);
+  });
+
+  it("accepts the multipleItems calm limit with its copy", () => {
+    expect(isDropAnalysis(DROP_MULTIPLE_ITEMS)).toBe(true);
+  });
+
+  it("rejects a multipleItems without a usable copy (fail-closed)", () => {
+    expect(isDropAnalysis({ kind: "multipleItems" })).toBe(false);
+    expect(isDropAnalysis({ kind: "multipleItems", message: "" })).toBe(false);
+  });
+
+  it("rejects a multipleItems with extra fields", () => {
+    expect(isDropAnalysis({ ...DROP_MULTIPLE_ITEMS, leaked: true })).toBe(
+      false,
+    );
+  });
+
+  it("accepts an artifact verdict through the dialog-import guard", () => {
+    expect(isDropAnalysis(DROP_ARTIFACT)).toBe(true);
+    expect(isDropAnalysis(DROP_ARTIFACT_BLOCKED)).toBe(true);
+  });
+
+  it("rejects a drifted artifact verdict exactly like the import guard", () => {
+    expect(isDropAnalysis({ ...DROP_ARTIFACT, quality: "clean" })).toBe(false);
+    expect(isDropAnalysis({ ...DROP_ARTIFACT, sourceName: "" })).toBe(false);
+    expect(
+      isDropAnalysis({
+        ...DROP_ARTIFACT_BLOCKED,
+        importableContent: IMPORTABLE_CONTENT,
+      }),
+    ).toBe(false);
+  });
+
+  it("accepts a folder verdict through the picker-folder guard", () => {
+    expect(isDropAnalysis(DROP_FOLDER)).toBe(true);
+    expect(isDropAnalysis(DROP_FOLDER_BLOCKED)).toBe(true);
+  });
+
+  it("rejects a drifted folder verdict exactly like the picker guard", () => {
+    expect(isDropAnalysis({ ...DROP_FOLDER, folderPath: "" })).toBe(false);
+    expect(isDropAnalysis({ ...DROP_FOLDER, folderName: "" })).toBe(false);
+    const { creatableSummary: _omit, ...withoutSummary } = DROP_FOLDER as {
+      creatableSummary?: unknown;
+    } & Record<string, unknown>;
+    expect(isDropAnalysis(withoutSummary)).toBe(false);
+  });
+
+  it("rejects the sibling channels' own kinds (closed union)", () => {
+    expect(isDropAnalysis({ kind: "analyzed" })).toBe(false);
+    expect(isDropAnalysis({ ...ANALYZED_PARTIAL })).toBe(false);
+    expect(isDropAnalysis({ kind: "multipleFiles", message: "x" })).toBe(
+      false,
+    );
+    expect(isDropAnalysis({ kind: "cancelled" })).toBe(false);
+    expect(isDropAnalysis({ kind: "weird" })).toBe(false);
+  });
+
+  it.each([null, undefined, 42, "string", []])(
+    "rejects non-objects (%s)",
+    (value) => {
+      expect(isDropAnalysis(value)).toBe(false);
+    },
+  );
 });

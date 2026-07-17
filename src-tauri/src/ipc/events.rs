@@ -43,6 +43,36 @@ pub const EVENT_OS_OPEN_REQUESTED: &str = "os-open:requested";
 #[serde(rename_all = "camelCase")]
 pub struct OsOpenRequestedEvent {}
 
+/// Wire event name: a drag carrying paths entered the window. A pure
+/// hover SIGNAL for the decorative overlay — never a carrier (the paths
+/// stay Rust-side; see `ui-states.md#Drop Intent Contract`).
+pub const EVENT_DROP_HOVER: &str = "drop:hover";
+/// Wire event name: the drag left the window OR a drop landed (`Leave` is
+/// not guaranteed after a `Drop` on every platform, so the frontier emits
+/// this on both — consumers are idempotent).
+pub const EVENT_DROP_HOVER_ENDED: &str = "drop:hover-ended";
+/// Wire event name: a drop produced a pending intent. A pure SIGNAL — the
+/// frontend pulls the verdict through `analyze_drop_request`, never from
+/// the event.
+pub const EVENT_DROP_REQUESTED: &str = "drop:requested";
+
+/// `drop:hover` payload: an EMPTY versionable object (`{}`) — no path, no
+/// count, no kind ever crosses through the signals.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DropHoverEvent {}
+
+/// `drop:hover-ended` payload: an EMPTY versionable object (`{}`).
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DropHoverEndedEvent {}
+
+/// `drop:requested` payload: an EMPTY versionable object (`{}`). The
+/// verdict is pulled by command — the absolute path never crosses.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DropRequestedEvent {}
+
 /// Stable `errorCode` carried by every preparation `job:failed` — both
 /// functional (`retryable`) and transport failures. The structured cause +
 /// blockers come from the authoritative re-read, not this label.
@@ -284,11 +314,32 @@ mod tests {
         assert_eq!(EVENT_JOB_COMPLETED, "job:completed");
         assert_eq!(EVENT_JOB_FAILED, "job:failed");
         assert_eq!(EVENT_OS_OPEN_REQUESTED, "os-open:requested");
+        assert_eq!(EVENT_DROP_HOVER, "drop:hover");
+        assert_eq!(EVENT_DROP_HOVER_ENDED, "drop:hover-ended");
+        assert_eq!(EVENT_DROP_REQUESTED, "drop:requested");
     }
 
     #[test]
     fn os_open_requested_payload_is_an_empty_versionable_object() {
         let v = serde_json::to_value(OsOpenRequestedEvent {}).expect("ser");
         assert_eq!(v, json!({}));
+    }
+
+    #[test]
+    fn drop_signal_payloads_are_empty_versionable_objects() {
+        // The three drop signals carry NO data by design — no path, no
+        // count, no kind; the verdict is pulled by command.
+        assert_eq!(
+            serde_json::to_value(DropHoverEvent {}).expect("ser"),
+            json!({})
+        );
+        assert_eq!(
+            serde_json::to_value(DropHoverEndedEvent {}).expect("ser"),
+            json!({})
+        );
+        assert_eq!(
+            serde_json::to_value(DropRequestedEvent {}).expect("ser"),
+            json!({})
+        );
     }
 }

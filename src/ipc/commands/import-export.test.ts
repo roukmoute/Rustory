@@ -8,6 +8,7 @@ import { invoke } from "@tauri-apps/api/core";
 
 import {
   ContentSourcePolicyContractDriftError,
+  DropContractDriftError,
   ExportStoryContractDriftError,
   ImportArtifactContractDriftError,
   OsOpenContractDriftError,
@@ -17,8 +18,10 @@ import {
   acceptRssStoryCreation,
   acceptStructuredCreation,
   analyzeArtifactForImport,
+  analyzeDropRequest,
   analyzeOsOpenRequest,
   analyzeStructuredFolderForCreation,
+  discardDropRequest,
   discardOsOpenRequest,
   exportStoryWithSaveDialog,
   fetchRssSourcePreview,
@@ -295,6 +298,102 @@ describe("discardOsOpenRequest", () => {
   it("normalizes a transport rejection", async () => {
     vi.mocked(invoke).mockRejectedValueOnce("boom");
     await expect(discardOsOpenRequest()).rejects.toMatchObject({
+      code: "UNKNOWN",
+    });
+  });
+});
+
+// ===== Drop channel facades =====
+
+describe("analyzeDropRequest", () => {
+  beforeEach(() => {
+    vi.mocked(invoke).mockReset();
+  });
+
+  it("calls analyze_drop_request and returns a validated artifact verdict", async () => {
+    vi.mocked(invoke).mockResolvedValueOnce({ ...ANALYZED, kind: "artifact" });
+    const result = await analyzeDropRequest();
+    expect(invoke).toHaveBeenCalledWith("analyze_drop_request");
+    expect(result.kind).toBe("artifact");
+  });
+
+  it("returns a validated folder verdict", async () => {
+    vi.mocked(invoke).mockResolvedValueOnce({
+      ...FOLDER_ANALYZED,
+      kind: "folder",
+    });
+    const result = await analyzeDropRequest();
+    expect(result.kind).toBe("folder");
+  });
+
+  it("resolves the none and multipleItems kinds as-is", async () => {
+    vi.mocked(invoke).mockResolvedValueOnce({ kind: "none" });
+    expect(await analyzeDropRequest()).toEqual({ kind: "none" });
+
+    const limit = {
+      kind: "multipleItems",
+      message:
+        "Rustory traite un seul élément déposé à la fois. Dépose chaque élément séparément.",
+    };
+    vi.mocked(invoke).mockResolvedValueOnce(limit);
+    expect(await analyzeDropRequest()).toEqual(limit);
+  });
+
+  it("rejects with DropContractDriftError (carrying the raw payload) on a shape drift", async () => {
+    const raw = { kind: "multipleItems", message: "" };
+    vi.mocked(invoke).mockResolvedValueOnce(raw);
+    const err = (await analyzeDropRequest().then(
+      () => {
+        throw new Error("expected rejection");
+      },
+      (e: unknown) => e,
+    )) as DropContractDriftError;
+    expect(err).toBeInstanceOf(DropContractDriftError);
+    expect(err.raw).toEqual(raw);
+  });
+
+  it("rejects the sibling channels' own kinds as a drift", async () => {
+    // A drifted backend answering with the OS-open tag must never render.
+    vi.mocked(invoke).mockResolvedValueOnce(ANALYZED);
+    await expect(analyzeDropRequest()).rejects.toBeInstanceOf(
+      DropContractDriftError,
+    );
+  });
+
+  it("propagates an IMPORT_FAILED read error verbatim (the intent stays pending Rust-side)", async () => {
+    const rustError = {
+      code: "IMPORT_FAILED",
+      message: "Import impossible: fichier illisible.",
+      userAction:
+        "Vérifie que le fichier existe, qu'il s'agit bien d'un artefact Rustory, puis réessaie.",
+      details: { source: "file_read", stage: "metadata" },
+    };
+    vi.mocked(invoke).mockRejectedValueOnce(rustError);
+    await expect(analyzeDropRequest()).rejects.toEqual(rustError);
+  });
+
+  it("normalizes a non-AppError transport rejection", async () => {
+    vi.mocked(invoke).mockRejectedValueOnce("boom");
+    await expect(analyzeDropRequest()).rejects.toMatchObject({
+      code: "UNKNOWN",
+    });
+  });
+});
+
+describe("discardDropRequest", () => {
+  beforeEach(() => {
+    vi.mocked(invoke).mockReset();
+  });
+
+  it("calls discard_drop_request and resolves", async () => {
+    vi.mocked(invoke).mockResolvedValueOnce(null);
+    await expect(discardDropRequest()).resolves.toBeUndefined();
+    expect(invoke).toHaveBeenCalledWith("discard_drop_request");
+  });
+
+  it("normalizes a transport rejection", async () => {
+    vi.mocked(invoke).mockRejectedValueOnce("boom");
+    await expect(discardDropRequest()).rejects.toMatchObject({
       code: "UNKNOWN",
     });
   });

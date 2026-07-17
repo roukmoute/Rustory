@@ -2,6 +2,9 @@
 #[path = "contracts/import_export.rs"]
 mod import_export;
 
+#[path = "contracts/drop_intent.rs"]
+mod drop_intent;
+
 #[path = "contracts/os_open.rs"]
 mod os_open;
 

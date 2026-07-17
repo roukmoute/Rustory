@@ -177,6 +177,7 @@ Avoid:
 
 - `bibliothèque` is the stable home for selection, transfer visibility, and recovery traces
 - `bibliothèque` is also the landing context of every OS-open intent (`intention d'ouverture`): a file opened through the operating system always resolves into the library's existing artifact-import review — never a new screen, never a new route (see `OS Open Contract`)
+- `bibliothèque` is likewise the landing context of every drop intent (`intention de dépôt`): a file or folder dropped on the window always resolves into the library's existing import / folder-creation review (see `Drop Intent Contract`); the hover overlay that accompanies the drag gesture is APP-LEVEL (mounted by the shell above the routed outlet — the whole window is the drop target, no route owns it)
 - `édition` is a separate context and must not silently replace library state vocabulary
 - `Profil de support` (route `/settings`) is the read-only screen where the distribution's support facts live — devices, local artifacts, content sources, posture; it never becomes a settings/toggles surface (see `Support Profile Screen Contract`)
 - `modals` and reports may clarify a state, but should not become the only place where a critical state exists
@@ -2153,7 +2154,7 @@ Closed flow states:
 | No pending intent (`none`) | TOTAL silent no-op — nothing renders, nothing announces. |
 | Artifact intent | The existing import machine: analysis → recognition report (sourceName + verdict) → explicit accept — no ambiguity about the content type. |
 | Several files in one gesture (`multipleFiles`) | Calm named limit: the Rust-carried frozen copy renders VERBATIM inline in the library, `role="status"` — never a toast, never a modal, never an error. The intent is consumed (no partial processing). |
-| A library flow is busy (import / creation — the primary title submission included — / RSS / transfer in flight) | Calm refusal: the frontend-frozen busy copy renders inline (`role="status"`) and the intent is DISCARDED — the living flow is NEVER interrupted (the user reopens the file afterwards; no queue, no hybrid state). The refusal applies to an intent ARRIVING WARM (signal); a dormant intent re-served by the library-mount pull follows the cold-start regime — its pure analysis may render its verdict beside a live flow (which re-hydrates asynchronously) without ever interrupting it. The exclusion is MUTUAL: while an OS-open read is settling (internally busy, visually silent), no sibling flow may start — the import CTA, the folder/RSS entries and the primary `Créer` submission are gated; the OS channel itself is NOT gated by its own settling — it serializes through its mono-slot queue. |
+| A library flow is busy (import / creation — the primary title submission included — / RSS / transfer in flight / an ACTIVE drop channel — a drop settlement in flight or a displayed drop-fed surface, see the Drop Intent Contract) | Calm refusal: the frontend-frozen busy copy renders inline (`role="status"`) and the intent is DISCARDED — the living flow is NEVER interrupted (the user reopens the file afterwards; no queue, no hybrid state). The refusal applies to an intent ARRIVING WARM (signal); a dormant intent re-served by the library-mount pull follows the cold-start regime — its pure analysis may render its verdict beside a live flow (which re-hydrates asynchronously) without ever interrupting it. The exclusion is MUTUAL: while an OS-open read is settling (internally busy, visually silent), no sibling flow may start — the import CTA, the folder/RSS entries and the primary `Créer` submission are gated; the OS channel itself is NOT gated by its own settling — it serializes through its mono-slot queue. |
 | Unreadable file (gone, permissions, oversize) | The existing `failed` transport state (`IMPORT_FAILED` / `file_read`): the intent STAYS PENDING Rust-side, so `Réessayer` replays the SAME intent; `Fermer` discards it. |
 | Unsupported / invalid content | A calm CONTENT VERDICT through the existing findings envelope (`state: blocked`) — never an `AppError`, never a silent redirect: the refused file gets a VISIBLE recognition report. |
 
@@ -2163,3 +2164,160 @@ arriving during an edit session lets the editor unmount through its normal
 flush; an intent arriving during a live flow is refused without touching
 that flow; the intent is consumed one-shot Rust-side (no double
 processing).
+
+## Drop Intent Contract
+
+Dropping a supported file or folder ON THE RUSTORY WINDOW (native
+drag-and-drop) delivers an **`intention de dépôt`** (canonical term) to the
+app — the gesture sibling of the `intention d'ouverture` above (the OS Open
+Contract is this contract's brother; cross-references are deliberate). The
+WHOLE window is the drop target: no drawn zone, no position-based routing —
+the produced context is always the library (the product's stable return
+base). Dropping a media file onto a NODE SLOT (editor) is OUTSIDE this
+contract: the media attach is slot-directed and single-phase
+(`attach_node_media`), a media drop would need a "visible before mutation"
+confirmation surface that does not exist — a dedicated deferred workstream
+(named in the deferred-work register); a dropped media meanwhile receives
+the calm content verdict below.
+
+Reception channel (ONE channel, unlike the OS-open triple):
+
+- The native window drag-drop handler is ACTIVE BY DEFAULT (Tauri v2
+  `app.windows[].dragDropEnabled` defaults to `true` — verified on the
+  vendored source of the locked versions, `tauri-utils 2.8.3`; the project
+  sets no key, `tauri.conf.json` stays untouched).
+- For a `WindowContent` webview (this project's single full-frame window),
+  wry SYNTHESIZES the webview drag-drop at the WINDOW level: the events
+  arrive at the run handler as `RunEvent::WindowEvent { event:
+  WindowEvent::DragDrop(…) }` (verified on `tauri-runtime-wry 2.10.1`, fn
+  `create_webview`; the `RunEvent::WebviewEvent` arm only concerns child
+  webviews, which do not exist here — it is NOT matched; if a platform ever
+  emitted both, the one-shot generational take would absorb the duplicate).
+- Frontier glue (thin, zero decision): `Enter { paths }` (non-empty) emits
+  the `drop:hover` signal; `Leave` emits `drop:hover-ended`; `Drop { paths }`
+  emits `drop:hover-ended` THEN offers the paths to the intent state and,
+  if an intent results, emits `drop:requested` (a failed emission is traced
+  to the local import log — the intent stays pending, served by the next
+  library-mount pull); `Over` is IGNORED (a high-frequency stream, never
+  relayed). `Leave` is NOT guaranteed after a `Drop` on every platform —
+  hence the hover-ended emission on `Drop` too, and the frontend closes the
+  overlay on `requested` as well (idempotent, belt and braces).
+- NO window wake: unlike the OS-open channels (whose gestures can target a
+  hidden instance), a drop lands on a window that is visible and frontal by
+  definition of the gesture — no `unminimize`/`show`/`set_focus`.
+
+**Framework observation (documented, not simulated):** while the native
+handler is active, Tauri ITSELF emits the built-in JS events
+`tauri://drag-enter`, `tauri://drag-over`, `tauri://drag-drop`,
+`tauri://drag-leave` toward the webview, payload INCLUDING the absolute
+paths (verified on `tauri 2.10.3`, `manager/window.rs`) — not separately
+disableable from `dragDropEnabled`. The "the path never crosses the
+boundary" doctrine therefore reads, for THIS channel, as a
+NON-CONSUMPTION DISCIPLINE: the frontend NEVER listens to any
+`tauri://drag-*` event (no `listen("tauri://drag-…")` anywhere in `src/` —
+enforced by a repo-wide sweep), the only signals consumed are the three
+EMPTY events below, and the verdict is pulled by command (basename only,
+the PII discipline of the import contracts).
+
+Intent state (Rust-owned, one-shot, ITS OWN slot):
+
+- The dropped paths are held Rust-side in a DEDICATED slot
+  (`drop_intent.rs`), NEVER shared with the OS-open intent slot: a drop
+  never replaces a pending open intent and vice versa — each channel has
+  its own state, its own frontend mono-slot queue, its own commands; the
+  arbitration happens at the library gates (calm cross-refusal), never by
+  silently overwriting another gesture's intent. The slot duplicates the
+  `PendingSlot` + monotonic-generation + compare-and-take pattern of the
+  OS Open Contract LOCALLY (the generic extraction waits for a third
+  channel, per project rule).
+- Offering has NO argv semantics (the paths come from the native
+  drag-drop, absolute and clean): no cwd resolution, no `-`-prefix
+  filtering (a dropped file named `-histoire.rustory` is a legitimate
+  candidate), no `file://` conversion. Only EMPTY paths are discarded;
+  0 candidates → no-op (a pending intent survives); 1 → an item intent;
+  ≥ 2 → a `multipleItems` intent (NO partial processing). A newer offer
+  REPLACES a pending one (the user's last gesture wins — WITHIN this
+  channel only), under a fresh generation.
+- The three signals are EMPTY versionable objects (`{}`): `drop:hover`,
+  `drop:hover-ended`, `drop:requested`. They carry NO path, NO count, NO
+  kind — the overlay and the pull do the rest.
+- The frontend PULLS the verdict by command (`analyze_drop_request`) —
+  once at library mount (a dormant intent follows the cold-start regime)
+  and on each `drop:requested` signal, SERIALIZED through a DEDICATED
+  frontend mono-slot queue (the channel never gates on its OWN settling —
+  it serializes through its queue; the OS-open queue is a separate one).
+  The listener registration is handshaked exactly like the OS-open events
+  (one catch-up pull once the registration settles — a `none` answer is a
+  total no-op). `discard_drop_request` drops the pending intent
+  (idempotent). Explicit terminal gestures (`Fermer` / `Abandonner`) are
+  TERMINAL: they discard the pending intent AND invalidate (epoch) any
+  settlement still in flight — a closed flow never resurrects.
+
+Routing — by the TYPE of the dropped element, INTO THE EXISTING flows:
+
+- Classification happens at ANALYSIS time (not at drop time) via
+  `fs::metadata` (which follows symlinks, like a picker would — the
+  no-follow hardening joins the known "no-follow parity" workstream):
+  - **regular file** → `read_artifact_bounded` (8 MiB cap, FIFO/device
+    refusal, TOCTOU re-check — VERBATIM) + `analyze_artifact` (same
+    `is_supported_artifact_source_name` authority, same findings — a
+    media/`.zip`/`.txt` falls into the calm envelope verdict) → the
+    verdict feeds the SAME import review machine as the Local Artifact
+    Import Contract and the OS Open Contract; acceptance is the
+    UNCHANGED `accept_artifact_import`.
+  - **folder** → UTF-8 path required (the wire round-trip to the accept —
+    otherwise the honest `non_filesystem_path` refusal of the folder flow,
+    the picker's exact error) + `analyze_structured_folder` VERBATIM → the
+    verdict feeds the SAME folder-creation review machine as the
+    Structured Folder Creation Contract — the drop replaces the
+    picker, NOTHING else changes; the carried `folderPath` reuses that
+    contract's doctrine unchanged (round-trip only, never
+    rendered/persisted/logged, zero authority — the accept re-analyzes
+    from zero); acceptance is the UNCHANGED `accept_structured_creation`.
+  - **missing / special file** → the existing `file_read` transport regime;
+    the intent STAYS PENDING (`Réessayer` replays the SAME intent).
+  - A settlement for a SUPERSEDED generation (a newer drop landed
+    mid-read) is DROPPED and the newest intent re-served; a `discard`
+    landing mid-read settles as `none`. The verdict and the multi-item
+    limit CONSUME the intent (compare-and-take); transport does not.
+- No new route, no new pipeline, no new verdict, no new copy: the landing
+  screen is `/library` (`replace` navigation — the intent must not trap
+  the back button; an editor left this way unmounts through its NORMAL
+  lifecycle, autosave flush included), and the reviews render EXACTLY as
+  their contracts describe. The pull itself is SILENT: no transient
+  `analyzing` state renders (a `none` answer leaves zero visual trace) —
+  a verdict lands DIRECTLY in `review`, an unreadable element directly in
+  `failed`.
+
+Hover overlay (feedback, not a surface):
+
+- A GLOBAL overlay (mounted app-level by the shell, above the routed
+  outlet) renders while a drag hovers the window: frozen copy
+  `Dépose ton fichier ou ton dossier pour l'analyser` (honest — the drop
+  triggers an ANALYSIS, never a direct import), `aria-hidden="true"` (the
+  visual feedback of a mouse gesture in progress; the VERDICTS announce
+  through the live regions), `pointer-events: none` (the drop is captured
+  natively by the webview — the overlay is purely decorative), no stolen
+  focus. Closed on `drop:hover-ended` AND on `drop:requested` (idempotent).
+  No "busy" hover variant (the refusal falls at the drop; one decision,
+  one test); not a design-system component (the 3-occurrence rule).
+
+Closed flow states:
+
+| Situation | Behavior |
+| --- | --- |
+| No pending intent (`none`) | TOTAL silent no-op — nothing renders, nothing announces. |
+| Dropped regular file | The existing import machine (Local Artifact Import Contract): analysis → recognition report (sourceName + verdict) → explicit accept — a media/archive/unknown file gets the calm envelope verdict, never a half-treatment. |
+| Dropped folder | The existing folder-creation machine (Structured Folder Creation Contract): analysis → `Création depuis un dossier` review → `Créer l'histoire` — a folder without a readable manifest gets the calm folder envelope verdict. |
+| Several elements in one gesture (`multipleItems`) | Calm named limit: the Rust-carried frozen copy renders VERBATIM inline in the library, `role="status"` — NOTHING is processed (neither the first nor the rest). |
+| A library flow is busy (import / creation — the primary title submission included — / RSS / transfer in flight / an OS-open settlement in flight) | Calm refusal: the frontend-frozen busy copy renders inline (`role="status"`) and the intent is DISCARDED — the living flow is NEVER interrupted. The refusal applies to an intent ARRIVING WARM (signal); a dormant intent re-served by the library-mount pull follows the cold-start regime. The cross-channel exclusion is DELIBERATELY ASYMMETRIC: the OS-open busy gate covers the drop channel whenever it is ACTIVE (a drop settlement in flight OR a displayed drop-fed surface — a drop verdict is a consumed one-shot, a dropped folder has no reopenable file, so it must never be silently replaced), while the drop gate covers a settling OS-open READ only — a displayed OS-open review stays replaceable by a newer gesture (the surfaces' "last gesture wins" doctrine, the OS Open Contract behavior unchanged: a double-clickable file can simply be reopened). NEITHER channel gates on its own settling (each serializes through its own queue). |
+| Unreadable element (gone, permissions, oversize, special file) | The existing `failed` transport state (`IMPORT_FAILED` / `file_read`): the intent STAYS PENDING Rust-side, so `Réessayer` replays the SAME intent; `Fermer` discards it. |
+| Unsupported / invalid content | A calm CONTENT VERDICT through the existing findings envelopes (file: import findings; folder: folder findings) — never an `AppError`, never a silent redirect. |
+
+Non-corruption (AC1/AC2, by construction): both analyses are PURE (zero
+mutation before the UNCHANGED accepts); a drop arriving during an edit
+session lets the editor unmount through its normal flush (the `replace`
+navigation to the library); a drop arriving during a live flow is refused
+without touching that flow; the intent is consumed one-shot Rust-side (no
+double processing); a `Partiellement exploitable` verdict is named as such
+by the unchanged machines — never presented as a full success.

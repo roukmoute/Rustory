@@ -733,3 +733,58 @@ export function isStructuredCreationAnalysis(
   }
   return true;
 }
+
+// ===== Drop channel (a file or folder dropped on the window) =====
+//
+// Mirror of `src-tauri/src/ipc/dto/import_export.rs::DropAnalysisDto`. The
+// `artifact` variant COMPOSES the exact field set of the dialog-import
+// `analyzed` verdict and the `folder` variant the exact field set of the
+// picker folder `analyzed` verdict (same keys, same coherence rules — the
+// existing guards validate both, modulo the tag); `none` is the total
+// silent no-op; `multipleItems` carries the Rust-frozen calm-limit copy,
+// rendered verbatim.
+
+/** Tagged outcome of `analyze_drop_request`. A transport failure (the
+ *  dropped element became unreadable) rejects with a normalized `AppError`
+ *  instead — the intent then STAYS pending Rust-side so a retry can
+ *  replay it. */
+export type DropAnalysis =
+  | { kind: "none" }
+  | { kind: "multipleItems"; message: string }
+  | ({ kind: "artifact" } & Omit<
+      Extract<ImportArtifactAnalysis, { kind: "analyzed" }>,
+      "kind"
+    >)
+  | ({ kind: "folder" } & Omit<
+      Extract<StructuredCreationAnalysis, { kind: "analyzed" }>,
+      "kind"
+    >);
+
+/**
+ * Runtime guard for a [`DropAnalysis`] payload. Fail-closed: the
+ * `multipleItems` copy must be non-empty (a calm limit with no words would
+ * render an empty status region), and the `artifact` / `folder` variants
+ * are validated by the SAME dialog-import / picker-folder guards
+ * (structural identity through a re-tag — never a re-typed sibling check).
+ */
+export function isDropAnalysis(value: unknown): value is DropAnalysis {
+  if (typeof value !== "object" || value === null) return false;
+  const c = value as Record<string, unknown>;
+  if (c.kind === "none") {
+    return Object.keys(c).length === 1;
+  }
+  if (c.kind === "multipleItems") {
+    return (
+      Object.keys(c).length === 2 &&
+      typeof c.message === "string" &&
+      c.message.length > 0
+    );
+  }
+  if (c.kind === "artifact") {
+    return isImportArtifactAnalysis({ ...c, kind: "analyzed" });
+  }
+  if (c.kind === "folder") {
+    return isStructuredCreationAnalysis({ ...c, kind: "analyzed" });
+  }
+  return false;
+}
