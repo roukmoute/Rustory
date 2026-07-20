@@ -273,10 +273,19 @@ jobs:
       # The committed tauri.conf.json deliberately does NOT carry
       # createUpdaterArtifacts (a local build must stay possible without
       # any key — docs/release-runbook.md). The release build alone
-      # enables it, through this NEVER-committed overlay file.
+      # enables it, through this NEVER-committed overlay file. The
+      # overlay must also carry the real public key: the bundler refuses
+      # to produce updater artifacts against the neutral shell's empty
+      # pubkey ("Missing comment in public key"), and the runtime keeps
+      # reading the compile-time key regardless of this config value.
       - name: Enable updater artifacts (release overlay)
         shell: bash
-        run: printf '{"bundle":{"createUpdaterArtifacts":true}}' > src-tauri/updater-overlay.json
+        env:
+          RUSTORY_UPDATER_PUBKEY: ${{ vars.RUSTORY_UPDATER_PUBKEY }}
+        run: |
+          jq -n --arg pubkey "$RUSTORY_UPDATER_PUBKEY" \
+            '{bundle: {createUpdaterArtifacts: true}, plugins: {updater: {pubkey: $pubkey}}}' \
+            > src-tauri/updater-overlay.json
 
       # The ONLY step that sees the signing secrets (and the only
       # third-party action that does) — pinned to an audited commit SHA
