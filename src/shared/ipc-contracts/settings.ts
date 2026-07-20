@@ -673,3 +673,342 @@ export function isUpdateAvailability(
     c.notice === UPDATE_NOTICES[c.status]
   );
 }
+
+// ===== Update apply (the `Update Apply Contract`) =====
+//
+// Mirror of the update-apply DTOs and `update:*` event payloads of
+// `src-tauri/src/ipc/dto/settings.rs` + `src-tauri/src/ipc/events.rs`.
+// Rust alone decides the plan, drives the gesture and carries every
+// copy; the guards refuse a drifted wire shape so the gesture zone
+// never renders against an arbitrary object. The commands are
+// INFALLIBLE by contract: refusals are STATES of the payloads — the
+// only facade-side rejection is a contract drift.
+
+/** Closed set of the manual-plan reasons of the gesture gate. */
+export type UpdateApplyManualReason =
+  | "development_build"
+  | "unofficial_install"
+  | "package_manager_owned"
+  | "channel_unproven"
+  | "trust_chain_not_configured";
+
+/** The read gesture plan: integrated (this copy may install updates) or
+ *  manual with its frozen reason; the Rust-carried couple renders
+ *  VERBATIM. `reason` is present IFF manual. */
+export interface UpdateApplyPlan {
+  mode: "integrated" | "manual";
+  reason?: UpdateApplyManualReason;
+  headline: string;
+  guidance: string;
+}
+
+/** Closed set of the phases of a gesture in flight. */
+export type UpdateApplyPhaseTag = "checking" | "downloading" | "installing";
+
+/** Closed set of the failure stages of the gesture. */
+export type UpdateApplyFailureStageTag =
+  | "feed"
+  | "not_applicable"
+  | "download"
+  | "verification"
+  | "install";
+
+/** The read SESSION state of the gesture — the authoritative re-read
+ *  the zone always trusts over events. Strict omission discipline:
+ *  `jobId`/`phase`/`percent` exist IFF running, `stage` IFF failed, the
+ *  copies IFF the state carries any. `jobId` makes a live flight
+ *  recoverable from the re-read alone (renderer reload, lost local
+ *  tracking): the zone re-attaches its event subscription to it. */
+export interface UpdateApplyState {
+  status: "idle" | "running" | "readyToRestart" | "failed";
+  jobId?: string;
+  phase?: UpdateApplyPhaseTag;
+  percent?: number;
+  stage?: UpdateApplyFailureStageTag;
+  headline?: string;
+  notice?: string;
+}
+
+/** The start decision: a refusal is a STATE, never an error. `jobId`
+ *  is present IFF started. */
+export interface StartUpdateApplyOutcome {
+  outcome: "started" | "alreadyRunning" | "notEligible";
+  jobId?: string;
+}
+
+/** `update:progress` payload — SAMPLED transitions of the gesture in
+ *  flight; `percent` present IFF a reliable integer fraction is known. */
+export interface UpdateApplyProgressEvent {
+  jobId: string;
+  phase: UpdateApplyPhaseTag;
+  percent?: number;
+  sequence: number;
+}
+
+/** `update:completed` payload — the successful terminal (applied,
+ *  restart pending as a USER gesture). */
+export interface UpdateApplyCompletedEvent {
+  jobId: string;
+  sequence: number;
+}
+
+/** `update:failed` payload — the failure terminal with its closed stage
+ *  and Rust-carried copies. */
+export interface UpdateApplyFailedEvent {
+  jobId: string;
+  sequence: number;
+  stage: UpdateApplyFailureStageTag;
+  headline: string;
+  notice: string;
+}
+
+/** The frozen plan couples (headline, guidance) — VALIDATION literals
+ *  only (the rendering keeps the Rust-carried values): `integrated`
+ *  plus one couple per manual reason. */
+const APPLY_PLAN_COUPLES: Readonly<
+  Record<"integrated" | UpdateApplyManualReason, readonly [string, string]>
+> = {
+  integrated: [
+    "Cette copie peut installer les mises à jour de Rustory.",
+    "Le téléchargement vérifie l'authenticité de la mise à jour avant de l'installer.",
+  ],
+  development_build: [
+    "La mise à jour intégrée n'est pas disponible pour un build de développement.",
+    "Reconstruis Rustory depuis les sources pour obtenir la dernière version.",
+  ],
+  unofficial_install: [
+    "La mise à jour intégrée n'est pas disponible pour cette copie.",
+    "Cette copie n'est pas passée par un canal de distribution officiel. La page officielle des versions reste disponible : github.com/roukmoute/Rustory/releases.",
+  ],
+  package_manager_owned: [
+    "La mise à jour de Rustory passe par ton gestionnaire de paquets.",
+    "Cette copie a été installée comme paquet système : mets-la à jour avec l'outil de ton système, puis relance Rustory.",
+  ],
+  channel_unproven: [
+    "La mise à jour intégrée n'est pas encore disponible pour cette installation.",
+    "Rustory ne peut pas confirmer le canal de cette copie. La page officielle des versions reste disponible : github.com/roukmoute/Rustory/releases.",
+  ],
+  trust_chain_not_configured: [
+    "La mise à jour intégrée n'est pas encore activée pour cette copie.",
+    "Cette copie ne peut pas vérifier l'authenticité des mises à jour. La page officielle des versions reste disponible : github.com/roukmoute/Rustory/releases.",
+  ],
+};
+
+/** The frozen phase → running-headline couples. */
+const APPLY_RUNNING_HEADLINES: Readonly<Record<UpdateApplyPhaseTag, string>> = {
+  checking: "Vérification de la mise à jour en cours…",
+  downloading: "Téléchargement de la mise à jour en cours…",
+  installing: "Installation de la mise à jour en cours…",
+};
+
+/** The frozen COMMON running notice. */
+const APPLY_RUNNING_NOTICE =
+  "Tu peux continuer à utiliser Rustory pendant cette opération.";
+
+/** The frozen ready-to-restart couple. */
+const APPLY_READY_COUPLE: readonly [string, string] = [
+  "La mise à jour de Rustory est prête.",
+  "Redémarre Rustory pour terminer l'installation. Ton travail local reste en place.",
+];
+
+/** The frozen stage → (headline, notice) couples of a failed gesture. */
+const APPLY_FAILED_COUPLES: Readonly<
+  Record<UpdateApplyFailureStageTag, readonly [string, string]>
+> = {
+  feed: [
+    "Le canal de mise à jour n'a pas répondu.",
+    "Rustory reste sur sa version actuelle. Réessaie plus tard ; la page officielle des versions reste disponible : github.com/roukmoute/Rustory/releases.",
+  ],
+  not_applicable: [
+    "La mise à jour n'est pas encore proposée pour cette installation.",
+    "La nouvelle version n'est pas encore publiée sur le canal de mise à jour de cette copie. La page officielle des versions reste disponible : github.com/roukmoute/Rustory/releases.",
+  ],
+  download: [
+    "Le téléchargement de la mise à jour n'a pas abouti.",
+    "Rustory reste sur sa version actuelle. Vérifie ta connexion, puis réessaie.",
+  ],
+  verification: [
+    "L'authenticité de la mise à jour n'a pas pu être confirmée.",
+    "Rien n'a été installé : Rustory reste sur sa version actuelle. Réessaie plus tard ; la page officielle des versions reste disponible : github.com/roukmoute/Rustory/releases.",
+  ],
+  install: [
+    "L'installation de la mise à jour n'a pas abouti.",
+    "Ta version actuelle de Rustory reste en place et utilisable. Réessaie, ou passe par la page officielle des versions : github.com/roukmoute/Rustory/releases.",
+  ],
+};
+
+/** Closed-table membership WITHOUT consulting the prototype chain: an
+ *  inherited key (`constructor`, `toString`, `__proto__`…) must be
+ *  refused as an IPC drift, never resolved into a prototype value that
+ *  would then crash the couple destructuring. */
+function hasOwnKey<T extends object>(
+  table: T,
+  key: unknown,
+): key is keyof T & string {
+  return (
+    typeof key === "string" &&
+    Object.prototype.hasOwnProperty.call(table, key)
+  );
+}
+
+function isUpdateApplyPhaseTag(value: unknown): value is UpdateApplyPhaseTag {
+  return hasOwnKey(APPLY_RUNNING_HEADLINES, value);
+}
+
+function isUpdateApplyFailureStageTag(
+  value: unknown,
+): value is UpdateApplyFailureStageTag {
+  return hasOwnKey(APPLY_FAILED_COUPLES, value);
+}
+
+/** An integer 0..=100 — the only percent the wire may carry. */
+function isWirePercent(value: unknown): value is number {
+  return (
+    typeof value === "number" &&
+    Number.isInteger(value) &&
+    value >= 0 &&
+    value <= 100
+  );
+}
+
+/** A strictly-typed wire sequence: a non-negative integer. */
+function isWireSequence(value: unknown): value is number {
+  return typeof value === "number" && Number.isInteger(value) && value >= 0;
+}
+
+/**
+ * Runtime guard for an [`UpdateApplyPlan`] payload, both ways: closed
+ * mode set, `reason` present IFF manual (from the closed reason set),
+ * and the (headline, guidance) couple locked byte-for-byte on the
+ * frozen couple of the mode/reason — a drifted copy never renders as
+ * authoritative.
+ */
+export function isUpdateApplyPlan(value: unknown): value is UpdateApplyPlan {
+  if (typeof value !== "object" || value === null) return false;
+  const c = value as Record<string, unknown>;
+  if (c.mode === "integrated") {
+    if (c.reason !== undefined) return false;
+    const [headline, guidance] = APPLY_PLAN_COUPLES.integrated;
+    return c.headline === headline && c.guidance === guidance;
+  }
+  if (c.mode !== "manual") return false;
+  if (!hasOwnKey(APPLY_PLAN_COUPLES, c.reason)) {
+    return false;
+  }
+  if (c.reason === "integrated") return false;
+  const [headline, guidance] =
+    APPLY_PLAN_COUPLES[c.reason as UpdateApplyManualReason];
+  return c.headline === headline && c.guidance === guidance;
+}
+
+/**
+ * Runtime guard for an [`UpdateApplyState`] payload, both ways: closed
+ * status set, strict omission discipline per status (`phase`/`percent`
+ * IFF running, `stage` IFF failed, copies IFF the state carries any),
+ * integer percent, and every copy locked on its frozen couple.
+ */
+export function isUpdateApplyState(value: unknown): value is UpdateApplyState {
+  if (typeof value !== "object" || value === null) return false;
+  const c = value as Record<string, unknown>;
+  switch (c.status) {
+    case "idle":
+      return (
+        c.jobId === undefined &&
+        c.phase === undefined &&
+        c.percent === undefined &&
+        c.stage === undefined &&
+        c.headline === undefined &&
+        c.notice === undefined
+      );
+    case "running": {
+      // A live flight is ALWAYS correlatable: the Rust session mints the
+      // id atomically with the single-flight claim — a running state
+      // without one is a drift, never a surface to render.
+      if (typeof c.jobId !== "string" || c.jobId.length === 0) return false;
+      if (!isUpdateApplyPhaseTag(c.phase)) return false;
+      if (c.percent !== undefined && !isWirePercent(c.percent)) return false;
+      if (c.stage !== undefined) return false;
+      return (
+        c.headline === APPLY_RUNNING_HEADLINES[c.phase] &&
+        c.notice === APPLY_RUNNING_NOTICE
+      );
+    }
+    case "readyToRestart":
+      return (
+        c.jobId === undefined &&
+        c.phase === undefined &&
+        c.percent === undefined &&
+        c.stage === undefined &&
+        c.headline === APPLY_READY_COUPLE[0] &&
+        c.notice === APPLY_READY_COUPLE[1]
+      );
+    case "failed": {
+      if (!isUpdateApplyFailureStageTag(c.stage)) return false;
+      if (
+        c.jobId !== undefined ||
+        c.phase !== undefined ||
+        c.percent !== undefined
+      ) {
+        return false;
+      }
+      const [headline, notice] = APPLY_FAILED_COUPLES[c.stage];
+      return c.headline === headline && c.notice === notice;
+    }
+    default:
+      return false;
+  }
+}
+
+/**
+ * Runtime guard for a [`StartUpdateApplyOutcome`] payload: closed
+ * outcome set, `jobId` a non-empty string present IFF started.
+ */
+export function isStartUpdateApplyOutcome(
+  value: unknown,
+): value is StartUpdateApplyOutcome {
+  if (typeof value !== "object" || value === null) return false;
+  const c = value as Record<string, unknown>;
+  if (c.outcome === "started") {
+    return typeof c.jobId === "string" && c.jobId.length > 0;
+  }
+  if (c.outcome !== "alreadyRunning" && c.outcome !== "notEligible") {
+    return false;
+  }
+  return c.jobId === undefined;
+}
+
+/** Runtime guard for an `update:progress` payload. */
+export function isUpdateApplyProgressEvent(
+  value: unknown,
+): value is UpdateApplyProgressEvent {
+  if (typeof value !== "object" || value === null) return false;
+  const c = value as Record<string, unknown>;
+  if (typeof c.jobId !== "string" || c.jobId.length === 0) return false;
+  if (!isUpdateApplyPhaseTag(c.phase)) return false;
+  if (c.percent !== undefined && !isWirePercent(c.percent)) return false;
+  return isWireSequence(c.sequence);
+}
+
+/** Runtime guard for an `update:completed` payload. */
+export function isUpdateApplyCompletedEvent(
+  value: unknown,
+): value is UpdateApplyCompletedEvent {
+  if (typeof value !== "object" || value === null) return false;
+  const c = value as Record<string, unknown>;
+  if (typeof c.jobId !== "string" || c.jobId.length === 0) return false;
+  return isWireSequence(c.sequence);
+}
+
+/** Runtime guard for an `update:failed` payload — the (headline,
+ *  notice) couple is locked on the frozen couple of its stage. */
+export function isUpdateApplyFailedEvent(
+  value: unknown,
+): value is UpdateApplyFailedEvent {
+  if (typeof value !== "object" || value === null) return false;
+  const c = value as Record<string, unknown>;
+  if (typeof c.jobId !== "string" || c.jobId.length === 0) return false;
+  if (!isWireSequence(c.sequence)) return false;
+  if (!isUpdateApplyFailureStageTag(c.stage)) return false;
+  const [headline, notice] = APPLY_FAILED_COUPLES[c.stage];
+  return c.headline === headline && c.notice === notice;
+}

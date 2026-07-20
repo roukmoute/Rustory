@@ -30,6 +30,17 @@ tauri-plugin-dialog = "=2.7.0"
 # stack (zbus already in the tree), Windows rides windows-sys (already
 # present).
 tauri-plugin-single-instance = "2"
+# Official Tauri updater for the user-triggered update gesture (`Update
+# Apply Contract`). Rust-side ONLY: no npm companion, no capability (the
+# renderer never invokes the plugin — everything rides our commands).
+# `default-features = false` is MANDATORY: the plugin defaults to
+# `rustls-tls`, and the CI TLS constraint (system OpenSSL via native-tls,
+# no cmake — see the reqwest block below) applies to it like to every
+# networked dep. `zip` stays on: it carries the updater-archive
+# extraction, pure Rust. The plugin brings its own async reqwest 0.13,
+# which COEXISTS with the product's pinned blocking 0.12 (two distinct
+# majors) — the lock cortege is expected and bounded to this plugin.
+tauri-plugin-updater = { version = "=2.10.1", default-features = false, features = ["native-tls", "zip"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 rusqlite = { version = "=0.32", features = ["bundled"] }

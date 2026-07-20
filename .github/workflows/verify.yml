@@ -1,8 +1,10 @@
 name: Verify
 
-# Verification-only pipeline. Release / multi-OS matrix / updater workflows
-# are intentionally deferred — see `docs/release-runbook.md` for the current
-# manual-delivery posture.
+# Verification-only pipeline. The release chain lives next door:
+# `build-release.yml` (signed multi-OS drafts on a version tag) and
+# `promote-release.yml` (human-gated feed promotion) — see
+# `docs/release-runbook.md` for their activation status (manual delivery
+# remains the posture until the signing chain is provisioned).
 
 on:
   push:

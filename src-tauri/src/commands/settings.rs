@@ -10,19 +10,32 @@
 use std::path::Path;
 use std::time::Duration;
 
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 
-use crate::application::update::{ensure_update_availability, UpdateCheckMemo};
+use crate::application::update::{
+    ensure_update_availability, run_update_apply_supervised, StartUpdateApplyOutcome,
+    UpdateApplyEventEmitter, UpdateCheckMemo,
+};
 use crate::domain::device::official_device_support_matrix;
 use crate::domain::import::official_local_artifacts;
 #[cfg(not(target_os = "linux"))]
 use crate::domain::import::LinuxInstallKind;
 #[cfg(target_os = "linux")]
 use crate::domain::import::{classify_linux_install, LinuxInstallKind, LINUX_PACKAGE_MIME_XML};
-use crate::domain::update::{decide_update_check, parse_release_version, UpdateCheckDecision};
+use crate::domain::update::{
+    decide_update_apply, decide_update_check, parse_release_version, UpdateApplyFailureStage,
+    UpdateApplyMode, UpdateApplyPhase, UpdateApplyState, UpdateCheckDecision,
+};
 use crate::infrastructure::diagnostics::update_log;
 use crate::infrastructure::updates::UpdateReleaseSource;
-use crate::ipc::dto::settings::{SupportProfileDto, UpdateAvailabilityDto};
+use crate::ipc::dto::settings::{
+    StartUpdateApplyDto, SupportProfileDto, UpdateApplyPlanDto, UpdateApplyStateDto,
+    UpdateAvailabilityDto,
+};
+use crate::ipc::events::{
+    UpdateApplyCompletedEvent, UpdateApplyFailedEvent, UpdateApplyProgressEvent,
+    EVENT_UPDATE_COMPLETED, EVENT_UPDATE_FAILED, EVENT_UPDATE_PROGRESS,
+};
 
 /// Wall-clock budget of the whole update-availability consultation,
 /// connection to last body byte (`Update Availability Contract`).
@@ -174,10 +187,181 @@ pub async fn read_update_availability(app: tauri::AppHandle) -> UpdateAvailabili
     })
 }
 
+/// The trust chain as a COMPILATION fact of this binary: the updater
+/// public key embedded through `option_env!` (never `env!` — a keyless
+/// local build must compile), configured IFF present and non-empty
+/// after trim (an empty build variable = NOT configured — fail-closed).
+fn trust_chain_configured() -> bool {
+    option_env!("RUSTORY_UPDATER_PUBKEY")
+        .map(|value| !value.trim().is_empty())
+        .unwrap_or(false)
+}
+
+/// Resolve THIS copy's gesture plan, SHORT-CIRCUITING the install probe
+/// on a development build (the `resolve_update_check_decision` pattern:
+/// the probe closure must never run there). Kept separate (probe
+/// injected) so the short-circuit is unit-provable without a Tauri
+/// runtime. Re-run at EVERY start — the frontend is never trusted.
+fn resolve_update_apply_mode(
+    is_debug_build: bool,
+    probe: impl FnOnce() -> Option<LinuxInstallKind>,
+    trust_chain_configured: bool,
+) -> UpdateApplyMode {
+    if is_debug_build {
+        return decide_update_apply(true, None, trust_chain_configured);
+    }
+    decide_update_apply(false, probe(), trust_chain_configured)
+}
+
+/// Tauri implementation of the update-apply event sink: the only place
+/// that constructs `update:*` payloads and calls `AppHandle::emit`.
+/// Best-effort by contract (a dropped event surfaces via the
+/// authoritative re-read).
+struct TauriUpdateApplyEmitter {
+    app: tauri::AppHandle,
+}
+
+impl UpdateApplyEventEmitter for TauriUpdateApplyEmitter {
+    fn progress(&self, job_id: &str, phase: UpdateApplyPhase, percent: Option<u8>, sequence: u64) {
+        let _ = self.app.emit(
+            EVENT_UPDATE_PROGRESS,
+            UpdateApplyProgressEvent {
+                job_id: job_id.to_string(),
+                phase: phase.wire_tag().to_string(),
+                percent,
+                sequence,
+            },
+        );
+    }
+
+    fn completed(&self, job_id: &str, sequence: u64) {
+        let _ = self.app.emit(
+            EVENT_UPDATE_COMPLETED,
+            UpdateApplyCompletedEvent {
+                job_id: job_id.to_string(),
+                sequence,
+            },
+        );
+    }
+
+    fn failed(
+        &self,
+        job_id: &str,
+        sequence: u64,
+        stage: UpdateApplyFailureStage,
+        headline: &str,
+        notice: &str,
+    ) {
+        let _ = self.app.emit(
+            EVENT_UPDATE_FAILED,
+            UpdateApplyFailedEvent {
+                job_id: job_id.to_string(),
+                sequence,
+                stage: stage.token().to_string(),
+                headline: headline.to_string(),
+                notice: notice.to_string(),
+            },
+        );
+    }
+}
+
+/// Read THIS copy's gesture plan (`Update Apply Contract`). INFAILLIBLE
+/// and PURE: the domain decision fed by `cfg!(debug_assertions)` (the
+/// short-circuit), the EXISTING install probe reused as-is (and never
+/// consulted on a dev build) and the compile-time trust-chain fact —
+/// zero network, zero lock, zero DB.
+#[tauri::command]
+pub fn read_update_apply_plan(app: tauri::AppHandle) -> UpdateApplyPlanDto {
+    let mode = resolve_update_apply_mode(
+        cfg!(debug_assertions),
+        || probe_current_install(&app),
+        trust_chain_configured(),
+    );
+    UpdateApplyPlanDto::from_mode(mode)
+}
+
+/// Read the gesture's SESSION state (`Update Apply Contract`) — the
+/// authoritative re-read the zone always trusts over events.
+/// INFAILLIBLE: a snapshot of the session mutex, serialized purely.
+#[tauri::command]
+pub fn read_update_apply_state(state: tauri::State<'_, crate::AppState>) -> UpdateApplyStateDto {
+    UpdateApplyStateDto::from_snapshot(state.update_apply_session.snapshot())
+}
+
+/// Start ONE update-apply gesture (`Update Apply Contract`). INFAILLIBLE
+/// — the refusal is a STATE of the DTO (`alreadyRunning` /
+/// `notEligible`), never a wire error. The plan is RE-DECIDED here,
+/// Rust-side (fail-closed — the frontend is never trusted); an accepted
+/// start claims the session single-flight atomically, answers
+/// IMMEDIATELY with the job id, and runs the worker on a
+/// `spawn_blocking` thread (the async plugin is driven to completion
+/// INSIDE that worker — never on the IPC thread). The worker is
+/// PANIC-SUPERVISED: a death settles the defensive `Failed` terminal
+/// instead of wedging the single-flight until the app restarts.
+#[tauri::command]
+pub async fn start_update_apply(app: tauri::AppHandle) -> StartUpdateApplyDto {
+    let mode = resolve_update_apply_mode(
+        cfg!(debug_assertions),
+        || probe_current_install(&app),
+        trust_chain_configured(),
+    );
+    let (gateway, session) = {
+        let state = app.state::<crate::AppState>();
+        (
+            state.update_apply_gateway.clone(),
+            state.update_apply_session.clone(),
+        )
+    };
+    let outcome = crate::application::update::start_update_apply(mode, &session);
+    if let StartUpdateApplyOutcome::Started { job_id } = &outcome {
+        // No diagnostics home (unresolvable app-data dir) skips the
+        // trace, never the gesture.
+        let log_path = app
+            .path()
+            .app_data_dir()
+            .ok()
+            .map(|dir| update_log::log_path_for(&dir));
+        let emitter = TauriUpdateApplyEmitter { app: app.clone() };
+        let worker_job_id = job_id.clone();
+        tauri::async_runtime::spawn_blocking(move || {
+            run_update_apply_supervised(
+                gateway.as_ref(),
+                &emitter,
+                &session,
+                log_path.as_deref(),
+                &worker_job_id,
+            );
+        });
+    }
+    StartUpdateApplyDto::from_outcome(outcome)
+}
+
+/// Restart to finish an applied update (`Update Apply Contract`). The
+/// restart is a USER gesture guarded RUST-SIDE: a silent no-op unless
+/// the session state is `ReadyToRestart` (fail-closed, whatever the
+/// frontend believed), otherwise one `update_apply_restart_requested`
+/// trace line THEN `app.restart()` — which never returns.
+#[tauri::command]
+pub fn restart_for_update(app: tauri::AppHandle, state: tauri::State<'_, crate::AppState>) {
+    if !matches!(
+        state.update_apply_session.snapshot().state,
+        UpdateApplyState::ReadyToRestart
+    ) {
+        return;
+    }
+    if let Ok(dir) = app.path().app_data_dir() {
+        let _ = update_log::record_event_at_path(
+            &update_log::log_path_for(&dir),
+            update_log::Event::UpdateApplyRestartRequested,
+        );
+    }
+    app.restart();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::update::{ReleaseProbe, UpdateCheckSkipReason};
+    use crate::domain::update::{ManualUpdateReason, ReleaseProbe, UpdateCheckSkipReason};
     use crate::infrastructure::updates::UpdateFetchStage;
     use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -273,6 +457,63 @@ mod tests {
         assert_eq!(
             resolve_update_check_decision(false, || None),
             UpdateCheckDecision::Run
+        );
+    }
+
+    // ===== Update-apply plan resolution (the gesture's gate) =====
+
+    #[test]
+    fn a_debug_build_never_consults_the_probe_for_the_apply_plan() {
+        // The contract's letter, gesture-side: a dev build decides
+        // BEFORE the probe is even consulted — the closure must not run,
+        // whatever the trust chain claims.
+        for trust in [true, false] {
+            let mut probed = false;
+            let mode = resolve_update_apply_mode(
+                true,
+                || {
+                    probed = true;
+                    Some(LinuxInstallKind::AppImage)
+                },
+                trust,
+            );
+            assert_eq!(
+                mode,
+                UpdateApplyMode::Manual {
+                    reason: ManualUpdateReason::DevelopmentBuild
+                }
+            );
+            assert!(!probed, "the probe must never run on a debug build");
+        }
+    }
+
+    #[test]
+    fn a_release_build_feeds_the_probe_verdict_to_the_apply_gate() {
+        let mut probed = false;
+        let mode = resolve_update_apply_mode(
+            false,
+            || {
+                probed = true;
+                Some(LinuxInstallKind::AppImage)
+            },
+            true,
+        );
+        assert!(probed, "a release copy decides on the probe's verdict");
+        assert_eq!(mode, UpdateApplyMode::Integrated);
+        // The stricter-than-information rule: a silent probe REFUSES the
+        // gesture (while the availability check runs on it).
+        assert_eq!(
+            resolve_update_apply_mode(false, || None, true),
+            UpdateApplyMode::Manual {
+                reason: ManualUpdateReason::ChannelUnproven
+            }
+        );
+        // And the trust chain gates the only integrated path.
+        assert_eq!(
+            resolve_update_apply_mode(false, || Some(LinuxInstallKind::AppImage), false),
+            UpdateApplyMode::Manual {
+                reason: ManualUpdateReason::TrustChainNotConfigured
+            }
         );
     }
 }

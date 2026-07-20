@@ -537,7 +537,7 @@ describe("<LibraryRoute />", () => {
       name: /collection d'histoires/i,
     });
     expect(
-      within(main).getByRole("heading", {
+      await within(main).findByRole("heading", {
         name: /ta bibliothèque est vide/i,
       }),
     ).toBeInTheDocument();

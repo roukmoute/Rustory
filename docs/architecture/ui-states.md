@@ -2345,3 +2345,26 @@ TWO read-only surfaces, nothing else:
 | Copies | Rust-carried `headline` + `notice`, rendered VERBATIM (no TS content literal beyond the `Voir les détails` button and its aria-label) — frozen in [product-language.md](./product-language.md). |
 | Forbidden | `role="alert"`, toast, modal, any blocking element, chip tone `error`/`warning`, color alone carrying the distinction, a spinner or waiting state, a retry button, an external link, any coupling of the core flow to the verdict. |
 | Offline | A failed or impossible check leaves the app fully usable: `checkUnavailable` is a calm state of the settings line, never an alarm; the library signal simply does not exist. The core flow NEVER depends on the verdict. |
+
+## Update Apply Contract
+
+The user-triggered gesture of applying an official Rustory update (see
+[device-support-profile.md#Update Apply Contract](./device-support-profile.md)
+for the mechanism, the per-copy gate and the closed failure stages). ONE
+gesture zone on `/settings`, rendered UNDER the availability status line —
+the existing header, the `Version {version}` line, the status line and the
+five-section support-profile screen all stay INTACT. Every copy beyond the
+four frontend-frozen button literals is Rust-carried and renders VERBATIM.
+
+| Aspect | Value |
+| --- | --- |
+| Existence | The zone exists IFF the session's availability verdict is `updateAvailable`. Any other verdict — or no verdict — renders NOTHING: no placeholder, no disabled button, no waiting state. |
+| Manual plan | When the copy's plan is manual (package-manager-owned, unofficial install, unproven channel, unconfigured trust chain), the zone is ONE calm `role="status"` block: the Rust-carried headline + guidance VERBATIM, and NO button — a dead CTA never renders. |
+| Integrated plan, at rest | ONE primary CTA `Mettre à jour Rustory` (frontend-frozen literal), visible ONLY because it is executable now — the button-hierarchy rule. Starting is ALWAYS a user click; mounting the zone never triggers a download. |
+| In flight | A calm progress indicator at a STABLE slot: the named phase (Rust-carried headline), a determinate bar with the integer percentage WHEN it is reliable (indeterminate otherwise), and the common notice that the app stays usable. NEVER a tunnel, never an overlay, never a blocked surface — the whole app remains usable. |
+| Ready to restart | A sober confirmation (Rust-carried headline + notice) + `Redémarrer maintenant` + `Plus tard`. `Plus tard` folds the invite into a sober consultable line — the state stays rendered, it is never re-proposed insistently, and the restart stays reachable. |
+| Failed | A calm `role="status"` message: the Rust-carried headline + notice (probable cause, impact, next gesture) VERBATIM — the manual-guidance path — plus `Réessayer la mise à jour` (a NEW gesture, full cycle). The current installation stays intact and the version line keeps naming the RUNNING version. |
+| Frontend-frozen literals | EXACTLY four: `Mettre à jour Rustory` (aria-label `Télécharger et installer la mise à jour de Rustory`), `Redémarrer maintenant` (aria-label `Redémarrer Rustory pour terminer la mise à jour`), `Plus tard`, `Réessayer la mise à jour`. Everything else renders Rust copies verbatim. |
+| Accessibility | Shared `Button` (visible focus), keyboard-sufficient on start/restart/retry, a text label on every state (color alone never carries it), progress carries a textual label consistent with the product's indicators. |
+| Forbidden | `role="alert"`, toast, modal, chip tone `error`/`warning`, color alone, auto-start of any kind, a clickable external link (the releases-page address travels as plain text), any ambiguity about the installed version (the `Version {version}` line ALWAYS names the version that runs). |
+| Offline | The gesture is an optional capability of the zone: a network failure is a calm `failed` state of the zone, never an alarm; the core flow never depends on it. |

@@ -1,0 +1,306 @@
+name: Build Release
+
+# Builds SIGNED multi-OS artifacts on a version tag and attaches them —
+# installers, updater artifacts, their .sig signatures and latest.json —
+# to a DRAFT GitHub release.
+#
+# FAIL-CLOSED BY DESIGN:
+# - the run refuses anything but a strict `vMAJOR.MINOR.PATCH` TAG ref
+#   (a workflow_dispatch from a branch, or a loose `v*` tag, can never
+#   become a release candidate), and the tag must equal the version of
+#   the three manifests — no mislabeled candidate;
+# - a tag that is ALREADY PUBLISHED never rebuilds: re-running a build
+#   would push fresh artifacts onto the live channel (latest.json
+#   included) without promote-release's checks — ship a new version,
+#   never a rewrite of the public channel;
+# - the run refuses to start when the signing secrets or the updater
+#   public key are not provisioned — no unsigned release can ever be
+#   born here;
+# - the signing secrets are exposed ONLY to the steps that need them
+#   (the presence guard and the build-and-sign step), never job-wide —
+#   third-party actions and package lifecycle scripts never see them —
+#   and the action receiving them is pinned to an audited commit SHA;
+# - a FULL verification (typecheck, tests, build, fmt, clippy) runs on
+#   the exact tagged commit BEFORE anything is signed.
+#
+# NOTHING is published automatically: a draft release is invisible to
+# `releases/latest` (and thus to the updater feed); promotion is a HUMAN
+# act through promote-release.yml, which shares this workflow's per-tag
+# concurrency lock so a build and a promotion of the same tag can never
+# overlap. See docs/release-runbook.md for the activation status and
+# docs/update-signing.md for the key lifecycle.
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+# Least privilege: only the `build` job writes (tauri-action uploads
+# the draft's assets) — `guard` and `verify` run with a read-only
+# token, so their third-party actions never hold a token able to touch
+# the repo or its releases (promote-release.yml's per-job discipline).
+permissions:
+  contents: read
+
+# Shared with promote-release.yml (same group formula): one release
+# operation per tag at a time — a promotion can never race a build.
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  guard:
+    name: Release identity guard
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Require a strict release tag ref (vMAJOR.MINOR.PATCH)
+        shell: bash
+        env:
+          REF: ${{ github.ref }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$REF" =~ ^refs/tags/v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "::error::This workflow only builds from a strict release tag (vMAJOR.MINOR.PATCH) — got '${REF}'. A branch run or a loose tag can never become a release candidate."
+            exit 1
+          fi
+
+      # `releases/tags/{tag}` only ever sees PUBLISHED releases (drafts
+      # are invisible to it): an answer means this tag already went
+      # through promotion — rebuilding it would push FRESH artifacts
+      # straight onto the live channel (latest.json included) without
+      # any of promote-release's checks re-running. A 404 is the
+      # nominal path for a fresh candidate; any other failure stays
+      # fail-closed.
+      - name: Refuse to rebuild a published tag
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${TAG}" > /dev/null 2>err.txt; then
+            echo "::error::Tag ${TAG} is already published — a published channel is never rebuilt in place; ship a NEW version instead."
+            exit 1
+          fi
+          if ! grep -qiE 'HTTP 404|Not Found' err.txt; then
+            echo "::error::Could not determine whether ${TAG} is already published:"
+            cat err.txt
+            exit 1
+          fi
+          echo "Tag ${TAG} is not published — nominal path for a fresh candidate."
+
+      - name: Refuse to build unsigned (fail-closed)
+        shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          RUSTORY_UPDATER_PUBKEY: ${{ vars.RUSTORY_UPDATER_PUBKEY }}
+        run: |
+          set -euo pipefail
+          missing=0
+          if [ -z "${TAURI_SIGNING_PRIVATE_KEY:-}" ]; then
+            echo "::error::TAURI_SIGNING_PRIVATE_KEY secret is not provisioned."
+            missing=1
+          fi
+          if [ -z "${TAURI_SIGNING_PRIVATE_KEY_PASSWORD:-}" ]; then
+            echo "::error::TAURI_SIGNING_PRIVATE_KEY_PASSWORD secret is not provisioned."
+            missing=1
+          fi
+          if [ -z "${RUSTORY_UPDATER_PUBKEY:-}" ]; then
+            echo "::error::RUSTORY_UPDATER_PUBKEY variable is not provisioned."
+            missing=1
+          fi
+          if [ "$missing" -ne 0 ]; then
+            echo "::error::No unsigned release, ever — provision the signing chain first (docs/update-signing.md)."
+            exit 1
+          fi
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Require the tag to match the three version manifests
+        shell: bash
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          expected="${TAG#v}"
+          bundle="$(python3 -c 'import json;print(json.load(open("src-tauri/tauri.conf.json"))["version"])')"
+          npm="$(python3 -c 'import json;print(json.load(open("package.json"))["version"])')"
+          cargo="$(python3 -c '
+          import re
+          block = open("src-tauri/Cargo.toml").read().split("[dependencies]")[0]
+          print(re.search(r"^version\s*=\s*\"([^\"]+)\"", block, re.M).group(1))
+          ')"
+          for pair in "tauri.conf.json:$bundle" "package.json:$npm" "Cargo.toml:$cargo"; do
+            name="${pair%%:*}"
+            found="${pair#*:}"
+            if [ "$found" != "$expected" ]; then
+              echo "::error::Tag ${TAG} does not match ${name} version ${found} — a mislabeled candidate never builds."
+              exit 1
+            fi
+          done
+          echo "Tag ${TAG} matches the three manifests (${expected})."
+
+  # The full verification pipeline on the EXACT tagged commit — nothing
+  # gets signed from a commit that does not pass what verify.yml demands
+  # of every push.
+  verify:
+    name: Full verification on the tagged commit
+    needs: guard
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Type-check
+        run: pnpm typecheck
+
+      - name: Unit & contract tests
+        run: pnpm test
+
+      - name: Production build
+        run: pnpm build
+
+      # Tauri v2 Linux build deps — mirror verify.yml exactly.
+      - name: Install Tauri Linux build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config \
+            libwebkit2gtk-4.1-dev \
+            libjavascriptcoregtk-4.1-dev \
+            libglib2.0-dev \
+            libgtk-3-dev \
+            librsvg2-dev \
+            libayatana-appindicator3-dev \
+            libxdo-dev \
+            libssl-dev \
+            build-essential
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.95.0
+          components: rustfmt, clippy
+
+      - name: Cargo cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      - name: cargo fmt --check
+        working-directory: src-tauri
+        run: cargo fmt --all -- --check
+
+      - name: cargo clippy
+        working-directory: src-tauri
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: cargo test
+        working-directory: src-tauri
+        run: cargo test --all-targets
+
+  build:
+    needs: verify
+    # The ONLY job that writes: tauri-action creates/updates the DRAFT
+    # release and uploads its assets.
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [ubuntu-24.04, windows-latest, macos-latest]
+    runs-on: ${{ matrix.platform }}
+    timeout-minutes: 90
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # Tauri v2 Linux build deps — mirror verify.yml exactly.
+      - name: Install Tauri Linux build deps
+        if: matrix.platform == 'ubuntu-24.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config \
+            libwebkit2gtk-4.1-dev \
+            libjavascriptcoregtk-4.1-dev \
+            libglib2.0-dev \
+            libgtk-3-dev \
+            librsvg2-dev \
+            libayatana-appindicator3-dev \
+            libxdo-dev \
+            libssl-dev \
+            build-essential
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.95.0
+
+      - name: Cargo cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      # The committed tauri.conf.json deliberately does NOT carry
+      # createUpdaterArtifacts (a local build must stay possible without
+      # any key — docs/release-runbook.md). The release build alone
+      # enables it, through this NEVER-committed overlay file.
+      - name: Enable updater artifacts (release overlay)
+        shell: bash
+        run: printf '{"bundle":{"createUpdaterArtifacts":true}}' > src-tauri/updater-overlay.json
+
+      # The ONLY step that sees the signing secrets (and the only
+      # third-party action that does) — pinned to an audited commit SHA
+      # of the v0 line, whose inputs were verified against its
+      # action.yml (tagName / releaseDraft / includeUpdaterJson / args).
+      - name: Build, sign and attach to a DRAFT release
+        uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5 # v0 (audited 2026-07-17)
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          # Embedded into the binaries at compile time (option_env!): the
+          # copies built here can VERIFY the signed feed — a keyless
+          # binary would fail closed into manual guidance and must never
+          # ship as an official release (the guard job enforced its
+          # presence).
+          RUSTORY_UPDATER_PUBKEY: ${{ vars.RUSTORY_UPDATER_PUBKEY }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: Rustory ${{ github.ref_name }}
+          releaseBody: >-
+            Release candidate — draft until promoted through the
+            promote-release workflow after human review.
+          releaseDraft: true
+          prerelease: false
+          includeUpdaterJson: true
+          args: --config src-tauri/updater-overlay.json

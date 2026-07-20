@@ -1077,3 +1077,87 @@ alarming) ≠ `checkNotRun` (this copy does not check — the decision table
 above). The user-facing rendering of these states belongs to
 [ui-states.md#Update Availability Contract](./ui-states.md); the frozen
 copies live in [product-language.md](./product-language.md).
+
+## Update Apply Contract
+
+Applying an official Rustory update is a GESTURE — a user-triggered
+MUTATION of the installed copy — and the strict inverse of the consultation
+above. This contract owns the gesture: its mechanism, its per-copy gate,
+its session bounds and its failure regime. The availability contract stays
+INTACT: the information verdict (public releases API) only decides WHETHER
+the gesture surface exists; the gesture itself trusts a different, signed
+authority.
+
+### Mechanism
+
+- The gesture rides the OFFICIAL Tauri updater exclusively, Rust-side only:
+  the feed is a `latest.json` manifest attached to the latest PUBLISHED
+  GitHub release
+  (`https://github.com/roukmoute/Rustory/releases/latest/download/latest.json`),
+  signed with a minisign Ed25519 key pair.
+- The PUBLIC key is embedded in the binary AT COMPILE TIME through the
+  `RUSTORY_UPDATER_PUBKEY` build variable. A build without it (or with an
+  empty value) has NO configured trust chain — fail-closed into manual
+  guidance, never a permissive default.
+- Signature verification is MANDATORY and cannot be disabled: an artifact
+  whose authenticity is not confirmed is NEVER applied. There is no
+  "install anyway" path.
+- The feed is the SINGLE authority of the gesture. The information verdict
+  never short-circuits the feed check: a published release whose manifest
+  does not (yet) cover this target is the honest "not yet offered for this
+  installation" state, never a fabricated coverage.
+
+### Decision table — which installed copy gets the integrated gesture
+
+The gate of the gesture is STRICTER than the gate of the information check
+— a deliberate, documented inverse of the public-read rule above: reading a
+public page claims nothing, but MUTATING the installation requires a PROVEN
+channel. The decision is pure, fed by the SAME Linux install probe (reused
+as-is, never a second probe), and re-decided Rust-side at every start
+(never trusting the frontend):
+
+| Installed copy | Gesture | Why |
+| --- | --- | --- |
+| PROVEN AppImage + configured trust chain (embedded public key) | ✅ integrated | The only channel the Tauri updater can mutate on Linux, with a verifiable signature path. |
+| PROVEN AppImage, NO configured trust chain | ❌ manual guidance | The copy cannot verify update authenticity: fail-closed to the releases page. |
+| PROVEN system package (`.deb` / `.rpm`) | ❌ manual guidance | The package manager owns the installation; the Tauri updater updates NO deb/rpm — Linux integrated updates are AppImage-only. |
+| PROVEN local build | ❌ manual guidance | No official distribution channel exists for this copy. |
+| SILENT probe (Windows/macOS release, an indeterminable Linux executable) | ❌ manual guidance | The channel cannot be proven, so the mutation is refused. Extending the gesture to Windows/macOS requires DEDICATED install probes — named deferred work, not a permissive default. |
+| Development build (`debug_assertions`) | ❌ never | Short-circuited BEFORE the probe is even consulted (the availability pattern); the surface does not even exist in a dev build. |
+
+A manual verdict is a CALM, DURABLE state of this copy (the
+durable-distribution-limit regime), carried with a per-reason guidance —
+never an error.
+
+### Gesture bounds
+
+- **User-triggered ONLY.** No auto-download, no silent installation, no
+  automatic restart, no periodic retry. The restart is its OWN user
+  gesture, guarded Rust-side (a no-op unless an update is ready).
+- **One gesture in flight per session** (single-flight): a running or
+  ready-to-restart gesture refuses a new start calmly; a failed gesture
+  re-opens the right to start. No cancellation (the transfer pattern);
+  closing the app abandons naturally — nothing is ever applied without a
+  complete, verified artifact.
+- **Honest progress**: an integer percentage is shown IFF the content
+  length is known; otherwise the progress is indeterminate. Never an
+  invented fraction.
+- **Failure leaves the installation INTACT.** The closed failure stages —
+  `feed` (the signed feed could not be consulted), `not_applicable` (feed
+  consulted, no update applicable to this target/version), `download`,
+  `verification` (authenticity not confirmed — nothing applied), `install`
+  (applying failed, current copy untouched) — all land on manual guidance
+  plus retry; the running version line always names the version that RUNS.
+- **No persistence.** The gesture state is session truth only: no table,
+  no migration, no dismissed-state memory. After a restart, the running
+  version IS the proof.
+
+### Delivery chain
+
+The release runbook ([release-runbook.md](../release-runbook.md)) owns the
+operational side: signed multi-OS draft builds, human promotion (publishing
+the draft is what makes the feed public), and the signing key lifecycle
+([update-signing.md](../update-signing.md)). The manual posture REMAINS the
+current posture until the signing secrets are provisioned and a release is
+built AND promoted through the workflows; activating the integrated channel
+is an OPERATOR act — the code never changes for it.

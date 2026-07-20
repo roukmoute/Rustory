@@ -73,6 +73,54 @@ pub struct DropHoverEndedEvent {}
 #[serde(rename_all = "camelCase")]
 pub struct DropRequestedEvent {}
 
+/// Wire event name: the update-apply gesture progressed (phase change or
+/// integer-percent change — SAMPLED, never one event per chunk). A
+/// DEDICATED family (`Update Apply Contract`): the `job:*` payloads carry
+/// a NON-optional `targetStoryId` and frozen contracts — the gesture (no
+/// target story) never rides them.
+pub const EVENT_UPDATE_PROGRESS: &str = "update:progress";
+/// Wire event name: the update-apply gesture reached its successful
+/// terminal (applied — restart pending as a USER gesture).
+pub const EVENT_UPDATE_COMPLETED: &str = "update:completed";
+/// Wire event name: the update-apply gesture reached its failure
+/// terminal. Carries the closed stage + the Rust-composed copies so the
+/// zone can render immediately; the authoritative truth stays the
+/// re-read.
+pub const EVENT_UPDATE_FAILED: &str = "update:failed";
+
+/// `update:progress` payload. `percent` is present IFF a reliable
+/// integer fraction is known (omitted, never `null` — the settings-wire
+/// omission discipline); `sequence` is strictly increasing per job.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateApplyProgressEvent {
+    pub job_id: String,
+    pub phase: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub percent: Option<u8>,
+    pub sequence: u64,
+}
+
+/// `update:completed` payload — the successful terminal.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateApplyCompletedEvent {
+    pub job_id: String,
+    pub sequence: u64,
+}
+
+/// `update:failed` payload — the failure terminal: the closed stage
+/// token and the Rust-carried copies, rendered verbatim by the zone.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateApplyFailedEvent {
+    pub job_id: String,
+    pub sequence: u64,
+    pub stage: String,
+    pub headline: String,
+    pub notice: String,
+}
+
 /// Stable `errorCode` carried by every preparation `job:failed` — both
 /// functional (`retryable`) and transport failures. The structured cause +
 /// blockers come from the authoritative re-read, not this label.
@@ -317,6 +365,76 @@ mod tests {
         assert_eq!(EVENT_DROP_HOVER, "drop:hover");
         assert_eq!(EVENT_DROP_HOVER_ENDED, "drop:hover-ended");
         assert_eq!(EVENT_DROP_REQUESTED, "drop:requested");
+        assert_eq!(EVENT_UPDATE_PROGRESS, "update:progress");
+        assert_eq!(EVENT_UPDATE_COMPLETED, "update:completed");
+        assert_eq!(EVENT_UPDATE_FAILED, "update:failed");
+    }
+
+    #[test]
+    fn update_progress_serializes_camel_case_and_omits_an_unknown_percent() {
+        let ev = UpdateApplyProgressEvent {
+            job_id: "j1".into(),
+            phase: "downloading".into(),
+            percent: None,
+            sequence: 2,
+        };
+        let v = serde_json::to_value(&ev).expect("ser");
+        assert_eq!(
+            v,
+            json!({
+                "jobId": "j1",
+                "phase": "downloading",
+                "sequence": 2,
+            })
+        );
+        // Omission discipline: no reliable fraction → the key is ABSENT,
+        // never `null` (the exact inverse of the job:* `progress: null`).
+        assert!(v.get("percent").is_none());
+        assert!(v.get("job_id").is_none(), "snake_case must not leak");
+    }
+
+    #[test]
+    fn update_progress_carries_the_integer_percent_when_known() {
+        let ev = UpdateApplyProgressEvent {
+            job_id: "j1".into(),
+            phase: "downloading".into(),
+            percent: Some(42),
+            sequence: 3,
+        };
+        let v = serde_json::to_value(&ev).expect("ser");
+        assert_eq!(v["percent"], 42);
+    }
+
+    #[test]
+    fn update_completed_serializes_camel_case() {
+        let ev = UpdateApplyCompletedEvent {
+            job_id: "j1".into(),
+            sequence: 9,
+        };
+        let v = serde_json::to_value(&ev).expect("ser");
+        assert_eq!(
+            v,
+            json!({
+                "jobId": "j1",
+                "sequence": 9,
+            })
+        );
+    }
+
+    #[test]
+    fn update_failed_carries_the_stage_and_the_rust_copies() {
+        let ev = UpdateApplyFailedEvent {
+            job_id: "j1".into(),
+            sequence: 4,
+            stage: "verification".into(),
+            headline: "L'authenticité de la mise à jour n'a pas pu être confirmée.".into(),
+            notice: "Rien n'a été installé.".into(),
+        };
+        let v = serde_json::to_value(&ev).expect("ser");
+        assert_eq!(v["stage"], "verification");
+        assert!(!v["headline"].as_str().expect("headline").is_empty());
+        assert!(!v["notice"].as_str().expect("notice").is_empty());
+        assert!(v.get("job_id").is_none(), "snake_case must not leak");
     }
 
     #[test]

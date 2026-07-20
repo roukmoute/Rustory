@@ -11,6 +11,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const mockReadSupportProfile = vi.fn();
 const mockReadContentSourcePolicy = vi.fn();
 const mockGetVersion = vi.fn();
+const mockReadUpdateApplyPlan = vi.fn();
+const mockReadUpdateApplyState = vi.fn();
 
 vi.mock("../../ipc/commands/settings", async () => {
   const actual = await vi.importActual<
@@ -19,6 +21,8 @@ vi.mock("../../ipc/commands/settings", async () => {
   return {
     ...actual,
     readSupportProfile: () => mockReadSupportProfile(),
+    readUpdateApplyPlan: () => mockReadUpdateApplyPlan(),
+    readUpdateApplyState: () => mockReadUpdateApplyState(),
   };
 });
 
@@ -37,6 +41,7 @@ vi.mock("@tauri-apps/api/app", () => ({
 }));
 
 import { SettingsRoute } from "./SettingsRoute";
+import { useUpdateApplyShell } from "../../shell/state/update-apply-shell-store";
 import { useUpdateShell } from "../../shell/state/update-shell-store";
 
 /** Compact builder of the official profile payload (byte-for-byte
@@ -229,7 +234,22 @@ describe("<SettingsRoute />", () => {
     mockReadContentSourcePolicy.mockResolvedValue(officialPolicy());
     mockGetVersion.mockReset();
     mockGetVersion.mockResolvedValue("0.1.0");
+    mockReadUpdateApplyPlan.mockReset();
+    mockReadUpdateApplyPlan.mockResolvedValue({
+      mode: "integrated",
+      headline: "Cette copie peut installer les mises à jour de Rustory.",
+      guidance:
+        "Le téléchargement vérifie l'authenticité de la mise à jour avant de l'installer.",
+    });
+    mockReadUpdateApplyState.mockReset();
+    mockReadUpdateApplyState.mockResolvedValue({ status: "idle" });
     useUpdateShell.setState({ availability: null });
+    useUpdateApplyShell.setState({
+      plan: null,
+      state: null,
+      jobId: null,
+      restartInviteFolded: false,
+    });
   });
 
   it("renders the standalone screen: main landmark, h1, version header and the five sections", async () => {
@@ -426,6 +446,76 @@ describe("<SettingsRoute />", () => {
     expect(
       document.querySelector(".update-status-line"),
     ).not.toBeInTheDocument();
+  });
+
+  it("renders the update-apply zone UNDER the status line on a positive verdict", async () => {
+    useUpdateShell.setState({
+      availability: {
+        status: "updateAvailable",
+        headline: "Nouvelle version disponible : 9.9.9.",
+        notice:
+          "Ta version actuelle est 0.1.0. Récupère la nouvelle version depuis la page officielle des versions : github.com/roukmoute/Rustory/releases.",
+        currentVersion: "0.1.0",
+        latestVersion: "9.9.9",
+      },
+    });
+    renderSettings();
+    // The zone read its plan and rendered the idle CTA.
+    const startButton = await screen.findByRole("button", {
+      name: "Télécharger et installer la mise à jour de Rustory",
+    });
+    // The status line and the version line stay UNCHANGED above it.
+    await waitFor(() => {
+      expect(screen.getByText("Version 0.1.0")).toBeInTheDocument();
+    });
+    const statusLine = screen
+      .getByText("Nouvelle version disponible : 9.9.9.")
+      .closest("[role='status']");
+    expect(statusLine).not.toBeNull();
+    expect(
+      (statusLine as HTMLElement).compareDocumentPosition(startButton) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    expect(
+      screen.getByText("Version 0.1.0").compareDocumentPosition(startButton) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+  });
+
+  it("renders no update-apply zone without a positive verdict", async () => {
+    // No verdict at all…
+    renderSettings();
+    await waitFor(() => {
+      expect(screen.getByText("Version 0.1.0")).toBeInTheDocument();
+    });
+    expect(document.querySelector(".update-apply-zone")).toBeNull();
+    expect(
+      screen.queryByRole("button", {
+        name: "Télécharger et installer la mise à jour de Rustory",
+      }),
+    ).not.toBeInTheDocument();
+    // …and the zone never even read its plan.
+    expect(mockReadUpdateApplyPlan).not.toHaveBeenCalled();
+    expect(mockReadUpdateApplyState).not.toHaveBeenCalled();
+  });
+
+  it("renders no update-apply zone on a non-positive verdict", async () => {
+    useUpdateShell.setState({
+      availability: {
+        status: "upToDate",
+        headline: "Aucune version plus récente n'est publiée.",
+        notice: "Aucune action n'est nécessaire.",
+        currentVersion: "0.1.0",
+      },
+    });
+    renderSettings();
+    await waitFor(() => {
+      expect(
+        screen.getByText("Aucune version plus récente n'est publiée."),
+      ).toBeInTheDocument();
+    });
+    expect(document.querySelector(".update-apply-zone")).toBeNull();
+    expect(mockReadUpdateApplyPlan).not.toHaveBeenCalled();
   });
 
   it("renders the calm checkNotRun verdict without any chip or alarm", async () => {

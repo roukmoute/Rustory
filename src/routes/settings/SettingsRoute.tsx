@@ -6,6 +6,7 @@ import { getVersion } from "@tauri-apps/api/app";
 
 import type { SectionRead } from "../../features/settings/components/SupportProfileView";
 import { SupportProfileView } from "../../features/settings/components/SupportProfileView";
+import { UpdateApplyZone } from "../../features/settings/components/UpdateApplyZone";
 import { UpdateStatusLine } from "../../features/settings/components/UpdateStatusLine";
 import { readContentSourcePolicy } from "../../ipc/commands/import-export";
 import { readSupportProfile } from "../../ipc/commands/settings";
@@ -109,6 +110,11 @@ export function SettingsRoute(): React.JSX.Element {
               verdict exists, NOTHING before (`Update Availability
               Contract`). */}
           <UpdateStatusLine />
+          {/* The update-apply gesture zone, UNDER the status line:
+              exists IFF the verdict is `updateAvailable` (`Update Apply
+              Contract`) — the line above and the `Version {version}`
+              line never move. */}
+          <UpdateApplyZone />
         </div>
         <Button
           variant="secondary"

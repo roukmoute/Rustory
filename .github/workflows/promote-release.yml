@@ -1,0 +1,275 @@
+name: Promote Release
+
+# Human-gated promotion of a DRAFT release built by build-release.yml.
+# NOTHING becomes public before the release set is proven, not assumed:
+#
+# - the tag input must be a strict vMAJOR.MINOR.PATCH (and is only ever
+#   handed to jq through --arg, never interpolated into a program);
+# - a COMPLETED, SUCCESSFUL build-release run must exist for the exact
+#   commit the tag points to (the whole matrix finished — no snapshot of
+#   a half-built draft), and this workflow shares build-release's
+#   per-tag concurrency lock so a build can never overlap a promotion;
+# - latest.json must cover the three platform families, carry EXACTLY
+#   the promoted version, and every platform entry must reference the
+#   EXACT canonical download URL of an asset attached to THIS draft,
+#   with its detached .sig attached alongside;
+# - every referenced asset is downloaded and its signature VERIFIED with
+#   minisign against the provisioned updater public key — a corrupted
+#   signature, a mismatched key pair or a foreign URL can never be
+#   promoted (the "never a partial feed" runbook rule, enforced
+#   cryptographically);
+# - the promoted version must be STRICTLY newer than the currently
+#   published stable release — a stale or regressive feed never ships.
+#
+# Publishing the draft is what makes releases/latest/download/latest.json
+# public — i.e. THE promotion of the stable channel's feed. Manual only
+# (workflow_dispatch), never automatic: the human review is the gate.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag of the draft release to promote (e.g. v0.2.0)'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+# Shared with build-release.yml (same group formula): one release
+# operation per tag at a time — a promotion can never race a build.
+concurrency:
+  group: release-${{ inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  promote:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: write
+      actions: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ inputs.tag }}
+    steps:
+      - name: Validate the tag input (strict vMAJOR.MINOR.PATCH)
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! "$TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "::error::'${TAG}' is not a strict release tag (vMAJOR.MINOR.PATCH) — nothing to promote."
+            exit 1
+          fi
+
+      - name: Attest the build matrix completed successfully for this tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Resolve the commit the tag points to (dereference an
+          # annotated tag object down to its commit).
+          ref="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${TAG}")"
+          object_type="$(printf '%s' "$ref" | jq -r '.object.type')"
+          object_sha="$(printf '%s' "$ref" | jq -r '.object.sha')"
+          if [ "$object_type" = "tag" ]; then
+            commit_sha="$(gh api "repos/${GITHUB_REPOSITORY}/git/tags/${object_sha}" --jq '.object.sha')"
+          else
+            commit_sha="$object_sha"
+          fi
+          echo "Tag ${TAG} points at ${commit_sha}."
+          # A promotion only follows a COMPLETED, SUCCESSFUL build run of
+          # that exact commit: the run's success attests the WHOLE matrix
+          # finished — never a snapshot of a half-built draft. The MOST
+          # RECENT completed run is the one that must have succeeded: an
+          # older success cannot attest a draft a LATER failed re-run may
+          # have half-rewritten (each matrix job replaces its assets
+          # before failing). The shared per-tag concurrency group
+          # additionally keeps a re-run from overlapping this promotion.
+          latest_conclusion="$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/build-release.yml/runs?head_sha=${commit_sha}&status=completed" \
+            --jq '.workflow_runs | sort_by(.run_started_at) | last | .conclusion // empty')"
+          if [ "${latest_conclusion}" != "success" ]; then
+            echo "::error::The most recent completed build-release run for ${TAG} (${commit_sha}) is '${latest_conclusion:-absent}', not 'success' — build it first, and never promote a partial or unverified set."
+            exit 1
+          fi
+
+      - name: Locate the draft release
+        id: draft
+        shell: bash
+        run: |
+          set -euo pipefail
+          # `releases/tags/{tag}` cannot see drafts — list, then filter
+          # with jq --arg (the tag never touches the jq program text).
+          # `--paginate` emits ONE JSON array per page: `jq -s add`
+          # folds them into a single array whatever the page count.
+          gh api "repos/${GITHUB_REPOSITORY}/releases" --paginate | jq -s 'add' > releases.json
+          release_id="$(jq -r --arg tag "$TAG" \
+            '[.[] | select(.tag_name == $tag and .draft == true)][0].id // empty' releases.json)"
+          if [ -z "$release_id" ]; then
+            echo "::error::No DRAFT release found for tag ${TAG} — build it first (build-release.yml), and never promote an already-published release through this path."
+            exit 1
+          fi
+          echo "release_id=$release_id" >> "$GITHUB_OUTPUT"
+
+      - name: Verify the release set (complete AND cryptographically sound)
+        shell: bash
+        env:
+          RUSTORY_UPDATER_PUBKEY: ${{ vars.RUSTORY_UPDATER_PUBKEY }}
+          RELEASE_ID: ${{ steps.draft.outputs.release_id }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${RUSTORY_UPDATER_PUBKEY:-}" ]; then
+            echo "::error::RUSTORY_UPDATER_PUBKEY variable is not provisioned — the release set cannot be verified, so it cannot be promoted."
+            exit 1
+          fi
+
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends minisign
+
+          # The provisioned public key travels as base64 of the minisign
+          # .pub file — the exact encoding the updater embeds.
+          printf '%s' "$RUSTORY_UPDATER_PUBKEY" | base64 -d > minisign.pub
+
+          # `--paginate` emits ONE JSON array per page: `jq -s add`
+          # folds them into a single array whatever the page count.
+          gh api "repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}/assets" --paginate | jq -s 'add' > assets.json
+          jq -r '.[].name' assets.json > asset-names.txt
+          echo "Attached assets:"
+          cat asset-names.txt
+
+          asset_id_of() {
+            jq -r --arg name "$1" '[.[] | select(.name == $name)][0].id // empty' assets.json
+          }
+
+          latest_id="$(asset_id_of "latest.json")"
+          if [ -z "$latest_id" ]; then
+            echo "::error::latest.json is not attached to the draft — the release set is incomplete."
+            exit 1
+          fi
+          gh api "repos/${GITHUB_REPOSITORY}/releases/assets/${latest_id}" \
+            -H "Accept: application/octet-stream" > latest.json
+          echo "latest.json platforms:"
+          jq -r '.platforms | keys[]' latest.json
+
+          # The feed must carry EXACTLY the promoted version.
+          feed_version="$(jq -r '.version // empty' latest.json)"
+          if [ "v${feed_version}" != "$TAG" ]; then
+            echo "::error::latest.json carries version '${feed_version}' but the promoted tag is '${TAG}' — a mislabeled feed never ships."
+            exit 1
+          fi
+
+          # The three platform families must ALL be covered — a feed
+          # covering a subset would fake full coverage (runbook rule).
+          families="$(jq -r '.platforms | keys[] | split("-")[0]' latest.json | sort -u)"
+          for family in linux windows darwin; do
+            if ! printf '%s\n' "$families" | grep -qxF "$family"; then
+              echo "::error::latest.json does not cover the ${family} family — never promote a partial feed."
+              exit 1
+            fi
+          done
+
+          # Every platform entry must reference the EXACT canonical
+          # download URL of an asset attached to THIS draft, ship its
+          # detached .sig alongside, agree with it byte-for-byte, and
+          # VERIFY against the provisioned public key.
+          # Equality against an asset's pre-publication
+          # browser_download_url is structurally impossible (draft URLs
+          # live under `untagged-…`): the reconstructed canonical prefix
+          # below is the strongest achievable form of this check.
+          expected_prefix="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/"
+          mkdir -p verify
+          while IFS=$'\t' read -r key url signature; do
+            echo "Verifying platform ${key}…"
+            if [ -z "$signature" ]; then
+              echo "::error::platform ${key} carries no signature in latest.json."
+              exit 1
+            fi
+            case "$url" in
+              "$expected_prefix"*) ;;
+              *)
+                echo "::error::platform ${key} references '${url}', outside this release's canonical download URLs (${expected_prefix}…) — a foreign or mislabeled URL never ships."
+                exit 1
+                ;;
+            esac
+            asset_name="${url#"$expected_prefix"}"
+            if [ -z "$asset_name" ] || [[ "$asset_name" == */* ]]; then
+              echo "::error::platform ${key} references a non-canonical asset path '${asset_name}'."
+              exit 1
+            fi
+            asset_id="$(asset_id_of "$asset_name")"
+            if [ -z "$asset_id" ]; then
+              echo "::error::platform ${key} references '${asset_name}', which is not attached to the draft."
+              exit 1
+            fi
+            sig_id="$(asset_id_of "${asset_name}.sig")"
+            if [ -z "$sig_id" ]; then
+              echo "::error::'${asset_name}.sig' is not attached to the draft — the detached signatures are part of the release set."
+              exit 1
+            fi
+            gh api "repos/${GITHUB_REPOSITORY}/releases/assets/${asset_id}" \
+              -H "Accept: application/octet-stream" > "verify/${asset_name}"
+            gh api "repos/${GITHUB_REPOSITORY}/releases/assets/${sig_id}" \
+              -H "Accept: application/octet-stream" > "verify/${asset_name}.sig"
+            # The manifest's signature and the detached .sig must agree —
+            # a diverging pair means the set was tampered mid-flight.
+            if [ "$(cat "verify/${asset_name}.sig")" != "$signature" ]; then
+              echo "::error::platform ${key}: the detached '${asset_name}.sig' differs from the manifest's signature."
+              exit 1
+            fi
+            # Tauri encodes the minisign signature file as base64 (both
+            # in the manifest and in the .sig asset) — decode, then
+            # verify the ACTUAL bytes with the provisioned public key.
+            printf '%s' "$signature" | base64 -d > "verify/${asset_name}.minisig"
+            if ! minisign -V -p minisign.pub -x "verify/${asset_name}.minisig" -m "verify/${asset_name}"; then
+              echo "::error::platform ${key}: '${asset_name}' does NOT verify against the provisioned updater public key — a broken trust chain never ships."
+              exit 1
+            fi
+            rm -f "verify/${asset_name}" "verify/${asset_name}.minisig" "verify/${asset_name}.sig"
+          done < <(jq -r '.platforms | to_entries[] | [.key, (.value.url // ""), (.value.signature // "")] | @tsv' latest.json)
+
+          # The promoted version must be STRICTLY newer than the current
+          # published stable (releases/latest only sees published,
+          # non-prerelease releases — a 404 means this is the first).
+          # ONLY the legitimate 404 may relax the guard: any other
+          # failure (5xx, network, rate-limit) must fail closed — the
+          # anti-regression promise cannot be skipped silently precisely
+          # when the API wavers.
+          if current_stable="$(gh api "repos/${GITHUB_REPOSITORY}/releases/latest" --jq '.tag_name' 2>latest-err.txt)"; then
+            :
+          elif grep -qiE 'HTTP 404|Not Found' latest-err.txt; then
+            current_stable=''
+          else
+            echo "::error::Could not read the published stable release (releases/latest) — refusing to skip the strictly-newer guard:"
+            cat latest-err.txt
+            exit 1
+          fi
+          if [ -n "$current_stable" ]; then
+            if [[ ! "$current_stable" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+              echo "::error::The published stable tag '${current_stable}' is outside the strict convention — resolve that release manually before promoting."
+              exit 1
+            fi
+            IFS=. read -r new_major new_minor new_patch <<< "${TAG#v}"
+            IFS=. read -r cur_major cur_minor cur_patch <<< "${current_stable#v}"
+            newer=0
+            if [ "$new_major" -gt "$cur_major" ]; then newer=1;
+            elif [ "$new_major" -eq "$cur_major" ] && [ "$new_minor" -gt "$cur_minor" ]; then newer=1;
+            elif [ "$new_major" -eq "$cur_major" ] && [ "$new_minor" -eq "$cur_minor" ] && [ "$new_patch" -gt "$cur_patch" ]; then newer=1;
+            fi
+            if [ "$newer" -ne 1 ]; then
+              echo "::error::${TAG} is not strictly newer than the published stable ${current_stable} — a stale or regressive feed never ships."
+              exit 1
+            fi
+          fi
+
+          echo "Release set is sound: three families covered, exact canonical URLs, detached signatures attached and agreeing, every asset cryptographically verified, version strictly newer."
+
+      - name: Publish the draft (the feed becomes public)
+        shell: bash
+        env:
+          RELEASE_ID: ${{ steps.draft.outputs.release_id }}
+        run: |
+          set -euo pipefail
+          gh api -X PATCH "repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}" \
+            -F draft=false > /dev/null
+          echo "Release ${TAG} is published: releases/latest/download/latest.json now serves the stable channel."

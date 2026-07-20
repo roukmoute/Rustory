@@ -20,6 +20,9 @@ mod support_profile;
 #[path = "contracts/update_availability.rs"]
 mod update_availability;
 
+#[path = "contracts/update_apply.rs"]
+mod update_apply;
+
 #[path = "contracts/file_association.rs"]
 mod file_association;
 

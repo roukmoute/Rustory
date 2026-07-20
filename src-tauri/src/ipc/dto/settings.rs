@@ -8,6 +8,7 @@
 
 use serde::Serialize;
 
+use crate::application::update::{StartUpdateApplyOutcome, UpdateApplySessionSnapshot};
 use crate::domain::device::{
     DeviceFamily, DeviceSupportLine, FirmwareCohort, FlamFirmwareCohort, LuniiFirmwareCohort,
     SupportedOperation,
@@ -18,7 +19,11 @@ use crate::domain::import::{
     LocalArtifactSupport,
 };
 use crate::domain::update::{
-    format_release_version, update_headline, update_notice, ReleaseVersion, UpdateAvailability,
+    format_release_version, update_apply_failed_headline, update_apply_failed_notice,
+    update_apply_plan_guidance, update_apply_plan_headline, update_apply_ready_headline,
+    update_apply_ready_notice, update_apply_running_headline, update_apply_running_notice,
+    update_headline, update_notice, ReleaseVersion, UpdateApplyMode, UpdateApplyState,
+    UpdateAvailability,
 };
 
 /// The stable wire rendering order of the four operations of a device
@@ -498,6 +503,144 @@ impl UpdateAvailabilityDto {
             ),
             current_version: raw_current.to_string(),
             latest_version: None,
+        }
+    }
+}
+
+/// The serialized gesture plan of THIS copy (`Update Apply Contract`):
+/// the closed mode tag, the manual reason token (present IFF manual —
+/// omitted, never `null`) and the frozen Rust-carried couple the zone
+/// renders VERBATIM. Read is infallible by construction (build-time
+/// facts + the install probe degrading to "no claim").
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateApplyPlanDto {
+    pub mode: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<&'static str>,
+    pub headline: &'static str,
+    pub guidance: &'static str,
+}
+
+impl UpdateApplyPlanDto {
+    /// Map a decided plan to its wire face — tags, tokens and copies
+    /// all derive from the domain's pure composers.
+    pub fn from_mode(mode: UpdateApplyMode) -> Self {
+        Self {
+            mode: mode.wire_tag(),
+            reason: match mode {
+                UpdateApplyMode::Manual { reason } => Some(reason.log_token()),
+                UpdateApplyMode::Integrated => None,
+            },
+            headline: update_apply_plan_headline(&mode),
+            guidance: update_apply_plan_guidance(&mode),
+        }
+    }
+}
+
+/// The serialized SESSION state of the gesture (`Update Apply
+/// Contract`) — the authoritative re-read the zone always trusts over
+/// events. Strict omission discipline: `jobId`/`phase`/`percent` exist
+/// IFF running (`percent` additionally IFF a reliable integer is
+/// known), `stage` IFF failed, the copies IFF the state carries any —
+/// `idle` serializes as the bare status. `jobId` makes a live flight
+/// recoverable from the re-read ALONE: a frontend that lost its tracked
+/// id (renderer reload, unmounted start resolution) re-attaches to the
+/// events without any local memory.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateApplyStateDto {
+    pub status: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub job_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub phase: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub percent: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stage: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub headline: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub notice: Option<&'static str>,
+}
+
+impl UpdateApplyStateDto {
+    /// Map a session snapshot to its wire face — exhaustive over the
+    /// sealed domain states (adding one without deciding its wire face
+    /// is a compile error), copies from the domain's pure composers.
+    /// The correlation id rides ONLY the running face: terminals need no
+    /// re-attachment (the state itself is the truth) and idle has none.
+    pub fn from_snapshot(snapshot: UpdateApplySessionSnapshot) -> Self {
+        let state = snapshot.state;
+        match state {
+            UpdateApplyState::Idle => Self {
+                status: state.wire_tag(),
+                job_id: None,
+                phase: None,
+                percent: None,
+                stage: None,
+                headline: None,
+                notice: None,
+            },
+            UpdateApplyState::Running { phase, percent } => Self {
+                status: state.wire_tag(),
+                job_id: snapshot.job_id,
+                phase: Some(phase.wire_tag()),
+                percent,
+                stage: None,
+                headline: Some(update_apply_running_headline(phase)),
+                notice: Some(update_apply_running_notice()),
+            },
+            UpdateApplyState::ReadyToRestart => Self {
+                status: state.wire_tag(),
+                job_id: None,
+                phase: None,
+                percent: None,
+                stage: None,
+                headline: Some(update_apply_ready_headline()),
+                notice: Some(update_apply_ready_notice()),
+            },
+            UpdateApplyState::Failed { stage } => Self {
+                status: state.wire_tag(),
+                job_id: None,
+                phase: None,
+                percent: None,
+                stage: Some(stage.token()),
+                headline: Some(update_apply_failed_headline(stage)),
+                notice: Some(update_apply_failed_notice(stage)),
+            },
+        }
+    }
+}
+
+/// The serialized start decision (`Update Apply Contract`): a REFUSAL
+/// is a state of this DTO, never a wire error — `jobId` present IFF
+/// started (omitted, never `null`).
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct StartUpdateApplyDto {
+    pub outcome: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub job_id: Option<String>,
+}
+
+impl StartUpdateApplyDto {
+    /// Map the application layer's start decision to its wire face.
+    pub fn from_outcome(outcome: StartUpdateApplyOutcome) -> Self {
+        match outcome {
+            StartUpdateApplyOutcome::Started { job_id } => Self {
+                outcome: "started",
+                job_id: Some(job_id),
+            },
+            StartUpdateApplyOutcome::AlreadyInFlight => Self {
+                outcome: "alreadyRunning",
+                job_id: None,
+            },
+            StartUpdateApplyOutcome::NotEligible => Self {
+                outcome: "notEligible",
+                job_id: None,
+            },
         }
     }
 }

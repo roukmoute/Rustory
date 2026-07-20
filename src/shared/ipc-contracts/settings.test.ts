@@ -4,7 +4,13 @@ import {
   isDeviceSupportLine,
   isFileAssociation,
   isLocalArtifactLine,
+  isStartUpdateApplyOutcome,
   isSupportProfile,
+  isUpdateApplyCompletedEvent,
+  isUpdateApplyFailedEvent,
+  isUpdateApplyPlan,
+  isUpdateApplyProgressEvent,
+  isUpdateApplyState,
   isUpdateAvailability,
 } from "./settings";
 
@@ -743,5 +749,408 @@ describe("isUpdateAvailability", () => {
         currentVersion: "99999999999999999999.0.0",
       }),
     ).toBe(false);
+  });
+});
+
+describe("isUpdateApplyPlan", () => {
+  const integratedPlan = () => ({
+    mode: "integrated",
+    headline: "Cette copie peut installer les mises à jour de Rustory.",
+    guidance:
+      "Le téléchargement vérifie l'authenticité de la mise à jour avant de l'installer.",
+  });
+
+  const manualPlan = () => ({
+    mode: "manual",
+    reason: "channel_unproven",
+    headline:
+      "La mise à jour intégrée n'est pas encore disponible pour cette installation.",
+    guidance:
+      "Rustory ne peut pas confirmer le canal de cette copie. La page officielle des versions reste disponible : github.com/roukmoute/Rustory/releases.",
+  });
+
+  it("accepts the exact integrated and manual payloads Rust serializes", () => {
+    expect(isUpdateApplyPlan(integratedPlan())).toBe(true);
+    expect(isUpdateApplyPlan(manualPlan())).toBe(true);
+    expect(
+      isUpdateApplyPlan({
+        mode: "manual",
+        reason: "trust_chain_not_configured",
+        headline:
+          "La mise à jour intégrée n'est pas encore activée pour cette copie.",
+        guidance:
+          "Cette copie ne peut pas vérifier l'authenticité des mises à jour. La page officielle des versions reste disponible : github.com/roukmoute/Rustory/releases.",
+      }),
+    ).toBe(true);
+    expect(
+      isUpdateApplyPlan({
+        mode: "manual",
+        reason: "package_manager_owned",
+        headline:
+          "La mise à jour de Rustory passe par ton gestionnaire de paquets.",
+        guidance:
+          "Cette copie a été installée comme paquet système : mets-la à jour avec l'outil de ton système, puis relance Rustory.",
+      }),
+    ).toBe(true);
+    expect(
+      isUpdateApplyPlan({
+        mode: "manual",
+        reason: "unofficial_install",
+        headline:
+          "La mise à jour intégrée n'est pas disponible pour cette copie.",
+        guidance:
+          "Cette copie n'est pas passée par un canal de distribution officiel. La page officielle des versions reste disponible : github.com/roukmoute/Rustory/releases.",
+      }),
+    ).toBe(true);
+    expect(
+      isUpdateApplyPlan({
+        mode: "manual",
+        reason: "development_build",
+        headline:
+          "La mise à jour intégrée n'est pas disponible pour un build de développement.",
+        guidance:
+          "Reconstruis Rustory depuis les sources pour obtenir la dernière version.",
+      }),
+    ).toBe(true);
+  });
+
+  it("rejects an unknown mode, an unknown reason and non-object payloads", () => {
+    expect(isUpdateApplyPlan({ ...integratedPlan(), mode: "auto" })).toBe(false);
+    expect(isUpdateApplyPlan({ ...manualPlan(), reason: "because" })).toBe(
+      false,
+    );
+    expect(isUpdateApplyPlan(null)).toBe(false);
+    expect(isUpdateApplyPlan("manual")).toBe(false);
+  });
+
+  it("rejects a reason on the integrated plan and a missing reason on a manual one", () => {
+    // `reason` is present IFF manual — both drifts fail closed.
+    expect(
+      isUpdateApplyPlan({ ...integratedPlan(), reason: "channel_unproven" }),
+    ).toBe(false);
+    const missing: Record<string, unknown> = manualPlan();
+    delete missing.reason;
+    expect(isUpdateApplyPlan(missing)).toBe(false);
+  });
+
+  it("rejects the integrated literal smuggled as a manual reason", () => {
+    expect(isUpdateApplyPlan({ ...manualPlan(), reason: "integrated" })).toBe(
+      false,
+    );
+  });
+
+  it("rejects a drifted copy on either branch", () => {
+    expect(
+      isUpdateApplyPlan({ ...integratedPlan(), headline: "Mets à jour !" }),
+    ).toBe(false);
+    expect(
+      isUpdateApplyPlan({
+        ...manualPlan(),
+        guidance: "Va sur le site officiel.",
+      }),
+    ).toBe(false);
+    // A couple swapped between reasons is a drift too.
+    expect(
+      isUpdateApplyPlan({
+        ...manualPlan(),
+        reason: "unofficial_install",
+      }),
+    ).toBe(false);
+  });
+});
+
+describe("isUpdateApplyState", () => {
+  const runningState = () => ({
+    status: "running",
+    jobId: "j1",
+    phase: "downloading",
+    percent: 42,
+    headline: "Téléchargement de la mise à jour en cours…",
+    notice: "Tu peux continuer à utiliser Rustory pendant cette opération.",
+  });
+
+  const failedState = () => ({
+    status: "failed",
+    stage: "verification",
+    headline: "L'authenticité de la mise à jour n'a pas pu être confirmée.",
+    notice:
+      "Rien n'a été installé : Rustory reste sur sa version actuelle. Réessaie plus tard ; la page officielle des versions reste disponible : github.com/roukmoute/Rustory/releases.",
+  });
+
+  it("accepts the four exact states Rust serializes", () => {
+    expect(isUpdateApplyState({ status: "idle" })).toBe(true);
+    expect(isUpdateApplyState(runningState())).toBe(true);
+    expect(
+      isUpdateApplyState({
+        status: "running",
+        jobId: "j2",
+        phase: "checking",
+        headline: "Vérification de la mise à jour en cours…",
+        notice: "Tu peux continuer à utiliser Rustory pendant cette opération.",
+      }),
+    ).toBe(true);
+    expect(
+      isUpdateApplyState({
+        status: "readyToRestart",
+        headline: "La mise à jour de Rustory est prête.",
+        notice:
+          "Redémarre Rustory pour terminer l'installation. Ton travail local reste en place.",
+      }),
+    ).toBe(true);
+    expect(isUpdateApplyState(failedState())).toBe(true);
+  });
+
+  it("rejects an unknown status and non-object payloads", () => {
+    expect(isUpdateApplyState({ status: "paused" })).toBe(false);
+    expect(isUpdateApplyState(null)).toBe(false);
+    expect(isUpdateApplyState(undefined)).toBe(false);
+  });
+
+  it("rejects stray keys on the idle state", () => {
+    expect(isUpdateApplyState({ status: "idle", percent: 3 })).toBe(false);
+    expect(
+      isUpdateApplyState({ status: "idle", headline: "…" }),
+    ).toBe(false);
+  });
+
+  it("rejects a non-integer or out-of-range percent", () => {
+    expect(isUpdateApplyState({ ...runningState(), percent: 41.5 })).toBe(
+      false,
+    );
+    expect(isUpdateApplyState({ ...runningState(), percent: 101 })).toBe(
+      false,
+    );
+    expect(isUpdateApplyState({ ...runningState(), percent: -1 })).toBe(false);
+  });
+
+  it("accepts a running state without percent (unknown fraction)", () => {
+    const payload: Record<string, unknown> = runningState();
+    delete payload.percent;
+    expect(isUpdateApplyState(payload)).toBe(true);
+  });
+
+  it("rejects a running headline drifted from its phase couple", () => {
+    expect(
+      isUpdateApplyState({
+        ...runningState(),
+        headline: "Vérification de la mise à jour en cours…",
+      }),
+    ).toBe(false);
+  });
+
+  it("rejects a stage outside the failed state and a phase on a failed one", () => {
+    expect(
+      isUpdateApplyState({ ...runningState(), stage: "download" }),
+    ).toBe(false);
+    expect(
+      isUpdateApplyState({ ...failedState(), phase: "downloading" }),
+    ).toBe(false);
+  });
+
+  it("rejects a failed couple drifted from its stage", () => {
+    expect(
+      isUpdateApplyState({
+        ...failedState(),
+        stage: "download",
+      }),
+    ).toBe(false);
+    expect(
+      isUpdateApplyState({
+        ...failedState(),
+        notice: "Réessaie.",
+      }),
+    ).toBe(false);
+  });
+
+  it("requires the correlation id on a running state — a live flight is always re-attachable", () => {
+    const payload: Record<string, unknown> = runningState();
+    delete payload.jobId;
+    expect(isUpdateApplyState(payload)).toBe(false);
+    expect(isUpdateApplyState({ ...runningState(), jobId: "" })).toBe(false);
+  });
+
+  it("rejects a correlation id outside the running state", () => {
+    expect(isUpdateApplyState({ status: "idle", jobId: "j1" })).toBe(false);
+    expect(
+      isUpdateApplyState({
+        status: "readyToRestart",
+        jobId: "j1",
+        headline: "La mise à jour de Rustory est prête.",
+        notice:
+          "Redémarre Rustory pour terminer l'installation. Ton travail local reste en place.",
+      }),
+    ).toBe(false);
+    expect(isUpdateApplyState({ ...failedState(), jobId: "j1" })).toBe(false);
+  });
+});
+
+describe("isStartUpdateApplyOutcome", () => {
+  it("accepts the three exact outcomes Rust serializes", () => {
+    expect(
+      isStartUpdateApplyOutcome({ outcome: "started", jobId: "j1" }),
+    ).toBe(true);
+    expect(isStartUpdateApplyOutcome({ outcome: "alreadyRunning" })).toBe(
+      true,
+    );
+    expect(isStartUpdateApplyOutcome({ outcome: "notEligible" })).toBe(true);
+  });
+
+  it("rejects a started outcome without a job id and refusals carrying one", () => {
+    expect(isStartUpdateApplyOutcome({ outcome: "started" })).toBe(false);
+    expect(isStartUpdateApplyOutcome({ outcome: "started", jobId: "" })).toBe(
+      false,
+    );
+    expect(
+      isStartUpdateApplyOutcome({ outcome: "alreadyRunning", jobId: "j1" }),
+    ).toBe(false);
+    expect(
+      isStartUpdateApplyOutcome({ outcome: "notEligible", jobId: "j1" }),
+    ).toBe(false);
+  });
+
+  it("rejects an unknown outcome and non-object payloads", () => {
+    expect(isStartUpdateApplyOutcome({ outcome: "queued" })).toBe(false);
+    expect(isStartUpdateApplyOutcome(null)).toBe(false);
+  });
+});
+
+describe("update apply event guards", () => {
+  it("accepts the exact progress payloads with and without percent", () => {
+    expect(
+      isUpdateApplyProgressEvent({
+        jobId: "j1",
+        phase: "downloading",
+        percent: 7,
+        sequence: 3,
+      }),
+    ).toBe(true);
+    expect(
+      isUpdateApplyProgressEvent({
+        jobId: "j1",
+        phase: "checking",
+        sequence: 0,
+      }),
+    ).toBe(true);
+  });
+
+  it("rejects a rotten progress payload", () => {
+    expect(
+      isUpdateApplyProgressEvent({
+        jobId: "",
+        phase: "downloading",
+        sequence: 1,
+      }),
+    ).toBe(false);
+    expect(
+      isUpdateApplyProgressEvent({
+        jobId: "j1",
+        phase: "uploading",
+        sequence: 1,
+      }),
+    ).toBe(false);
+    expect(
+      isUpdateApplyProgressEvent({
+        jobId: "j1",
+        phase: "downloading",
+        percent: 12.5,
+        sequence: 1,
+      }),
+    ).toBe(false);
+    expect(
+      isUpdateApplyProgressEvent({
+        jobId: "j1",
+        phase: "downloading",
+        sequence: -1,
+      }),
+    ).toBe(false);
+    expect(
+      isUpdateApplyProgressEvent({
+        jobId: "j1",
+        phase: "downloading",
+        sequence: 1.5,
+      }),
+    ).toBe(false);
+  });
+
+  it("accepts and rejects completed payloads", () => {
+    expect(isUpdateApplyCompletedEvent({ jobId: "j1", sequence: 5 })).toBe(
+      true,
+    );
+    expect(isUpdateApplyCompletedEvent({ jobId: "", sequence: 5 })).toBe(
+      false,
+    );
+    expect(isUpdateApplyCompletedEvent({ jobId: "j1" })).toBe(false);
+  });
+
+  it("accepts a failed payload locked on its stage couple and rejects drifts", () => {
+    const failed = {
+      jobId: "j1",
+      sequence: 4,
+      stage: "download",
+      headline: "Le téléchargement de la mise à jour n'a pas abouti.",
+      notice:
+        "Rustory reste sur sa version actuelle. Vérifie ta connexion, puis réessaie.",
+    };
+    expect(isUpdateApplyFailedEvent(failed)).toBe(true);
+    expect(isUpdateApplyFailedEvent({ ...failed, stage: "feed" })).toBe(false);
+    expect(
+      isUpdateApplyFailedEvent({ ...failed, headline: "Erreur réseau." }),
+    ).toBe(false);
+    expect(isUpdateApplyFailedEvent({ ...failed, stage: "panic" })).toBe(
+      false,
+    );
+  });
+});
+
+describe("update apply guards against prototype-inherited keys", () => {
+  it("rejects inherited keys smuggled as a manual reason — never a crash", () => {
+    for (const hostile of ["constructor", "toString", "__proto__", "hasOwnProperty"]) {
+      expect(
+        isUpdateApplyPlan({
+          mode: "manual",
+          reason: hostile,
+          headline: "x",
+          guidance: "y",
+        }),
+      ).toBe(false);
+    }
+  });
+
+  it("rejects inherited keys smuggled as a phase or a stage — never a crash", () => {
+    for (const hostile of ["constructor", "toString", "__proto__"]) {
+      expect(
+        isUpdateApplyState({
+          status: "running",
+          jobId: "j1",
+          phase: hostile,
+          headline: "x",
+          notice: "y",
+        }),
+      ).toBe(false);
+      expect(
+        isUpdateApplyState({
+          status: "failed",
+          stage: hostile,
+          headline: "x",
+          notice: "y",
+        }),
+      ).toBe(false);
+      expect(
+        isUpdateApplyProgressEvent({
+          jobId: "j1",
+          phase: hostile,
+          sequence: 1,
+        }),
+      ).toBe(false);
+      expect(
+        isUpdateApplyFailedEvent({
+          jobId: "j1",
+          sequence: 1,
+          stage: hostile,
+          headline: "x",
+          notice: "y",
+        }),
+      ).toBe(false);
+    }
   });
 });

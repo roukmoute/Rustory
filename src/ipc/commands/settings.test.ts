@@ -8,9 +8,14 @@ import { invoke } from "@tauri-apps/api/core";
 
 import {
   SupportProfileContractDriftError,
+  UpdateApplyContractDriftError,
   UpdateAvailabilityContractDriftError,
   readSupportProfile,
+  readUpdateApplyPlan,
+  readUpdateApplyState,
   readUpdateAvailability,
+  restartForUpdate,
+  startUpdateApply,
 } from "./settings";
 
 /** Compact builder of the EXACT official payload Rust serializes (the
@@ -256,6 +261,162 @@ describe("readUpdateAvailability", () => {
   it("normalizes an IPC rejection into an AppError (fail-closed upstream)", async () => {
     vi.mocked(invoke).mockRejectedValueOnce(new Error("ipc down"));
     const err = (await readUpdateAvailability().then(
+      () => {
+        throw new Error("expected rejection");
+      },
+      (e: unknown) => e,
+    )) as { code: string };
+    expect(err.code).toBe("UNKNOWN");
+  });
+});
+
+describe("readUpdateApplyPlan", () => {
+  beforeEach(() => {
+    vi.mocked(invoke).mockReset();
+  });
+
+  it("resolves the validated integrated plan", async () => {
+    vi.mocked(invoke).mockResolvedValueOnce({
+      mode: "integrated",
+      headline: "Cette copie peut installer les mises à jour de Rustory.",
+      guidance:
+        "Le téléchargement vérifie l'authenticité de la mise à jour avant de l'installer.",
+    });
+    const plan = await readUpdateApplyPlan();
+    expect(invoke).toHaveBeenCalledWith("read_update_apply_plan");
+    expect(plan.mode).toBe("integrated");
+    expect(plan.reason).toBeUndefined();
+  });
+
+  it("resolves a manual plan as a STATE, never a rejection", async () => {
+    vi.mocked(invoke).mockResolvedValueOnce({
+      mode: "manual",
+      reason: "package_manager_owned",
+      headline:
+        "La mise à jour de Rustory passe par ton gestionnaire de paquets.",
+      guidance:
+        "Cette copie a été installée comme paquet système : mets-la à jour avec l'outil de ton système, puis relance Rustory.",
+    });
+    const plan = await readUpdateApplyPlan();
+    expect(plan.mode).toBe("manual");
+    expect(plan.reason).toBe("package_manager_owned");
+  });
+
+  it("rejects with UpdateApplyContractDriftError on a drifted payload", async () => {
+    const raw = { mode: "manual", reason: "because" };
+    vi.mocked(invoke).mockResolvedValueOnce(raw);
+    const err = (await readUpdateApplyPlan().then(
+      () => {
+        throw new Error("expected rejection");
+      },
+      (e: unknown) => e,
+    )) as UpdateApplyContractDriftError;
+    expect(err).toBeInstanceOf(UpdateApplyContractDriftError);
+    expect(err.raw).toBe(raw);
+  });
+
+  it("normalizes an IPC rejection into an AppError (fail-closed upstream)", async () => {
+    vi.mocked(invoke).mockRejectedValueOnce(new Error("ipc down"));
+    const err = (await readUpdateApplyPlan().then(
+      () => {
+        throw new Error("expected rejection");
+      },
+      (e: unknown) => e,
+    )) as { code: string };
+    expect(err.code).toBe("UNKNOWN");
+  });
+});
+
+describe("readUpdateApplyState", () => {
+  beforeEach(() => {
+    vi.mocked(invoke).mockReset();
+  });
+
+  it("resolves the validated session state", async () => {
+    vi.mocked(invoke).mockResolvedValueOnce({ status: "idle" });
+    const state = await readUpdateApplyState();
+    expect(invoke).toHaveBeenCalledWith("read_update_apply_state");
+    expect(state.status).toBe("idle");
+  });
+
+  it("resolves a running state with its phase couple", async () => {
+    vi.mocked(invoke).mockResolvedValueOnce({
+      status: "running",
+      jobId: "j1",
+      phase: "downloading",
+      percent: 12,
+      headline: "Téléchargement de la mise à jour en cours…",
+      notice: "Tu peux continuer à utiliser Rustory pendant cette opération.",
+    });
+    const state = await readUpdateApplyState();
+    expect(state.status).toBe("running");
+    expect(state.percent).toBe(12);
+  });
+
+  it("rejects with UpdateApplyContractDriftError on a drifted payload", async () => {
+    const raw = { status: "running", phase: "uploading" };
+    vi.mocked(invoke).mockResolvedValueOnce(raw);
+    const err = (await readUpdateApplyState().then(
+      () => {
+        throw new Error("expected rejection");
+      },
+      (e: unknown) => e,
+    )) as UpdateApplyContractDriftError;
+    expect(err).toBeInstanceOf(UpdateApplyContractDriftError);
+    expect(err.raw).toBe(raw);
+  });
+});
+
+describe("startUpdateApply", () => {
+  beforeEach(() => {
+    vi.mocked(invoke).mockReset();
+  });
+
+  it("resolves an accepted start with its job id", async () => {
+    vi.mocked(invoke).mockResolvedValueOnce({
+      outcome: "started",
+      jobId: "j1",
+    });
+    const outcome = await startUpdateApply();
+    expect(invoke).toHaveBeenCalledWith("start_update_apply");
+    expect(outcome).toEqual({ outcome: "started", jobId: "j1" });
+  });
+
+  it("resolves the two refusals as STATES, never rejections", async () => {
+    vi.mocked(invoke).mockResolvedValueOnce({ outcome: "alreadyRunning" });
+    expect((await startUpdateApply()).outcome).toBe("alreadyRunning");
+    vi.mocked(invoke).mockResolvedValueOnce({ outcome: "notEligible" });
+    expect((await startUpdateApply()).outcome).toBe("notEligible");
+  });
+
+  it("rejects with UpdateApplyContractDriftError on a drifted payload", async () => {
+    const raw = { outcome: "started" };
+    vi.mocked(invoke).mockResolvedValueOnce(raw);
+    const err = (await startUpdateApply().then(
+      () => {
+        throw new Error("expected rejection");
+      },
+      (e: unknown) => e,
+    )) as UpdateApplyContractDriftError;
+    expect(err).toBeInstanceOf(UpdateApplyContractDriftError);
+    expect(err.raw).toBe(raw);
+  });
+});
+
+describe("restartForUpdate", () => {
+  beforeEach(() => {
+    vi.mocked(invoke).mockReset();
+  });
+
+  it("invokes the guarded restart command", async () => {
+    vi.mocked(invoke).mockResolvedValueOnce(undefined);
+    await restartForUpdate();
+    expect(invoke).toHaveBeenCalledWith("restart_for_update");
+  });
+
+  it("normalizes an IPC rejection into an AppError", async () => {
+    vi.mocked(invoke).mockRejectedValueOnce(new Error("ipc down"));
+    const err = (await restartForUpdate().then(
       () => {
         throw new Error("expected rejection");
       },

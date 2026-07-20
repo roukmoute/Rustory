@@ -92,3 +92,6 @@ mod transfer_outcome;
 
 #[path = "integration/update_availability.rs"]
 mod update_availability;
+
+#[path = "integration/update_apply.rs"]
+mod update_apply;

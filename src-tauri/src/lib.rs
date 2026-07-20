@@ -66,6 +66,17 @@ pub struct AppState {
     /// lock is ever held across the fetch). `Arc` so the
     /// `spawn_blocking` worker can own a handle.
     pub update_availability: std::sync::Arc<application::update::UpdateCheckMemo>,
+    /// Gateway of the update-apply GESTURE (`Update Apply Contract`):
+    /// the official Tauri updater behind a mockable trait, wired at
+    /// setup with the compile-time public key and the canonical feed
+    /// endpoint (+ env override). Only ever invoked AFTER the pure plan
+    /// decision allowed the start — a keyless copy never reaches it.
+    pub update_apply_gateway: std::sync::Arc<dyn infrastructure::updates::UpdateApplyGateway>,
+    /// Session state of the update-apply gesture — the single-flight
+    /// bound and the authoritative truth of `read_update_apply_state`.
+    /// `Arc` so the `spawn_blocking` worker can own a handle. No
+    /// persistence by contract.
+    pub update_apply_session: std::sync::Arc<application::update::UpdateApplySession>,
 }
 
 /// Read every story id that still has a pending draft row. Ordered by
@@ -303,6 +314,13 @@ pub fn run() {
             receive_os_open_candidates(app, &candidates, std::path::Path::new(&cwd));
         }))
         .plugin(tauri_plugin_dialog::init())
+        // Official Tauri updater (`Update Apply Contract`), Rust-side
+        // ONLY: no capability (the renderer never invokes the plugin —
+        // the gesture rides our commands), no npm companion. The real
+        // endpoint + public key are provided at runtime by the gateway;
+        // the committed `plugins.updater` block stays a neutral shell
+        // (the crate requires a deserializable config to register).
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             // Cold-start OS-open seed: Windows/Linux hand the opened file
             // as a raw process argument. `args_os` (never `args`): a Unix
@@ -465,6 +483,22 @@ pub fn run() {
                 update_availability: std::sync::Arc::new(
                     application::update::UpdateCheckMemo::new(),
                 ),
+                update_apply_gateway: std::sync::Arc::new(
+                    // The compile-time trust chain: `option_env!` (never
+                    // `env!`) — a keyless local build compiles and stays
+                    // manual-guided by the plan decision; the gateway is
+                    // then simply never invoked.
+                    infrastructure::updates::TauriUpdaterGateway::new(
+                        app.handle().clone(),
+                        option_env!("RUSTORY_UPDATER_PUBKEY")
+                            .unwrap_or("")
+                            .trim()
+                            .to_string(),
+                    ),
+                ),
+                update_apply_session: std::sync::Arc::new(
+                    application::update::UpdateApplySession::new(),
+                ),
             });
             Ok(())
         })
@@ -514,16 +548,20 @@ pub fn run() {
             commands::transfer::read_transfer_outcome,
             commands::device::read_transfer_preview,
             commands::transfer::read_transfer_state,
+            commands::settings::read_update_apply_plan,
+            commands::settings::read_update_apply_state,
             commands::settings::read_update_availability,
             commands::catalog::refresh_official_catalog,
             commands::story::record_draft,
             commands::story::record_node_draft,
             commands::story::remove_node_media,
             commands::story::remove_node_option,
+            commands::settings::restart_for_update,
             commands::device::set_device_story_title,
             commands::story::set_node_option_link,
             commands::transfer::start_prepare_story,
             commands::transfer::start_transfer_story,
+            commands::settings::start_update_apply,
             commands::story::update_node_content,
             commands::story::update_story,
         ])

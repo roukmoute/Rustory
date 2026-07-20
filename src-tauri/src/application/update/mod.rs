@@ -3,6 +3,17 @@
 //! diagnostics line, session memo. The catalog pattern: this layer
 //! consumes the infrastructure trait so the whole sequence is testable
 //! with a mock source and no network; the command stays a THIN frontier.
+//!
+//! The `apply` submodule carries the SEPARATE orchestration of the
+//! update GESTURE (`Update Apply Contract`) — same testability
+//! discipline, its own session state and event family.
+
+pub mod apply;
+
+pub use apply::{
+    run_update_apply, run_update_apply_supervised, start_update_apply, StartUpdateApplyOutcome,
+    UpdateApplyEventEmitter, UpdateApplySession, UpdateApplySessionSnapshot,
+};
 
 use std::path::Path;
 use std::sync::{Condvar, Mutex};

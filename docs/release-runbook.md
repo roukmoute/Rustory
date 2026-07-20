@@ -2,17 +2,17 @@
 
 ## Purpose
 
-Ce document est la référence opérationnelle pour livrer des builds Rustory tant que la chaîne officielle de release (CI multi-OS, signing, feed updater, promotion) n'est pas encore en place. Il matérialise la posture actuelle du socle et définit les critères précis pour en sortir.
+Ce document est la référence opérationnelle pour livrer des builds Rustory. La chaîne officielle de release (CI multi-OS, signing, feed updater, promotion) est désormais OUTILLÉE dans le repo, mais elle n'est PAS ENCORE ACTIVE : son activation est un acte opérateur (provisionner les secrets, pousser un tag, promouvoir une release). Ce document matérialise la posture courante et le chemin d'activation.
 
-## Current posture — manual delivery only
+## Current posture — manual delivery only (still)
 
 À cette étape :
 
-- **Aucun workflow GitHub Actions `build-release.yml`** et aucun `promote-release.yml` n'existent dans le repo. Seul [`.github/workflows/verify.yml`](../.github/workflows/verify.yml) tourne à chaque `push` / `pull_request` pour valider frontend + Rust.
-- **Aucun bloc `plugins.updater`** n'est déclaré dans [`src-tauri/tauri.conf.json`](../src-tauri/tauri.conf.json). Les clients distribués CONSULTENT la disponibilité d'une version publiée — une lecture seule, bornée, de l'API publique des versions du repo (`releases/latest`), dont le résultat est AFFICHÉ sans aucune action (voir le contrat de disponibilité de mise à jour, [architecture/device-support-profile.md](architecture/device-support-profile.md)) ; AUCUN feed updater signé n'est consulté ni appliqué. La posture manuelle, les invariants ci-dessous et les critères de sortie restent inchangés.
-- **Aucune dépendance `tauri-plugin-updater`** n'est présente dans [`src-tauri/Cargo.toml`](../src-tauri/Cargo.toml). Aucune clé de signature n'est attendue par le binaire.
+- **Les workflows GitHub Actions [`build-release.yml`](../.github/workflows/build-release.yml) et [`promote-release.yml`](../.github/workflows/promote-release.yml) EXISTENT** mais n'ont jamais été exercés : aucun secret de signature n'est provisionné, aucun tag `v*` n'a été poussé, aucune release n'a été construite ni promue. `build-release.yml` échoue proprement (fail-closed) tant que les secrets manquent — aucune release non signée ne peut naître. [`verify.yml`](../.github/workflows/verify.yml) reste le seul workflow qui tourne à chaque `push` / `pull_request`.
+- **Le bloc `plugins.updater` de [`src-tauri/tauri.conf.json`](../src-tauri/tauri.conf.json) est une COQUILLE NEUTRE** (`{"pubkey": ""}`) — une exception technique assumée : la crate `tauri-plugin-updater` exige une configuration désérialisable à l'enregistrement du plugin (champ `pubkey` requis ; bloc absent = échec au démarrage). Cette coquille ne configure RIEN de réel : la configuration effective du mécanisme est entièrement runtime (endpoint constant + clé publique lue à la compilation, une pubkey vide = chaîne non configurée, fail-closed), et un test de contrat verrouille la coquille dans cet état neutre (jamais d'endpoint statique, jamais de flag dangereux). `createUpdaterArtifacts` n'est PAS committé : la production des artefacts updater n'est activée que par l'overlay de configuration du workflow de release. Conséquence directe : le build local ci-dessous reste possible sans aucune clé.
+- **La dépendance `tauri-plugin-updater` est présente** dans [`src-tauri/Cargo.toml`](../src-tauri/Cargo.toml) (`default-features = false`, `features = ["native-tls", "zip"]` — la contrainte TLS de la CI s'applique au plugin comme au reste). Le geste intégré de mise à jour (voir le contrat d'application de mise à jour, [architecture/device-support-profile.md](architecture/device-support-profile.md)) est FAIL-CLOSED : sans clé publique embarquée à la compilation (`RUSTORY_UPDATER_PUBKEY`), toute copie distribuée retombe sur la guidance manuelle. Les clients distribués continuent par ailleurs de CONSULTER la disponibilité d'une version publiée — une lecture seule, bornée, de l'API publique des versions du repo (`releases/latest`), sans aucune action (contrat de disponibilité de mise à jour, inchangé).
 
-Conséquence : publier un build = fournir un binaire produit localement à l'utilisateur final. Pas de mécanisme automatique de distribution ni de mise à jour.
+Conséquence : publier un build = fournir un binaire produit localement à l'utilisateur final, tant que les conditions d'activation ci-dessous ne sont pas remplies. La posture manuelle RESTE la posture courante tant que : (a) les secrets `TAURI_SIGNING_PRIVATE_KEY` / `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` et la variable `RUSTORY_UPDATER_PUBKEY` ne sont pas provisionnés, ET (b) aucune release n'a été construite ET promue par les workflows.
 
 ## Manual build procedure
 
@@ -34,38 +34,45 @@ Distribution hors CI : upload manuel vers le canal privé convenu avec l'utilisa
 
 ## Why manual for now
 
-Deux invariants interdisent de publier un updater tant qu'ils ne sont pas tenus : les builds officiellement distribués doivent être reproductibles depuis la CI, et les artefacts de mise à jour doivent être signés. Tant que ces deux garanties ne sont pas établies par une chaîne CI signée et une politique de promotion explicite, publier un binaire via un updater serait **plus risqué** que ne pas publier du tout : un utilisateur qui a installé une build manuelle sait qu'il l'a fait manuellement et ne s'attend pas à une mise à jour silencieuse.
+Deux invariants interdisent de publier un updater tant qu'ils ne sont pas tenus : les builds officiellement distribués doivent être reproductibles depuis la CI, et les artefacts de mise à jour doivent être signés. Tant que ces deux garanties ne sont pas établies par une chaîne CI signée exercée au moins une fois et une promotion humaine effective, publier un binaire via un updater serait **plus risqué** que ne pas publier du tout : un utilisateur qui a installé une build manuelle sait qu'il l'a fait manuellement et ne s'attend pas à une mise à jour silencieuse.
 
-La posture manuelle est donc un choix conservateur : si la chaîne de confiance ne peut pas être établie pour une cible, retomber sur la distribution manuelle plutôt que d'embarquer un chemin updater non validé.
+La posture manuelle est donc un choix conservateur : si la chaîne de confiance ne peut pas être établie pour une cible, retomber sur la distribution manuelle plutôt que d'embarquer un chemin updater non validé. Le geste intégré embarqué dans le binaire respecte ce choix par construction : sans clé publique embarquée, il retombe sur la guidance manuelle.
 
-## Exit criteria — when to switch to automated delivery
+## Exit criteria — state of delivery
 
-Les quatre éléments ci-dessous relèvent d'un futur travail de release hardening. La posture manuelle reste de rigueur tant que les quatre ne sont pas livrés :
+Trois des quatre critères de sortie sont MATÉRIALISÉS dans le repo ; le premier est un acte opérateur documenté, jamais exécuté par le code :
 
-1. **Secrets signing provisionnés** dans les GitHub Actions secrets du repo :
-   - `TAURI_SIGNING_PRIVATE_KEY` (clé privée Ed25519 du updater Tauri)
-   - `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` (passphrase associée)
+1. **Secrets signing provisionnés** — À FAIRE (acte opérateur) :
+   - `TAURI_SIGNING_PRIVATE_KEY` (clé privée Ed25519 du updater Tauri) et `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` (passphrase associée) dans les GitHub Actions **secrets** du repo
+   - `RUSTORY_UPDATER_PUBKEY` (clé publique correspondante) dans les GitHub Actions **variables** du repo — embarquée dans les binaires au moment du build
 
-   Perte = incident opérationnel critique (pas de rollback possible).
+   La procédure de génération, la chaîne de responsabilité, la rotation et le modèle de perte sont décrits dans [update-signing.md](update-signing.md). Perte de la clé privée = incident opérationnel critique (pas de récupération possible).
 
-2. **Workflow `.github/workflows/build-release.yml`** avec :
-   - matrice `runs-on: [windows-latest, macos-latest, ubuntu-latest]`
-   - builds signés produisant des artefacts `.msi`, `.dmg`, `AppImage`
-   - upload GitHub Release avec assets attachés
-   - génération du fichier `updater.json` (ou équivalent manifest statique)
+2. **Workflow [`.github/workflows/build-release.yml`](../.github/workflows/build-release.yml)** — LIVRÉ :
+   - déclenchement sur tag `v*` (ou manuel), matrice `ubuntu-24.04` / `windows-latest` / `macos-latest`
+   - builds signés produisant les artefacts installables ET leurs artefacts updater signés (`.sig`)
+   - création d'une GitHub Release **draft** avec tous les assets attachés, dont `latest.json`
+   - fail-closed : le workflow échoue si les secrets de signature manquent — aucune release non signée, jamais
 
-3. **Workflow `.github/workflows/promote-release.yml`** pour la publication contrôlée du feed updater :
-   - déclenchement manuel (`workflow_dispatch`), jamais automatique
-   - promotion d'une release candidate vers le canal `stable`
-   - publication du manifest updater uniquement après revue humaine explicite
+3. **Workflow [`.github/workflows/promote-release.yml`](../.github/workflows/promote-release.yml)** — LIVRÉ :
+   - déclenchement manuel uniquement (`workflow_dispatch` avec le tag en input), jamais automatique
+   - garde-fou « jamais de feed partiel » : la promotion vérifie que la release draft porte les artefacts des trois cibles, leurs signatures et un `latest.json` couvrant les trois plateformes — le job échoue sinon
+   - publication de la draft après revue humaine explicite : c'est la publication qui rend `releases/latest/download/latest.json` public, donc qui promeut le feed du canal `stable`
 
-4. **Document `docs/update-signing.md`** décrivant :
-   - procédure de génération initiale de la paire de clés
-   - procédure de rotation en cas de compromission
-   - chaîne de responsabilité et accès aux secrets
-   - procédure de récupération en cas de perte (ou pourquoi il n'y en a pas, selon le modèle de confiance choisi)
+4. **Document [`docs/update-signing.md`](update-signing.md)** — LIVRÉ : génération initiale, stockage, chaîne de responsabilité, rotation en cas de compromission, modèle assumé en cas de perte.
 
-Quand les quatre sont livrés, mettre à jour cette page : supprimer la section « Manual build procedure » au profit d'un renvoi vers `build-release.yml`, et déplacer la section « Manual posture » dans un encart historique.
+## Automated delivery path
+
+Le chemin de livraison automatisé, une fois les secrets provisionnés :
+
+1. **Tag** : pousser un tag `v*` conforme à la convention stricte `vMAJOR.MINOR.PATCH` (aligné sur les trois manifests du repo — le verrou d'alignement des versions est testé en CI).
+2. **Build** : `build-release.yml` construit et signe les artefacts des trois cibles, génère `latest.json` + les `.sig`, et attache le tout à une release **draft**. Rien n'est public à ce stade : une draft n'apparaît pas dans `releases/latest`.
+3. **Revue humaine** : vérifier la release draft (artefacts présents pour les trois cibles, signatures, versions cohérentes, notes de release).
+4. **Promotion** : lancer `promote-release.yml` avec le tag. Le workflow re-vérifie la complétude (jamais de feed partiel) puis publie la draft — le feed `releases/latest/download/latest.json` devient public et les copies AppImage distribuées porteuses de la clé publique voient la mise à jour via le geste intégré.
+
+**Limite assumée** : ces workflows ne peuvent pas être exercés tant qu'aucun secret n'est provisionné — leur relecture a été statique (syntaxe, inputs/outputs de `tauri-apps/tauri-action` vérifiés contre sa documentation). La PREMIÈRE release réelle est leur banc d'essai, sous contrôle opérateur : ne jamais présenter la chaîne comme validée avant ce premier passage complet (build → draft → promotion → mise à jour constatée sur une copie réelle).
+
+La procédure de build manuel ci-dessus reste VALIDE telle quelle : le build local n'exige aucune clé (les artefacts updater ne sont produits que sous l'overlay de configuration du workflow de release).
 
 ## Local persistence footprint
 
@@ -134,5 +141,6 @@ Même en livraison manuelle, ne **jamais** :
 
 - publier un binaire non issu d'une checkout `main` propre et vérifiée localement
 - promouvoir une CI verte comme « release ready » — `verify.yml` valide la compilation et les tests, pas la signature ni la reproductibilité release
-- activer un feed updater partiel pointant vers un sous-ensemble de plateformes (donnerait l'illusion d'une couverture complète)
+- activer un feed updater partiel pointant vers un sous-ensemble de plateformes (donnerait l'illusion d'une couverture complète) — `promote-release.yml` outille désormais ce garde-fou : il refuse de publier une draft dont `latest.json` ne couvre pas les trois cibles, et publier la draft à la main en contournant ce contrôle reste interdit
+- publier une release automatiquement — la promotion passe TOUJOURS par la revue humaine puis `promote-release.yml`
 - distribuer un build dont les vérifications locales ne sont pas toutes vertes
