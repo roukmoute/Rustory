@@ -2,11 +2,11 @@
 
 ## Purpose
 
-Ce document est la référence opérationnelle pour livrer des builds Rustory. La chaîne officielle de release (CI multi-OS, signing, feed updater, promotion) est désormais OUTILLÉE dans le repo, mais elle n'est PAS ENCORE ACTIVE : son activation est un acte opérateur (provisionner les secrets, pousser un tag, promouvoir une release). Ce document matérialise la posture courante et le chemin d'activation.
+Ce document est la référence opérationnelle pour livrer des builds Rustory. La chaîne officielle de release (CI multi-OS, signing, feed updater, promotion) est OUTILLÉE et **ACTIVE depuis la v0.1.0 (2026-07-21)** : les secrets de signature sont provisionnés, les workflows `build-release` / `promote-release` ont été exercés de bout en bout et le feed `releases/latest/download/latest.json` est public. Le chemin de livraison courant est le chemin automatisé ci-dessous (« Automated delivery path ») ; la procédure de build manuel reste valide comme filet.
 
-## Current posture — manual delivery only (still)
+## Historical posture — manual delivery only (until v0.1.0)
 
-À cette étape :
+Jusqu'à l'activation, la posture était la suivante (conservée pour le contexte ; les caveats techniques restent exacts) :
 
 - **Les workflows GitHub Actions [`build-release.yml`](../.github/workflows/build-release.yml) et [`promote-release.yml`](../.github/workflows/promote-release.yml) EXISTENT** mais n'ont jamais été exercés : aucun secret de signature n'est provisionné, aucun tag `v*` n'a été poussé, aucune release n'a été construite ni promue. `build-release.yml` échoue proprement (fail-closed) tant que les secrets manquent — aucune release non signée ne peut naître. [`verify.yml`](../.github/workflows/verify.yml) reste le seul workflow qui tourne à chaque `push` / `pull_request`.
 - **Le bloc `plugins.updater` de [`src-tauri/tauri.conf.json`](../src-tauri/tauri.conf.json) est une COQUILLE NEUTRE** (`{"pubkey": ""}`) — une exception technique assumée : la crate `tauri-plugin-updater` exige une configuration désérialisable à l'enregistrement du plugin (champ `pubkey` requis ; bloc absent = échec au démarrage). Cette coquille ne configure RIEN de réel : la configuration effective du mécanisme est entièrement runtime (endpoint constant + clé publique lue à la compilation, une pubkey vide = chaîne non configurée, fail-closed), et un test de contrat verrouille la coquille dans cet état neutre (jamais d'endpoint statique, jamais de flag dangereux). `createUpdaterArtifacts` n'est PAS committé : la production des artefacts updater n'est activée que par l'overlay de configuration du workflow de release — overlay qui porte AUSSI la clé publique effective, car le bundler refuse de produire des artefacts updater contre la pubkey vide de la coquille (constat du premier passage réel de la chaîne ; le runtime, lui, continue de lire exclusivement la clé embarquée à la compilation). Conséquence directe : le build local ci-dessous reste possible sans aucune clé.
@@ -40,9 +40,9 @@ La posture manuelle est donc un choix conservateur : si la chaîne de confiance 
 
 ## Exit criteria — state of delivery
 
-Trois des quatre critères de sortie sont MATÉRIALISÉS dans le repo ; le premier est un acte opérateur documenté, jamais exécuté par le code :
+Les quatre critères de sortie sont REMPLIS (le premier a été exécuté comme acte opérateur le 2026-07-21) :
 
-1. **Secrets signing provisionnés** — À FAIRE (acte opérateur) :
+1. **Secrets signing provisionnés** — FAIT (2026-07-21) :
    - `TAURI_SIGNING_PRIVATE_KEY` (clé privée Ed25519 du updater Tauri) et `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` (passphrase associée) dans les GitHub Actions **secrets** du repo
    - `RUSTORY_UPDATER_PUBKEY` (clé publique correspondante) dans les GitHub Actions **variables** du repo — embarquée dans les binaires au moment du build
 
@@ -70,7 +70,11 @@ Le chemin de livraison automatisé, une fois les secrets provisionnés :
 3. **Revue humaine** : vérifier la release draft (artefacts présents pour les trois cibles, signatures, versions cohérentes, notes de release).
 4. **Promotion** : lancer `promote-release.yml` avec le tag. Le workflow re-vérifie la complétude (jamais de feed partiel) puis publie la draft — le feed `releases/latest/download/latest.json` devient public et les copies AppImage distribuées porteuses de la clé publique voient la mise à jour via le geste intégré.
 
-**Limite assumée** : ces workflows ne peuvent pas être exercés tant qu'aucun secret n'est provisionné — leur relecture a été statique (syntaxe, inputs/outputs de `tauri-apps/tauri-action` vérifiés contre sa documentation). La PREMIÈRE release réelle est leur banc d'essai, sous contrôle opérateur : ne jamais présenter la chaîne comme validée avant ce premier passage complet (build → draft → promotion → mise à jour constatée sur une copie réelle).
+**Banc d'essai passé** : la première release réelle (v0.1.0, 2026-07-21) a exercé le passage complet build → draft → promotion → feed public, et a corrigé au passage le seul défaut trouvé (l'overlay doit porter la clé publique — voir la posture ci-dessus). Pièges opérateur constatés à connaître :
+
+- **Éditer une draft via l'API sans re-fournir `tag_name` réinitialise son tag** (`untagged-…`) et fait échouer la promotion (« No DRAFT release found ») — toute mise à jour des notes d'une draft doit repasser `tag_name`.
+- **Baseline glibc des binaires Linux** : construits sur `ubuntu-24.04`, ils exigent glibc ≥ 2.39 (Ubuntu 24.04+, Debian 13+, Fedora 40+…) — à documenter dans les notes de release ; élargir la matrice si une baseline plus ancienne devient nécessaire.
+- Le build macOS produit un artefact Apple Silicon uniquement (`macos-latest`).
 
 La procédure de build manuel ci-dessus reste VALIDE telle quelle : le build local n'exige aucune clé (les artefacts updater ne sont produits que sous l'overlay de configuration du workflow de release).
 
