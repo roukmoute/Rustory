@@ -3359,7 +3359,7 @@ dependencies = [
 
 [[package]]
 name = "rustory"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "quick-xml 0.40.1",
  "reqwest 0.12.9",
