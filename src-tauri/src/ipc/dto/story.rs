@@ -20,6 +20,24 @@ pub struct UpdateStoryInputDto {
     pub title: String,
 }
 
+/// Input accepted by the `delete_stories` Tauri command: the ids of the
+/// selection the user explicitly confirmed. Same `deny_unknown_fields`
+/// discipline as the sibling inputs.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DeleteStoriesInputDto {
+    pub ids: Vec<String>,
+}
+
+/// Wire-level return shape for `delete_stories` — the ids actually removed,
+/// echoed back so the UI reconciles its selection against what happened
+/// (all-or-nothing: on error, nothing was removed).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeleteStoriesOutputDto {
+    pub deleted_ids: Vec<String>,
+}
+
 /// Wire-level return shape for `update_story` (and `apply_recovery`, whose
 /// title write shares it). Carries the freshly persisted values so the UI
 /// can reconcile its draft against the source of truth without issuing a

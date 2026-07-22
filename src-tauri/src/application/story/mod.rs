@@ -194,6 +194,130 @@ pub fn update_story(
     })
 }
 
+/// Input of [`delete_stories`] — the selection the user confirmed, verbatim.
+pub struct DeleteStoriesInput {
+    pub ids: Vec<String>,
+}
+
+/// Delete stories from the local library, all-or-nothing.
+///
+/// One `BEGIN IMMEDIATE` transaction deletes every requested row; a single
+/// missing id rolls the whole batch back — what the user confirmed is
+/// exactly what happens, never a partial removal. The schema's
+/// `ON DELETE CASCADE` chains remove the DB children (drafts, provenance,
+/// transfer memory, asset rows) inside the same transaction.
+///
+/// Node-media files are content-addressed and SHARED across stories, so
+/// they are reclaimed AFTER commit through the refcounted GC
+/// ([`node::gc_unreferenced_media_file`]): a file survives as long as any
+/// remaining `assets` row references its content. The per-story
+/// `imports/<id>` directory is filesystem-only and is the CALLER's cleanup
+/// (off the DB lock) — a leftover is inert and swept at next boot.
+pub fn delete_stories(
+    db: &mut DbHandle,
+    input: DeleteStoriesInput,
+    node_media_dir: &std::path::Path,
+) -> Result<Vec<String>, AppError> {
+    if input.ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // Captured BEFORE the rows disappear: the (content_hash, file_name)
+    // pairs whose files may become unreferenced once the cascade fires.
+    let mut media_candidates: std::collections::BTreeSet<(String, String)> =
+        std::collections::BTreeSet::new();
+
+    let tx = db
+        .conn_mut()
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(|err| map_delete_transport_error(&err, "begin_transaction", "<batch>"))?;
+
+    for id in &input.ids {
+        {
+            let mut stmt = tx
+                .prepare("SELECT content_hash, file_name FROM assets WHERE story_id = ?1")
+                .map_err(|err| map_delete_transport_error(&err, "select_assets", id))?;
+            let rows = stmt
+                .query_map(rusqlite::params![id], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })
+                .map_err(|err| map_delete_transport_error(&err, "select_assets", id))?;
+            for row in rows {
+                let pair =
+                    row.map_err(|err| map_delete_transport_error(&err, "select_assets", id))?;
+                media_candidates.insert(pair);
+            }
+        }
+
+        let rows_affected = tx
+            .execute("DELETE FROM stories WHERE id = ?1", rusqlite::params![id])
+            .map_err(|err| map_delete_transport_error(&err, "delete", id))?;
+
+        if rows_affected == 0 {
+            // One missing row invalidates the whole confirmed batch: roll
+            // back so no story disappears under a stale confirmation.
+            let rollback_err = tx.rollback().err();
+            return Err(AppError::library_inconsistent(
+                "Histoire introuvable, recharge la bibliothèque.",
+                "Retourne à la bibliothèque et recharge la liste.",
+            )
+            .with_details(serde_json::json!({
+                "source": "story_missing",
+                "id": id,
+                "rollback": rollback_err.as_ref().map(|e| sqlite_kind_label(e)),
+            })));
+        }
+
+        if rows_affected > 1 {
+            // Defense in depth, mirroring `update_story`: `id` is the
+            // PRIMARY KEY — more than one row means a broken schema state.
+            let _ = tx.rollback();
+            return Err(AppError::library_inconsistent(
+                "La bibliothèque locale est incohérente.",
+                "Relance Rustory pour reconstruire la vue cohérente.",
+            )
+            .with_details(serde_json::json!({
+                "source": "story_duplicate",
+                "id": id,
+                "rowsAffected": rows_affected,
+            })));
+        }
+    }
+
+    tx.commit()
+        .map_err(|err| map_delete_transport_error(&err, "commit", "<batch>"))?;
+
+    // Post-commit, still under the command's DB lock: unlink every media
+    // file whose content is no longer referenced by ANY remaining asset
+    // row. Best-effort by design — a missed unlink is reclaimed by the
+    // boot sweep (`node::sweep_orphan_node_media`), never a user error.
+    for (content_hash, file_name) in media_candidates {
+        node::gc_unreferenced_media_file(db, node_media_dir, Some((content_hash, file_name)));
+    }
+
+    Ok(input.ids)
+}
+
+fn map_delete_transport_error(
+    err: &rusqlite::Error,
+    stage: &'static str,
+    story_id: &str,
+) -> AppError {
+    // Same PII discipline as `map_update_transport_error`: drop the raw
+    // rusqlite message, keep a stable `source`/`stage` for support.
+    AppError::local_storage_unavailable(
+        "Rustory n'a pas pu supprimer la sélection.",
+        "Réessaie dans un instant ; si le problème persiste, consulte les traces locales.",
+    )
+    .with_details(serde_json::json!({
+        "source": "sqlite_delete",
+        "table": "stories",
+        "stage": stage,
+        "kind": sqlite_kind_label(err),
+        "id": story_id,
+    }))
+}
+
 /// Read a single story by id for the edit surface.
 ///
 /// Returns `Ok(None)` when the row is missing — an informational case the
@@ -421,6 +545,156 @@ mod tests {
         let mut db = db::open_in_memory().expect("open in-memory db");
         db::run_migrations(&mut db).expect("migrate");
         db
+    }
+
+    fn insert_asset(db: &DbHandle, story_id: &str, content_hash: &str, file_name: &str) {
+        db.conn()
+            .execute(
+                "INSERT INTO assets (id, story_id, content_hash, media_type, media_format, byte_size, file_name, created_at)
+                 VALUES (?1, ?2, ?3, 'image', 'png', 1, ?4, '2026-07-22T00:00:00.000Z')",
+                rusqlite::params![
+                    format!("asset-{story_id}-{file_name}"),
+                    story_id,
+                    content_hash,
+                    file_name
+                ],
+            )
+            .expect("insert asset row");
+    }
+
+    fn story_count(db: &DbHandle) -> i64 {
+        db.conn()
+            .query_row("SELECT COUNT(*) FROM stories", [], |r| r.get(0))
+            .expect("count stories")
+    }
+
+    #[test]
+    fn delete_stories_removes_the_requested_rows_and_returns_them() {
+        let mut db = fresh_db();
+        let kept = create_story(
+            &mut db,
+            CreateStoryInput {
+                title: "Gardée".into(),
+            },
+        )
+        .expect("create kept");
+        let doomed = create_story(
+            &mut db,
+            CreateStoryInput {
+                title: "Condamnée".into(),
+            },
+        )
+        .expect("create doomed");
+        let media_dir = tempfile::tempdir().expect("tempdir");
+
+        let deleted = delete_stories(
+            &mut db,
+            DeleteStoriesInput {
+                ids: vec![doomed.id.clone()],
+            },
+            media_dir.path(),
+        )
+        .expect("delete");
+
+        assert_eq!(deleted, vec![doomed.id]);
+        assert_eq!(story_count(&db), 1);
+        let remaining: String = db
+            .conn()
+            .query_row("SELECT id FROM stories", [], |r| r.get(0))
+            .expect("read survivor");
+        assert_eq!(remaining, kept.id);
+    }
+
+    #[test]
+    fn delete_stories_is_all_or_nothing_when_an_id_is_missing() {
+        let mut db = fresh_db();
+        let existing = create_story(
+            &mut db,
+            CreateStoryInput {
+                title: "Présente".into(),
+            },
+        )
+        .expect("create");
+        let media_dir = tempfile::tempdir().expect("tempdir");
+
+        let err = delete_stories(
+            &mut db,
+            DeleteStoriesInput {
+                ids: vec![
+                    existing.id.clone(),
+                    "0197a5d0-dead-7000-8000-000000000000".into(),
+                ],
+            },
+            media_dir.path(),
+        )
+        .expect_err("missing id must fail the batch");
+
+        assert_eq!(err.code, AppErrorCode::LibraryInconsistent);
+        let details = err.details.as_ref().expect("details");
+        assert_eq!(details["source"], "story_missing");
+        // The confirmed batch was rolled back whole: the existing story
+        // survived — never a partial removal under a stale confirmation.
+        assert_eq!(story_count(&db), 1);
+    }
+
+    #[test]
+    fn delete_stories_reclaims_media_files_only_when_unreferenced() {
+        let mut db = fresh_db();
+        let a = create_story(&mut db, CreateStoryInput { title: "A".into() }).expect("a");
+        let b = create_story(&mut db, CreateStoryInput { title: "B".into() }).expect("b");
+
+        let shared_hash = "a".repeat(64);
+        let solo_hash = "b".repeat(64);
+        insert_asset(&db, &a.id, &shared_hash, "shared.png");
+        insert_asset(&db, &b.id, &shared_hash, "shared.png");
+        insert_asset(&db, &a.id, &solo_hash, "solo.png");
+
+        let media_dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(media_dir.path().join("shared.png"), b"x").expect("shared file");
+        std::fs::write(media_dir.path().join("solo.png"), b"x").expect("solo file");
+
+        delete_stories(
+            &mut db,
+            DeleteStoriesInput { ids: vec![a.id] },
+            media_dir.path(),
+        )
+        .expect("delete a");
+
+        // The content B still references survives; A's exclusive content is
+        // reclaimed by the refcounted GC.
+        assert!(media_dir.path().join("shared.png").exists());
+        assert!(!media_dir.path().join("solo.png").exists());
+
+        delete_stories(
+            &mut db,
+            DeleteStoriesInput { ids: vec![b.id] },
+            media_dir.path(),
+        )
+        .expect("delete b");
+        assert!(!media_dir.path().join("shared.png").exists());
+    }
+
+    #[test]
+    fn delete_stories_with_an_empty_selection_is_a_noop() {
+        let mut db = fresh_db();
+        create_story(
+            &mut db,
+            CreateStoryInput {
+                title: "Intacte".into(),
+            },
+        )
+        .expect("create");
+        let media_dir = tempfile::tempdir().expect("tempdir");
+
+        let deleted = delete_stories(
+            &mut db,
+            DeleteStoriesInput { ids: Vec::new() },
+            media_dir.path(),
+        )
+        .expect("noop");
+
+        assert!(deleted.is_empty());
+        assert_eq!(story_count(&db), 1);
     }
 
     #[test]

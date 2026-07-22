@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 
 import {
   isAttachNodeMediaOutcome,
+  isDeleteStoriesOutput,
   isNodeMediaPreview,
   isNodeWriteOutput,
   isRecoverableDraft,
@@ -14,6 +15,8 @@ import {
   type ApplyRecoveryInput,
   type AttachNodeMediaOutcome,
   type CreateStoryInput,
+  type DeleteStoriesInput,
+  type DeleteStoriesOutput,
   type DeleteStoryNodeInput,
   type MoveStoryNodeInput,
   type NodeMediaPreview,
@@ -47,6 +50,25 @@ import {
  */
 export function createStory(input: CreateStoryInput): Promise<StoryCardDto> {
   return invoke<StoryCardDto>("create_story", { input });
+}
+
+/**
+ * Delete the confirmed selection from the local library. All-or-nothing on
+ * the Rust side: a rejection means nothing was removed. The acknowledgement
+ * is validated at this boundary (`isDeleteStoriesOutput`) so the caller
+ * reconciles its selection against what actually happened.
+ */
+export async function deleteStories(
+  input: DeleteStoriesInput,
+): Promise<DeleteStoriesOutput> {
+  const raw = await invoke<unknown>("delete_stories", { input });
+  if (!isDeleteStoriesOutput(raw)) {
+    throw new StoryContractDriftError(
+      "delete_stories a renvoyé une forme inattendue.",
+      { raw },
+    );
+  }
+  return raw;
 }
 
 /**

@@ -32,6 +32,7 @@ const mockDiscardOsOpen = vi.fn();
 const mockAnalyzeDrop = vi.fn();
 const mockDiscardDrop = vi.fn();
 const mockCreateStory = vi.fn();
+const mockDeleteStories = vi.fn();
 const mockFetchRssPreview = vi.fn();
 const mockAcceptRssCreation = vi.fn();
 const mockReadContentSourcePolicy = vi.fn();
@@ -178,6 +179,7 @@ vi.mock("../../ipc/commands/story", async () => {
   return {
     ...actual,
     createStory: (input: unknown) => mockCreateStory(input),
+    deleteStories: (input: unknown) => mockDeleteStories(input),
   };
 });
 
@@ -333,6 +335,10 @@ describe("<LibraryRoute />", () => {
     // Default: the primary title creation never settles unless a test
     // drives it explicitly.
     mockCreateStory.mockReset();
+    // Default: deletion resolves with an empty ack; tests exercising the
+    // flow override it with the confirmed ids.
+    mockDeleteStories.mockReset();
+    mockDeleteStories.mockResolvedValue({ deletedIds: [] });
     mockCreateStory.mockImplementation(() => new Promise(() => {}));
     // Default: the RSS preview is user-triggered; a never-settling fetch is
     // overridden by the tests that exercise the flow.
@@ -615,6 +621,80 @@ describe("<LibraryRoute />", () => {
     expect(
       screen.getByText(/2 histoires — 1 sélectionnée/),
     ).toBeInTheDocument();
+  });
+
+  it("deletes the confirmed selection, clears it, and re-reads the overview", async () => {
+    const user = userEvent.setup();
+    mockGet.mockResolvedValueOnce({
+      stories: [
+        { id: "s1", title: "À supprimer" },
+        { id: "s2", title: "Conservée" },
+      ],
+    });
+    // The re-read AFTER the deletion answers without the removed story.
+    mockGet.mockResolvedValueOnce({
+      stories: [{ id: "s2", title: "Conservée" }],
+    });
+    mockDeleteStories.mockResolvedValueOnce({ deletedIds: ["s1"] });
+    renderLibrary();
+
+    await user.click(await screen.findByRole("button", { name: /à supprimer/i }));
+    const panel = screen.getByRole("complementary", {
+      name: /panneau de décision/i,
+    });
+    await user.click(
+      within(panel).getByRole("button", { name: /^supprimer$/i }),
+    );
+    await user.click(
+      within(panel).getByRole("button", { name: /confirmer la suppression/i }),
+    );
+
+    expect(mockDeleteStories).toHaveBeenCalledWith({ ids: ["s1"] });
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("button", { name: /à supprimer/i }),
+      ).not.toBeInTheDocument(),
+    );
+    expect(
+      screen.getByRole("button", { name: /conservée/i }),
+    ).toBeInTheDocument();
+    expect(
+      within(panel).getByText(/^aucune histoire sélectionnée$/i),
+    ).toBeInTheDocument();
+  });
+
+  it("keeps the library and the selection intact when the deletion fails, and surfaces the alert", async () => {
+    const user = userEvent.setup();
+    mockGet.mockResolvedValueOnce({
+      stories: [{ id: "s1", title: "Increvable" }],
+    });
+    mockDeleteStories.mockRejectedValueOnce({
+      code: "LOCAL_STORAGE_UNAVAILABLE",
+      message: "Rustory n'a pas pu supprimer la sélection.",
+      userAction: "Réessaie dans un instant.",
+      details: null,
+    });
+    renderLibrary();
+
+    await user.click(await screen.findByRole("button", { name: /increvable/i }));
+    const panel = screen.getByRole("complementary", {
+      name: /panneau de décision/i,
+    });
+    await user.click(
+      within(panel).getByRole("button", { name: /^supprimer$/i }),
+    );
+    await user.click(
+      within(panel).getByRole("button", { name: /confirmer la suppression/i }),
+    );
+
+    expect(
+      await within(panel).findByRole("alert"),
+    ).toHaveTextContent(/n'a pas pu supprimer la sélection/i);
+    // All-or-nothing: the card is still there, still selected — the user
+    // can retry the same confirmed intent.
+    expect(
+      screen.getByRole("button", { name: /increvable/i }),
+    ).toHaveAttribute("aria-pressed", "true");
   });
 
   it("Ctrl+click on a second card toggles multi-selection and disables Éditer with the canonical reason", async () => {

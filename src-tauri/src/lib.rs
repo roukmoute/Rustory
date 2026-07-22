@@ -521,6 +521,7 @@ pub fn run() {
             commands::story::apply_recovery,
             commands::story::attach_node_media,
             commands::story::create_story,
+            commands::story::delete_stories,
             commands::story::delete_story_node,
             commands::story::discard_draft,
             commands::import_export::discard_drop_request,

@@ -16,12 +16,12 @@ use crate::infrastructure::diagnostics::recovery_log;
 use crate::infrastructure::filesystem::{resolve_node_media_dir, MediaKind, MAX_MEDIA_BYTES};
 use crate::ipc::dto::{
     AddNodeOptionInputDto, AddStoryNodeInputDto, ApplyRecoveryInputDto, AttachNodeMediaOutcomeDto,
-    CreateStoryInputDto, DeleteStoryNodeInputDto, DiscardDraftInputDto, DiscardNodeDraftInputDto,
-    MoveDirectionDto, MoveStoryNodeInputDto, NodeMediaPreviewDto, NodeMediaSlotInputDto,
-    NodeWriteOutputDto, RecordDraftInputDto, RecordNodeDraftInputDto, RecoverableDraftDto,
-    RecoverableNodeDraftDto, RemoveNodeOptionInputDto, SetNodeOptionLinkInputDto, StoryCardDto,
-    StoryDetailDto, StructureWriteOutputDto, UpdateNodeContentInputDto, UpdateStoryInputDto,
-    UpdateStoryOutputDto,
+    CreateStoryInputDto, DeleteStoriesInputDto, DeleteStoriesOutputDto, DeleteStoryNodeInputDto,
+    DiscardDraftInputDto, DiscardNodeDraftInputDto, MoveDirectionDto, MoveStoryNodeInputDto,
+    NodeMediaPreviewDto, NodeMediaSlotInputDto, NodeWriteOutputDto, RecordDraftInputDto,
+    RecordNodeDraftInputDto, RecoverableDraftDto, RecoverableNodeDraftDto,
+    RemoveNodeOptionInputDto, SetNodeOptionLinkInputDto, StoryCardDto, StoryDetailDto,
+    StructureWriteOutputDto, UpdateNodeContentInputDto, UpdateStoryInputDto, UpdateStoryOutputDto,
 };
 use crate::AppState;
 
@@ -43,6 +43,47 @@ pub fn create_story(
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     story::create_story(&mut db, CreateStoryInput { title: input.title })
+}
+
+/// Delete the confirmed selection from the local library, all-or-nothing.
+///
+/// The DB transaction (rows + cascaded children + refcounted media GC)
+/// runs under the lock; the per-story `imports/<id>` directories are
+/// removed AFTER the lock is released — larger filesystem I/O never holds
+/// the store hostage (NFR5), and a leftover directory is inert.
+#[tauri::command]
+pub fn delete_stories(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    input: DeleteStoriesInputDto,
+) -> Result<DeleteStoriesOutputDto, AppError> {
+    for id in &input.ids {
+        validate_story_id(id)?;
+    }
+    let app_data_dir = resolve_app_data_dir(&app)?;
+    let node_media_dir = resolve_node_media_dir(&app_data_dir);
+
+    let deleted_ids = {
+        let mut db = state
+            .db
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        story::delete_stories(
+            &mut db,
+            story::DeleteStoriesInput { ids: input.ids },
+            &node_media_dir,
+        )?
+    };
+
+    // Off the lock: best-effort removal of the device-pack bytes each
+    // deleted story may own. A missing directory is the nominal case for
+    // native stories; any other failure leaves an inert leftover.
+    for id in &deleted_ids {
+        let dir = crate::infrastructure::filesystem::resolve_import_story_dir(&app_data_dir, id);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    Ok(DeleteStoriesOutputDto { deleted_ids })
 }
 
 /// Update an existing story's metadata and return the freshly persisted

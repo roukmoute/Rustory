@@ -51,6 +51,8 @@ import type {
   SupportedFamilyDto,
   SupportedOperationsDto,
 } from "../../shared/ipc-contracts/device";
+import { deleteStories } from "../../ipc/commands/story";
+import { toAppError } from "../../shared/errors/app-error";
 import type { DeviceStoryDto } from "../../shared/ipc-contracts/device-library";
 import type { ContentSourcePolicy } from "../../shared/ipc-contracts/import-export";
 import type { StoryCardDto } from "../../shared/ipc-contracts/library";
@@ -86,6 +88,7 @@ export function LibraryRoute(): React.JSX.Element {
   const device = useConnectedLunii();
   const selectedStoryIds = useLibraryShell((s) => s.selectedStoryIds);
   const selectStory = useLibraryShell((s) => s.selectStory);
+  const clearSelection = useLibraryShell((s) => s.clearSelection);
   const pruneSelection = useLibraryShell((s) => s.pruneSelection);
   const query = useLibraryShell((s) => s.query);
   const sort = useLibraryShell((s) => s.sort);
@@ -168,6 +171,28 @@ export function LibraryRoute(): React.JSX.Element {
     if (presentSelectedIds.size !== 1) return;
     const [id] = presentSelectedIds;
     handleOpenStory(id);
+  };
+
+  // Deletion of the confirmed selection. All-or-nothing on the Rust side:
+  // a rejection means the library was NOT touched, so the selection is
+  // kept for a retry; a success clears it and re-reads the overview.
+  const [deleteState, setDeleteState] = useState<
+    { kind: "idle" } | { kind: "deleting" } | { kind: "failed"; message: string }
+  >({ kind: "idle" });
+
+  const handleDeleteSelected = async (): Promise<void> => {
+    if (presentSelectedIds.size === 0 || deleteState.kind === "deleting") {
+      return;
+    }
+    setDeleteState({ kind: "deleting" });
+    try {
+      await deleteStories({ ids: [...presentSelectedIds] });
+      clearSelection();
+      setDeleteState({ kind: "idle" });
+      invalidate();
+    } catch (err) {
+      setDeleteState({ kind: "failed", message: toAppError(err).message });
+    }
   };
 
   const handleCreateStoryRequest = (): void => {
@@ -1052,6 +1077,13 @@ export function LibraryRoute(): React.JSX.Element {
               }
               onDismissTransfer={storyTransfer.dismiss}
               onEdit={handleEditSelected}
+              onDeleteSelected={() => {
+                void handleDeleteSelected();
+              }}
+              isDeletingSelection={deleteState.kind === "deleting"}
+              deleteSelectionError={
+                deleteState.kind === "failed" ? deleteState.message : null
+              }
               onRefreshDevice={device.refresh}
               onConsultSupportProfile={openSupportProfile}
             />

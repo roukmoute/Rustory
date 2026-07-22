@@ -1832,4 +1832,158 @@ describe("<LuniiDecisionPanel /> — transfer", () => {
       screen.queryByRole("region", { name: /^transfert$/i }),
     ).toBeNull();
   });
+
+  describe("deletion of the selection", () => {
+    it("renders Supprimer disabled with the canonical reason when nothing is selected", () => {
+      render(
+        <LuniiDecisionPanel selectedCount={0} onEdit={noop} onDeleteSelected={noop} />,
+      );
+      const cta = screen.getByRole("button", { name: /^supprimer$/i });
+      expect(cta).toHaveAttribute("aria-disabled", "true");
+      const reasonId = cta.getAttribute("aria-describedby");
+      const reason = document.getElementById(reasonId as string);
+      expect(reason).toHaveTextContent(
+        /suppression indisponible: aucune histoire sélectionnée/i,
+      );
+    });
+
+    it("stays disabled when the route does not wire onDeleteSelected", () => {
+      render(<LuniiDecisionPanel selectedCount={2} onEdit={noop} />);
+      expect(
+        screen.getByRole("button", { name: /^supprimer$/i }),
+      ).toHaveAttribute("aria-disabled", "true");
+    });
+
+    it("never deletes on the first click: it opens the confirmation, and Confirmer fires the callback", async () => {
+      const user = userEvent.setup();
+      const onDeleteSelected = vi.fn();
+      render(
+        <LuniiDecisionPanel
+          selectedCount={1}
+          onEdit={noop}
+          onDeleteSelected={onDeleteSelected}
+        />,
+      );
+
+      await user.click(screen.getByRole("button", { name: /^supprimer$/i }));
+      expect(onDeleteSelected).not.toHaveBeenCalled();
+      expect(
+        screen.getByText(
+          /supprimer définitivement cette histoire de la bibliothèque \?/i,
+        ),
+      ).toBeInTheDocument();
+
+      await user.click(
+        screen.getByRole("button", { name: /confirmer la suppression/i }),
+      );
+      expect(onDeleteSelected).toHaveBeenCalledTimes(1);
+    });
+
+    it("names the exact multi-selection scope in the confirmation copy", async () => {
+      const user = userEvent.setup();
+      render(
+        <LuniiDecisionPanel
+          selectedCount={3}
+          onEdit={noop}
+          onDeleteSelected={noop}
+        />,
+      );
+      await user.click(screen.getByRole("button", { name: /^supprimer$/i }));
+      expect(
+        screen.getByText(
+          /supprimer définitivement ces 3 histoires de la bibliothèque \?/i,
+        ),
+      ).toBeInTheDocument();
+      expect(
+        screen.getByText(/brouillons, médias et mémoires de transfert/i),
+      ).toBeInTheDocument();
+    });
+
+    it("Annuler withdraws the confirmation without deleting", async () => {
+      const user = userEvent.setup();
+      const onDeleteSelected = vi.fn();
+      render(
+        <LuniiDecisionPanel
+          selectedCount={1}
+          onEdit={noop}
+          onDeleteSelected={onDeleteSelected}
+        />,
+      );
+      await user.click(screen.getByRole("button", { name: /^supprimer$/i }));
+      await user.click(screen.getByRole("button", { name: /^annuler$/i }));
+
+      expect(onDeleteSelected).not.toHaveBeenCalled();
+      expect(
+        screen.queryByRole("button", { name: /confirmer la suppression/i }),
+      ).toBeNull();
+      expect(
+        screen.getByRole("button", { name: /^supprimer$/i }),
+      ).toBeInTheDocument();
+    });
+
+    it("withdraws a pending confirmation when the selection changes", async () => {
+      const user = userEvent.setup();
+      const { rerender } = render(
+        <LuniiDecisionPanel
+          selectedCount={2}
+          onEdit={noop}
+          onDeleteSelected={noop}
+        />,
+      );
+      await user.click(screen.getByRole("button", { name: /^supprimer$/i }));
+      expect(
+        screen.getByRole("button", { name: /confirmer la suppression/i }),
+      ).toBeInTheDocument();
+
+      rerender(
+        <LuniiDecisionPanel
+          selectedCount={1}
+          onEdit={noop}
+          onDeleteSelected={noop}
+        />,
+      );
+      expect(
+        screen.queryByRole("button", { name: /confirmer la suppression/i }),
+      ).toBeNull();
+    });
+
+    it("freezes the confirmation gesture while the deletion is in flight", async () => {
+      const user = userEvent.setup();
+      const onDeleteSelected = vi.fn();
+      const { rerender } = render(
+        <LuniiDecisionPanel
+          selectedCount={1}
+          onEdit={noop}
+          onDeleteSelected={onDeleteSelected}
+        />,
+      );
+      await user.click(screen.getByRole("button", { name: /^supprimer$/i }));
+      rerender(
+        <LuniiDecisionPanel
+          selectedCount={1}
+          onEdit={noop}
+          onDeleteSelected={onDeleteSelected}
+          isDeletingSelection
+        />,
+      );
+      const busy = screen.getByRole("button", { name: /suppression…/i });
+      expect(busy).toHaveAttribute("aria-disabled", "true");
+      await user.click(busy);
+      expect(onDeleteSelected).not.toHaveBeenCalled();
+    });
+
+    it("surfaces a failed deletion as an in-context alert", () => {
+      render(
+        <LuniiDecisionPanel
+          selectedCount={1}
+          onEdit={noop}
+          onDeleteSelected={noop}
+          deleteSelectionError="Rustory n'a pas pu supprimer la sélection."
+        />,
+      );
+      expect(screen.getByRole("alert")).toHaveTextContent(
+        /n'a pas pu supprimer la sélection/i,
+      );
+    });
+  });
 });

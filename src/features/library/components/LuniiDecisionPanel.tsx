@@ -1,5 +1,5 @@
 import type React from "react";
-import { useId } from "react";
+import { useEffect, useId, useState } from "react";
 
 import type { AppError } from "../../../shared/errors/app-error";
 import type {
@@ -180,6 +180,18 @@ export interface LuniiDecisionPanelProps {
   onDismissTransfer?: () => void;
   /** Required when the panel may expose an active Éditer CTA. */
   onEdit: () => void;
+  /** Delete the CONFIRMED selection — wired by the route to the
+   *  `delete_stories` command. Fired only after the explicit in-panel
+   *  confirmation gesture (never on the first click). When omitted, the
+   *  Supprimer CTA stays disabled with its reason (tests/storybook that do
+   *  not exercise deletion). */
+  onDeleteSelected?: () => void;
+  /** True while the route's delete call is in flight — freezes the
+   *  confirmation gesture so a double activation cannot fire twice. */
+  isDeletingSelection?: boolean;
+  /** Canonical message of a failed deletion, surfaced inline as an alert.
+   *  `null`/omitted when the last deletion attempt did not fail. */
+  deleteSelectionError?: string | null;
   /** Optional refresh trigger — wired by the route to
    *  `useConnectedLunii.refresh`. When omitted, the refresh button is
    *  hidden (used by tests/storybook that do not need the affordance). */
@@ -222,6 +234,9 @@ export function LuniiDecisionPanel({
   onRetryTransfer,
   onDismissTransfer,
   onEdit,
+  onDeleteSelected,
+  isDeletingSelection = false,
+  deleteSelectionError = null,
   onRefreshDevice,
   onConsultSupportProfile,
 }: LuniiDecisionPanelProps): React.JSX.Element {
@@ -269,6 +284,18 @@ export function LuniiDecisionPanel({
   const editReason = formatEditReason(selectedCount);
   const editIsActive = selectedCount === 1;
 
+  const deleteReasonId = useId();
+  const deleteIsActive = selectedCount >= 1 && onDeleteSelected !== undefined;
+  // Two-gesture destructive confirmation (the StoryStructureNavigator
+  // pattern): the first click only OPENS the confirmation; the removal
+  // fires on the explicit second gesture. Any change of the selection
+  // withdraws a pending confirmation — a stale confirm can never apply to
+  // a different selection than the one it named.
+  const [isConfirmingDelete, setIsConfirmingDelete] = useState<boolean>(false);
+  useEffect(() => {
+    setIsConfirmingDelete(false);
+  }, [selectedCount]);
+
   const sendDisabledReason =
     deviceReason ?? formatSendReason(deviceState, hasAnyCapability, deviceFamily);
 
@@ -304,6 +331,50 @@ export function LuniiDecisionPanel({
               {editReason}
             </p>
           </>
+        )}
+        {!deleteIsActive ? (
+          <>
+            <Button
+              variant="quiet"
+              aria-disabled="true"
+              aria-describedby={deleteReasonId}
+            >
+              Supprimer
+            </Button>
+            <p id={deleteReasonId} className="lunii-panel__reason">
+              {formatDeleteReason()}
+            </p>
+          </>
+        ) : !isConfirmingDelete ? (
+          <Button variant="quiet" onClick={() => setIsConfirmingDelete(true)}>
+            Supprimer
+          </Button>
+        ) : (
+          <div className="lunii-panel__delete-confirm">
+            <p className="lunii-panel__reason">
+              {formatDeleteConfirmCopy(selectedCount)}
+            </p>
+            {isDeletingSelection ? (
+              <Button variant="primary" aria-disabled="true">
+                Suppression…
+              </Button>
+            ) : (
+              <Button variant="primary" onClick={onDeleteSelected}>
+                Confirmer la suppression
+              </Button>
+            )}
+            <Button
+              variant="quiet"
+              onClick={() => setIsConfirmingDelete(false)}
+            >
+              Annuler
+            </Button>
+          </div>
+        )}
+        {deleteSelectionError !== null && (
+          <p role="alert" className="lunii-panel__reason">
+            {deleteSelectionError}
+          </p>
         )}
       </section>
 
@@ -947,6 +1018,20 @@ function formatSelectionLabel(count: number): string {
 function formatEditReason(count: number): string {
   if (count <= 0) return "Reprise indisponible: aucune histoire sélectionnée";
   return "Reprise indisponible: sélection multiple";
+}
+
+function formatDeleteReason(): string {
+  return "Suppression indisponible: aucune histoire sélectionnée";
+}
+
+/** Impact copy of the two-gesture confirmation — names the exact scope of
+ *  the removal so the confirmation is informed, never a reflex click. */
+function formatDeleteConfirmCopy(count: number): string {
+  const scope =
+    count === 1
+      ? "Supprimer définitivement cette histoire de la bibliothèque ?"
+      : `Supprimer définitivement ces ${count} histoires de la bibliothèque ?`;
+  return `${scope} Les brouillons, médias et mémoires de transfert associés seront aussi supprimés.`;
 }
 
 /** Canonical FAMILY names (product-language.md). Distinct from the

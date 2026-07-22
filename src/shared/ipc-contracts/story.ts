@@ -195,6 +195,32 @@ export interface DeleteStoryNodeInput {
   nodeId: string;
 }
 
+/** Mirror of `DeleteStoriesInputDto` — the confirmed selection, verbatim. */
+export interface DeleteStoriesInput {
+  ids: string[];
+}
+
+/**
+ * Mirror of `DeleteStoriesOutputDto`. Echoes the ids actually removed —
+ * all-or-nothing on the Rust side: an error means nothing was removed.
+ */
+export interface DeleteStoriesOutput {
+  deletedIds: string[];
+}
+
+export function isDeleteStoriesOutput(
+  value: unknown,
+): value is DeleteStoriesOutput {
+  if (typeof value !== "object" || value === null) return false;
+  const candidate = value as Record<string, unknown>;
+  return (
+    Array.isArray(candidate.deletedIds) &&
+    candidate.deletedIds.every(
+      (id) => typeof id === "string" && id.length > 0,
+    )
+  );
+}
+
 /** Mirror of `MoveStoryNodeInputDto`. */
 export interface MoveStoryNodeInput {
   storyId: string;

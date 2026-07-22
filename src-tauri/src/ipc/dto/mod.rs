@@ -35,12 +35,13 @@ pub use settings::{
 };
 pub use story::{
     AddNodeOptionInputDto, AddStoryNodeInputDto, ApplyRecoveryInputDto, AttachNodeMediaOutcomeDto,
-    CreateStoryInputDto, DeleteStoryNodeInputDto, DiscardDraftInputDto, DiscardNodeDraftInputDto,
-    MoveDirectionDto, MoveStoryNodeInputDto, NodeContentDto, NodeGraphDto, NodeMediaPreviewDto,
-    NodeMediaSlotDto, NodeMediaSlotInputDto, NodeWriteOutputDto, OptionLinkDto, OptionRefDto,
-    RecordDraftInputDto, RecordNodeDraftInputDto, RecoverableDraftDto, RecoverableNodeDraftDto,
-    RemoveNodeOptionInputDto, SetNodeOptionLinkInputDto, StoryDetailDto, StoryStructureDto,
-    StructureWriteOutputDto, UpdateNodeContentInputDto, UpdateStoryInputDto, UpdateStoryOutputDto,
+    CreateStoryInputDto, DeleteStoriesInputDto, DeleteStoriesOutputDto, DeleteStoryNodeInputDto,
+    DiscardDraftInputDto, DiscardNodeDraftInputDto, MoveDirectionDto, MoveStoryNodeInputDto,
+    NodeContentDto, NodeGraphDto, NodeMediaPreviewDto, NodeMediaSlotDto, NodeMediaSlotInputDto,
+    NodeWriteOutputDto, OptionLinkDto, OptionRefDto, RecordDraftInputDto, RecordNodeDraftInputDto,
+    RecoverableDraftDto, RecoverableNodeDraftDto, RemoveNodeOptionInputDto,
+    SetNodeOptionLinkInputDto, StoryDetailDto, StoryStructureDto, StructureWriteOutputDto,
+    UpdateNodeContentInputDto, UpdateStoryInputDto, UpdateStoryOutputDto,
 };
 pub use story_preparation::{
     PreparationCauseDto, PreparationStateDto, PreparationStoryDto, ReadPreparationStateInputDto,
