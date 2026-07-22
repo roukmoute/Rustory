@@ -21,12 +21,11 @@ import { LibraryFiltersNav } from "../../features/library/components/LibraryFilt
 import {
   LuniiDecisionPanel,
   type LuniiDeviceState,
-  type PreparationView,
   type StoryValidationView,
   type TransferComparisonView,
   type TransferView,
 } from "../../features/library/components/LuniiDecisionPanel";
-import { useStoryPreparation, useStoryTransfer } from "../../features/transfer";
+import { useStoryTransfer } from "../../features/transfer";
 import { CreateFromArchiveSurface } from "../../features/import-export/components/CreateFromArchiveSurface";
 import { CreateFromFolderSurface } from "../../features/import-export/components/CreateFromFolderSurface";
 import { CreateFromRssSurface } from "../../features/import-export/components/CreateFromRssSurface";
@@ -432,66 +431,31 @@ export function LibraryRoute(): React.JSX.Element {
       ? { kind: "none" }
       : mapStoryValidationToView(storyValidation.state);
 
-  // Pre-transfer preparation (LOCAL, orthogonal to the send gate). USER-TRIGGERED
-  // via the Préparer CTA — the hook stays idle until `prepare()`. Same gating
-  // pair (single selection + readable device) as the comparison / validation;
-  // the CTA is enabled only when the verdict is `présumée transférable`.
-  // Tracks ONE preparation, independent of the selection — an in-flight job or a
-  // recoverable failure stays consultable when the user selects another story
-  // (AC2). The panel reflects it only while its target story is selected.
-  const storyPreparation = useStoryPreparation();
-  const deviceAvailability: DeviceAvailability =
-    readableDeviceId !== null
-      ? "readable"
-      : effectiveDevice !== null
-        ? "unsupported"
-        : "absent";
-  const preparationView: PreparationView = mapPreparationView(
-    storyPreparation.state,
-    singleSelectedStoryId,
-    presentSelectedIds.size,
-    deviceAvailability,
-    validationView,
-  );
-  const handlePrepareSelected = (): void => {
-    if (singleSelectedStoryId && readableDeviceId) {
-      storyPreparation.prepare(singleSelectedStoryId, readableDeviceId);
-    }
-  };
-
-  // Pre-write transfer (real device WRITE, AC1/AC2/AC3). USER-TRIGGERED via the
-  // Envoyer CTA — the hook stays idle until `send()`. The send gate is
-  // FAIL-CLOSED: enabled only on a writable cohort (V1/V2) + a `Préparée` story
-  // + a single clear target; everything else is a standardized "Envoi
-  // indisponible: …" reason. Tracks ONE transfer, independent of the selection
-  // (an in-flight write / recoverable failure stays consultable via its badge).
+  // Transfer to the device (real WRITE, AC1/AC2/AC3). USER-TRIGGERED via the
+  // single `Envoyer` CTA — the hook stays idle until `send()`. Preparation is
+  // FOLDED IN: the write job runs the full pipeline (préflight → préparation →
+  // écriture → vérification) itself, so there is no separate Préparer step.
+  // The send gate is FAIL-CLOSED: enabled only on a writable cohort (V1/V2) + a
+  // TRANSFERABLE story (owns a device-format pack) + a single clear target;
+  // everything else is a standardized "Envoi indisponible: …" reason. Tracks ONE
+  // transfer, independent of the selection (an in-flight write / recoverable
+  // failure stays consultable via its card badge).
   const storyTransfer = useStoryTransfer();
-  const preparedForSelected =
-    storyPreparation.state.kind === "prepared" &&
-    storyPreparation.state.storyId === singleSelectedStoryId
-      ? storyPreparation.state
-      : null;
-  // A `prepared` story is sendable ONLY to the device it was prepared for (F6): a
-  // story prepared for one target must be re-prepared before it can be sent to
-  // another, so a device swap can never send a stale descriptor to the wrong Lunii.
-  const selectedStoryPrepared =
-    preparedForSelected !== null &&
-    writableDeviceId !== null &&
-    preparedForSelected.deviceIdentifier === writableDeviceId;
-  // A native story (no device-format pack) is `prepared` but NOT transferable —
-  // the send gate disables `Envoyer` with a dedicated reason before any write.
+  // Transferability is a durable fact of the selected card (it owns a
+  // device-format pack), read straight from the overview — no preparation probe.
+  // A native / file-imported story is not transferable in MVP; the gate disables
+  // `Envoyer` with a dedicated reason before any write.
   const selectedStoryTransferable =
-    preparedForSelected !== null &&
-    writableDeviceId !== null &&
-    preparedForSelected.deviceIdentifier === writableDeviceId &&
-    preparedForSelected.transferable;
+    singleSelectedStoryId !== null &&
+    (overview?.stories.find((s) => s.id === singleSelectedStoryId)
+      ?.transferable ??
+      false);
   const transferView: TransferView = mapTransferView(
     storyTransfer.state,
     singleSelectedStoryId,
     presentSelectedIds.size,
     deviceState,
     writableDeviceId !== null,
-    selectedStoryPrepared,
     selectedStoryTransferable,
   );
   const handleSendSelected = (): void => {
@@ -859,22 +823,14 @@ export function LibraryRoute(): React.JSX.Element {
     structuredCreation.dismiss();
   };
 
-  // Reflect the in-flight / failed preparation as a discreet card badge (AC2),
-  // keyed on the job's TARGET story (from the hook state) — never the current
-  // selection — so it survives the user selecting another story. The panel stays
-  // the authoritative surface; this is a derived signal.
+  // Reflect the in-flight / failed transfer as a discreet card badge (AC2),
+  // keyed on the write job's TARGET story (from the hook state) — never the
+  // current selection — so it survives the user selecting another story. The
+  // panel stays the authoritative surface; this is a derived signal. (Now that
+  // preparation is folded into the write job, the badge tracks the transfer
+  // alone.)
   const preparationBadges = useMemo(() => {
     const map = new Map<string, StoryPreparationBadge>();
-    const prep = storyPreparation.state;
-    if (prep.kind === "preflight" || prep.kind === "preparing") {
-      map.set(prep.storyId, "preparing");
-    } else if (prep.kind === "retryable") {
-      map.set(prep.storyId, "retryable");
-    }
-    // A transfer badge takes precedence for its target story — a write in flight
-    // (or its terminal verdict) is past preparation. The verdicts are sticky
-    // anchors across selection changes (the panel restores the full context on
-    // re-select).
     const tx = storyTransfer.state;
     if (tx.kind === "transferring") {
       map.set(tx.storyId, "transferring");
@@ -888,7 +844,7 @@ export function LibraryRoute(): React.JSX.Element {
       map.set(tx.storyId, "incomplete");
     }
     return map;
-  }, [storyPreparation.state, storyTransfer.state]);
+  }, [storyTransfer.state]);
 
   // Inspection is offered when the supported profile authorizes it.
   // `inspectStory` is ✅ for every supported cohort (V3 included, unlike
@@ -1178,9 +1134,6 @@ export function LibraryRoute(): React.JSX.Element {
               onRetryComparison={transferPreview.refresh}
               validation={validationView}
               onRetryValidation={storyValidation.refresh}
-              preparation={preparationView}
-              onPrepare={handlePrepareSelected}
-              onRetryPreparation={storyPreparation.retry}
               transfer={transferView}
               onSend={handleSendSelected}
               onRetryTransfer={
@@ -1342,90 +1295,13 @@ export function mapStoryValidationToView(
   }
 }
 
-/** Disposition of the connected device for the preparation gate: a readable
- *  supported Lunii, a device present but not read-authorized, or nothing. */
-type DeviceAvailability = "readable" | "unsupported" | "absent";
-
-/**
- * Pure mapper from the `useStoryPreparation` state (+ the gating context) to the
- * `preparation` prop `LuniiDecisionPanel` expects. Pure so it stays testable in
- * isolation. An active / terminal preparation shows its own state; an idle hook
- * shows the `Préparer` CTA, enabled only for a single selection + a readable
- * device + a `présumée transférable` verdict, else disabled with the
- * standardized "Préparation indisponible: …" reason.
- */
-export function mapPreparationView(
-  state: ReturnType<typeof useStoryPreparation>["state"],
-  selectedStoryId: string | null,
-  selectionCount: number,
-  deviceAvailability: DeviceAvailability,
-  validation: StoryValidationView,
-): PreparationView {
-  // An active / terminal preparation is shown ONLY for the story it targets, so
-  // it stays consultable while that story is selected and the panel reflects the
-  // CURRENT selection's gate otherwise (the badge keeps the other story flagged).
-  if (state.kind !== "idle" && state.storyId === selectedStoryId) {
-    switch (state.kind) {
-      case "preflight":
-        return { kind: "preflight" };
-      case "preparing":
-        return { kind: "preparing", progress: state.progress };
-      case "prepared":
-        return { kind: "prepared" };
-      case "retryable":
-        return {
-          kind: "retryable",
-          message: state.message,
-          userAction: state.userAction,
-          blockers: state.blockers,
-        };
-      case "error":
-        return { kind: "error", error: state.error };
-    }
-  }
-  if (selectionCount === 0) {
-    return {
-      kind: "unavailable",
-      reason: "Préparation indisponible: aucune histoire sélectionnée",
-    };
-  }
-  if (selectionCount > 1) {
-    return {
-      kind: "unavailable",
-      reason: "Préparation indisponible: sélection multiple",
-    };
-  }
-  if (deviceAvailability === "absent") {
-    return {
-      kind: "unavailable",
-      reason: "Préparation indisponible: aucun appareil connecté",
-    };
-  }
-  if (deviceAvailability === "unsupported") {
-    return {
-      kind: "unavailable",
-      reason: "Préparation indisponible: profil non supporté",
-    };
-  }
-  if (
-    validation.kind === "ready" &&
-    validation.verdict === "presumedTransferable"
-  ) {
-    return { kind: "ready" };
-  }
-  // Any non-passing or still-pending verdict: repair the blocks first.
-  return {
-    kind: "unavailable",
-    reason: "Préparation indisponible: corrige les blocages d'abord",
-  };
-}
-
 /**
  * Pure mapper from the `useStoryTransfer` state (+ the send-gate context) to the
  * `transfer` prop `LuniiDecisionPanel` expects. Pure so it stays testable in
  * isolation. FAIL-CLOSED: the `Envoyer vers la Lunii` CTA is `ready` ONLY for a
- * single selection + a write-authorized device (V1/V2) + a `Préparée` story;
- * every other case is a standardized "Envoi indisponible: …" reason. An active /
+ * single selection + a write-authorized device (V1/V2) + a transferable story
+ * (owns a device-format pack); every other case is a standardized "Envoi
+ * indisponible: …" reason. The write job prepares internally. An active /
  * terminal transfer is shown ONLY for the story it targets (so it stays
  * consultable while that story is selected; the card badge keeps the other story
  * flagged). The success terminal `verified` (`transférée et vérifiée`) appears
@@ -1444,7 +1320,6 @@ export function mapTransferView(
   selectionCount: number,
   deviceState: LuniiDeviceState,
   writable: boolean,
-  prepared: boolean,
   transferable: boolean,
 ): TransferView {
   // The active / failure terminal is shown in the panel ONLY for the SELECTED
@@ -1511,12 +1386,6 @@ export function mapTransferView(
   }
   if (!writable) {
     return { kind: "unavailable", reason: formatSendDeviceReason(deviceState) };
-  }
-  if (!prepared) {
-    return {
-      kind: "unavailable",
-      reason: "Envoi indisponible: prépare l'histoire d'abord",
-    };
   }
   if (!transferable) {
     return {

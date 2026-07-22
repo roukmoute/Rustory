@@ -1816,6 +1816,7 @@ mod tests {
                 title: "Episode".into(),
                 import_state: Some(ImportStateDto::NeedsReview),
                 import_report: None,
+                transferable: false,
             },
             report: vec![ImportFindingDto {
                 aspect: ImportAspectDto::Source,

@@ -462,6 +462,7 @@ pub fn commit_structured_creation(
         } else {
             Some(import_report)
         },
+        transferable: false,
     })
 }
 

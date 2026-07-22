@@ -25,6 +25,11 @@ export interface StoryCardDto {
    *  `partial` / `needsReview` import — a `resolved` review keeps its trace
    *  in base but never on the wire. */
   importReport?: ImportFinding[];
+  /** `true` iff the story owns a device-format pack (imported FROM a
+   *  device) — the only stories MVP can write back to a Lunii. Drives the
+   *  send gate's pre-click "native non transférable" block. Absent (falsy)
+   *  on native / file-imported cards, so their shape is unchanged. */
+  transferable?: boolean;
 }
 
 const CARD_IMPORT_STATES: ReadonlySet<string> = new Set([
@@ -69,6 +74,14 @@ export function isStoryCardDto(value: unknown): value is StoryCardDto {
     ) {
       return false;
     }
+  }
+  // Optional transferability flag: a boolean when present (the Rust side
+  // only ever emits `true`, skipping it otherwise).
+  if (
+    candidate.transferable !== undefined &&
+    typeof candidate.transferable !== "boolean"
+  ) {
+    return false;
   }
   return true;
 }

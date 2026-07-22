@@ -103,7 +103,8 @@ fn project_story_card(
     device_pack: bool,
 ) -> StoryCardDto {
     if device_pack {
-        return StoryCardDto::native(id, title);
+        // A device-pack story owns its writeback artifacts — transferable.
+        return StoryCardDto::device_pack(id, title);
     }
     let Some(state) = import_state.as_deref().and_then(import_state_dto_from_tag) else {
         return StoryCardDto::native(id, title);
@@ -135,6 +136,9 @@ fn project_story_card(
         title,
         import_state: Some(state),
         import_report,
+        // A file import (`.rustory` / folder / archive / rss) owns no
+        // device-format pack — not transferable to a device in MVP.
+        transferable: false,
     }
 }
 
@@ -464,5 +468,32 @@ mod tests {
             card.import_report.is_none(),
             "the pack primes: no local import report on the card"
         );
+        assert!(
+            card.transferable,
+            "a device-pack story is transferable back to a device"
+        );
+    }
+
+    #[test]
+    fn transferability_follows_the_device_pack_only() {
+        // A device-pack story is transferable; a native one and a
+        // file-import one are not — the send gate's pre-click block reads
+        // exactly this flag, no preparation probe needed.
+        let device = super::project_story_card("d".into(), "Pack".into(), None, None, None, true);
+        assert!(device.transferable);
+
+        let native =
+            super::project_story_card("n".into(), "Native".into(), None, None, None, false);
+        assert!(!native.transferable);
+
+        let file_import = super::project_story_card(
+            "f".into(),
+            "Importée".into(),
+            Some("recognized".into()),
+            None,
+            Some("rustory".into()),
+            false,
+        );
+        assert!(!file_import.transferable);
     }
 }

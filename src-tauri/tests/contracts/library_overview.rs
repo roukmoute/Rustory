@@ -39,6 +39,7 @@ fn library_overview_with_an_imported_story_carries_import_state() {
                 message: "Le titre a été normalisé à l'import (espaces ou caractères ajustés)."
                     .into(),
             }]),
+            transferable: false,
         }],
     };
     let v = serde_json::to_value(&dto).expect("serialize overview");

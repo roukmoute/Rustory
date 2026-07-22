@@ -12,7 +12,7 @@ import "./StoryCard.css";
 export type StoryCardSelectionMode = "replace" | "toggle";
 
 /** Preparation / transfer state reflected as a discreet card badge (AC2 —
- *  "éléments prêts/bloquants"). Derived from `useStoryPreparation` /
+ *  "éléments prêts/bloquants"). Derived from the transfer flow /
  *  `useStoryTransfer`, never a new source of truth; the authoritative surface
  *  stays the decision panel. */
 export type StoryPreparationBadge =

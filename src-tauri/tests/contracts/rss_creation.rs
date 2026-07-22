@@ -237,6 +237,7 @@ fn rss_creation_outcome_wire_shapes_are_frozen() {
             title: "Episode".into(),
             import_state: Some(rustory_lib::ipc::dto::ImportStateDto::NeedsReview),
             import_report: None,
+            transferable: false,
         },
         report: Vec::new(),
     };

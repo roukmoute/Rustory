@@ -121,7 +121,7 @@ export interface UseStoryTransfer {
 /**
  * Track ONE story transfer, independent of the library selection. The hook is
  * USER-TRIGGERED (`send()`) and does NOT reset on selection change. It is a clone
- * of `useStoryPreparation`, with the transfer wire contract and a non-success
+ * of the transfer wire contract, with a non-success
  * terminal:
  * - `send()` starts the background write, subscribes to the correlated `job:*`
  *   events for the live phase, and on a TERMINAL event performs an authoritative

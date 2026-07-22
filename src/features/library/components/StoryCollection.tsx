@@ -25,7 +25,7 @@ export interface StoryCollectionProps {
   onResetFilters: () => void;
   selectedStoryIds?: ReadonlySet<string>;
   /** Per-story preparation badge (AC2). Keyed by story id; absent ⇒ no badge.
-   *  Derived from `useStoryPreparation`, never a competing source of truth. */
+   *  Derived from the transfer flow, never a competing source of truth. */
   preparationBadges?: ReadonlyMap<string, StoryPreparationBadge>;
   onSelectStory?: (id: string, mode: StoryCardSelectionMode) => void;
   onOpenStory?: (id: string) => void;

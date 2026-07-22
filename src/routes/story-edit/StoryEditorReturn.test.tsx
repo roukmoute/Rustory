@@ -15,7 +15,6 @@ const mockDeviceLibrary = vi.fn();
 const mockTransferPreview = vi.fn();
 const mockStoryValidation = vi.fn();
 const mockCatalogStatus = vi.fn();
-const mockReadPreparation = vi.fn();
 const mockReadTransfer = vi.fn();
 const mockReadTransferOutcome = vi.fn();
 
@@ -80,15 +79,6 @@ vi.mock("../../ipc/commands/device-catalog", () => ({
   readPackCover: () => Promise.resolve(null),
 }));
 
-vi.mock("../../ipc/commands/story-preparation", async () => {
-  const actual = await vi.importActual<
-    typeof import("../../ipc/commands/story-preparation")
-  >("../../ipc/commands/story-preparation");
-  return {
-    ...actual,
-    readPreparationState: (input: unknown) => mockReadPreparation(input),
-  };
-});
 
 vi.mock("../../ipc/commands/story-transfer", async () => {
   const actual = await vi.importActual<
@@ -210,8 +200,6 @@ describe("Library ↔ editor round trip (AC2)", () => {
     mockStoryValidation.mockResolvedValue({ kind: "noDevice" });
     mockCatalogStatus.mockReset();
     mockCatalogStatus.mockResolvedValue({ count: 0 });
-    mockReadPreparation.mockReset();
-    mockReadPreparation.mockResolvedValue({ kind: "idle" });
     mockReadTransfer.mockReset();
     mockReadTransfer.mockResolvedValue({ kind: "idle" });
     mockReadTransferOutcome.mockReset();
