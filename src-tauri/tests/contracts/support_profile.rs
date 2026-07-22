@@ -299,8 +299,9 @@ fn the_official_artifact_registry_serializes_exactly() {
             {
                 "kind": "structuredArchive",
                 "label": "Archive structurée",
-                "available": false,
-                "reason": "Lecture d'archives non prise en charge",
+                "formatLabel": "Format v1",
+                "available": true,
+                "capabilitiesLabel": "Création d'une histoire",
             },
         ])
     );
@@ -510,7 +511,19 @@ fn an_available_artifact_line_omits_the_reason_and_a_deferred_one_omits_the_capa
     let rustory = v["localArtifacts"][0].as_object().expect("object");
     assert!(rustory.get("reason").is_none());
     assert!(rustory.get("capabilitiesLabel").is_some());
-    let archive = v["localArtifacts"][2].as_object().expect("object");
+    // Since the archive reader shipped, no OFFICIAL line is deferred
+    // anymore: prove the shape rule on a hand-built deferred line — the
+    // wire face of a future deferred kind stays locked.
+    let deferred = [LocalArtifactLine {
+        kind: LocalArtifactKind::StructuredArchive,
+        format_version: None,
+        support: LocalArtifactSupport::Deferred {
+            reason: "Lecture d'archives non prise en charge",
+        },
+    }];
+    let dto = SupportProfileDto::from_matrices(official_device_support_matrix(), &deferred);
+    let v = serde_json::to_value(&dto).expect("ser");
+    let archive = v["localArtifacts"][0].as_object().expect("object");
     assert!(archive.get("capabilitiesLabel").is_none());
     assert!(archive.get("formatLabel").is_none());
     assert!(archive.get("reason").is_some());

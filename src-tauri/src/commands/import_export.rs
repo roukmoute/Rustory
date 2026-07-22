@@ -18,9 +18,10 @@ use crate::infrastructure::diagnostics::import_log;
 use crate::ipc::dto::import_export::state_db_tag;
 use crate::ipc::dto::import_export::ContentSourcePolicyDto;
 use crate::ipc::dto::{
-    AcceptArtifactImportInputDto, AcceptStructuredCreationInputDto, DropAnalysisDto,
-    ExportStoryDialogInputDto, ExportStoryDialogOutcomeDto, ImportArtifactAnalysisDto,
-    OsOpenAnalysisDto, RssCreationOutcomeDto, RssItemRefDto, RssPreviewDto, StoryCardDto,
+    AcceptArchiveCreationInputDto, AcceptArtifactImportInputDto, AcceptStructuredCreationInputDto,
+    ArchiveCreationAnalysisDto, DropAnalysisDto, ExportStoryDialogInputDto,
+    ExportStoryDialogOutcomeDto, ImportArtifactAnalysisDto, OsOpenAnalysisDto,
+    RssCreationOutcomeDto, RssItemRefDto, RssPreviewDto, StoryCardDto,
     StructuredCreationAnalysisDto,
 };
 use crate::AppState;
@@ -574,6 +575,101 @@ pub async fn accept_structured_creation(
             Err(failure) => {
                 // A refused prepare may have promoted files before failing:
                 // reclaim them under a brief lock (refcounted GC).
+                if !failure.promoted.is_empty() {
+                    let guard = db.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                    import_export::compensate_structured_creation(
+                        &guard,
+                        &app_data_dir,
+                        &failure.promoted,
+                    );
+                }
+                Err(failure.error)
+            }
+        }
+    })
+    .await
+    .map_err(|_| structured_creation::spawn_blocking_join_error())?
+}
+
+/// Name shown by the system dialog's filter for the structured-archive
+/// picker (the community `.zip` pack).
+const ARCHIVE_DIALOG_FILTER_NAME: &str = "Archive de pack";
+
+/// Pick + analyze a structured archive for creation (phase 1). Bounded
+/// reads only, ZERO mutation, ZERO extraction; a user-cancelled dialog is
+/// the calm `cancelled` verdict; every archive-state problem (unreadable
+/// zip, descriptor absent / malformed, media missing…) is the typed
+/// verdict DTO. The returned `archivePath` exists ONLY to be passed back
+/// to `accept_structured_archive_creation` — never rendered, persisted or
+/// logged (PII).
+#[tauri::command]
+pub async fn analyze_structured_archive_for_creation(
+    app: AppHandle,
+) -> Result<ArchiveCreationAnalysisDto, AppError> {
+    let (tx, mut rx) = async_runtime::channel::<Option<FilePath>>(1);
+    app.dialog()
+        .file()
+        .add_filter(ARCHIVE_DIALOG_FILTER_NAME, &["zip"])
+        .pick_file(move |path| {
+            let _ = tx.try_send(path);
+        });
+
+    let picked = match rx.recv().await {
+        Some(inner) => inner,
+        None => return Err(structured_creation::dialog_failed_error()),
+    };
+    let Some(file) = picked else {
+        return Ok(ArchiveCreationAnalysisDto::Cancelled);
+    };
+    let path = file
+        .as_path()
+        .map(|p| p.to_path_buf())
+        .ok_or_else(structured_creation::non_filesystem_path_error)?;
+    // Same UTF-8 wire discipline as the folder flow: a non-UTF-8 path
+    // cannot round-trip verbatim to the accept phase.
+    let archive_path = path
+        .to_str()
+        .map(str::to_string)
+        .ok_or_else(structured_creation::non_filesystem_path_error)?;
+
+    let outcome =
+        async_runtime::spawn_blocking(move || import_export::analyze_structured_archive(&path))
+            .await
+            .map_err(|_| structured_creation::spawn_blocking_join_error())??;
+
+    Ok(ArchiveCreationAnalysisDto::analyzed(
+        &outcome.analysis,
+        outcome.archive_name,
+        archive_path,
+    ))
+}
+
+/// Commit an analyzed structured archive (phase 2). Re-analyzes the
+/// archive FROM ZERO on a blocking worker (the wire path is a pointer,
+/// never an authority). TRUE "files first, DB second": the re-analysis,
+/// the bounded extraction and the media promotions run WITHOUT the DB
+/// mutex — the lock is taken only for the single atomic transaction (or
+/// the brief refcounted compensation), INSIDE the worker so no
+/// `MutexGuard` ever lives across an `await`.
+#[tauri::command]
+pub async fn accept_structured_archive_creation(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    input: AcceptArchiveCreationInputDto,
+) -> Result<StoryCardDto, AppError> {
+    let app_data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|_| structured_creation::app_data_unavailable_error())?;
+    let db = state.db.clone();
+    async_runtime::spawn_blocking(move || -> Result<StoryCardDto, AppError> {
+        let archive = Path::new(&input.archive_path);
+        match import_export::prepare_structured_archive_creation(&app_data_dir, archive) {
+            Ok(prepared) => {
+                let mut guard = db.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                import_export::commit_structured_creation(&mut guard, &app_data_dir, prepared)
+            }
+            Err(failure) => {
                 if !failure.promoted.is_empty() {
                     let guard = db.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
                     import_export::compensate_structured_creation(

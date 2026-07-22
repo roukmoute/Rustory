@@ -348,6 +348,51 @@ describe("<CreateStoryDialog />", () => {
     expect(onClose).not.toHaveBeenCalled();
   });
 
+  it("Choisir une archive de pack (.zip)… closes the dialog THEN hands over to the archive flow", async () => {
+    const user = userEvent.setup();
+    const onCreateFromArchiveRequest = vi.fn();
+    const { onClose } = renderDialog({ onCreateFromArchiveRequest });
+    expect(
+      screen.getByText("Ou importe une archive de pack au format communautaire"),
+    ).toBeInTheDocument();
+    await user.click(
+      screen.getByRole("button", { name: "Choisir une archive de pack (.zip)…" }),
+    );
+    expect(onClose).toHaveBeenCalledTimes(1);
+    expect(onCreateFromArchiveRequest).toHaveBeenCalledTimes(1);
+    // The dialog closes BEFORE the handover (the native picker must never
+    // stack under a modal).
+    expect(onClose.mock.invocationCallOrder[0]).toBeLessThan(
+      onCreateFromArchiveRequest.mock.invocationCallOrder[0],
+    );
+    expect(createStory).not.toHaveBeenCalled();
+  });
+
+  it("disables the archive entry while a sibling flow is busy, and hides it when unwired", async () => {
+    const user = userEvent.setup();
+    const onCreateFromArchiveRequest = vi.fn();
+    const { onClose } = renderDialog({
+      onCreateFromArchiveRequest,
+      isCreateFromArchiveUnavailable: true,
+    });
+    const archiveButton = screen.getByRole("button", {
+      name: "Choisir une archive de pack (.zip)…",
+    });
+    expect(archiveButton).toHaveAttribute("aria-disabled", "true");
+    await user.click(archiveButton);
+    expect(onCreateFromArchiveRequest).not.toHaveBeenCalled();
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it("hides the archive entry when no archive handler is wired", () => {
+    renderDialog();
+    expect(
+      screen.queryByRole("button", {
+        name: "Choisir une archive de pack (.zip)…",
+      }),
+    ).not.toBeInTheDocument();
+  });
+
   it("hides the RSS entry when no RSS handler is wired", () => {
     renderDialog();
     expect(

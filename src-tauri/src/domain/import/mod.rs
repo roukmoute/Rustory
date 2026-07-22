@@ -8,6 +8,7 @@ pub mod file_association;
 pub mod local_artifact;
 pub mod recognition;
 pub mod rss;
+pub mod structured_archive;
 pub mod structured_folder;
 
 pub use artifact::{
@@ -36,6 +37,11 @@ pub use rss::{
     rss_import_state, rss_item_findings, rss_item_fingerprint, rss_item_ref, RssAnalysis, RssItem,
     RssItemRef, MAX_RSS_ITEMS, MAX_RSS_ITEM_TEXT_CHARS, MAX_RSS_URL_CHARS, MAX_RSS_XML_DEPTH,
     RSS_FALLBACK_TITLE_PREFIX, RSS_SOURCE_FORMAT_VERSION,
+};
+pub use structured_archive::{
+    analyze_structured_archive_components, archive_referenced_media,
+    STRUCTURED_ARCHIVE_ASSETS_PREFIX, STRUCTURED_ARCHIVE_FORMAT_VERSION,
+    STRUCTURED_ARCHIVE_STORY_JSON_NAME,
 };
 pub use structured_folder::{
     analyze_structured_folder_components, is_sober_media_basename, is_supported_folder_source_name,

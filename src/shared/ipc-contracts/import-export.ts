@@ -363,6 +363,31 @@ export interface AcceptStructuredCreationInput {
   folderPath: string;
 }
 
+/** Tagged outcome of `analyze_structured_archive_for_creation` — the
+ *  folder verdict's exact shape with the archive identity fields (the
+ *  community `.zip` pack: `story.json` + `assets/`). */
+export type ArchiveCreationAnalysis =
+  | {
+      kind: "analyzed";
+      quality: ImportQuality;
+      state: ImportState;
+      findings: ImportFinding[];
+      /** Present iff creatable (`quality !== "unusable"`). */
+      creatableSummary?: CreatableSummary;
+      /** The archive's basename — the only name the surface renders. */
+      archiveName: string;
+      /** The absolute path from the SYSTEM dialog, round-tripped to the
+       *  accept call ONLY. Never rendered, never persisted, never logged. */
+      archivePath: string;
+    }
+  | { kind: "cancelled" };
+
+/** Input to `accept_structured_archive_creation` — the archive pointer,
+ *  verbatim. */
+export interface AcceptArchiveCreationInput {
+  archivePath: string;
+}
+
 // ===== RSS external-source creation (feed → new canonical story) =====
 //
 // Mirror of `src-tauri/src/ipc/dto/import_export.rs` (RSS side). Rust is
@@ -657,6 +682,15 @@ const FOLDER_ASPECTS: ReadonlySet<string> = new Set([
   "media",
 ]);
 
+/** The ARCHIVE flow's OWN aspect set: the foreign pack format declares no
+ *  format version, so the aspect is never asserted (work never done). */
+const ARCHIVE_ASPECTS: ReadonlySet<string> = new Set([
+  "envelope",
+  "title",
+  "structure",
+  "media",
+]);
+
 function isCreatableSummary(value: unknown): value is CreatableSummary {
   if (typeof value !== "object" || value === null) return false;
   const c = value as Record<string, unknown>;
@@ -729,6 +763,56 @@ export function isStructuredCreationAnalysis(
     if (hasSummary) return false;
   } else {
     if (aspects.size !== FOLDER_ASPECTS.size) return false;
+    if (!isCreatableSummary(c.creatableSummary)) return false;
+  }
+  return true;
+}
+
+export function isArchiveCreationAnalysis(
+  value: unknown,
+): value is ArchiveCreationAnalysis {
+  if (typeof value !== "object" || value === null) return false;
+  const c = value as Record<string, unknown>;
+  if (c.kind === "cancelled") {
+    return Object.keys(c).length === 1;
+  }
+  if (c.kind !== "analyzed") return false;
+  if (typeof c.quality !== "string" || !IMPORT_QUALITIES.has(c.quality)) {
+    return false;
+  }
+  if (typeof c.state !== "string" || !IMPORT_STATES.has(c.state)) return false;
+  if (!Array.isArray(c.findings) || !c.findings.every(isImportFinding)) {
+    return false;
+  }
+  const findings = c.findings as ImportFinding[];
+  if (
+    typeof c.archiveName !== "string" ||
+    c.archiveName.length === 0 ||
+    typeof c.archivePath !== "string" ||
+    c.archivePath.length === 0
+  ) {
+    return false;
+  }
+  // Aspects: from the archive set, no duplicates.
+  const aspects = new Set<string>();
+  for (const finding of findings) {
+    if (!ARCHIVE_ASPECTS.has(finding.aspect)) return false;
+    if (aspects.has(finding.aspect)) return false;
+    aspects.add(finding.aspect);
+  }
+  if (c.quality !== qualityFromFindings(findings)) return false;
+  if (!isCoherentQualityState(c.quality, c.state)) return false;
+  const hasMissing = findings.some((f) => f.category === "missing");
+  if (c.state === "partial" && !hasMissing) return false;
+  if (c.state === "needsReview" && hasMissing) return false;
+  // A non-blocked verdict analyzes the WHOLE archive matrix (four
+  // aspects) and carries what will be created; a blocked one carries
+  // nothing.
+  const hasSummary = c.creatableSummary !== undefined;
+  if (c.quality === "unusable") {
+    if (hasSummary) return false;
+  } else {
+    if (aspects.size !== ARCHIVE_ASPECTS.size) return false;
     if (!isCreatableSummary(c.creatableSummary)) return false;
   }
   return true;

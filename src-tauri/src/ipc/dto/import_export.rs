@@ -342,6 +342,79 @@ pub struct AcceptStructuredCreationInputDto {
     pub folder_path: String,
 }
 
+/// Functional verdict of the structured-ARCHIVE analysis (`analyzed`) or a
+/// user-cancelled picker (`cancelled`) — the folder DTO's exact shape with
+/// the archive identity fields. A TRANSPORT failure rejects with
+/// `AppError` instead; the functional verdict is NEVER an error.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum ArchiveCreationAnalysisDto {
+    #[serde(rename_all = "camelCase")]
+    Analyzed {
+        quality: ImportQualityDto,
+        state: ImportStateDto,
+        findings: Vec<ImportFindingDto>,
+        /// Present iff creatable (`quality != unusable`). `None` ⇒ blocked
+        /// (only `Abandonner`).
+        #[serde(skip_serializing_if = "Option::is_none")]
+        creatable_summary: Option<CreatableSummaryDto>,
+        /// The archive's basename — the only name the surface renders.
+        archive_name: String,
+        /// The absolute path returned by the SYSTEM dialog, carried ONLY to
+        /// be passed back to `accept_structured_archive_creation`. NEVER
+        /// rendered, NEVER persisted, NEVER logged (PII) — the accept phase
+        /// grants it no authority (it re-analyzes the archive from zero).
+        archive_path: String,
+    },
+    Cancelled,
+}
+
+impl ArchiveCreationAnalysisDto {
+    /// Map a domain analysis + the dialog facts to the `analyzed` wire
+    /// verdict, with the ARCHIVE per-pair FR copy.
+    pub fn analyzed(
+        analysis: &StructuredFolderAnalysis,
+        archive_name: String,
+        archive_path: String,
+    ) -> Self {
+        Self::Analyzed {
+            quality: quality_dto(analysis.quality),
+            state: state_dto(analysis.state),
+            findings: analysis
+                .findings
+                .iter()
+                .map(ImportFindingDto::from_archive_domain)
+                .collect(),
+            creatable_summary: analysis.creatable.as_ref().map(|creatable| {
+                let mut seen = std::collections::BTreeSet::new();
+                let retained_media: Vec<String> = creatable
+                    .retained_media
+                    .iter()
+                    .filter(|media| seen.insert(media.basename.clone()))
+                    .map(|media| media.basename.clone())
+                    .collect();
+                CreatableSummaryDto {
+                    title: normalize_title(&creatable.title),
+                    node_count: creatable.structure.nodes.len() as u32,
+                    retained_media,
+                    discarded_media: analysis.discarded_media.clone(),
+                }
+            }),
+            archive_name,
+            archive_path,
+        }
+    }
+}
+
+/// Input accepted by the `accept_structured_archive_creation` Tauri
+/// command: the archive path from a prior analysis, round-tripped
+/// verbatim — a POINTER, never an authority (the accept re-analyzes).
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AcceptArchiveCreationInputDto {
+    pub archive_path: String,
+}
+
 // ===== Drop channel (a file or folder dropped on the window) =====
 
 /// Frozen calm-limit copy when one drop gesture hands SEVERAL elements at
@@ -814,6 +887,18 @@ impl ImportFindingDto {
         }
     }
 
+    /// The structured-ARCHIVE variant: same discriminants, the archive
+    /// per-pair FR copy ([`structured_archive_finding_message`]).
+    pub fn from_archive_domain(finding: &RecognitionFinding) -> Self {
+        let aspect = aspect_dto(finding.aspect);
+        let category = category_dto(finding.category);
+        Self {
+            aspect,
+            category,
+            message: structured_archive_finding_message(aspect, category).to_string(),
+        }
+    }
+
     /// The RSS-ingestion variant: same discriminants, the RSS per-pair FR
     /// copy ([`rss_finding_message`]).
     pub fn from_rss_domain(finding: &RecognitionFinding) -> Self {
@@ -964,6 +1049,39 @@ pub fn structured_folder_finding_message(
         }
         (A::Structure, C::Missing | C::Blocking) => {
             "La structure du manifest est incomplète ou incohérente. Corrige le manifest puis relance l'analyse."
+        }
+        _ => finding_message(aspect, category),
+    }
+}
+
+/// The structured-ARCHIVE per-pair FR copy: the community pack's
+/// `story.json` descriptor wording. Media pairs fall back to the shared
+/// [`finding_message`] copy (identical semantics: referenced files).
+pub fn structured_archive_finding_message(
+    aspect: ImportAspectDto,
+    category: ImportCategoryDto,
+) -> &'static str {
+    use ImportAspectDto as A;
+    use ImportCategoryDto as C;
+    match (aspect, category) {
+        (A::Envelope, C::Recognized) => "Le descripteur story.json est présent et lisible.",
+        (A::Envelope, C::Ambiguous | C::Missing | C::Blocking) => {
+            "L'archive ne contient pas de descripteur story.json lisible. Corrige l'archive puis relance l'analyse."
+        }
+        (A::Title, C::Ambiguous) => {
+            "Le titre a été complété ou normalisé à la création (titre absent du descripteur ou espaces ajustés)."
+        }
+        (A::Title, C::Missing | C::Blocking) => {
+            "Le titre du descripteur est manquant ou n'est pas valide. Corrige l'archive puis relance l'analyse."
+        }
+        (A::Structure, C::Recognized) => {
+            "La structure du pack est reconnue et convertie en histoire."
+        }
+        (A::Structure, C::Ambiguous) => {
+            "La structure du pack contient des références incomplètes ; l'histoire sera créée telle quelle et tu pourras corriger dans l'éditeur."
+        }
+        (A::Structure, C::Missing | C::Blocking) => {
+            "La structure du descripteur est incomplète ou incohérente. Corrige l'archive puis relance l'analyse."
         }
         _ => finding_message(aspect, category),
     }

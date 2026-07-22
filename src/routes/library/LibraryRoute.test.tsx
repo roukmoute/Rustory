@@ -24,6 +24,8 @@ const mockReadTransfer = vi.fn();
 const mockReadTransferOutcome = vi.fn();
 const mockDiscardTransferOutcome = vi.fn();
 const mockAnalyzeFolder = vi.fn();
+const mockAnalyzeArchive = vi.fn();
+const mockAcceptArchive = vi.fn();
 const mockAcceptFolder = vi.fn();
 const mockAnalyzeArtifact = vi.fn();
 const mockAcceptArtifact = vi.fn();
@@ -191,6 +193,9 @@ vi.mock("../../ipc/commands/import-export", async () => {
     ...actual,
     analyzeStructuredFolderForCreation: () => mockAnalyzeFolder(),
     acceptStructuredCreation: (input: unknown) => mockAcceptFolder(input),
+    analyzeStructuredArchiveForCreation: () => mockAnalyzeArchive(),
+    acceptStructuredArchiveCreation: (input: unknown) =>
+      mockAcceptArchive(input),
     analyzeArtifactForImport: () => mockAnalyzeArtifact(),
     acceptArtifactImport: (input: unknown) => mockAcceptArtifact(input),
     analyzeOsOpenRequest: () => mockAnalyzeOsOpen(),
@@ -302,6 +307,15 @@ describe("<LibraryRoute />", () => {
     // the safe default. Tests exercising the folder flow override this.
     mockAnalyzeFolder.mockReset();
     mockAnalyzeFolder.mockResolvedValue({ kind: "cancelled" });
+    // Default: the archive analysis is user-triggered too.
+    mockAnalyzeArchive.mockReset();
+    mockAnalyzeArchive.mockResolvedValue({ kind: "cancelled" });
+    mockAcceptArchive.mockReset();
+    mockAcceptArchive.mockResolvedValue({
+      id: "0197a5d0-0000-7000-8000-0000000000ee",
+      title: "Le pack du soir",
+      importState: "recognized",
+    });
     // Default: the folder accept settles into a fresh card. Tests that
     // exercise a commit failure override it.
     mockAcceptFolder.mockReset();
@@ -695,6 +709,65 @@ describe("<LibraryRoute />", () => {
     expect(
       screen.getByRole("button", { name: /increvable/i }),
     ).toHaveAttribute("aria-pressed", "true");
+  });
+
+  it("creates a story from a structured archive: dialog entry → review → accept → fresh card", async () => {
+    const user = userEvent.setup();
+    mockGet.mockResolvedValueOnce({ stories: [] });
+    mockGet.mockResolvedValueOnce({
+      stories: [{ id: "arch-1", title: "Le pack du soir" }],
+    });
+    mockAnalyzeArchive.mockResolvedValueOnce({
+      kind: "analyzed",
+      quality: "clean",
+      state: "recognized",
+      findings: [
+        {
+          aspect: "envelope",
+          category: "recognized",
+          message: "Le descripteur story.json est présent et lisible.",
+        },
+      ],
+      creatableSummary: {
+        title: "Le pack du soir",
+        nodeCount: 3,
+        retainedMedia: ["cover.png"],
+        discardedMedia: ["fond.bmp"],
+      },
+      archiveName: "Le pack du soir.zip",
+      archivePath: "/home/user/Le pack du soir.zip",
+    });
+    renderLibrary();
+    await screen.findByRole("heading", { name: /ta bibliothèque est vide/i });
+
+    // Header CTA + empty-state CTA share the label — the first is the header.
+    await user.click(
+      screen.getAllByRole("button", { name: /^créer une histoire$/i })[0],
+    );
+    await user.click(
+      screen.getByRole("button", {
+        name: "Choisir une archive de pack (.zip)…",
+      }),
+    );
+
+    // The review surface renders the archive identity + the summary.
+    expect(
+      await screen.findByText("Le pack du soir.zip"),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/médias écartés : fond\.bmp/i)).toBeInTheDocument();
+
+    await user.click(
+      screen.getByRole("button", { name: /^créer l'histoire$/i }),
+    );
+    await waitFor(() =>
+      expect(mockAcceptArchive).toHaveBeenCalledWith({
+        archivePath: "/home/user/Le pack du soir.zip",
+      }),
+    );
+    // The overview re-read surfaces the fresh card.
+    expect(
+      await screen.findByRole("button", { name: /le pack du soir/i }),
+    ).toBeInTheDocument();
   });
 
   it("Ctrl+click on a second card toggles multi-selection and disables Éditer with the canonical reason", async () => {

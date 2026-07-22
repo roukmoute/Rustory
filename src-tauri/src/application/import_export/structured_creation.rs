@@ -131,8 +131,14 @@ pub struct PreparedCreation {
     structure_json: String,
     checksum: String,
     now_iso: String,
-    folder_name: String,
-    manifest_checksum: String,
+    /// Provenance identity of the creation source: the DB row's
+    /// `source_format` / `source_format_version` — parameterized since the
+    /// structured ARCHIVE became the second creation source sharing this
+    /// acceptance machinery.
+    source_format: &'static str,
+    source_format_version: u64,
+    source_name: String,
+    artifact_checksum: String,
     state: crate::domain::import::ImportState,
     findings: Vec<crate::domain::import::RecognitionFinding>,
     asset_rows: Vec<AssetRow>,
@@ -140,6 +146,18 @@ pub struct PreparedCreation {
     /// what [`compensate_structured_creation`] reclaims if the commit
     /// never lands.
     promoted: Vec<(String, String)>,
+}
+
+/// The provenance facts a creation source hands to
+/// [`prepare_from_creatable`] — everything the shared tail cannot derive
+/// itself (it only owns the media promotion and the asset wiring).
+pub(crate) struct CreationProvenance {
+    pub source_format: &'static str,
+    pub source_format_version: u64,
+    pub source_name: String,
+    pub artifact_checksum: String,
+    pub state: crate::domain::import::ImportState,
+    pub findings: Vec<crate::domain::import::RecognitionFinding>,
 }
 
 /// A prepare refusal: the typed error + the files ALREADY promoted when it
@@ -153,7 +171,7 @@ pub struct PrepareFailure {
 }
 
 impl PrepareFailure {
-    fn bare(error: AppError) -> Self {
+    pub(crate) fn bare(error: AppError) -> Self {
         Self {
             error,
             promoted: Vec::new(),
@@ -200,6 +218,32 @@ pub fn prepare_structured_creation(
         )));
     }
 
+    prepare_from_creatable(
+        app_data_dir,
+        folder_path,
+        &creatable,
+        CreationProvenance {
+            source_format: "structured-folder",
+            source_format_version: STRUCTURED_FOLDER_FORMAT_VERSION,
+            source_name: outcome.folder_name,
+            artifact_checksum: manifest_checksum,
+            state: outcome.analysis.state,
+            findings: outcome.analysis.findings,
+        },
+    )
+}
+
+/// The SHARED tail of every structured-creation prepare (folder and
+/// archive): defensive title re-check, birth timestamp, media promotion
+/// from `media_base_dir` (the picked folder, or the archive's bounded
+/// extraction directory), asset wiring, canonical serialization. The
+/// caller owns the source-specific analysis and provenance validation.
+pub(crate) fn prepare_from_creatable(
+    app_data_dir: &Path,
+    media_base_dir: &Path,
+    creatable: &crate::domain::import::CreatableStory,
+    provenance: CreationProvenance,
+) -> Result<PreparedCreation, PrepareFailure> {
     // Defensive title re-check. The re-analysis already blocks an invalid
     // title through the `Title` aspect, so this is unreachable in practice
     // — kept inside the closed `IMPORT_FAILED` taxonomy (never the creation
@@ -221,7 +265,7 @@ pub fn prepare_structured_creation(
     // bytes actually read. No DB handle exists here by construction.
     let promoted = promote_retained_media(
         app_data_dir,
-        folder_path,
+        media_base_dir,
         &creatable.retained_media,
         MAX_FOLDER_TOTAL_MEDIA_BYTES,
     )?;
@@ -271,10 +315,12 @@ pub fn prepare_structured_creation(
         structure_json,
         checksum,
         now_iso,
-        folder_name: outcome.folder_name,
-        manifest_checksum,
-        state: outcome.analysis.state,
-        findings: outcome.analysis.findings,
+        source_format: provenance.source_format,
+        source_format_version: provenance.source_format_version,
+        source_name: provenance.source_name,
+        artifact_checksum: provenance.artifact_checksum,
+        state: provenance.state,
+        findings: provenance.findings,
         asset_rows,
         promoted: promoted_pairs(&promoted),
     })
@@ -365,12 +411,13 @@ pub fn commit_structured_creation(
         .map_err(|err| db_commit_error(&err, "insert_story"))?;
         tx.execute(
             "INSERT INTO story_local_imports (story_id, source_format, source_format_version, source_name, artifact_checksum, import_state, findings_summary, imported_at) \
-             VALUES (?1, 'structured-folder', ?2, ?3, ?4, ?5, ?6, ?7)",
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             rusqlite::params![
                 &story_id,
-                STRUCTURED_FOLDER_FORMAT_VERSION,
-                &prepared.folder_name,
-                &prepared.manifest_checksum,
+                prepared.source_format,
+                prepared.source_format_version,
+                &prepared.source_name,
+                &prepared.artifact_checksum,
                 state_db_tag(prepared.state),
                 &findings_summary,
                 &prepared.now_iso,
@@ -634,7 +681,7 @@ fn promote_media(
     store_media(&media_dir, &staging_dir, &bytes).map_err(|_| media_promotion_error())
 }
 
-const fn folder_kind(kind: MediaKind) -> FolderMediaKind {
+pub(crate) const fn folder_kind(kind: MediaKind) -> FolderMediaKind {
     match kind {
         MediaKind::Image => FolderMediaKind::Image,
         MediaKind::Audio => FolderMediaKind::Audio,

@@ -154,17 +154,17 @@ const OFFICIAL_LOCAL_ARTIFACTS: &[LocalArtifactLine] = &[
         format_version: Some(1),
         support: LocalArtifactSupport::StoryCreation,
     },
-    // Structured archive ❌ deferred — no archive reader ships
-    // (zero-dependency rule); the line stays VISIBLE with its honest
-    // frozen reason, never silently dropped (the not-activated
-    // content-source pattern). No format version is documented, none
-    // is invented.
+    // Structured archive v1 ✅ creation — the community `.zip` pack
+    // (`story.json` stage/action graph + `assets/`), the story-creation
+    // entry point for files users actually hold. Activated 2026-07-22 by
+    // explicit product decision (the deferred line's zero-dependency
+    // rationale was lifted: the zip reader crate was already compiled in
+    // the tree). `format_version` is OUR reader-support revision — the
+    // foreign format declares none itself.
     LocalArtifactLine {
         kind: LocalArtifactKind::StructuredArchive,
-        format_version: None,
-        support: LocalArtifactSupport::Deferred {
-            reason: "Lecture d'archives non prise en charge",
-        },
+        format_version: Some(1),
+        support: LocalArtifactSupport::StoryCreation,
     },
 ];
 
@@ -210,21 +210,20 @@ mod tests {
     }
 
     #[test]
-    fn official_registry_defers_the_structured_archive_with_a_non_empty_reason() {
-        // Documents the CURRENT distribution state: the archive kind is
-        // KNOWN (its label and honest reason render on the support
-        // profile) but no capability ships — no archive reader exists
-        // (zero-dependency rule). A capability appearing one day is an
-        // announced re-scope of this test.
+    fn official_registry_supports_the_structured_archive_for_creation() {
+        // The announced re-scope happened (2026-07-22): the archive reader
+        // ships, the line moved from deferred to the story-creation
+        // bundle — the exact folder-line shape.
         let line = official_local_artifacts()
             .iter()
             .find(|line| line.kind == LocalArtifactKind::StructuredArchive)
             .expect("archive line");
-        assert_eq!(line.format_version, None, "no version is ever invented");
-        assert!(!line.support.is_available());
-        let reason = line.support.reason().expect("deferred carries a reason");
-        assert_eq!(reason, "Lecture d'archives non prise en charge");
-        assert_eq!(line.support.capabilities(), LocalArtifactCapabilities::NONE);
+        assert_eq!(line.format_version, Some(1));
+        assert_eq!(line.support, LocalArtifactSupport::StoryCreation);
+        let capabilities = line.support.capabilities();
+        assert!(!capabilities.import_artifact);
+        assert!(!capabilities.export_artifact);
+        assert!(capabilities.create_story);
     }
 
     #[test]

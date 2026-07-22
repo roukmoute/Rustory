@@ -31,6 +31,12 @@ export interface CreateStoryDialogProps {
    *  review surfaces must never stack. Mirrors the library bar's import
    *  CTA gating. */
   isCreateFromFolderUnavailable?: boolean;
+  /** Start the structured-ARCHIVE creation path (`Choisir une archive de
+   *  pack (.zip)…`): closes this dialog and hands over to the archive
+   *  flow. Optional — when absent, the archive entry is not rendered. */
+  onCreateFromArchiveRequest?: () => void;
+  /** Same cross-flow exclusivity for the archive entry. */
+  isCreateFromArchiveUnavailable?: boolean;
   /** Start the external-source creation path (`Démarrer depuis une source
    *  externe (RSS)`): closes this dialog and hands over to the RSS flow.
    *  Optional — when absent, the content-source section is not rendered. */
@@ -79,6 +85,8 @@ export function CreateStoryDialog({
   onCreated,
   onCreateFromFolderRequest,
   isCreateFromFolderUnavailable = false,
+  onCreateFromArchiveRequest,
+  isCreateFromArchiveUnavailable = false,
   onCreateFromRssRequest,
   isCreateFromRssUnavailable = false,
   isSubmitUnavailable = false,
@@ -200,6 +208,15 @@ export function CreateStoryDialog({
     onCreateFromFolderRequest?.();
   };
 
+  const handleCreateFromArchive = (): void => {
+    // Same cross-flow exclusivity as the folder entry.
+    if (isSubmitting || isCreateFromArchiveUnavailable) return;
+    // Hand over to the archive flow: close this dialog first so the
+    // native file picker is never stacked under a modal.
+    onClose();
+    onCreateFromArchiveRequest?.();
+  };
+
   const handleCreateFromRss = (): void => {
     // Same cross-flow exclusivity as the folder entry.
     if (isSubmitting || isCreateFromRssUnavailable) return;
@@ -302,6 +319,22 @@ export function CreateStoryDialog({
             }
           >
             Choisir un dossier…
+          </Button>
+        </div>
+      ) : null}
+      {onCreateFromArchiveRequest ? (
+        <div className="create-story-dialog__folder-entry">
+          <p className="create-story-dialog__folder-hint">
+            Ou importe une archive de pack au format communautaire
+          </p>
+          <Button
+            variant="quiet"
+            onClick={handleCreateFromArchive}
+            aria-disabled={
+              isSubmitting || isCreateFromArchiveUnavailable || undefined
+            }
+          >
+            Choisir une archive de pack (.zip)…
           </Button>
         </div>
       ) : null}

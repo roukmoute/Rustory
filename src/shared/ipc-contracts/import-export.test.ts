@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  isArchiveCreationAnalysis,
   isContentSourceEntry,
   isContentSourcePolicy,
   isDropAnalysis,
@@ -620,6 +621,125 @@ describe("isStructuredCreationAnalysis", () => {
         ...FOLDER_ANALYZED_CLEAN,
         quality: "partial",
         state: "needsReview",
+      }),
+    ).toBe(false);
+  });
+});
+
+// ===== Structured-archive creation =====
+
+const ARCHIVE_FINDINGS_CLEAN = [
+  {
+    aspect: "envelope",
+    category: "recognized",
+    message: "Le descripteur story.json est présent et lisible.",
+  },
+  {
+    aspect: "title",
+    category: "recognized",
+    message: "Le titre de l'histoire est valide.",
+  },
+  {
+    aspect: "structure",
+    category: "recognized",
+    message: "La structure du pack est reconnue et convertie en histoire.",
+  },
+  {
+    aspect: "media",
+    category: "recognized",
+    message: "Tous les fichiers référencés sont présents et reconnus.",
+  },
+] as const;
+
+const ARCHIVE_ANALYZED_CLEAN = {
+  kind: "analyzed",
+  quality: "clean",
+  state: "recognized",
+  findings: [...ARCHIVE_FINDINGS_CLEAN],
+  creatableSummary: {
+    title: "Le pack du soir",
+    nodeCount: 3,
+    retainedMedia: ["cover.png"],
+    discardedMedia: [],
+  },
+  archiveName: "Le pack du soir.zip",
+  archivePath: "/home/user/Le pack du soir.zip",
+};
+
+const ARCHIVE_ANALYZED_BLOCKED = {
+  kind: "analyzed",
+  quality: "unusable",
+  state: "blocked",
+  findings: [
+    {
+      aspect: "envelope",
+      category: "blocking",
+      message: "L'archive ne contient pas de descripteur story.json lisible.",
+    },
+  ],
+  archiveName: "casse.zip",
+  archivePath: "/home/user/casse.zip",
+};
+
+describe("isArchiveCreationAnalysis", () => {
+  it("accepts a clean creatable verdict", () => {
+    expect(isArchiveCreationAnalysis(ARCHIVE_ANALYZED_CLEAN)).toBe(true);
+  });
+
+  it("accepts a blocked verdict with no creatable summary", () => {
+    expect(isArchiveCreationAnalysis(ARCHIVE_ANALYZED_BLOCKED)).toBe(true);
+  });
+
+  it("accepts a cancelled payload with only the kind discriminant", () => {
+    expect(isArchiveCreationAnalysis({ kind: "cancelled" })).toBe(true);
+    expect(isArchiveCreationAnalysis({ kind: "cancelled", extra: 1 })).toBe(
+      false,
+    );
+  });
+
+  it("rejects an analyzed verdict without archivePath or archiveName", () => {
+    const { archivePath: _dropped, ...rest } = ARCHIVE_ANALYZED_CLEAN;
+    expect(isArchiveCreationAnalysis(rest)).toBe(false);
+    expect(
+      isArchiveCreationAnalysis({ ...ARCHIVE_ANALYZED_CLEAN, archiveName: "" }),
+    ).toBe(false);
+  });
+
+  it("rejects the folder flow's formatVersion aspect — never analyzed here", () => {
+    expect(
+      isArchiveCreationAnalysis({
+        ...ARCHIVE_ANALYZED_CLEAN,
+        findings: [
+          ...ARCHIVE_FINDINGS_CLEAN,
+          {
+            aspect: "formatVersion",
+            category: "recognized",
+            message: "Version ok.",
+          },
+        ],
+      }),
+    ).toBe(false);
+  });
+
+  it("rejects a creatable verdict missing one of the four archive aspects", () => {
+    expect(
+      isArchiveCreationAnalysis({
+        ...ARCHIVE_ANALYZED_CLEAN,
+        findings: ARCHIVE_FINDINGS_CLEAN.slice(0, 3),
+      }),
+    ).toBe(false);
+  });
+
+  it("rejects a creatable verdict without its summary", () => {
+    const { creatableSummary: _dropped, ...rest } = ARCHIVE_ANALYZED_CLEAN;
+    expect(isArchiveCreationAnalysis(rest)).toBe(false);
+  });
+
+  it("rejects a blocked verdict that carries a summary", () => {
+    expect(
+      isArchiveCreationAnalysis({
+        ...ARCHIVE_ANALYZED_BLOCKED,
+        creatableSummary: ARCHIVE_ANALYZED_CLEAN.creatableSummary,
       }),
     ).toBe(false);
   });

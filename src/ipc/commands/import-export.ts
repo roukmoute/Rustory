@@ -2,8 +2,10 @@ import { invoke } from "@tauri-apps/api/core";
 
 import { toAppError } from "../../shared/errors/app-error";
 import type {
+  AcceptArchiveCreationInput,
   AcceptArtifactImportInput,
   AcceptStructuredCreationInput,
+  ArchiveCreationAnalysis,
   ContentSourcePolicy,
   DropAnalysis,
   ExportStoryDialogInput,
@@ -16,6 +18,7 @@ import type {
   StructuredCreationAnalysis,
 } from "../../shared/ipc-contracts/import-export";
 import {
+  isArchiveCreationAnalysis,
   isContentSourcePolicy,
   isDropAnalysis,
   isExportStoryDialogOutcome,
@@ -325,6 +328,52 @@ export async function acceptStructuredCreation(
   if (!isStoryCardDto(raw)) {
     throw new StructuredCreationContractDriftError(
       "accept_structured_creation",
+      raw,
+    );
+  }
+  return raw;
+}
+
+/**
+ * Pick + analyze a structured ARCHIVE (the community `.zip` pack) for
+ * creation (phase 1). Same discipline as the folder flow: transport
+ * rejects, functional verdicts resolve, drift rejects.
+ */
+export async function analyzeStructuredArchiveForCreation(): Promise<ArchiveCreationAnalysis> {
+  let raw: unknown;
+  try {
+    raw = await invoke<unknown>("analyze_structured_archive_for_creation");
+  } catch (err) {
+    throw toAppError(err);
+  }
+  if (!isArchiveCreationAnalysis(raw)) {
+    throw new StructuredCreationContractDriftError(
+      "analyze_structured_archive_for_creation",
+      raw,
+    );
+  }
+  return raw;
+}
+
+/**
+ * Commit an analyzed structured archive (phase 2). Sends the archive
+ * pointer back; Rust RE-ANALYZES the archive from zero and returns the
+ * created local Story Card.
+ */
+export async function acceptStructuredArchiveCreation(
+  input: AcceptArchiveCreationInput,
+): Promise<StoryCardDto> {
+  let raw: unknown;
+  try {
+    raw = await invoke<unknown>("accept_structured_archive_creation", {
+      input,
+    });
+  } catch (err) {
+    throw toAppError(err);
+  }
+  if (!isStoryCardDto(raw)) {
+    throw new StructuredCreationContractDriftError(
+      "accept_structured_archive_creation",
       raw,
     );
   }

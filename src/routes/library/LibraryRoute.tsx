@@ -27,6 +27,7 @@ import {
   type TransferView,
 } from "../../features/library/components/LuniiDecisionPanel";
 import { useStoryPreparation, useStoryTransfer } from "../../features/transfer";
+import { CreateFromArchiveSurface } from "../../features/import-export/components/CreateFromArchiveSurface";
 import { CreateFromFolderSurface } from "../../features/import-export/components/CreateFromFolderSurface";
 import { CreateFromRssSurface } from "../../features/import-export/components/CreateFromRssSurface";
 import { ImportArtifactSurface } from "../../features/import-export/components/ImportArtifactSurface";
@@ -35,6 +36,7 @@ import {
   discardOsOpenRequest,
   readContentSourcePolicy,
 } from "../../ipc/commands/import-export";
+import { useArchiveCreation } from "../../features/import-export/hooks/use-archive-creation";
 import { useRssCreation } from "../../features/import-export/hooks/use-rss-creation";
 import { useStoryImport } from "../../features/import-export/hooks/use-story-import";
 import { useStructuredCreation } from "../../features/import-export/hooks/use-structured-creation";
@@ -255,6 +257,29 @@ export function LibraryRoute(): React.JSX.Element {
       invalidate();
     }
   }, [structuredCreationStatusKind, invalidate]);
+
+  // Structured-ARCHIVE creation flow (community .zip pack → new canonical
+  // story). USER-TRIGGERED from the creation dialog's archive entry
+  // ("Choisir une archive de pack (.zip)…"). Picker-only channel — the
+  // drop/os-open routing of archives is a separate extension.
+  const archiveCreation = useArchiveCreation();
+  const isCreateFromArchiveBusy =
+    archiveCreation.status.kind === "analyzing" ||
+    archiveCreation.status.kind === "creating";
+  const archiveCreationStatusKind = archiveCreation.status.kind;
+  useEffect(() => {
+    if (archiveCreationStatusKind === "created") {
+      invalidate();
+    }
+  }, [archiveCreationStatusKind, invalidate]);
+
+  const handleArchiveRetry = (): void => {
+    if (archiveCreation.failedPhase === "accept") {
+      void archiveCreation.retryAccept();
+    } else {
+      void archiveCreation.pickAndAnalyze();
+    }
+  };
 
   // RSS external-source creation flow (feed → new canonical draft).
   // USER-TRIGGERED from the creation dialog's third entry ("Démarrer depuis
@@ -976,6 +1001,15 @@ export function LibraryRoute(): React.JSX.Element {
         onRetry={handleFolderRetry}
         onDismiss={handleFolderDismiss}
       />
+      <CreateFromArchiveSurface
+        status={archiveCreation.status}
+        onAccept={() => {
+          void archiveCreation.acceptCreation();
+        }}
+        onAbandon={archiveCreation.abandon}
+        onRetry={handleArchiveRetry}
+        onDismiss={archiveCreation.dismiss}
+      />
       <CreateFromRssSurface
         open={isRssCreationOpen}
         status={rssCreation.status}
@@ -1099,13 +1133,28 @@ export function LibraryRoute(): React.JSX.Element {
           void structuredCreation.pickAndAnalyze();
         }}
         isCreateFromFolderUnavailable={
-          isImportBusy || isCreateFromFolderBusy || isRssCreationActive
+          isImportBusy ||
+          isCreateFromFolderBusy ||
+          isCreateFromArchiveBusy ||
+          isRssCreationActive
+        }
+        onCreateFromArchiveRequest={() => {
+          void archiveCreation.pickAndAnalyze();
+        }}
+        isCreateFromArchiveUnavailable={
+          isImportBusy ||
+          isCreateFromFolderBusy ||
+          isCreateFromArchiveBusy ||
+          isRssCreationActive
         }
         onCreateFromRssRequest={() => {
           setIsRssCreationOpen(true);
         }}
         isCreateFromRssUnavailable={
-          isImportBusy || isCreateFromFolderBusy || isRssCreationActive
+          isImportBusy ||
+          isCreateFromFolderBusy ||
+          isCreateFromArchiveBusy ||
+          isRssCreationActive
         }
         isSubmitUnavailable={
           storyImport.isOsOpenSettling || storyImport.isDropSettling

@@ -1,9 +1,15 @@
+pub mod archive_creation;
 pub mod drop_intent;
 pub mod export;
 pub mod import;
 pub mod os_open;
 pub mod rss_creation;
 pub mod structured_creation;
+
+pub use archive_creation::{
+    accept_structured_archive_creation, analyze_structured_archive,
+    prepare_structured_archive_creation, ArchiveCreationOutcome,
+};
 
 pub use drop_intent::{analyze_pending_drop, DropIntent, DropIntentState, DROP_INTENT_STATE};
 pub use export::{export_story, ExportStoryInput, ExportStoryOutput};
