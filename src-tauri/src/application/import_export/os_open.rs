@@ -166,7 +166,11 @@ impl OsOpenState {
 /// worker): the bounded file read happens here, and no `MutexGuard` ever
 /// crosses an `.await` (the state locks are inside `peek`/`take_if`).
 pub fn analyze_pending_intent(state: &OsOpenState) -> Result<OsOpenAnalysisDto, AppError> {
-    analyze_pending_intent_with(state, read_artifact_bounded)
+    analyze_pending_intent_with(
+        state,
+        read_artifact_bounded,
+        super::archive_creation::analyze_structured_archive,
+    )
 }
 
 /// [`analyze_pending_intent`] parameterized by the file reader, so the
@@ -188,6 +192,7 @@ pub fn analyze_pending_intent(state: &OsOpenState) -> Result<OsOpenAnalysisDto, 
 fn analyze_pending_intent_with(
     state: &OsOpenState,
     read: impl Fn(&Path) -> Result<Vec<u8>, AppError>,
+    analyze_archive: impl Fn(&Path) -> Result<super::archive_creation::ArchiveCreationOutcome, AppError>,
 ) -> Result<OsOpenAnalysisDto, AppError> {
     loop {
         let Some((generation, intent)) = state.peek() else {
@@ -201,6 +206,50 @@ fn analyze_pending_intent_with(
                 // A newer gesture replaced it between peek and claim —
                 // analyze THAT one instead.
                 continue;
+            }
+            // An OS-opened `.zip` is a structured archive (the community
+            // pack): routed to the archive analysis — never to the
+            // `.rustory` envelope parse. The wire needs the archive PATH
+            // (the accept round-trips it): a non-UTF-8 path cannot cross
+            // verbatim and is refused at the boundary (the folder-drop
+            // doctrine).
+            OsOpenIntent::Artifact(path) if super::drop_intent::is_zip_archive_path(&path) => {
+                let Some(archive_path) = path.to_str().map(str::to_string) else {
+                    let still_current = matches!(
+                        state.peek(),
+                        Some((current, _)) if current == generation
+                    );
+                    if !still_current {
+                        continue;
+                    }
+                    return Err(super::structured_creation::non_filesystem_path_error());
+                };
+                match analyze_archive(&path) {
+                    Ok(outcome) => {
+                        if !state.take_if(generation) {
+                            // The user's newer gesture wins — drop this
+                            // stale verdict and serve the newest intent.
+                            continue;
+                        }
+                        return Ok(OsOpenAnalysisDto::archive(
+                            &outcome.analysis,
+                            outcome.archive_name,
+                            archive_path,
+                        ));
+                    }
+                    Err(err) => {
+                        let still_current = matches!(
+                            state.peek(),
+                            Some((current, _)) if current == generation
+                        );
+                        if !still_current {
+                            continue;
+                        }
+                        // The intent SURVIVES a transport failure so
+                        // `Réessayer` can replay it.
+                        return Err(err);
+                    }
+                }
             }
             OsOpenIntent::Artifact(path) => {
                 // Carry the BASENAME only across the boundary — never the
@@ -459,12 +508,16 @@ mod tests {
 
         // The reader plays the barrier: WHILE A is being read, B lands.
         let b_arg = strings(&[path_b.to_str().expect("utf8")]);
-        let dto = analyze_pending_intent_with(&state, |path| {
-            if path == path_a {
-                state.offer(&b_arg, tmp.path());
-            }
-            read_artifact_bounded(path)
-        })
+        let dto = analyze_pending_intent_with(
+            &state,
+            |path| {
+                if path == path_a {
+                    state.offer(&b_arg, tmp.path());
+                }
+                read_artifact_bounded(path)
+            },
+            crate::application::import_export::archive_creation::analyze_structured_archive,
+        )
         .expect("analyze");
 
         match &dto {
@@ -497,12 +550,16 @@ mod tests {
         state.offer(&strings(&[missing_a.to_str().expect("utf8")]), tmp.path());
 
         let b_arg = strings(&[path_b.to_str().expect("utf8")]);
-        let dto = analyze_pending_intent_with(&state, |path| {
-            if path == missing_a {
-                state.offer(&b_arg, tmp.path());
-            }
-            read_artifact_bounded(path)
-        })
+        let dto = analyze_pending_intent_with(
+            &state,
+            |path| {
+                if path == missing_a {
+                    state.offer(&b_arg, tmp.path());
+                }
+                read_artifact_bounded(path)
+            },
+            crate::application::import_export::archive_creation::analyze_structured_archive,
+        )
         .expect("the stale failure must not surface — B analyzes");
 
         match &dto {
@@ -546,10 +603,14 @@ mod tests {
 
         let state = OsOpenState::new();
         state.offer(&strings(&[path.to_str().expect("utf8")]), tmp.path());
-        let dto = analyze_pending_intent_with(&state, |p| {
-            state.discard();
-            read_artifact_bounded(p)
-        })
+        let dto = analyze_pending_intent_with(
+            &state,
+            |p| {
+                state.discard();
+                read_artifact_bounded(p)
+            },
+            crate::application::import_export::archive_creation::analyze_structured_archive,
+        )
         .expect("analyze");
         assert_eq!(dto, OsOpenAnalysisDto::None);
     }
@@ -628,5 +689,44 @@ mod tests {
             }
             other => panic!("expected analyzed, got {other:?}"),
         }
+    }
+
+    /// An OS-opened `.zip` routes to the ARCHIVE analysis — never to the
+    /// `.rustory` envelope parse (which would refuse it as unrecognized).
+    #[test]
+    fn an_os_opened_zip_settles_as_an_archive_verdict() {
+        use std::io::Write;
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let zip_path = tmp.path().join("Mon pack.zip");
+        let file = std::fs::File::create(&zip_path).expect("create zip");
+        let mut writer = zip::ZipWriter::new(file);
+        writer
+            .start_file("story.json", zip::write::SimpleFileOptions::default())
+            .expect("entry");
+        writer
+            .write_all(
+                br#"{"title":"T","stageNodes":[{"uuid":"s1","squareOne":true,"image":null,"audio":null,"okTransition":null,"controlSettings":{}}],"actionNodes":[]}"#,
+            )
+            .expect("bytes");
+        writer.finish().expect("finish");
+
+        let state = OsOpenState::new();
+        assert!(state.offer(&[zip_path.clone().into_os_string()], tmp.path()));
+        let dto = analyze_pending_intent(&state).expect("analyze");
+        match &dto {
+            OsOpenAnalysisDto::Archive {
+                archive_name,
+                archive_path,
+                creatable_summary,
+                ..
+            } => {
+                assert_eq!(archive_name, "Mon pack.zip");
+                assert_eq!(archive_path, zip_path.to_str().expect("utf-8"));
+                assert!(creatable_summary.is_some());
+            }
+            other => panic!("expected an archive settlement, got {other:?}"),
+        }
+        // One-shot: the intent was consumed by the settlement.
+        assert!(state.peek().is_none());
     }
 }

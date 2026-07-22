@@ -52,7 +52,16 @@ export type OsOpenAnalyzeOutcome =
   | { kind: "none" }
   | { kind: "multipleFiles"; message: string }
   | { kind: "review" }
+  | { kind: "archive"; verdict: OsOpenArchiveVerdict }
   | { kind: "failed" };
+
+/** The OS-open channel's `archive` wire verdict — the exact field set of
+ *  the picker archive `analyzed` verdict under its own tag, handed to the
+ *  library for the archive-creation machine. */
+export type OsOpenArchiveVerdict = Extract<OsOpenAnalysis, { kind: "archive" }>;
+
+/** The drop channel's `archive` wire verdict — same shape, drop-tagged. */
+export type DropArchiveVerdict = Extract<DropAnalysis, { kind: "archive" }>;
 
 /** What a drop analysis produced, for the caller: the calm cases the
  *  MACHINE does not carry (`none`; `multipleItems` — the library renders
@@ -70,6 +79,7 @@ export type DropAnalyzeOutcome =
   | { kind: "multipleItems"; message: string }
   | { kind: "review" }
   | { kind: "folder"; verdict: DropFolderVerdict }
+  | { kind: "archive"; verdict: DropArchiveVerdict }
   | { kind: "failed" };
 
 export interface UseStoryImport {
@@ -273,6 +283,21 @@ export function useStoryImport(): UseStoryImport {
           // machine state: the current status survives untouched.
           return { kind: "multipleFiles", message: verdict.message };
         }
+        if (verdict.kind === "archive") {
+          // The archive verdict belongs to the SIBLING machine (the route
+          // injects it). The channel's newest settlement is the only one
+          // displayed: an import surface fed by an EARLIER OS-open steps
+          // aside; a dialog/drop surface is untouched (other gestures).
+          if (
+            originRef.current === "osOpen" &&
+            statusRef.current.kind !== "idle"
+          ) {
+            reviewVerdictRef.current = null;
+            setStatus({ kind: "idle" });
+            setFailedPhase(null);
+          }
+          return { kind: "archive", verdict };
+        }
         setOrigin("osOpen");
         setStatus({ kind: "review", verdict });
         setFailedPhase(null);
@@ -363,6 +388,19 @@ export function useStoryImport(): UseStoryImport {
             setFailedPhase(null);
           }
           return { kind: "folder", verdict };
+        }
+        if (verdict.kind === "archive") {
+          // The archive verdict belongs to ITS sibling machine — the same
+          // step-aside discipline as the folder settlement above.
+          if (
+            originRef.current === "drop" &&
+            statusRef.current.kind !== "idle"
+          ) {
+            reviewVerdictRef.current = null;
+            setStatus({ kind: "idle" });
+            setFailedPhase(null);
+          }
+          return { kind: "archive", verdict };
         }
         // A dropped FILE: the exact field set of the dialog verdict under
         // its own tag — re-tagged into the SAME review machine.

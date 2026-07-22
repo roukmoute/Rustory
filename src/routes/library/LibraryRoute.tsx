@@ -275,10 +275,40 @@ export function LibraryRoute(): React.JSX.Element {
 
   const handleArchiveRetry = (): void => {
     if (archiveCreation.failedPhase === "accept") {
+      // The commit failed AFTER the (possibly one-shot) verdict was
+      // consumed: re-run the accept with the preserved verdict — an
+      // external re-pull would answer `none` and retry nothing.
       void archiveCreation.retryAccept();
     } else {
+      // An analyze-phase failure only exists on the picker origin (an
+      // external settlement arrives already analyzed): re-open the picker.
       void archiveCreation.pickAndAnalyze();
     }
+  };
+
+  const handleArchiveAbandon = (): void => {
+    if (archiveCreation.origin === "drop") {
+      // Terminal channel-wide: drop the pending Rust intent AND
+      // invalidate any settlement still in flight — a late verdict must
+      // never reopen the review the user just closed.
+      storyImport.invalidateDropSettlements();
+      void discardDropRequest().catch(() => {});
+    } else if (archiveCreation.origin === "osOpen") {
+      storyImport.invalidateDropSettlements();
+      void discardOsOpenRequest().catch(() => {});
+    }
+    archiveCreation.abandon();
+  };
+
+  const handleArchiveDismiss = (): void => {
+    if (archiveCreation.origin === "drop") {
+      storyImport.invalidateDropSettlements();
+      void discardDropRequest().catch(() => {});
+    } else if (archiveCreation.origin === "osOpen") {
+      storyImport.invalidateDropSettlements();
+      void discardOsOpenRequest().catch(() => {});
+    }
+    archiveCreation.dismiss();
   };
 
   // RSS external-source creation flow (feed → new canonical draft).
@@ -514,17 +544,39 @@ export function LibraryRoute(): React.JSX.Element {
   }, []);
 
   const analyzeFromOsOpen = storyImport.analyzeFromOsOpen;
+  const injectExternalArchiveVerdict = archiveCreation.injectExternalVerdict;
+  const clearExternalArchiveReview = archiveCreation.clearExternalReview;
   const handleOsOpenIntent = useCallback(async (): Promise<void> => {
     const outcome = await analyzeFromOsOpen();
     if (!osOpenMountedRef.current) return;
     if (outcome.kind === "multipleFiles") {
       // Rendered VERBATIM — the copy travels in the Rust DTO.
       setOsOpenNotice(outcome.message);
-    } else if (outcome.kind !== "none") {
-      // A fresh intent (review / failed) replaces a lingering calm limit.
-      setOsOpenNotice(null);
+      return;
     }
-  }, [analyzeFromOsOpen]);
+    if (outcome.kind === "none") return;
+    // A fresh intent replaces a lingering calm limit.
+    setOsOpenNotice(null);
+    if (outcome.kind === "archive") {
+      // An OS-opened `.zip` lands in the archive-creation machine (the
+      // import machine already stepped aside inside the hook if it showed
+      // an earlier OS-open surface). A commit in flight DECLINES the
+      // injection: render the calm busy copy — the one-shot verdict
+      // cannot be re-served; the user re-opens the file afterwards.
+      if (!injectExternalArchiveVerdict(outcome.verdict, "osOpen")) {
+        setOsOpenNotice(OS_OPEN_BUSY_NOTICE);
+      }
+      return;
+    }
+    // `review` / `failed` landed in the import machine: an archive
+    // surface fed by an earlier external settlement steps aside — the
+    // newest gesture is the only one displayed.
+    clearExternalArchiveReview();
+  }, [
+    analyzeFromOsOpen,
+    injectExternalArchiveVerdict,
+    clearExternalArchiveReview,
+  ]);
 
   // One-shot pull at mount. The Rust-side one-shot take makes the
   // StrictMode double-effect harmless by construction: the second pull
@@ -563,11 +615,15 @@ export function LibraryRoute(): React.JSX.Element {
         storyImport.status.kind === "failed")) ||
     (structuredCreation.origin === "drop" &&
       (structuredCreation.status.kind === "review" ||
-        structuredCreation.status.kind === "failed"));
+        structuredCreation.status.kind === "failed")) ||
+    (archiveCreation.origin === "drop" &&
+      (archiveCreation.status.kind === "review" ||
+        archiveCreation.status.kind === "failed"));
   const isOsOpenBlockedByLiveFlow =
     storyImport.status.kind === "analyzing" ||
     storyImport.status.kind === "importing" ||
     isCreateFromFolderBusy ||
+    isCreateFromArchiveBusy ||
     isRssCreationActive ||
     isCreateSubmitting ||
     storyTransfer.state.kind === "transferring" ||
@@ -633,22 +689,42 @@ export function LibraryRoute(): React.JSX.Element {
     if (outcome.kind === "folder") {
       // …and lands in the folder-creation machine (the import machine
       // already stepped aside inside the hook if it showed an earlier
-      // drop surface). A commit in flight on that machine DECLINES the
-      // injection (it may not be rewritten mid-commit): render the frozen
-      // busy copy — the calm refusal the signal gate would have rendered
-      // had the commit been visible when the signal arrived (the one-shot
-      // verdict cannot be re-served; the user re-drops afterwards).
+      // drop surface; an archive surface fed by an earlier external
+      // settlement steps aside too). A commit in flight on that machine
+      // DECLINES the injection (it may not be rewritten mid-commit):
+      // render the frozen busy copy — the calm refusal the signal gate
+      // would have rendered had the commit been visible when the signal
+      // arrived (the one-shot verdict cannot be re-served; the user
+      // re-drops afterwards).
+      clearExternalArchiveReview();
       if (!injectDropFolderVerdict(outcome.verdict)) {
         setDropNotice(DROP_BUSY_NOTICE);
       }
       return;
     }
+    if (outcome.kind === "archive") {
+      // …and lands in the archive-creation machine — the folder-drop
+      // doctrine verbatim (siblings step aside, a mid-commit machine
+      // declines into the calm busy copy).
+      clearDropFolderReview();
+      if (!injectExternalArchiveVerdict(outcome.verdict, "drop")) {
+        setDropNotice(DROP_BUSY_NOTICE);
+      }
+      return;
+    }
     // `review` / `failed` landed in the import machine. The drop
-    // channel's newest settlement is the only one displayed: a folder
-    // surface fed by an EARLIER drop steps aside (a picker-origin one is
-    // never touched).
+    // channel's newest settlement is the only one displayed: a folder or
+    // archive surface fed by an EARLIER external settlement steps aside
+    // (a picker-origin one is never touched).
     clearDropFolderReview();
-  }, [analyzeFromDrop, injectDropFolderVerdict, clearDropFolderReview]);
+    clearExternalArchiveReview();
+  }, [
+    analyzeFromDrop,
+    injectDropFolderVerdict,
+    clearDropFolderReview,
+    injectExternalArchiveVerdict,
+    clearExternalArchiveReview,
+  ]);
 
   // One-shot pull at mount. The Rust-side one-shot take makes the
   // StrictMode double-effect harmless by construction: the second pull
@@ -668,6 +744,7 @@ export function LibraryRoute(): React.JSX.Element {
     storyImport.status.kind === "importing" ||
     storyImport.isOsOpenSettling ||
     isCreateFromFolderBusy ||
+    isCreateFromArchiveBusy ||
     isRssCreationActive ||
     isCreateSubmitting ||
     storyTransfer.state.kind === "transferring";
@@ -1006,9 +1083,9 @@ export function LibraryRoute(): React.JSX.Element {
         onAccept={() => {
           void archiveCreation.acceptCreation();
         }}
-        onAbandon={archiveCreation.abandon}
+        onAbandon={handleArchiveAbandon}
         onRetry={handleArchiveRetry}
-        onDismiss={archiveCreation.dismiss}
+        onDismiss={handleArchiveDismiss}
       />
       <CreateFromRssSurface
         open={isRssCreationOpen}

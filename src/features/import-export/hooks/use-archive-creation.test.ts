@@ -281,4 +281,63 @@ describe("useArchiveCreation", () => {
     });
     expect(result.current.status.kind).toBe("review");
   });
+
+  it("injectExternalVerdict lands DIRECTLY in review (silent settlement — no analyzing state)", () => {
+    const { result } = renderHook(() => useArchiveCreation());
+    const { kind: _k, ...fields } = ARCHIVE_ANALYZED_CLEAN;
+    let accepted = false;
+    act(() => {
+      accepted = result.current.injectExternalVerdict(fields, "drop");
+    });
+    expect(accepted).toBe(true);
+    expect(result.current.origin).toBe("drop");
+    expect(result.current.status).toEqual({
+      kind: "review",
+      verdict: ARCHIVE_ANALYZED_CLEAN,
+    });
+    expect(analyzeStructuredArchiveForCreation).not.toHaveBeenCalled();
+  });
+
+  it("accepts an injected external verdict through the UNCHANGED accept phase", async () => {
+    vi.mocked(acceptStructuredArchiveCreation).mockResolvedValueOnce(
+      CREATED_CARD,
+    );
+    const { result } = renderHook(() => useArchiveCreation());
+    const { kind: _k, ...fields } = ARCHIVE_ANALYZED_CLEAN;
+    act(() => {
+      result.current.injectExternalVerdict(fields, "osOpen");
+    });
+    await act(async () => {
+      await result.current.acceptCreation();
+    });
+    expect(acceptStructuredArchiveCreation).toHaveBeenCalledWith({
+      archivePath: ARCHIVE_ANALYZED_CLEAN.archivePath,
+    });
+    expect(result.current.status.kind).toBe("created");
+  });
+
+  it("clearExternalReview resets an external-origin surface only", async () => {
+    vi.mocked(analyzeStructuredArchiveForCreation).mockResolvedValueOnce(
+      ARCHIVE_ANALYZED_CLEAN,
+    );
+    const { result } = renderHook(() => useArchiveCreation());
+    // Picker origin: never touched by the internal supersede.
+    await act(async () => {
+      await result.current.pickAndAnalyze();
+    });
+    act(() => {
+      result.current.clearExternalReview();
+    });
+    expect(result.current.status.kind).toBe("review");
+
+    // External origin: steps aside.
+    const { kind: _k, ...fields } = ARCHIVE_ANALYZED_CLEAN;
+    act(() => {
+      result.current.injectExternalVerdict(fields, "drop");
+    });
+    act(() => {
+      result.current.clearExternalReview();
+    });
+    expect(result.current.status).toEqual({ kind: "idle" });
+  });
 });

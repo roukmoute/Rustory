@@ -396,6 +396,11 @@ const FOLDER_ANALYZED_BLOCKED: AnalyzedFolderVerdict = {
 };
 
 describe("isOsOpenAnalysis", () => {
+  it("accepts an archive settlement re-tagged from the picker verdict", () => {
+    const { kind: _k, ...fields } = ARCHIVE_ANALYZED_CLEAN;
+    expect(isOsOpenAnalysis({ kind: "archive", ...fields })).toBe(true);
+  });
+
   const MULTIPLE_FILES: OsOpenAnalysis = {
     kind: "multipleFiles",
     message:
@@ -1232,6 +1237,16 @@ const DROP_MULTIPLE_ITEMS: DropAnalysis = {
 };
 
 describe("isDropAnalysis", () => {
+  it("accepts an archive settlement re-tagged from the picker verdict", () => {
+    const { kind: _k, ...fields } = ARCHIVE_ANALYZED_CLEAN;
+    expect(isDropAnalysis({ kind: "archive", ...fields })).toBe(true);
+  });
+
+  it("rejects an archive settlement whose fields drift from the picker contract", () => {
+    const { kind: _k, archivePath: _p, ...fields } = ARCHIVE_ANALYZED_CLEAN;
+    expect(isDropAnalysis({ kind: "archive", ...fields })).toBe(false);
+  });
+
   it("accepts the silent none with only the kind discriminant", () => {
     expect(isDropAnalysis({ kind: "none" })).toBe(true);
   });

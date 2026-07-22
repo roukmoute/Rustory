@@ -29,13 +29,40 @@ export type ArchiveCreationStatus =
  *  the accept with the PRESERVED verdict). */
 export type ArchiveCreationFailedPhase = "analyze" | "accept";
 
+/** Which entry point fed the CURRENT flow: the native file picker
+ *  (`picker`), the drop channel (`drop`) or the OS-open channel
+ *  (`osOpen`). The route branches the terminal gestures on it (an
+ *  external-origin abandon also discards the Rust-side intent trace). */
+export type ArchiveCreationOrigin = "picker" | "drop" | "osOpen";
+
+/** An externally-settled archive verdict (drop or OS-open wire tag): the
+ *  exact field set of the picker `analyzed` verdict minus the tag. */
+export type ExternalArchiveVerdict = Omit<AnalyzedArchiveVerdict, "kind">;
+
 export interface UseArchiveCreation {
   status: ArchiveCreationStatus;
+  /** Origin of the current flow (meaningful while `status` is not idle). */
+  origin: ArchiveCreationOrigin;
   /** Phase of the current `failed` status — `null` outside `failed`. */
   failedPhase: ArchiveCreationFailedPhase | null;
   /** Open the native FILE picker (owned by Rust, `.zip` filter) and
    *  analyze the chosen archive. A cancelled dialog is a silent no-op. */
   pickAndAnalyze(): Promise<void>;
+  /** Inject an ALREADY-SETTLED external verdict (drop / OS-open) into the
+   *  review — the settlement is silent by contract: no transient
+   *  `analyzing` state, the verdict lands DIRECTLY in `review`, replacing
+   *  whatever the machine showed (the newest gesture wins). DECLINED
+   *  (returns `false`, nothing touched) while a commit is in flight: the
+   *  machine may not be rewritten mid-commit. */
+  injectExternalVerdict(
+    verdict: ExternalArchiveVerdict,
+    origin: Exclude<ArchiveCreationOrigin, "picker">,
+  ): boolean;
+  /** Reset the machine IFF its current surface came from an EXTERNAL
+   *  channel — called by the route when a newer settlement landed in a
+   *  sibling machine (last gesture wins across channels). A picker-origin
+   *  surface is never touched, nor a machine mid-commit. */
+  clearExternalReview(): void;
   /** Commit the analyzed archive from a `review` state (`Créer
    *  l'histoire`). No-op outside `review`, or when the verdict is blocked.
    *  Rust re-analyzes the archive from zero. */
@@ -63,11 +90,14 @@ export function useArchiveCreation(): UseArchiveCreation {
   const [status, setStatus] = useState<ArchiveCreationStatus>({
     kind: "idle",
   });
+  const [origin, setOrigin] = useState<ArchiveCreationOrigin>("picker");
   const [failedPhase, setFailedPhase] =
     useState<ArchiveCreationFailedPhase | null>(null);
 
   const statusRef = useRef<ArchiveCreationStatus>(status);
   statusRef.current = status;
+  const originRef = useRef<ArchiveCreationOrigin>(origin);
+  originRef.current = origin;
   const failedPhaseRef = useRef<ArchiveCreationFailedPhase | null>(
     failedPhase,
   );
@@ -100,9 +130,11 @@ export function useArchiveCreation(): UseArchiveCreation {
     // dialog must restore it verbatim — never silently wipe an
     // in-progress `review` verdict nor a `failed` alert.
     const priorStatus = statusRef.current;
+    const priorOrigin = originRef.current;
     const priorFailedPhase = failedPhaseRef.current;
     try {
       if (mountedRef.current) {
+        setOrigin("picker");
         setFailedPhase(null);
         setStatus({ kind: "analyzing" });
       }
@@ -119,6 +151,7 @@ export function useArchiveCreation(): UseArchiveCreation {
       if (verdict.kind === "cancelled") {
         // Restore the complete pre-existing status — a cancel is a no-op.
         setStatus(priorStatus);
+        setOrigin(priorOrigin);
         setFailedPhase(priorFailedPhase);
         return;
       }
@@ -126,6 +159,43 @@ export function useArchiveCreation(): UseArchiveCreation {
     } finally {
       inFlightRef.current = false;
     }
+  }, []);
+
+  const injectExternalVerdict = useCallback(
+    (
+      verdict: ExternalArchiveVerdict,
+      injectionOrigin: Exclude<ArchiveCreationOrigin, "picker">,
+    ): boolean => {
+      if (!mountedRef.current) return false;
+      // A commit in flight OWNS the machine: injecting would overwrite
+      // the displayed `creating` state AND wipe the verdict preserved for
+      // a possible `retryAccept`. Declined — the route renders the frozen
+      // busy copy (the one-shot settlement cannot be re-served; the user
+      // re-drops / re-opens afterwards).
+      if (inFlightRef.current) return false;
+      // The external settlement is SILENT by contract: it lands DIRECTLY
+      // in review — no transient analyzing state ever renders. The newest
+      // settlement replaces whatever the machine showed.
+      reviewVerdictRef.current = null;
+      setOrigin(injectionOrigin);
+      setFailedPhase(null);
+      setStatus({ kind: "review", verdict: { ...verdict, kind: "analyzed" } });
+      return true;
+    },
+    [],
+  );
+
+  const clearExternalReview = useCallback((): void => {
+    // Internal supersede, never a user gesture: only an EXTERNAL-origin
+    // surface steps aside for a sibling's newer settlement — and never a
+    // machine mid-commit (rewriting a `creating` state would mask the
+    // commit and orphan its retry).
+    if (inFlightRef.current) return;
+    if (originRef.current === "picker") return;
+    if (statusRef.current.kind === "idle") return;
+    reviewVerdictRef.current = null;
+    setStatus({ kind: "idle" });
+    setFailedPhase(null);
   }, []);
 
   /** Shared commit path of `acceptCreation` and `retryAccept`. */
@@ -202,8 +272,11 @@ export function useArchiveCreation(): UseArchiveCreation {
 
   return {
     status,
+    origin,
     failedPhase,
     pickAndAnalyze,
+    injectExternalVerdict,
+    clearExternalReview,
     acceptCreation,
     retryAccept,
     abandon,

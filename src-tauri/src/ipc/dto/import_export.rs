@@ -214,6 +214,23 @@ pub enum OsOpenAnalysisDto {
         source_name: String,
         artifact_checksum: String,
     },
+    /// An OS-opened structured ARCHIVE (.zip pack): the exact field set of
+    /// the picker archive `analyzed` verdict under its own tag — the
+    /// library routes it to the archive-creation machine.
+    #[serde(rename_all = "camelCase")]
+    Archive {
+        quality: ImportQualityDto,
+        state: ImportStateDto,
+        findings: Vec<ImportFindingDto>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        creatable_summary: Option<CreatableSummaryDto>,
+        /// The archive's basename — the only name the surface renders.
+        archive_name: String,
+        /// The absolute path of the opened archive, carried ONLY to be
+        /// passed back to `accept_structured_archive_creation` — NEVER
+        /// rendered, persisted or logged (PII); the accept re-analyzes.
+        archive_path: String,
+    },
 }
 
 impl OsOpenAnalysisDto {
@@ -221,6 +238,34 @@ impl OsOpenAnalysisDto {
     pub fn multiple_files() -> Self {
         Self::MultipleFiles {
             message: OS_OPEN_MULTIPLE_FILES_MESSAGE.to_string(),
+        }
+    }
+
+    /// Map a domain archive analysis + the intent facts to the `archive`
+    /// wire verdict — the picker mapping, re-tagged.
+    pub fn archive(
+        analysis: &StructuredFolderAnalysis,
+        archive_name: String,
+        archive_path: String,
+    ) -> Self {
+        let ArchiveCreationAnalysisDto::Analyzed {
+            quality,
+            state,
+            findings,
+            creatable_summary,
+            archive_name,
+            archive_path,
+        } = ArchiveCreationAnalysisDto::analyzed(analysis, archive_name, archive_path)
+        else {
+            unreachable!("ArchiveCreationAnalysisDto::analyzed always returns Analyzed");
+        };
+        Self::Archive {
+            quality,
+            state,
+            findings,
+            creatable_summary,
+            archive_name,
+            archive_path,
         }
     }
 
@@ -476,6 +521,24 @@ pub enum DropAnalysisDto {
         /// (re-analyzes from zero).
         folder_path: String,
     },
+    /// A dropped structured ARCHIVE (.zip pack): the exact field set of
+    /// the picker archive `analyzed` verdict under its own tag — the
+    /// library routes it to the archive-creation machine (the drop
+    /// replaces the picker, the folder-drop doctrine verbatim).
+    #[serde(rename_all = "camelCase")]
+    Archive {
+        quality: ImportQualityDto,
+        state: ImportStateDto,
+        findings: Vec<ImportFindingDto>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        creatable_summary: Option<CreatableSummaryDto>,
+        /// The archive's basename — the only name the surface renders.
+        archive_name: String,
+        /// The absolute path of the dropped archive, carried ONLY to be
+        /// passed back to `accept_structured_archive_creation` — NEVER
+        /// rendered, persisted or logged (PII); the accept re-analyzes.
+        archive_path: String,
+    },
 }
 
 impl DropAnalysisDto {
@@ -537,6 +600,34 @@ impl DropAnalysisDto {
             creatable_summary,
             folder_name,
             folder_path,
+        }
+    }
+
+    /// Map a domain archive analysis + the drop facts to the `archive`
+    /// wire verdict — the picker mapping, re-tagged.
+    pub fn archive(
+        analysis: &StructuredFolderAnalysis,
+        archive_name: String,
+        archive_path: String,
+    ) -> Self {
+        let ArchiveCreationAnalysisDto::Analyzed {
+            quality,
+            state,
+            findings,
+            creatable_summary,
+            archive_name,
+            archive_path,
+        } = ArchiveCreationAnalysisDto::analyzed(analysis, archive_name, archive_path)
+        else {
+            unreachable!("ArchiveCreationAnalysisDto::analyzed always returns Analyzed");
+        };
+        Self::Archive {
+            quality,
+            state,
+            findings,
+            creatable_summary,
+            archive_name,
+            archive_path,
         }
     }
 }

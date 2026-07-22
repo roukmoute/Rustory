@@ -158,7 +158,12 @@ impl DropIntentState {
 /// `MutexGuard` ever crosses an `.await` (the state locks are inside
 /// `peek`/`take_if`).
 pub fn analyze_pending_drop(state: &DropIntentState) -> Result<DropAnalysisDto, AppError> {
-    analyze_pending_drop_with(state, read_artifact_bounded, analyze_structured_folder)
+    analyze_pending_drop_with(
+        state,
+        read_artifact_bounded,
+        analyze_structured_folder,
+        super::archive_creation::analyze_structured_archive,
+    )
 }
 
 /// [`analyze_pending_drop`] parameterized by the file reader AND the
@@ -188,6 +193,7 @@ fn analyze_pending_drop_with(
     state: &DropIntentState,
     read: impl Fn(&Path) -> Result<Vec<u8>, AppError>,
     analyze_folder: impl Fn(&Path) -> Result<StructuredCreationOutcome, AppError>,
+    analyze_archive: impl Fn(&Path) -> Result<super::archive_creation::ArchiveCreationOutcome, AppError>,
 ) -> Result<DropAnalysisDto, AppError> {
     loop {
         let Some((generation, intent)) = state.peek() else {
@@ -214,6 +220,12 @@ fn analyze_pending_drop_with(
             Err(_) => Err(file_read_error("metadata")),
             Ok(meta) if meta.is_dir() => {
                 analyze_dropped_folder(state, generation, &path, &analyze_folder)
+            }
+            // A `.zip` FILE is a structured archive (the community pack):
+            // routed to the archive analysis, never to the `.rustory`
+            // envelope parse (which would refuse it as unrecognized).
+            Ok(meta) if meta.is_file() && is_zip_archive_path(&path) => {
+                analyze_dropped_archive(state, generation, &path, &analyze_archive)
             }
             Ok(meta) if meta.is_file() => analyze_dropped_file(state, generation, &path, &read),
             // Neither file nor folder (FIFO, device, socket): the same
@@ -312,6 +324,52 @@ fn analyze_dropped_folder(
         &outcome.analysis,
         outcome.folder_name,
         folder_path,
+    ))
+}
+
+/// True iff the dropped file NAMES itself a zip archive (ASCII-case
+/// extension check — the exact discriminant of the picker's dialog
+/// filter). The archive analysis then judges the CONTENT: a mislabeled
+/// file settles as a calm envelope-blocked verdict, never a transport lie.
+pub(crate) fn is_zip_archive_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("zip"))
+}
+
+/// Settle a dropped structured ARCHIVE: UTF-8 wire path + the unchanged
+/// picker archive analysis. Returns `Ok(None)` when the claim lost to a
+/// newer gesture (the caller's loop then re-serves the newest intent).
+fn analyze_dropped_archive(
+    state: &DropIntentState,
+    generation: u64,
+    path: &Path,
+    analyze_archive: &impl Fn(
+        &Path,
+    ) -> Result<super::archive_creation::ArchiveCreationOutcome, AppError>,
+) -> Result<DropAnalysisDto, AppError> {
+    // The wire is UTF-8 JSON: a non-UTF-8 path cannot round-trip VERBATIM
+    // to the accept phase — refused at the boundary (the folder doctrine).
+    let archive_path = path
+        .to_str()
+        .map(str::to_string)
+        .ok_or_else(non_filesystem_path_error)?;
+    let outcome = analyze_archive(path)?;
+    // TOCTOU requalification, the folder-drop discipline verbatim: an
+    // archive that VANISHED (or changed type) mid-analysis must not settle
+    // as a consumed calm verdict about a file that no longer exists.
+    match std::fs::metadata(path) {
+        Err(_) => return Err(file_read_error("metadata")),
+        Ok(meta) if !meta.is_file() => return Err(file_read_error("not_regular_file")),
+        Ok(_) => {}
+    }
+    if !state.take_if(generation) {
+        return Ok(DropAnalysisDto::None);
+    }
+    Ok(DropAnalysisDto::archive(
+        &outcome.analysis,
+        outcome.archive_name,
+        archive_path,
     ))
 }
 
@@ -689,6 +747,7 @@ mod tests {
                 read_artifact_bounded(path)
             },
             analyze_structured_folder,
+            crate::application::import_export::archive_creation::analyze_structured_archive,
         )
         .expect("analyze");
 
@@ -734,6 +793,7 @@ mod tests {
                 read_artifact_bounded(path)
             },
             analyze_structured_folder,
+            crate::application::import_export::archive_creation::analyze_structured_archive,
         )
         .expect("the stale failure must not surface — B analyzes");
 
@@ -763,6 +823,7 @@ mod tests {
                 read_artifact_bounded(p)
             },
             analyze_structured_folder,
+            crate::application::import_export::archive_creation::analyze_structured_archive,
         )
         .expect("analyze");
         assert_eq!(dto, DropAnalysisDto::None);
@@ -789,10 +850,15 @@ mod tests {
 
         // The analyzer stages the race: the folder vanishes mid-analysis
         // (the real analyzer then reads it as envelope-blocked).
-        let err = analyze_pending_drop_with(&state, read_artifact_bounded, |p| {
-            std::fs::remove_dir_all(p).expect("vanish");
-            analyze_structured_folder(p)
-        })
+        let err = analyze_pending_drop_with(
+            &state,
+            read_artifact_bounded,
+            |p| {
+                std::fs::remove_dir_all(p).expect("vanish");
+                analyze_structured_folder(p)
+            },
+            crate::application::import_export::archive_creation::analyze_structured_archive,
+        )
         .expect_err("a vanished folder is transport, never a calm verdict");
         let v = serde_json::to_value(&err).expect("ser");
         assert_eq!(v["details"]["source"], "file_read");
@@ -814,12 +880,17 @@ mod tests {
         let state = DropIntentState::new();
         state.offer_dropped(vec![folder.clone()]);
 
-        let err = analyze_pending_drop_with(&state, read_artifact_bounded, |p| {
-            let outcome = analyze_structured_folder(p);
-            std::fs::remove_dir_all(p).expect("remove");
-            std::fs::write(p, b"{}").expect("swap for a file");
-            outcome
-        })
+        let err = analyze_pending_drop_with(
+            &state,
+            read_artifact_bounded,
+            |p| {
+                let outcome = analyze_structured_folder(p);
+                std::fs::remove_dir_all(p).expect("remove");
+                std::fs::write(p, b"{}").expect("swap for a file");
+                outcome
+            },
+            crate::application::import_export::archive_creation::analyze_structured_archive,
+        )
         .expect_err("a type-swapped folder is transport, never a calm verdict");
         let v = serde_json::to_value(&err).expect("ser");
         assert_eq!(v["details"]["source"], "file_read");
@@ -877,5 +948,67 @@ mod tests {
             }
             other => panic!("expected artifact, got {other:?}"),
         }
+    }
+
+    /// A dropped `.zip` FILE routes to the ARCHIVE analysis — never to the
+    /// `.rustory` envelope parse (which would refuse it as unrecognized).
+    #[test]
+    fn a_dropped_zip_settles_as_an_archive_verdict() {
+        use std::io::Write;
+        let dir = TempDir::new().expect("tempdir");
+        let zip_path = dir.path().join("Mon pack.zip");
+        let file = std::fs::File::create(&zip_path).expect("create zip");
+        let mut writer = zip::ZipWriter::new(file);
+        writer
+            .start_file("story.json", zip::write::SimpleFileOptions::default())
+            .expect("entry");
+        writer
+            .write_all(
+                br#"{"title":"T","stageNodes":[{"uuid":"s1","squareOne":true,"image":null,"audio":null,"okTransition":null,"controlSettings":{}}],"actionNodes":[]}"#,
+            )
+            .expect("bytes");
+        writer.finish().expect("finish");
+
+        let state = DropIntentState::new();
+        assert!(state.offer_dropped(vec![zip_path.clone()]));
+        let dto = analyze_pending_drop(&state).expect("analyze");
+        match &dto {
+            DropAnalysisDto::Archive {
+                archive_name,
+                archive_path,
+                creatable_summary,
+                ..
+            } => {
+                assert_eq!(archive_name, "Mon pack.zip");
+                assert_eq!(archive_path, zip_path.to_str().expect("utf-8"));
+                assert!(creatable_summary.is_some());
+            }
+            other => panic!("expected an archive settlement, got {other:?}"),
+        }
+        // One-shot: the intent was consumed by the settlement.
+        assert!(state.peek().is_none());
+    }
+
+    /// A mislabeled `.zip` (not a zip at all) stays the ARCHIVE channel's
+    /// calm envelope-blocked verdict — consumed, never a transport lie and
+    /// never the `.rustory` unrecognized refusal.
+    #[test]
+    fn a_mislabeled_zip_settles_as_a_blocked_archive_verdict() {
+        let dir = TempDir::new().expect("tempdir");
+        let zip_path = dir.path().join("pas-un-pack.ZIP");
+        std::fs::write(&zip_path, b"du texte quelconque").expect("write");
+
+        let state = DropIntentState::new();
+        assert!(state.offer_dropped(vec![zip_path]));
+        let dto = analyze_pending_drop(&state).expect("analyze");
+        match &dto {
+            DropAnalysisDto::Archive {
+                creatable_summary, ..
+            } => {
+                assert!(creatable_summary.is_none(), "blocked ⇒ nothing creatable");
+            }
+            other => panic!("expected an archive settlement, got {other:?}"),
+        }
+        assert!(state.peek().is_none());
     }
 }

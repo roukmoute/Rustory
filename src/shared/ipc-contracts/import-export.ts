@@ -155,7 +155,11 @@ export interface AcceptArtifactImportInput {
 export type OsOpenAnalysis =
   | { kind: "none" }
   | { kind: "multipleFiles"; message: string }
-  | Extract<ImportArtifactAnalysis, { kind: "analyzed" }>;
+  | Extract<ImportArtifactAnalysis, { kind: "analyzed" }>
+  | ({ kind: "archive" } & Omit<
+      Extract<ArchiveCreationAnalysis, { kind: "analyzed" }>,
+      "kind"
+    >);
 
 /**
  * Runtime guard for an [`OsOpenAnalysis`] payload. Fail-closed: the
@@ -176,6 +180,9 @@ export function isOsOpenAnalysis(value: unknown): value is OsOpenAnalysis {
       typeof c.message === "string" &&
       c.message.length > 0
     );
+  }
+  if (c.kind === "archive") {
+    return isArchiveCreationAnalysis({ ...c, kind: "analyzed" });
   }
   return c.kind === "analyzed" && isImportArtifactAnalysis(value);
 }
@@ -842,6 +849,10 @@ export type DropAnalysis =
   | ({ kind: "folder" } & Omit<
       Extract<StructuredCreationAnalysis, { kind: "analyzed" }>,
       "kind"
+    >)
+  | ({ kind: "archive" } & Omit<
+      Extract<ArchiveCreationAnalysis, { kind: "analyzed" }>,
+      "kind"
     >);
 
 /**
@@ -869,6 +880,9 @@ export function isDropAnalysis(value: unknown): value is DropAnalysis {
   }
   if (c.kind === "folder") {
     return isStructuredCreationAnalysis({ ...c, kind: "analyzed" });
+  }
+  if (c.kind === "archive") {
+    return isArchiveCreationAnalysis({ ...c, kind: "analyzed" });
   }
   return false;
 }

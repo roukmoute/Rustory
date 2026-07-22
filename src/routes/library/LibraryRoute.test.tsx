@@ -770,6 +770,92 @@ describe("<LibraryRoute />", () => {
     ).toBeInTheDocument();
   });
 
+  it("routes a dropped .zip settlement into the archive review, then accepts it", async () => {
+    const user = userEvent.setup();
+    mockGet.mockResolvedValueOnce({ stories: [] });
+    mockGet.mockResolvedValueOnce({
+      stories: [{ id: "arch-2", title: "Pack déposé" }],
+    });
+    mockAnalyzeDrop.mockResolvedValueOnce({
+      kind: "archive",
+      quality: "clean",
+      state: "recognized",
+      findings: [
+        {
+          aspect: "envelope",
+          category: "recognized",
+          message: "Le descripteur story.json est présent et lisible.",
+        },
+      ],
+      creatableSummary: {
+        title: "Pack déposé",
+        nodeCount: 2,
+        retainedMedia: [],
+        discardedMedia: [],
+      },
+      archiveName: "Pack déposé.zip",
+      archivePath: "/home/user/Pack déposé.zip",
+    });
+    mockAcceptArchive.mockResolvedValueOnce({
+      id: "arch-2",
+      title: "Pack déposé",
+      importState: "recognized",
+    });
+    renderLibrary();
+
+    // The mount pull settles the pending drop directly into the archive
+    // review — no picker, no analyzing state.
+    const surface = await screen.findByRole("region", {
+      name: /création depuis une archive de pack/i,
+    });
+    expect(within(surface).getByText("Pack déposé.zip")).toBeInTheDocument();
+
+    await user.click(
+      within(surface).getByRole("button", { name: /^créer l'histoire$/i }),
+    );
+    await waitFor(() =>
+      expect(mockAcceptArchive).toHaveBeenCalledWith({
+        archivePath: "/home/user/Pack déposé.zip",
+      }),
+    );
+    expect(
+      await screen.findByRole("button", { name: /pack déposé/i }),
+    ).toBeInTheDocument();
+  });
+
+  it("routes an OS-opened .zip settlement into the archive review", async () => {
+    mockGet.mockResolvedValueOnce({ stories: [] });
+    mockAnalyzeOsOpen.mockResolvedValueOnce({
+      kind: "archive",
+      quality: "clean",
+      state: "recognized",
+      findings: [
+        {
+          aspect: "envelope",
+          category: "recognized",
+          message: "Le descripteur story.json est présent et lisible.",
+        },
+      ],
+      creatableSummary: {
+        title: "Pack ouvert",
+        nodeCount: 1,
+        retainedMedia: [],
+        discardedMedia: [],
+      },
+      archiveName: "Pack ouvert.zip",
+      archivePath: "/home/user/Pack ouvert.zip",
+    });
+    renderLibrary();
+
+    const surface = await screen.findByRole("region", {
+      name: /création depuis une archive de pack/i,
+    });
+    expect(within(surface).getByText("Pack ouvert.zip")).toBeInTheDocument();
+    expect(
+      within(surface).getByRole("button", { name: /^créer l'histoire$/i }),
+    ).toBeInTheDocument();
+  });
+
   it("Ctrl+click on a second card toggles multi-selection and disables Éditer with the canonical reason", async () => {
     const user = userEvent.setup();
     mockGet.mockResolvedValueOnce({
