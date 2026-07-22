@@ -208,13 +208,23 @@ function ReviewReport({
   );
 }
 
+/** Beyond this many discarded names, the list collapses to a count — a
+ *  community archive names its files by content hash, so a long list of
+ *  40-char basenames reads as noise, not information. */
+const MAX_LISTED_DISCARDED_MEDIA = 8;
+
 /** What an accepted archive WILL create — the normalized title, the node
- *  count, and the retained/discarded media BY BASENAME. */
+ *  count, and the media as COUNTS: archive basenames are content hashes
+ *  (never human-chosen names), so listing them verbatim would be noise.
+ *  Discarded media keep their names while the list stays short (they are
+ *  the actionable part of the report). */
 function CreatableSummarySection({
   summary,
 }: {
   summary: CreatableSummary;
 }): React.JSX.Element {
+  const retainedCount = summary.retainedMedia.length;
+  const discardedCount = summary.discardedMedia.length;
   return (
     <section className="create-from-archive__group">
       <p className="create-from-archive__group-heading">Ce qui sera créé</p>
@@ -225,14 +235,18 @@ function CreatableSummarySection({
         <li className="create-from-archive__summary-line">
           {summary.nodeCount} {summary.nodeCount > 1 ? "nœuds" : "nœud"}
         </li>
-        {summary.retainedMedia.length > 0 ? (
+        {retainedCount > 0 ? (
           <li className="create-from-archive__summary-line">
-            Médias retenus : {summary.retainedMedia.join(", ")}
+            {retainedCount > 1
+              ? `Médias retenus : ${retainedCount} fichiers`
+              : "Média retenu : 1 fichier"}
           </li>
         ) : null}
-        {summary.discardedMedia.length > 0 ? (
+        {discardedCount > 0 ? (
           <li className="create-from-archive__summary-line">
-            Médias écartés : {summary.discardedMedia.join(", ")}
+            {discardedCount <= MAX_LISTED_DISCARDED_MEDIA
+              ? `Médias écartés : ${summary.discardedMedia.join(", ")}`
+              : `Médias écartés : ${discardedCount} fichiers`}
           </li>
         ) : null}
       </ul>
