@@ -481,7 +481,7 @@ describe("<DeviceStoryInspector />", () => {
     expect(supportAffordance()).not.toBeInTheDocument();
   });
 
-  it("groups a fully-copyable story under 'Ce que Rustory reconnaît' only (AC2)", () => {
+  it("groups a fully-copyable story under 'Informations reconnues' only (AC2)", () => {
     render(
       <DeviceStoryInspector
         story={baseStory}
@@ -492,8 +492,10 @@ describe("<DeviceStoryInspector />", () => {
     const region = screen.getByRole("region", {
       name: /histoire sélectionnée/i,
     });
+    // Recognized facts live behind a low-key disclosure so they never
+    // compete with the always-visible blocking group.
     expect(
-      within(region).getByText(/ce que rustory reconnaît/i),
+      within(region).getByText(/informations reconnues/i),
     ).toBeInTheDocument();
     expect(within(region).getByText("Contenu présent")).toBeInTheDocument();
     // No blocker, nothing to review → those headers stay absent.

@@ -38,7 +38,7 @@
   line-height: var(--line-height-tight);
 }
 
-/* Honest triage group ("Ce que Rustory reconnaît" / "Ce qui bloque la
+/* Honest triage group ("Informations reconnues" / "Ce qui bloque la
  * copie" / "À revoir avant de copier"). Each is a quiet, headed block —
  * a heading for screen-reader structure, NOT a landmark region, so the
  * inspector keeps exactly one region (the SurfacePanel). */
@@ -56,6 +56,51 @@
   text-transform: uppercase;
   letter-spacing: 0.04em;
   line-height: var(--line-height-tight);
+}
+
+/* The recognized-facts group is a disclosure: keep the surface calm by
+   default (the technical identifiers are rarely useful up-front). The
+   summary reads as a plain, low-key toggle — NOT the uppercase group
+   heading — so it does not compete with the always-visible blocking group. */
+.device-inspector__disclosure {
+  gap: var(--space-2);
+}
+
+.device-inspector__disclosure-summary {
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  width: fit-content;
+  text-transform: none;
+  letter-spacing: normal;
+  border-radius: var(--radius-sm);
+  outline-offset: 2px;
+  list-style: none;
+}
+
+.device-inspector__disclosure-summary::-webkit-details-marker {
+  display: none;
+}
+
+/* Own caret so the affordance survives the removed native marker; rotates
+   open. Uses currentColor so it tracks the muted summary tone. */
+.device-inspector__disclosure-summary::before {
+  content: "";
+  width: 0;
+  height: 0;
+  border-style: solid;
+  border-width: 0.3em 0 0.3em 0.4em;
+  border-color: transparent transparent transparent currentColor;
+  transition: transform 120ms ease;
+}
+
+.device-inspector__disclosure[open] .device-inspector__disclosure-summary::before {
+  transform: rotate(90deg);
+}
+
+.device-inspector__disclosure-summary:hover {
+  color: var(--color-text-default);
 }
 
 .device-inspector__facts {

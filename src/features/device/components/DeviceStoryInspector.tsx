@@ -340,13 +340,15 @@ export function DeviceStoryInspector({
         </div>
       ) : null}
 
-      {/* Honest triage of the verified facts, BEFORE any copy. Each group
-          renders only when it carries a fact (anti-catalog: only the
-          inventory snapshot, no title, no asserted content quality). */}
-      <div className="device-inspector__group">
-        <h3 className="device-inspector__group-title">
-          Ce que Rustory reconnaît
-        </h3>
+      {/* Honest triage of the verified facts, BEFORE any copy. The
+          RECOGNIZED facts (technical identifiers + payload presence) are
+          rarely useful up-front, so they live behind a collapsed
+          disclosure ("Informations reconnues") to keep the surface calm;
+          the BLOCKING group below stays always visible. */}
+      <details className="device-inspector__group device-inspector__disclosure">
+        <summary className="device-inspector__group-title device-inspector__disclosure-summary">
+          Informations reconnues
+        </summary>
         <dl className="device-inspector__facts">
           <div className="device-inspector__fact">
             <dt className="device-inspector__fact-label">Identifiant</dt>
@@ -370,7 +372,7 @@ export function DeviceStoryInspector({
             <StateChip tone="neutral" label="Contenu présent" />
           </div>
         ) : null}
-      </div>
+      </details>
 
       {hasBlockingFacts ? (
         <div className="device-inspector__group">
