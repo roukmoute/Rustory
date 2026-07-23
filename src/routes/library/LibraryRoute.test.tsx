@@ -1,5 +1,12 @@
 import { StrictMode } from "react";
-import { act, render, screen, waitFor, within } from "@testing-library/react";
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import {
   RouterProvider,
@@ -612,6 +619,50 @@ describe("<LibraryRoute />", () => {
     expect(
       screen.getByText(/2 histoires — 1 sélectionnée/),
     ).toBeInTheDocument();
+  });
+
+  it("right-clicks a card, opens a context menu, and Supprimer → confirm deletes it", async () => {
+    const user = userEvent.setup();
+    mockGet.mockResolvedValueOnce({
+      stories: [
+        { id: "s1", title: "À supprimer" },
+        { id: "s2", title: "Conservée" },
+      ],
+    });
+    mockGet.mockResolvedValueOnce({
+      stories: [{ id: "s2", title: "Conservée" }],
+    });
+    mockDeleteStories.mockResolvedValueOnce({ deletedIds: ["s1"] });
+    renderLibrary();
+
+    const card = await screen.findByRole("button", { name: /à supprimer/i });
+    // Right-click opens our menu (not the browser's).
+    fireEvent.contextMenu(card);
+    const menu = await screen.findByRole("menu", {
+      name: /actions pour à supprimer/i,
+    });
+    // Éditer + Supprimer are offered.
+    expect(
+      within(menu).getByRole("menuitem", { name: /^éditer$/i }),
+    ).toBeInTheDocument();
+    await user.click(
+      within(menu).getByRole("menuitem", { name: /^supprimer$/i }),
+    );
+
+    // A confirmation dialog names the story; confirming deletes it.
+    const dialog = await screen.findByRole("dialog");
+    expect(dialog).toHaveTextContent(/à supprimer/i);
+    await user.click(
+      within(dialog).getByRole("button", { name: /confirmer la suppression/i }),
+    );
+    await waitFor(() =>
+      expect(mockDeleteStories).toHaveBeenCalledWith({ ids: ["s1"] }),
+    );
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("button", { name: /à supprimer/i }),
+      ).not.toBeInTheDocument(),
+    );
   });
 
   it("deletes the confirmed selection, clears it, and re-reads the overview", async () => {
