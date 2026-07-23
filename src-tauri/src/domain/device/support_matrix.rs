@@ -150,6 +150,13 @@ const OFFICIAL_DEVICE_SUPPORT_MATRIX: &[DeviceSupportLine] = &[
     // (read-only metadata peek), but import_story and write_story stay
     // closed — each cell carrying the frozen reason — until the V3
     // pipeline is verified end-to-end.
+    //
+    // NB: a V3 PACK-WRITE ENGINE exists and is HW-proven (cipher +
+    // transcode + assemble + on-volume write), but it is a DISTINCT
+    // operation from this `write_story` (round-trip of an imported pack).
+    // Activating the archive-send belongs on its OWN capability so it never
+    // enables the library round-trip "Envoyer" for V3 — see the deferred
+    // `send_archive` capability, not this cell.
     DeviceSupportLine {
         family: DeviceFamily::Lunii,
         cohort: FirmwareCohort::Lunii(LuniiFirmwareCohort::V3),
@@ -163,9 +170,6 @@ const OFFICIAL_DEVICE_SUPPORT_MATRIX: &[DeviceSupportLine] = &[
             write_story: OperationSupport::NotAvailable {
                 reason: V3_REVERSE_ENGINEERING_REASON,
             },
-            // Deletion removes opaque bytes (delist `.pi` + remove the content
-            // folder) — cohort-agnostic and crypto-free, so V3 can delete even
-            // while writing a pack to it stays blocked on the format work.
             delete_story: OperationSupport::Available,
         },
     },
