@@ -1,6 +1,6 @@
 [package]
 name = "rustory"
-version = "0.5.0"
+version = "0.6.0"
 description = "Rustory — local-first desktop companion for Lunii and other supported devices"
 authors = ["Rustory contributors"]
 edition = "2021"
