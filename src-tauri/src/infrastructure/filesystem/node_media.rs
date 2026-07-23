@@ -11,9 +11,13 @@
 //! The store mirrors `catalog_covers` (sniff magic bytes, hard byte ceiling,
 //! safe read) and `import_store` (staging → promote so the promoting
 //! `rename(2)` stays on one filesystem and is atomic). The frontend NEVER owns
-//! the bytes: it only ever sees a preview produced by a Rust read. Source media
-//! are stored AS-IS — no decoding, no transcoding, zero new dependency. A file
-//! is recognized strictly by its magic bytes, never by its extension.
+//! the bytes: it only ever sees a preview produced by a Rust read. A file is
+//! recognized strictly by its magic bytes, never by its extension.
+//!
+//! IMAGES are TRANSCODED on store to the Lunii display format — decoded, fit
+//! within 320×240 preserving aspect ratio, re-encoded as PNG — so an added
+//! photo is never kept raw (a 10 MB source becomes a small PNG) and a
+//! community-pack BMP image becomes a usable PNG. AUDIO is stored as-is.
 
 use std::path::{Path, PathBuf};
 
@@ -143,6 +147,18 @@ pub fn sniff_media(bytes: &[u8]) -> Option<SniffedMedia> {
             mime: "image/jpeg",
         });
     }
+    // BMP (`BM`): the image format community Lunii/STUdio packs store their
+    // illustrations in. Recognized as an image so a pack's images are RETAINED
+    // (not discarded); `store_media` transcodes every image to a PNG, so `bmp`
+    // is a transient input format that never reaches the `assets` table.
+    if bytes.starts_with(b"BM") {
+        return Some(SniffedMedia {
+            kind: MediaKind::Image,
+            format: "bmp",
+            ext: "bmp",
+            mime: "image/bmp",
+        });
+    }
     // Audio. WAV is a RIFF container tagged `WAVE`; OGG starts with `OggS`.
     if bytes.len() >= 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WAVE" {
         return Some(SniffedMedia {
@@ -218,8 +234,27 @@ pub fn store_media(
         return Err(NodeMediaError::Oversize);
     }
     let sniffed = sniff_media(bytes).ok_or(NodeMediaError::UnsupportedFormat)?;
-    let content_hash = content_checksum_bytes(bytes);
-    let file_name = format!("{content_hash}.{}", sniffed.ext);
+
+    // Images are TRANSCODED to the Lunii display PNG (≤320×240, aspect
+    // preserved): a raw photo shrinks to a small PNG and a pack's BMP becomes
+    // a usable PNG. Audio is stored verbatim. The stored bytes (never the
+    // source) are what the content hash and `assets` row describe.
+    let (stored_bytes, format, ext): (std::borrow::Cow<'_, [u8]>, &'static str, &'static str) =
+        match sniffed.kind {
+            MediaKind::Image => (
+                std::borrow::Cow::Owned(transcode_image_to_display_png(bytes)?),
+                "png",
+                "png",
+            ),
+            MediaKind::Audio => (
+                std::borrow::Cow::Borrowed(bytes),
+                sniffed.format,
+                sniffed.ext,
+            ),
+        };
+
+    let content_hash = content_checksum_bytes(&stored_bytes);
+    let file_name = format!("{content_hash}.{ext}");
     let promoted = media_dir.join(&file_name);
 
     // Idempotent fast path: identical bytes already promoted.
@@ -227,7 +262,7 @@ pub fn store_media(
         // Stage under a unique temp name in the same filesystem, then promote
         // by rename so a reader never sees a partially-written file.
         let staged = staging_dir.join(format!("{content_hash}.tmp"));
-        std::fs::write(&staged, bytes).map_err(|_| NodeMediaError::Transport("staging"))?;
+        std::fs::write(&staged, &stored_bytes).map_err(|_| NodeMediaError::Transport("staging"))?;
         if let Err(err) = std::fs::rename(&staged, &promoted) {
             // Promotion failed: best-effort clean the staged temp and report.
             let _ = std::fs::remove_file(&staged);
@@ -239,10 +274,39 @@ pub fn store_media(
     Ok(StoredMedia {
         content_hash,
         kind: sniffed.kind,
-        format: sniffed.format,
-        byte_size: bytes.len() as u64,
+        format,
+        byte_size: stored_bytes.len() as u64,
         file_name,
     })
+}
+
+/// Target of the image transcode: the Lunii display is 320×240. Images are
+/// fit WITHIN this box preserving aspect ratio (never stretched), then
+/// re-encoded as PNG.
+pub const DISPLAY_IMAGE_WIDTH: u32 = 320;
+pub const DISPLAY_IMAGE_HEIGHT: u32 = 240;
+
+/// Decode any recognized image (PNG / JPEG / BMP), resize it to fit within
+/// the Lunii display (320×240, aspect preserved), and re-encode it as PNG.
+/// A source that does not decode is [`NodeMediaError::UnsupportedFormat`] —
+/// the same verdict the sniffer gives a foreign format.
+pub fn transcode_image_to_display_png(bytes: &[u8]) -> Result<Vec<u8>, NodeMediaError> {
+    use image::ImageFormat;
+    use std::io::Cursor;
+
+    let decoded = image::load_from_memory(bytes).map_err(|_| NodeMediaError::UnsupportedFormat)?;
+    // `resize` scales to fit WITHIN (w, h) preserving the aspect ratio — no
+    // distortion, no cropping. A smaller source is scaled up to the frame.
+    let resized = decoded.resize(
+        DISPLAY_IMAGE_WIDTH,
+        DISPLAY_IMAGE_HEIGHT,
+        image::imageops::FilterType::Lanczos3,
+    );
+    let mut out = Vec::new();
+    resized
+        .write_to(&mut Cursor::new(&mut out), ImageFormat::Png)
+        .map_err(|_| NodeMediaError::Transport("encode"))?;
+    Ok(out)
 }
 
 /// Read a promoted media by its stored file name, returning `(bytes, mime)` for
@@ -320,6 +384,27 @@ mod tests {
         v
     }
 
+    /// A REAL, decodable image (the store transcodes images, so a fake magic
+    /// header no longer suffices). `write_to` a genuine encoder.
+    fn real_image(w: u32, h: u32, fmt: image::ImageFormat) -> Vec<u8> {
+        let img = image::RgbaImage::from_pixel(w, h, image::Rgba([12, 34, 56, 255]));
+        let mut out = Vec::new();
+        image::DynamicImage::ImageRgba8(img)
+            .write_to(&mut std::io::Cursor::new(&mut out), fmt)
+            .expect("encode image");
+        out
+    }
+
+    fn png_image(w: u32, h: u32) -> Vec<u8> {
+        real_image(w, h, image::ImageFormat::Png)
+    }
+
+    fn png_dimensions(bytes: &[u8]) -> (u32, u32) {
+        image::load_from_memory(bytes)
+            .map(|i| (i.width(), i.height()))
+            .expect("decode stored image")
+    }
+
     fn store(tmp: &TempDir) -> (PathBuf, PathBuf) {
         ensure_node_media_store(tmp.path()).expect("store")
     }
@@ -362,17 +447,53 @@ mod tests {
     }
 
     #[test]
-    fn stores_and_reads_back_a_png_round_trip() {
+    fn stores_and_reads_back_an_image_round_trip() {
         let tmp = TempDir::new().unwrap();
         let (media, staging) = store(&tmp);
-        let stored = store_media(&media, &staging, PNG).expect("store");
+        // A 400×300 source is LARGER than the 320×240 display frame.
+        let stored = store_media(&media, &staging, &png_image(400, 300)).expect("store");
         assert_eq!(stored.kind, MediaKind::Image);
         assert_eq!(stored.format, "png");
-        assert_eq!(stored.byte_size, PNG.len() as u64);
         assert_eq!(stored.file_name, format!("{}.png", stored.content_hash));
         let (bytes, mime) = read_media(&media, &stored.file_name).expect("read");
-        assert_eq!(bytes, PNG);
         assert_eq!(mime, "image/png");
+        // Stored bytes are the TRANSCODED display PNG: decodable + ≤320×240.
+        let (w, h) = png_dimensions(&bytes);
+        assert!(
+            w <= 320 && h <= 240,
+            "resized within the display frame: {w}x{h}"
+        );
+        // 4:3 source preserved (no stretch): fills the 320×240 box.
+        assert_eq!((w, h), (320, 240));
+    }
+
+    #[test]
+    fn transcodes_a_bmp_source_into_a_display_png() {
+        let tmp = TempDir::new().unwrap();
+        let (media, staging) = store(&tmp);
+        // A community-pack BMP: recognized, transcoded to PNG, resized.
+        let stored = store_media(
+            &media,
+            &staging,
+            &real_image(640, 480, image::ImageFormat::Bmp),
+        )
+        .expect("store bmp");
+        assert_eq!(stored.format, "png", "bmp is transcoded to png");
+        let (bytes, mime) = read_media(&media, &stored.file_name).expect("read");
+        assert_eq!(mime, "image/png");
+        let (w, h) = png_dimensions(&bytes);
+        assert!(w <= 320 && h <= 240, "{w}x{h}");
+    }
+
+    #[test]
+    fn refuses_an_undecodable_image() {
+        let tmp = TempDir::new().unwrap();
+        let (media, staging) = store(&tmp);
+        // PNG magic but no valid image body — the transcode refuses it.
+        assert_eq!(
+            store_media(&media, &staging, PNG),
+            Err(NodeMediaError::UnsupportedFormat)
+        );
     }
 
     #[test]

@@ -35,7 +35,7 @@ const CHIP_AVAILABLE = "Disponible";
 const CHIP_NOT_AVAILABLE = "Non disponible dans cette version";
 /** The node-media formats line — the canonical copy VERBATIM. */
 const NODE_MEDIA_FORMATS =
-  "Formats acceptés : images PNG, JPEG ; sons MP3, WAV, OGG";
+  "Formats acceptés : images PNG, JPEG, BMP ; sons MP3, WAV, OGG";
 /** The distribution posture, derived from the PRD official
  *  distribution policy (frozen copy). */
 const DISTRIBUTION_POSTURE =

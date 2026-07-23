@@ -33,7 +33,14 @@ use rustory_lib::infrastructure::db::{self, DbHandle};
 use rustory_lib::infrastructure::filesystem::resolve_node_media_dir;
 use tempfile::TempDir;
 
-const PNG: &[u8] = &[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 0, 0, 0, 0];
+// A REAL, decodable 8×6 RGB PNG: the media store transcodes images to a
+// display PNG, so a magic-only header is refused. Kept as literal bytes to
+// avoid pulling the image crate into the integration test crate.
+const PNG: &[u8] = &[
+    137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 8, 0, 0, 0, 6, 8, 2, 0,
+    0, 0, 113, 103, 72, 172, 0, 0, 0, 17, 73, 68, 65, 84, 120, 218, 99, 16, 209, 176, 193, 138, 24,
+    6, 82, 2, 0, 144, 240, 22, 129, 145, 56, 15, 101, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130,
+];
 const MP3: &[u8] = b"ID3\x03\x00\x00\x00rustory-audio";
 
 fn fresh_db() -> DbHandle {
@@ -165,8 +172,13 @@ fn journey_1_a_clean_folder_creates_a_fully_editable_canonical_story() {
     let media_dir = resolve_node_media_dir(app_data.path());
     let (image_bytes, image_mime) =
         node::read_node_media(&db, &media_dir, &card.id, &image.asset_id).expect("read image");
-    assert_eq!(image_bytes, PNG);
+    // The stored image is the TRANSCODED display PNG (not the source bytes):
+    // it is a PNG (magic) and non-empty.
     assert_eq!(image_mime, "image/png");
+    assert!(
+        image_bytes.starts_with(&[137, 80, 78, 71, 13, 10, 26, 10]) && !image_bytes.is_empty(),
+        "stored image is a PNG"
+    );
     let (audio_bytes, audio_mime) =
         node::read_node_media(&db, &media_dir, &card.id, &audio.asset_id).expect("read audio");
     assert_eq!(audio_bytes, MP3);

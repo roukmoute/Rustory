@@ -366,7 +366,7 @@ describe("<SupportProfileView />", () => {
     ).toBeInTheDocument();
     expect(
       screen.getByText(
-        "Formats acceptés : images PNG, JPEG ; sons MP3, WAV, OGG",
+        "Formats acceptés : images PNG, JPEG, BMP ; sons MP3, WAV, OGG",
       ),
     ).toBeInTheDocument();
   });

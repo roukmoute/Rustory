@@ -137,7 +137,7 @@ describe("<StoryNodeEditorHost />", () => {
     const error: AppError = {
       code: "MEDIA_INVALID",
       message: "Ce média utilise un format non pris en charge.",
-      userAction: "Choisis une image PNG ou JPEG.",
+      userAction: "Choisis une image PNG, JPEG ou BMP.",
       details: null,
     };
     render(

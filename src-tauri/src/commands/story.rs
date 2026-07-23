@@ -455,7 +455,7 @@ pub async fn attach_node_media(
     let app_data_dir = resolve_app_data_dir(&app)?;
 
     let (filter_name, exts): (&str, &[&str]) = match kind {
-        MediaKind::Image => ("Image (PNG, JPEG)", &["png", "jpg", "jpeg"]),
+        MediaKind::Image => ("Image (PNG, JPEG, BMP)", &["png", "jpg", "jpeg", "bmp"]),
         MediaKind::Audio => ("Audio (MP3, WAV, OGG)", &["mp3", "wav", "ogg"]),
     };
     let (tx, mut rx) = async_runtime::channel::<Option<FilePath>>(1);

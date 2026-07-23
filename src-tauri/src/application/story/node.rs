@@ -806,7 +806,7 @@ fn media_invalid(cause: MediaCause, stage: &'static str) -> AppError {
     let (message, action) = match cause {
         MediaCause::UnsupportedFormat => (
             "Ce média utilise un format non pris en charge.",
-            "Choisis une image PNG ou JPEG, ou un son MP3, WAV ou OGG.",
+            "Choisis une image PNG, JPEG ou BMP, ou un son MP3, WAV ou OGG.",
         ),
         MediaCause::Unreadable | MediaCause::SourceMissing => (
             "Ce média est illisible ou dépasse la taille autorisée.",
@@ -856,8 +856,23 @@ mod tests {
     use crate::infrastructure::db;
     use tempfile::TempDir;
 
-    const PNG: &[u8] = &[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 0, 0, 0, 0];
-    const JPEG: &[u8] = &[0xFF, 0xD8, 0xFF, 0xE0, 1, 2, 3, 4];
+    fn png() -> Vec<u8> {
+        real_image(image::ImageFormat::Png, 48, 36, [12, 34, 56, 255])
+    }
+    // A DIFFERENT image (distinct size + colour) so its transcoded PNG has a
+    // distinct content hash from `png()` — the replacement-GC test relies on
+    // the two sources not deduplicating to the same stored file.
+    fn jpeg() -> Vec<u8> {
+        real_image(image::ImageFormat::Jpeg, 64, 48, [200, 100, 50, 255])
+    }
+    fn real_image(fmt: image::ImageFormat, w: u32, h: u32, rgba: [u8; 4]) -> Vec<u8> {
+        let img = image::RgbaImage::from_pixel(w, h, image::Rgba(rgba));
+        let mut out = Vec::new();
+        image::DynamicImage::ImageRgba8(img)
+            .write_to(&mut std::io::Cursor::new(&mut out), fmt)
+            .expect("encode");
+        out
+    }
     const OGG: &[u8] = b"OggS\0\0\0\0\0\0\0\0";
 
     fn fresh_db() -> DbHandle {
@@ -1041,7 +1056,7 @@ mod tests {
                 story_id: id.clone(),
                 node_id: START_NODE_ID.into(),
                 kind: MediaKind::Image,
-                bytes: PNG.to_vec(),
+                bytes: png(),
             },
         )
         .expect("attach");
@@ -1140,15 +1155,18 @@ mod tests {
                 story_id: id.clone(),
                 node_id: START_NODE_ID.into(),
                 kind: MediaKind::Image,
-                bytes: PNG.to_vec(),
+                bytes: png(),
             },
         )
         .expect("attach");
         let asset_id = attached.node.image.unwrap().asset_id;
         let media_dir = resolve_node_media_dir(tmp.path());
         let (bytes, mime) = read_node_media(&db, &media_dir, &id, &asset_id).expect("read");
-        assert_eq!(bytes, PNG);
         assert_eq!(mime, "image/png");
+        assert!(
+            image::load_from_memory(&bytes).is_ok(),
+            "stored image decodes"
+        );
     }
 
     #[test]
@@ -1280,7 +1298,7 @@ mod tests {
                 story_id: id.clone(),
                 node_id: START_NODE_ID.into(),
                 kind: MediaKind::Image,
-                bytes: PNG.to_vec(),
+                bytes: png(),
             },
         )
         .expect("attach");
@@ -1329,7 +1347,7 @@ mod tests {
                 story_id: id.clone(),
                 node_id: START_NODE_ID.into(),
                 kind: MediaKind::Image,
-                bytes: PNG.to_vec(),
+                bytes: png(),
             },
         )
         .expect_err("media write refused");
@@ -1620,7 +1638,7 @@ mod tests {
                 story_id: id.clone(),
                 node_id: START_NODE_ID.into(),
                 kind: MediaKind::Image,
-                bytes: PNG.to_vec(),
+                bytes: png(),
             },
         )
         .expect("attach");
@@ -1658,7 +1676,7 @@ mod tests {
                 story_id: id,
                 node_id: "ghost".into(),
                 kind: MediaKind::Image,
-                bytes: PNG.to_vec(),
+                bytes: png(),
             },
         )
         .expect_err("mutation fails");
@@ -1686,7 +1704,7 @@ mod tests {
                 story_id: id.clone(),
                 node_id: START_NODE_ID.into(),
                 kind: MediaKind::Image,
-                bytes: PNG.to_vec(),
+                bytes: png(),
             },
         )
         .expect("attach A");
@@ -1707,11 +1725,13 @@ mod tests {
                 story_id: id.clone(),
                 node_id: START_NODE_ID.into(),
                 kind: MediaKind::Image,
-                bytes: JPEG.to_vec(),
+                bytes: jpeg(),
             },
         )
         .expect("attach B");
-        assert_eq!(replaced.node.image.unwrap().format.as_deref(), Some("jpeg"));
+        // Images are transcoded to PNG on store — the stored format is "png"
+        // even for a JPEG source; the point of the test is the DISTINCT hash.
+        assert_eq!(replaced.node.image.unwrap().format.as_deref(), Some("png"));
 
         // Exactly one asset row remains (the old one was reclaimed).
         let count: u32 = db

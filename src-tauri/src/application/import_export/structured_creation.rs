@@ -855,7 +855,16 @@ mod tests {
     use crate::infrastructure::db;
     use tempfile::TempDir;
 
-    const PNG: &[u8] = &[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 0, 0, 0, 0];
+    // A REAL, decodable image: the store transcodes images to a display PNG,
+    // so a fake magic header is refused. Audio (`MP3`) is stored verbatim.
+    fn png() -> Vec<u8> {
+        let img = image::RgbaImage::from_pixel(48, 36, image::Rgba([12, 34, 56, 255]));
+        let mut out = Vec::new();
+        image::DynamicImage::ImageRgba8(img)
+            .write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png)
+            .expect("encode png");
+        out
+    }
     const MP3: &[u8] = b"ID3\x03\x00\x00\x00rustory";
 
     fn fresh_db() -> DbHandle {
@@ -883,7 +892,7 @@ mod tests {
                 ]
             }"#,
         );
-        std::fs::write(folder.join("couverture.png"), PNG).expect("png");
+        std::fs::write(folder.join("couverture.png"), png()).expect("png");
         std::fs::write(folder.join("intro.mp3"), MP3).expect("mp3");
         folder
     }
@@ -989,7 +998,7 @@ mod tests {
             r#"{ "formatVersion": 1, "title": "Lien", "nodes": [ { "id": "n1", "image": "lien.png" } ] }"#,
         );
         let real = tmp.path().join("vraie.png");
-        std::fs::write(&real, PNG).expect("png");
+        std::fs::write(&real, png()).expect("png");
         std::os::unix::fs::symlink(&real, folder.join("lien.png")).expect("symlink");
         let outcome = analyze_structured_folder(&folder).expect("analyze");
         assert_eq!(outcome.analysis.state, ImportState::NeedsReview);
@@ -1403,10 +1412,10 @@ mod tests {
         // promotion: a mismatch refuses with NOTHING new to compensate.
         let tmp = TempDir::new().expect("tmp");
         let app_data = TempDir::new().expect("app data");
-        let png = tmp.path().join("image.png");
-        std::fs::write(&png, PNG).expect("png");
+        let png_path = tmp.path().join("image.png");
+        std::fs::write(&png_path, png()).expect("png");
 
-        let err = promote_media(app_data.path(), &png, FolderMediaKind::Audio)
+        let err = promote_media(app_data.path(), &png_path, FolderMediaKind::Audio)
             .expect_err("a PNG promoted as audio must refuse");
         let v = serde_json::to_value(&err).expect("ser");
         assert_eq!(v["details"]["cause"], "media_promotion");
@@ -1427,25 +1436,29 @@ mod tests {
         let tmp = TempDir::new().expect("tmp");
         let app_data = TempDir::new().expect("app data");
         let db = fresh_db();
-        std::fs::write(tmp.path().join("a.png"), PNG).expect("a");
-        std::fs::write(tmp.path().join("b.png"), PNG).expect("b");
+        // AUDIO media: stored verbatim (images are transcoded, which would
+        // make the stored size differ from the source and the bound
+        // arithmetic non-deterministic). The re-summed total bound is the
+        // property under test, independent of the media kind.
+        std::fs::write(tmp.path().join("a.mp3"), MP3).expect("a");
+        std::fs::write(tmp.path().join("b.mp3"), MP3).expect("b");
         let retained = vec![
             RetainedMediaRef {
                 node_id: "n1".into(),
-                kind: FolderMediaKind::Image,
-                basename: "a.png".into(),
+                kind: FolderMediaKind::Audio,
+                basename: "a.mp3".into(),
             },
             RetainedMediaRef {
                 node_id: "n2".into(),
-                kind: FolderMediaKind::Image,
-                basename: "b.png".into(),
+                kind: FolderMediaKind::Audio,
+                basename: "b.mp3".into(),
             },
         ];
 
         // A total bound the FIRST file already exhausts: the second
         // promotion trips the re-summed total.
         let failure =
-            promote_retained_media(app_data.path(), tmp.path(), &retained, PNG.len() as u64)
+            promote_retained_media(app_data.path(), tmp.path(), &retained, MP3.len() as u64)
                 .expect_err("the re-summed total must refuse");
         let v = serde_json::to_value(&failure.error).expect("ser");
         assert_eq!(v["details"]["source"], "file_read");

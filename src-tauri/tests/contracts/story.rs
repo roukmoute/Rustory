@@ -438,7 +438,7 @@ fn app_error_wire_shape_for_media_invalid() {
     // block inline at the slot. Freezing the wire shape prevents drift.
     let err = AppError::media_invalid(
         "Ce média utilise un format non pris en charge.",
-        "Choisis une image PNG ou JPEG, ou un son MP3, WAV ou OGG.",
+        "Choisis une image PNG, JPEG ou BMP, ou un son MP3, WAV ou OGG.",
     )
     .with_details(serde_json::json!({ "source": "media_invalid", "stage": "unsupported_format" }));
     let v = serde_json::to_value(&err).expect("serialize");

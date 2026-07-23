@@ -74,6 +74,13 @@ reqwest = { version = "=0.12.9", default-features = false, features = ["blocking
 # (chrono/mime/regex transitives, a second time stack next to `time`, a
 # model oversized for the minimal RSS 2.0 scope).
 quick-xml = "=0.40.1"
+# Added 2026-07-23 for node-media image processing: decode PNG/JPEG/BMP and
+# re-encode a resized (≤320×240, the Lunii display) PNG so an added photo is
+# not stored raw (10 MB), and community-pack BMP images become usable PNGs.
+# Explicit product requirement (image resizing). PURE RUST codecs only
+# (`default-features = false` drops the C-linked webp/etc.) — no cmake, no
+# system lib, honoring the CI build constraint. Pinned strict.
+image = { version = "=0.25.10", default-features = false, features = ["png", "jpeg", "bmp"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # Linux-only D-Bus binding used to talk to udisks2 and auto-mount a

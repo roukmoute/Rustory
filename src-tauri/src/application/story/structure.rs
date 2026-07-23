@@ -855,10 +855,16 @@ mod tests {
         let story_id = seeded_story(&mut db);
         add_node(&mut db, &story_id, None).expect("n2");
 
-        // Attach a real (tiny PNG) media to n2 through the actual store path.
-        let png: Vec<u8> = vec![
-            0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D,
-        ];
+        // Attach a real (decodable) image through the actual store path —
+        // the store transcodes images, so a magic-only header is refused.
+        let png: Vec<u8> = {
+            let img = image::RgbaImage::from_pixel(16, 12, image::Rgba([9, 9, 9, 255]));
+            let mut out = Vec::new();
+            image::DynamicImage::ImageRgba8(img)
+                .write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png)
+                .expect("encode png");
+            out
+        };
         crate::application::story::node::attach_node_media(
             &mut db,
             app_data_dir,

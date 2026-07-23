@@ -400,13 +400,28 @@ mod tests {
         "actionNodes": [ { "id": "action-1", "options": ["stage-2"] } ]
     }"#;
 
-    // Real magic bytes so the sniffer recognizes the formats.
-    const PNG_BYTES: &[u8] = &[
-        0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 0, 0, 0, 13, b'I', b'H', b'D', b'R', 1, 2,
-        3, 4,
-    ];
+    // Audio is stored verbatim (not decoded), so a magic-only fixture is fine.
     const MP3_BYTES: &[u8] = &[b'I', b'D', b'3', 4, 0, 0, 0, 0, 0, 0, 1, 2, 3, 4];
-    const BMP_BYTES: &[u8] = &[b'B', b'M', 60, 0, 0, 0, 0, 0, 0, 0, 54, 0, 0, 0, 40, 0];
+    // GIF: a format Rustory does NOT support — used to prove discarding still
+    // works now that BMP is recognized.
+    const GIF_BYTES: &[u8] = b"GIF89a\x01\x00\x01\x00\x00\x00\x00";
+
+    // REAL, decodable images (the store transcodes images, so magic-only
+    // bytes are refused). A 4:3 source so the transcode keeps 320×240.
+    fn real_image(fmt: image::ImageFormat) -> Vec<u8> {
+        let img = image::RgbaImage::from_pixel(64, 48, image::Rgba([12, 34, 56, 255]));
+        let mut out = Vec::new();
+        image::DynamicImage::ImageRgba8(img)
+            .write_to(&mut std::io::Cursor::new(&mut out), fmt)
+            .expect("encode");
+        out
+    }
+    fn png_bytes() -> Vec<u8> {
+        real_image(image::ImageFormat::Png)
+    }
+    fn bmp_bytes() -> Vec<u8> {
+        real_image(image::ImageFormat::Bmp)
+    }
 
     fn write_zip(path: &std::path::Path, entries: &[(&str, &[u8])]) {
         let file = std::fs::File::create(path).expect("create zip");
@@ -435,7 +450,7 @@ mod tests {
             &zip_path,
             &[
                 ("story.json", CLEAN_STORY_JSON.as_bytes()),
-                ("assets/cover.png", PNG_BYTES),
+                ("assets/cover.png", &png_bytes()),
                 ("assets/intro.mp3", MP3_BYTES),
             ],
         );
@@ -490,13 +505,15 @@ mod tests {
     #[test]
     fn analyze_discards_unsupported_media_and_stays_creatable() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let zip_path = dir.path().join("bmp-pack.zip");
-        let story = CLEAN_STORY_JSON.replace("cover.png", "cover.bmp");
+        let zip_path = dir.path().join("gif-pack.zip");
+        // A GIF cover: a format Rustory does not support → discarded, but the
+        // pack stays creatable (the audio is retained).
+        let story = CLEAN_STORY_JSON.replace("cover.png", "cover.gif");
         write_zip(
             &zip_path,
             &[
                 ("story.json", story.as_bytes()),
-                ("assets/cover.bmp", BMP_BYTES),
+                ("assets/cover.gif", GIF_BYTES),
                 ("assets/intro.mp3", MP3_BYTES),
             ],
         );
@@ -504,10 +521,49 @@ mod tests {
         let outcome = analyze_structured_archive(&zip_path).expect("analyze");
         assert_eq!(
             outcome.analysis.discarded_media,
-            vec!["cover.bmp".to_string()]
+            vec!["cover.gif".to_string()]
         );
         let creatable = outcome.analysis.creatable.expect("creatable");
         assert_eq!(creatable.retained_media.len(), 1);
+    }
+
+    #[test]
+    fn accepts_a_pack_with_bmp_images_transcoding_them_to_png() {
+        // Community packs store illustrations as BMP: they must be RETAINED
+        // (recognized) and transcoded to PNG on store, not discarded.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let app_data_dir = dir.path().join("appdata");
+        std::fs::create_dir_all(&app_data_dir).expect("appdata");
+        let zip_path = dir.path().join("bmp-pack.zip");
+        let story = CLEAN_STORY_JSON.replace("cover.png", "cover.bmp");
+        write_zip(
+            &zip_path,
+            &[
+                ("story.json", story.as_bytes()),
+                ("assets/cover.bmp", &bmp_bytes()),
+                ("assets/intro.mp3", MP3_BYTES),
+            ],
+        );
+
+        let outcome = analyze_structured_archive(&zip_path).expect("analyze");
+        assert!(
+            outcome.analysis.discarded_media.is_empty(),
+            "a BMP image is recognized, not discarded"
+        );
+
+        let mut handle = fresh_db();
+        let card = accept_structured_archive_creation(&mut handle, &app_data_dir, &zip_path)
+            .expect("accept");
+        // The BMP image asset was stored — transcoded to png.
+        let format: String = handle
+            .conn()
+            .query_row(
+                "SELECT media_format FROM assets WHERE story_id = ?1 AND media_type = 'image'",
+                rusqlite::params![&card.id],
+                |r| r.get(0),
+            )
+            .expect("image asset row");
+        assert_eq!(format, "png", "bmp source stored as png");
     }
 
     #[test]
