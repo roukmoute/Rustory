@@ -60,6 +60,28 @@ pub fn v3_story_key_iv(md: &[u8]) -> Option<([u8; AES_KEY_LEN], [u8; AES_KEY_LEN
     Some((key.try_into().ok()?, iv.try_into().ok()?))
 }
 
+/// `.md` offset + length of the SNU stored as ASCII hex (14 chars = 7 bytes).
+const MD_SNU_HEX_OFFSET: usize = 0x1A;
+const MD_SNU_HEX_LEN: usize = 14;
+
+/// Forge the 32-byte `bt` (boot) file for a CUSTOM (tool-written) V3 pack from
+/// the device `.md`: `hexlify(snu)(14) ‖ 10×0x00 ‖ hexlify(snu)[..8]`. This is
+/// the plaintext marker a non-store-bought pack carries (a genuine pack's `bt`
+/// instead wraps a per-story key under the hardware device key). `None` when the
+/// `.md` is too short to carry the SNU. Validated byte-for-byte against a real
+/// device's custom pack.
+pub fn v3_forge_bt(md: &[u8]) -> Option<[u8; 32]> {
+    if md.len() < MD_SNU_HEX_OFFSET + MD_SNU_HEX_LEN {
+        return None;
+    }
+    let snu_hex = &md[MD_SNU_HEX_OFFSET..MD_SNU_HEX_OFFSET + MD_SNU_HEX_LEN];
+    let mut bt = [0u8; 32];
+    bt[0..14].copy_from_slice(snu_hex);
+    // bt[14..24] stays zero.
+    bt[24..32].copy_from_slice(&snu_hex[0..8]);
+    Some(bt)
+}
+
 /// The 16-byte-aligned prefix actually ciphered for a file of length `len`:
 /// `min(512, len)` rounded DOWN to a multiple of the AES block size. Rounding
 /// down (never padding up) keeps the file length unchanged so the region
@@ -137,6 +159,17 @@ mod tests {
     #[test]
     fn v3_story_key_iv_refuses_a_short_md() {
         assert!(v3_story_key_iv(&[0u8; 0x40]).is_none());
+    }
+
+    #[test]
+    fn v3_forge_bt_builds_the_snu_marker() {
+        let mut md = vec![0u8; 0x60];
+        md[0x1A..0x28].copy_from_slice(b"40025040005071");
+        let bt = v3_forge_bt(&md).expect("snu present");
+        // hexlify(snu)(14) ‖ 10×00 ‖ hexlify(snu)[..8]
+        let mut expected = *b"40025040005071\x00\x00\x00\x00\x00\x00\x00\x00\x00\x0040025040";
+        assert_eq!(&bt, &expected);
+        let _ = &mut expected;
     }
 
     #[test]

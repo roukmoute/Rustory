@@ -14,6 +14,7 @@ pub mod catalog_source;
 pub mod cipher;
 pub mod deleter;
 pub mod library_reader;
+pub mod pack_assembly;
 pub mod pack_reader;
 pub mod parser;
 pub mod rss_source;
@@ -31,11 +32,12 @@ pub use automount::{
 };
 pub use catalog_source::{LuniiHttpCatalogSource, OfficialCatalogSource};
 pub use cipher::{
-    reverse_bytes_per_u32, v3_cipher_in_place, v3_decipher_in_place, v3_story_key_iv,
+    reverse_bytes_per_u32, v3_cipher_in_place, v3_decipher_in_place, v3_forge_bt, v3_story_key_iv,
     V3_CIPHER_REGION,
 };
 pub use deleter::{DeleteFailure, DeleteOutcome, DevicePackDeleter, SystemDevicePackDeleter};
 pub use library_reader::{DeviceLibraryReader, SystemDeviceLibraryReader};
+pub use pack_assembly::{assemble_v3_pack, AssembleError, AssembledFile};
 pub use pack_reader::{AcquiredPack, DevicePackReader, SystemDevicePackReader};
 pub use parser::{compute_device_identifier, parse_metadata_version, MetadataParseError};
 pub use rss_source::{HttpRssFeedSource, RssFeedSource, MAX_RSS_RESPONSE_BYTES};
