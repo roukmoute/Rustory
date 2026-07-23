@@ -20,6 +20,7 @@ pub mod parser;
 pub mod rss_source;
 pub mod scanner;
 pub mod system;
+pub mod v3_pack_writer;
 pub mod writer;
 
 #[cfg(test)]
@@ -43,6 +44,7 @@ pub use parser::{compute_device_identifier, parse_metadata_version, MetadataPars
 pub use rss_source::{HttpRssFeedSource, RssFeedSource, MAX_RSS_RESPONSE_BYTES};
 pub use scanner::{CandidateFacts, DeviceCandidate, DeviceScanReport, DeviceScanner};
 pub use system::{SystemDeviceScanner, EXTRA_MOUNT_ROOTS_ENV, SYSTEM_SCANNER_DEFAULT};
+pub use v3_pack_writer::{DeviceV3PackWriter, SystemDeviceV3PackWriter};
 pub use writer::{
     sweep_device_transfer_staging, DevicePackWriter, SystemDevicePackWriter, WriteFailure,
     WriteProgress,

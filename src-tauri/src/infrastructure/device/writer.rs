@@ -73,7 +73,7 @@ const COPY_BUF_BYTES: usize = 64 * 1024;
 /// Recognizable prefix for the on-device staging temp dir / `.pi` temp file, so
 /// [`sweep_device_transfer_staging`] can reclaim residues from an interrupted
 /// write without ever touching the device's own content.
-const DEVICE_STAGING_PREFIX: &str = ".rustory-staging-";
+pub(super) const DEVICE_STAGING_PREFIX: &str = ".rustory-staging-";
 
 /// Recognizable prefix for the set-aside folder holding the OLD pack during an
 /// atomic replacement (FR23). An orphan under this prefix is the residue of a
@@ -81,7 +81,7 @@ const DEVICE_STAGING_PREFIX: &str = ".rustory-staging-";
 /// old content is superseded by construction (the full replacement was staged +
 /// fsynced BEFORE the set-aside), so the sweep reclaims it exactly like a
 /// staging residue.
-const DEVICE_REPLACED_PREFIX: &str = ".rustory-replaced-";
+pub(super) const DEVICE_REPLACED_PREFIX: &str = ".rustory-replaced-";
 
 /// Progress of the content-copy step, reported by [`DevicePackWriter::write_pack`]
 /// so the application can surface an HONEST fraction. Emitted ONLY during the
@@ -465,7 +465,7 @@ pub(super) fn read_pi(pi_path: &Path) -> Result<Vec<u8>, TransferFailureCause> {
 /// not silently replace device content: refuse if ANY entry appeared meanwhile
 /// (a race). The probe is no-follow (`symlink_metadata`): `exists()` would
 /// report a dangling symlink as absent and the `rename` would clobber it.
-fn promote(staging_path: &Path, target: &Path) -> Result<(), TransferFailureCause> {
+pub(super) fn promote(staging_path: &Path, target: &Path) -> Result<(), TransferFailureCause> {
     match fs::symlink_metadata(target) {
         Ok(_) => return Err(TransferFailureCause::WriteRejected),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
@@ -573,7 +573,7 @@ pub(super) fn fsync_dir(path: &Path) -> std::io::Result<()> {
     File::open(path)?.sync_all()
 }
 
-fn fsync_tree(dir: &Path) -> std::io::Result<()> {
+pub(super) fn fsync_tree(dir: &Path) -> std::io::Result<()> {
     fsync_dir(dir)?;
     for entry in fs::read_dir(dir)? {
         let path = entry?.path();
@@ -607,7 +607,7 @@ fn validate_rel_path(rel_path: &str) -> Result<(), TransferFailureCause> {
 
 /// Join a forward-slash `rel_path` under `base`, fail-closed via
 /// [`validate_rel_path`] (refuses traversal / absolute paths).
-fn safe_rel_join(base: &Path, rel_path: &str) -> Result<PathBuf, TransferFailureCause> {
+pub(super) fn safe_rel_join(base: &Path, rel_path: &str) -> Result<PathBuf, TransferFailureCause> {
     validate_rel_path(rel_path)?;
     let mut out = base.to_path_buf();
     for component in rel_path.split('/') {
