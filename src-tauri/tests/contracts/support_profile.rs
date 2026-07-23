@@ -23,11 +23,13 @@ use rustory_lib::ipc::dto::settings::{
     metadata_format_label, operation_wire_tag, SupportProfileDto, FILE_ASSOCIATION_EXTENSION_LABEL,
 };
 
-const ALL_OPERATIONS: [SupportedOperation; 4] = [
+const ALL_OPERATIONS: [SupportedOperation; 6] = [
     SupportedOperation::ReadLibrary,
     SupportedOperation::InspectStory,
     SupportedOperation::ImportStory,
     SupportedOperation::WriteStory,
+    SupportedOperation::DeleteStory,
+    SupportedOperation::SendArchive,
 ];
 
 // ===== Frozen copies (product-language.md — byte-for-byte) =====
@@ -130,6 +132,18 @@ fn device_capability_labels_are_frozen_and_reuse_the_panel_wording() {
         device_capability_label(DeviceFamily::Flam, SupportedOperation::WriteStory),
         "Transfert vers l'appareil"
     );
+    // The two device-mutation capabilities added after the documented
+    // 4-column matrix are family-invariant.
+    for family in [DeviceFamily::Lunii, DeviceFamily::Flam] {
+        assert_eq!(
+            device_capability_label(family, SupportedOperation::DeleteStory),
+            "Suppression sur l'appareil"
+        );
+        assert_eq!(
+            device_capability_label(family, SupportedOperation::SendArchive),
+            "Envoi d'un pack (.zip)"
+        );
+    }
 }
 
 #[test]
@@ -156,6 +170,26 @@ fn device_limit_reasons_are_frozen_on_the_official_lines() {
         flam.support.write_story.reason(),
         Some("Écriture non prouvée sur matériel réel")
     );
+    assert_eq!(
+        flam.support.send_archive.reason(),
+        Some("Écriture non prouvée sur matériel réel")
+    );
+    // The V1/V2 archive-send cells carry the XXTEA-not-ported reason —
+    // and the V3 cell carries NONE (the dedicated pipeline is open).
+    for cohort in [
+        LuniiFirmwareCohort::OrigineV1,
+        LuniiFirmwareCohort::MidGenV2,
+    ] {
+        let line = official_device_support_matrix()
+            .iter()
+            .find(|line| line.cohort == FirmwareCohort::Lunii(cohort))
+            .expect("V1/V2 line");
+        assert_eq!(
+            line.support.send_archive.reason(),
+            Some("Chiffrement v1/v2 non pris en charge")
+        );
+    }
+    assert_eq!(v3.support.send_archive.reason(), None);
 }
 
 #[test]
@@ -324,6 +358,7 @@ fn the_dto_format_labels_follow_the_received_line_not_the_cohort_or_kind() {
             import_story: OperationSupport::Available,
             write_story: OperationSupport::Available,
             delete_story: OperationSupport::Available,
+            send_archive: OperationSupport::Available,
         },
     }];
     let custom_artifacts = [LocalArtifactLine {
@@ -358,6 +393,7 @@ fn a_line_version_without_a_frozen_copy_omits_the_format_key_never_invents_one()
             import_story: OperationSupport::Available,
             write_story: OperationSupport::Available,
             delete_story: OperationSupport::Available,
+            send_archive: OperationSupport::Available,
         },
     }];
     let dto = SupportProfileDto::from_matrices(&custom_devices, &[]);
@@ -395,6 +431,9 @@ fn every_closed_cell_serializes_a_non_empty_reason_even_on_a_custom_distribution
                 reason: "Distribution personnalisée",
             },
             delete_story: OperationSupport::NotAvailable {
+                reason: "Distribution personnalisée",
+            },
+            send_archive: OperationSupport::NotAvailable {
                 reason: "Distribution personnalisée",
             },
         },
@@ -639,6 +678,14 @@ fn wire_tags_stay_byte_identical_to_the_existing_device_wire() {
     assert_eq!(
         operation_wire_tag(SupportedOperation::WriteStory),
         "writeStory"
+    );
+    assert_eq!(
+        operation_wire_tag(SupportedOperation::DeleteStory),
+        "deleteStory"
+    );
+    assert_eq!(
+        operation_wire_tag(SupportedOperation::SendArchive),
+        "sendArchive"
     );
 }
 

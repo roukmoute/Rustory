@@ -23,6 +23,11 @@ export interface SupportedOperationsDto {
    *  pack-format ciphering, so Lunii V3 may delete even while it may
    *  not (yet) be written to. */
   deleteStory: boolean;
+  /** Send a STUdio-format pack archive (`.zip`) to the device. Gated
+   *  separately from `writeStory` (the round-trip of an imported pack):
+   *  the archive-send owns its whole V3 pipeline, so Lunii V3 may
+   *  receive archives while the round-trip stays closed. */
+  sendArchive: boolean;
 }
 
 export type UnsupportedReasonDto =
@@ -91,7 +96,8 @@ function isSupportedOperationsDto(
     typeof c.inspectStory === "boolean" &&
     typeof c.importStory === "boolean" &&
     typeof c.writeStory === "boolean" &&
-    typeof c.deleteStory === "boolean"
+    typeof c.deleteStory === "boolean" &&
+    typeof c.sendArchive === "boolean"
   );
 }
 

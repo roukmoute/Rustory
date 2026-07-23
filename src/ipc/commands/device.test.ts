@@ -25,6 +25,7 @@ const validSupported = {
     importStory: true,
     writeStory: false,
     deleteStory: false,
+    sendArchive: false,
   },
 };
 

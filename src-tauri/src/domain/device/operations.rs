@@ -24,6 +24,13 @@ pub struct SupportedOperations {
     /// pack-format ciphering, so a cohort can be allowed to delete before
     /// it can be written to (e.g. Lunii V3).
     pub delete_story: bool,
+    /// Send a STUdio-format pack archive (`.zip`) to the device: transcode
+    /// its graph to the on-device index files, cipher them with the target
+    /// device's own content key and write the pack. A DEVICE MUTATION,
+    /// gated separately from `write_story` (the round-trip of an imported
+    /// pack): the archive-send owns its whole pipeline, so a cohort can be
+    /// allowed to receive archives before the round-trip is (Lunii V3).
+    pub send_archive: bool,
 }
 
 impl SupportedOperations {
@@ -36,6 +43,7 @@ impl SupportedOperations {
         import_story: false,
         write_story: false,
         delete_story: false,
+        send_archive: false,
     };
 
     /// Lookup helper used by the capability gate to ask in a typed way:
@@ -48,6 +56,7 @@ impl SupportedOperations {
             SupportedOperation::ImportStory => self.import_story,
             SupportedOperation::WriteStory => self.write_story,
             SupportedOperation::DeleteStory => self.delete_story,
+            SupportedOperation::SendArchive => self.send_archive,
         }
     }
 }
@@ -62,6 +71,7 @@ pub enum SupportedOperation {
     ImportStory,
     WriteStory,
     DeleteStory,
+    SendArchive,
 }
 
 impl SupportedOperation {
@@ -73,6 +83,7 @@ impl SupportedOperation {
             Self::ImportStory => "import_story",
             Self::WriteStory => "write_story",
             Self::DeleteStory => "delete_story",
+            Self::SendArchive => "send_archive",
         }
     }
 }
@@ -89,6 +100,7 @@ mod tests {
         assert!(!ops.allows(SupportedOperation::ImportStory));
         assert!(!ops.allows(SupportedOperation::WriteStory));
         assert!(!ops.allows(SupportedOperation::DeleteStory));
+        assert!(!ops.allows(SupportedOperation::SendArchive));
     }
 
     #[test]
@@ -99,10 +111,23 @@ mod tests {
             import_story: false,
             write_story: false,
             delete_story: false,
+            send_archive: false,
         };
         assert!(ops.allows(SupportedOperation::ReadLibrary));
         assert!(!ops.allows(SupportedOperation::InspectStory));
         assert!(!ops.allows(SupportedOperation::ImportStory));
+        assert!(!ops.allows(SupportedOperation::WriteStory));
+        assert!(!ops.allows(SupportedOperation::DeleteStory));
+        assert!(!ops.allows(SupportedOperation::SendArchive));
+    }
+
+    #[test]
+    fn send_archive_authorizes_only_the_archive_send() {
+        let ops = SupportedOperations {
+            send_archive: true,
+            ..SupportedOperations::ALL_FALSE
+        };
+        assert!(ops.allows(SupportedOperation::SendArchive));
         assert!(!ops.allows(SupportedOperation::WriteStory));
         assert!(!ops.allows(SupportedOperation::DeleteStory));
     }
@@ -128,6 +153,10 @@ mod tests {
         assert_eq!(
             SupportedOperation::DeleteStory.diagnostic_tag(),
             "delete_story"
+        );
+        assert_eq!(
+            SupportedOperation::SendArchive.diagnostic_tag(),
+            "send_archive"
         );
     }
 }

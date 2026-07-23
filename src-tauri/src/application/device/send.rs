@@ -1,7 +1,7 @@
 //! Send a STUdio-format pack (`.zip`) TO a connected V3 device — the write
 //! flow ("Envoyer un pack vers l'appareil").
 //!
-//! Composes the proven V3 engine: authoritative re-scan + `write_story` gate →
+//! Composes the proven V3 engine: authoritative re-scan + `send_archive` gate →
 //! read the archive (`story.json` + assets) → [`transcode_pack`] →
 //! [`assemble_v3_pack`] (with the device `.md`) → [`DeviceV3PackWriter`]. The
 //! source archive's assets are written VERBATIM (community packs already carry
@@ -85,8 +85,10 @@ pub fn send_archive_to_device(
         }
     };
 
-    // 2. Fail-closed gate BEFORE any device mutation.
-    check_operation_allowed(&profile, SupportedOperation::WriteStory)?;
+    // 2. Fail-closed gate BEFORE any device mutation. The DEDICATED
+    //    archive-send capability — never `write_story` (the round-trip of an
+    //    imported pack), so opening one can never open the other.
+    check_operation_allowed(&profile, SupportedOperation::SendArchive)?;
 
     // 3. Read + parse the archive descriptor.
     let mut archive = open_archive(&request.archive_path)?;
@@ -139,13 +141,15 @@ pub fn send_archive_to_device(
 }
 
 /// The pack UUID = the entry ("squareOne") stage node's uuid, falling back to
-/// the first stage node. `None` for an empty pack.
+/// the first stage node. `None` for an empty pack. Lowercased: some community
+/// archives carry uppercase hex, but every downstream consumer (`short_id`,
+/// `.pi` bytes, the wire) requires the canonical lowercase form.
 fn pack_entry_uuid(pack: &StudioStoryPack) -> Option<String> {
     pack.stage_nodes
         .iter()
         .find(|n| n.square_one)
         .or_else(|| pack.stage_nodes.first())
-        .map(|n| n.uuid.clone())
+        .map(|n| n.uuid.to_ascii_lowercase())
 }
 
 fn open_archive(path: &Path) -> Result<zip::ZipArchive<std::fs::File>, AppError> {
@@ -233,9 +237,16 @@ fn device_write_error(cause: &'static str) -> AppError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::infrastructure::device::MockDeviceScanner;
+    use crate::infrastructure::device::{compute_device_identifier, MockDeviceScanner};
 
+    const V1_METADATA_VERSION: u8 = 3;
     const V3_METADATA_VERSION: u8 = 7;
+
+    /// The identifier `enqueue_supported_lunii` synthesizes (`.pi` = MOCK_PI,
+    /// serial = MOCK_SERIAL) — the value a matching request must carry.
+    fn mock_identifier() -> String {
+        compute_device_identifier(b"MOCK_PI", Some("MOCK_SERIAL"))
+    }
 
     /// A `DeviceV3PackWriter` that records the pack UUID + file count it was
     /// asked to write.
@@ -280,6 +291,53 @@ mod tests {
     }
 
     #[test]
+    fn refuses_a_v1_cohort_at_the_dedicated_gate_even_though_it_may_write_story() {
+        // V1's matrix line opens `write_story` (round-trip) but CLOSES
+        // `send_archive` (XXTEA not ported) — the refusal proves the send
+        // service consults the DEDICATED capability, not `write_story`.
+        let scanner = MockDeviceScanner::new();
+        scanner.enqueue_supported_lunii(V1_METADATA_VERSION);
+        let writer = RecordingWriter::default();
+        let req = SendArchiveRequest {
+            device_identifier: mock_identifier(),
+            archive_path: PathBuf::from("/nonexistent.zip"),
+        };
+        let err = send_archive_to_device(&scanner, &writer, &req, Duration::from_millis(200))
+            .expect_err("V1 must refuse the archive send");
+        let v = serde_json::to_value(&err).unwrap();
+        assert_eq!(v["code"], "DEVICE_UNSUPPORTED");
+        assert_eq!(v["details"]["source"], "capability_gate");
+        assert_eq!(v["details"]["operation"], "send_archive");
+        assert!(
+            writer.calls.lock().unwrap().is_empty(),
+            "no write attempted"
+        );
+    }
+
+    #[test]
+    fn passes_the_v3_gate_then_fails_honestly_on_an_unreadable_archive() {
+        // V3's matrix line CLOSES `write_story` but OPENS `send_archive` —
+        // the flow must get PAST the capability gate (no DEVICE_UNSUPPORTED)
+        // and only then refuse the unreadable source archive.
+        let scanner = MockDeviceScanner::new();
+        scanner.enqueue_supported_lunii(V3_METADATA_VERSION);
+        let writer = RecordingWriter::default();
+        let req = SendArchiveRequest {
+            device_identifier: mock_identifier(),
+            archive_path: PathBuf::from("/nonexistent.zip"),
+        };
+        let err = send_archive_to_device(&scanner, &writer, &req, Duration::from_millis(200))
+            .expect_err("missing archive refuses");
+        let v = serde_json::to_value(&err).unwrap();
+        assert_eq!(v["code"], "DEVICE_WRITE_FAILED");
+        assert_eq!(v["details"]["source"], "archive");
+        assert!(
+            writer.calls.lock().unwrap().is_empty(),
+            "no write attempted"
+        );
+    }
+
+    #[test]
     fn pack_entry_uuid_prefers_the_square_one_node() {
         let json = r#"{"version":1,"nightModeAvailable":false,"actionNodes":[],
             "stageNodes":[
@@ -290,9 +348,128 @@ mod tests {
         assert_eq!(pack_entry_uuid(&pack).as_deref(), Some("bbb"));
     }
 
-    // Note: the V3_METADATA_VERSION gate (write_story) is exercised end-to-end
-    // by the ignored real-archive smoke below; the unit test above proves the
-    // fail-closed re-scan path without a device.
-    #[allow(dead_code)]
-    const _: u8 = V3_METADATA_VERSION;
+    #[test]
+    fn pack_entry_uuid_lowercases_an_uppercase_community_uuid() {
+        // Some community archives carry uppercase hex; every downstream
+        // consumer (short id, `.pi` bytes, the wire) needs canonical
+        // lowercase.
+        let json = r#"{"version":1,"nightModeAvailable":false,"actionNodes":[],
+            "stageNodes":[
+              {"uuid":"ABABABAB-ABAB-ABAB-ABAB-ABABFAC5562D","squareOne":true,"controlSettings":{"wheel":true,"ok":true,"home":false,"pause":false,"autoplay":false}}
+            ]}"#;
+        let pack: StudioStoryPack = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            pack_entry_uuid(&pack).as_deref(),
+            Some("abababab-abab-abab-abab-ababfac5562d")
+        );
+    }
+
+    /// Ground-truth harness of the WHOLE wired service against a scratch V3
+    /// mount seeded with a real device's markers — the strongest
+    /// pre-hardware validation of the app path (real scanner → gate →
+    /// archive read → transcode → cipher → atomic write), byte-compared
+    /// against a folder captured from the real device. Env-gated like every
+    /// V3 ground-truth test:
+    ///
+    /// - `RUSTORY_DEVICE_MOUNT_ROOTS` — points the system scanner at the
+    ///   scratch mount (set it to the mount path itself);
+    /// - `RUSTORY_TEST_SEND_MOUNT` — the scratch mount dir, pre-seeded with
+    ///   a REAL `.md` + `.pi` (never a live device!);
+    /// - `RUSTORY_TEST_SEND_ZIP` — the source pack archive;
+    /// - `RUSTORY_TEST_SEND_UUID` — the expected pack uuid;
+    /// - `RUSTORY_TEST_SEND_CONTENT_REF` — the device-truth
+    ///   `.content/<SHORTID>` capture to byte-compare against.
+    #[test]
+    #[ignore]
+    fn sends_a_real_archive_to_a_scratch_v3_mount_and_matches_the_device_truth() {
+        use crate::infrastructure::device::{SystemDeviceScanner, SystemDeviceV3PackWriter};
+
+        let mount = PathBuf::from(env_or_skip("RUSTORY_TEST_SEND_MOUNT"));
+        let zip = PathBuf::from(env_or_skip("RUSTORY_TEST_SEND_ZIP"));
+        let expected_uuid = env_or_skip("RUSTORY_TEST_SEND_UUID");
+        let content_ref = PathBuf::from(env_or_skip("RUSTORY_TEST_SEND_CONTENT_REF"));
+        assert!(
+            std::env::var(crate::infrastructure::device::EXTRA_MOUNT_ROOTS_ENV).is_ok(),
+            "point RUSTORY_DEVICE_MOUNT_ROOTS at the scratch mount"
+        );
+
+        // 1. The REAL scanner resolves the scratch mount as a supported V3.
+        let scanner = SystemDeviceScanner::default();
+        let resolved =
+            resolve_connected_lunii(&scanner, Duration::from_secs(10)).expect("scan the mount");
+        let profile = match resolved.outcome {
+            ConnectedLuniiOutcome::Supported(p) => p,
+            other => panic!("expected a supported V3 scratch mount, got {other:?}"),
+        };
+
+        // 2. The WHOLE service, with the production writer.
+        let out = send_archive_to_device(
+            &scanner,
+            &SystemDeviceV3PackWriter,
+            &SendArchiveRequest {
+                device_identifier: profile.device_identifier,
+                archive_path: zip,
+            },
+            Duration::from_secs(300),
+        )
+        .expect("send the archive");
+        assert_eq!(out.pack_uuid, expected_uuid);
+
+        // 3. Byte-compare the written pack against the device-truth capture:
+        //    same file set, identical bytes, file by file.
+        let written = mount.join(".content").join(&out.short_id);
+        let reference = collect_files(&content_ref);
+        assert!(!reference.is_empty(), "empty reference capture");
+        let produced = collect_files(&written);
+        assert_eq!(
+            produced.keys().collect::<Vec<_>>(),
+            reference.keys().collect::<Vec<_>>(),
+            "file sets differ"
+        );
+        for (rel, ref_bytes) in &reference {
+            assert_eq!(
+                produced.get(rel).expect("present"),
+                ref_bytes,
+                "bytes differ for {rel}"
+            );
+        }
+
+        // 4. The pack is indexed exactly once (idempotent `.pi` append).
+        let pi = std::fs::read(mount.join(".pi")).expect("read .pi");
+        let uuid_bytes =
+            crate::domain::transfer::pack_uuid_bytes(&out.pack_uuid).expect("uuid bytes");
+        let listed = pi
+            .chunks_exact(16)
+            .filter(|c| *c == uuid_bytes.as_slice())
+            .count();
+        assert_eq!(listed, 1, "the pack must be listed exactly once in .pi");
+    }
+
+    /// Read one required env var of the ground-truth harness (panics with
+    /// the setup hint when absent — the test only runs explicitly).
+    fn env_or_skip(name: &str) -> String {
+        std::env::var(name).unwrap_or_else(|_| panic!("set {name} to run this ground-truth test"))
+    }
+
+    /// Recursively collect `rel-path → bytes` of every file under `root`.
+    fn collect_files(root: &Path) -> std::collections::BTreeMap<String, Vec<u8>> {
+        fn walk(root: &Path, dir: &Path, out: &mut std::collections::BTreeMap<String, Vec<u8>>) {
+            for entry in std::fs::read_dir(dir).expect("readdir").flatten() {
+                let p = entry.path();
+                if p.is_dir() {
+                    walk(root, &p, out);
+                } else {
+                    let rel = p
+                        .strip_prefix(root)
+                        .expect("under root")
+                        .to_string_lossy()
+                        .into_owned();
+                    out.insert(rel, std::fs::read(&p).expect("read file"));
+                }
+            }
+        }
+        let mut out = std::collections::BTreeMap::new();
+        walk(root, root, &mut out);
+        out
+    }
 }

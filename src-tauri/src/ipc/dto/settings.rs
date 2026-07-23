@@ -108,6 +108,7 @@ pub fn operation_wire_tag(operation: SupportedOperation) -> &'static str {
         SupportedOperation::ImportStory => "importStory",
         SupportedOperation::WriteStory => "writeStory",
         SupportedOperation::DeleteStory => "deleteStory",
+        SupportedOperation::SendArchive => "sendArchive",
     }
 }
 
@@ -129,6 +130,7 @@ pub fn device_capability_label(
             DeviceFamily::Flam => "Transfert vers l'appareil",
         },
         SupportedOperation::DeleteStory => "Suppression sur l'appareil",
+        SupportedOperation::SendArchive => "Envoi d'un pack (.zip)",
     }
 }
 

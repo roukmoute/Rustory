@@ -62,6 +62,7 @@ pub struct DeviceOperationsSupport {
     pub import_story: OperationSupport,
     pub write_story: OperationSupport,
     pub delete_story: OperationSupport,
+    pub send_archive: OperationSupport,
 }
 
 impl DeviceOperationsSupport {
@@ -73,6 +74,7 @@ impl DeviceOperationsSupport {
             SupportedOperation::ImportStory => self.import_story,
             SupportedOperation::WriteStory => self.write_story,
             SupportedOperation::DeleteStory => self.delete_story,
+            SupportedOperation::SendArchive => self.send_archive,
         }
     }
 
@@ -86,6 +88,7 @@ impl DeviceOperationsSupport {
             import_story: self.import_story.is_available(),
             write_story: self.write_story.is_available(),
             delete_story: self.delete_story.is_available(),
+            send_archive: self.send_archive.is_available(),
         }
     }
 }
@@ -110,6 +113,11 @@ const V3_REVERSE_ENGINEERING_REASON: &str = "Rétro-ingénierie du format en cou
 /// The frozen reason of the FLAM Gen1 write cell.
 const FLAM_WRITE_UNPROVEN_REASON: &str = "Écriture non prouvée sur matériel réel";
 
+/// The frozen reason of the V1/V2 archive-send cells: those cohorts
+/// cipher their packs with XXTEA, which this distribution has not
+/// ported (only the V3 AES pipeline is proven on real hardware).
+const V1_V2_ARCHIVE_CIPHER_REASON: &str = "Chiffrement v1/v2 non pris en charge";
+
 /// THE official device support matrix of this distribution — activated
 /// line by line, never wholesale (every line carries its own
 /// justification, mirroring `device-support-profile.md`).
@@ -128,6 +136,12 @@ const OFFICIAL_DEVICE_SUPPORT_MATRIX: &[DeviceSupportLine] = &[
             import_story: OperationSupport::Available,
             write_story: OperationSupport::Available,
             delete_story: OperationSupport::Available,
+            // The archive-send transcodes + ciphers a STUdio `.zip`; the
+            // V1/V2 XXTEA cipher is not ported (round-trip writes copy
+            // opaque bytes and never needed it).
+            send_archive: OperationSupport::NotAvailable {
+                reason: V1_V2_ARCHIVE_CIPHER_REASON,
+            },
         },
     },
     // Lunii Mid-Gen v2 (metadata v6) ✅✅✅✅ — same round-trip write
@@ -142,6 +156,9 @@ const OFFICIAL_DEVICE_SUPPORT_MATRIX: &[DeviceSupportLine] = &[
             import_story: OperationSupport::Available,
             write_story: OperationSupport::Available,
             delete_story: OperationSupport::Available,
+            send_archive: OperationSupport::NotAvailable {
+                reason: V1_V2_ARCHIVE_CIPHER_REASON,
+            },
         },
     },
     // Lunii V3 (metadata v7) ✅✅❌❌ — reverse engineering is still
@@ -151,12 +168,12 @@ const OFFICIAL_DEVICE_SUPPORT_MATRIX: &[DeviceSupportLine] = &[
     // closed — each cell carrying the frozen reason — until the V3
     // pipeline is verified end-to-end.
     //
-    // NB: a V3 PACK-WRITE ENGINE exists and is HW-proven (cipher +
-    // transcode + assemble + on-volume write), but it is a DISTINCT
-    // operation from this `write_story` (round-trip of an imported pack).
-    // Activating the archive-send belongs on its OWN capability so it never
-    // enables the library round-trip "Envoyer" for V3 — see the deferred
-    // `send_archive` capability, not this cell.
+    // NB: the V3 PACK-WRITE ENGINE is HW-proven (cipher + transcode +
+    // assemble + on-volume write), but it is a DISTINCT operation from
+    // this `write_story` (round-trip of an imported pack). The
+    // archive-send lives on its OWN `send_archive` capability so it
+    // never enables the library round-trip "Envoyer" for V3 — that cell
+    // stays closed until the round-trip pipeline itself is verified.
     DeviceSupportLine {
         family: DeviceFamily::Lunii,
         cohort: FirmwareCohort::Lunii(LuniiFirmwareCohort::V3),
@@ -171,6 +188,10 @@ const OFFICIAL_DEVICE_SUPPORT_MATRIX: &[DeviceSupportLine] = &[
                 reason: V3_REVERSE_ENGINEERING_REASON,
             },
             delete_story: OperationSupport::Available,
+            // The dedicated V3 pipeline (AES cipher keyed on the target
+            // device's `.md`, transcoder, atomic on-volume writer) is
+            // validated byte-for-byte against real hardware.
+            send_archive: OperationSupport::Available,
         },
     },
     // FLAM Gen1 (no documented metadata version — none is invented)
@@ -194,6 +215,11 @@ const OFFICIAL_DEVICE_SUPPORT_MATRIX: &[DeviceSupportLine] = &[
             // specifics than Lunii) — kept closed with the same frozen reason
             // until validated on hardware.
             delete_story: OperationSupport::NotAvailable {
+                reason: FLAM_WRITE_UNPROVEN_REASON,
+            },
+            // The archive-send pipeline is Lunii-V3-specific (AES `.md`
+            // key, `.content` layout) — nothing exists for FLAM.
+            send_archive: OperationSupport::NotAvailable {
                 reason: FLAM_WRITE_UNPROVEN_REASON,
             },
         },
@@ -236,11 +262,13 @@ pub fn supported_operations_for(cohort: FirmwareCohort) -> SupportedOperations {
 mod tests {
     use super::*;
 
-    const ALL_OPERATIONS: [SupportedOperation; 4] = [
+    const ALL_OPERATIONS: [SupportedOperation; 6] = [
         SupportedOperation::ReadLibrary,
         SupportedOperation::InspectStory,
         SupportedOperation::ImportStory,
         SupportedOperation::WriteStory,
+        SupportedOperation::DeleteStory,
+        SupportedOperation::SendArchive,
     ];
 
     // ===== The official matrix — one line = one test, every cell
@@ -254,6 +282,17 @@ mod tests {
         assert!(ops.inspect_story);
         assert!(ops.import_story);
         assert!(ops.write_story);
+        // The archive-send stays closed: the V1/V2 XXTEA cipher is not
+        // ported — with the frozen reason on the cell.
+        assert!(!ops.send_archive);
+        let line = official_device_support_matrix()
+            .iter()
+            .find(|line| line.cohort == FirmwareCohort::Lunii(LuniiFirmwareCohort::OrigineV1))
+            .expect("V1 line");
+        assert_eq!(
+            line.support.send_archive.reason(),
+            Some("Chiffrement v1/v2 non pris en charge")
+        );
     }
 
     #[test]
@@ -263,6 +302,15 @@ mod tests {
         assert!(ops.inspect_story);
         assert!(ops.import_story);
         assert!(ops.write_story);
+        assert!(!ops.send_archive);
+        let line = official_device_support_matrix()
+            .iter()
+            .find(|line| line.cohort == FirmwareCohort::Lunii(LuniiFirmwareCohort::MidGenV2))
+            .expect("V2 line");
+        assert_eq!(
+            line.support.send_archive.reason(),
+            Some("Chiffrement v1/v2 non pris en charge")
+        );
     }
 
     #[test]
@@ -287,18 +335,34 @@ mod tests {
     }
 
     #[test]
+    fn official_matrix_lunii_v3_line_opens_the_archive_send_while_write_story_stays_closed() {
+        // The dedicated V3 pipeline is HW-proven, so the ARCHIVE-SEND
+        // opens — while the round-trip `write_story` cell stays closed:
+        // the two mutations are gated independently by design.
+        let ops = supported_operations_for(FirmwareCohort::Lunii(LuniiFirmwareCohort::V3));
+        assert!(ops.send_archive);
+        assert!(!ops.write_story);
+        assert!(!ops.import_story);
+    }
+
+    #[test]
     fn official_matrix_flam_gen1_line_blocks_write_only_with_the_frozen_reason() {
         let ops = supported_operations_for(FirmwareCohort::Flam(FlamFirmwareCohort::Gen1));
         assert!(ops.read_library);
         assert!(ops.inspect_story);
         assert!(ops.import_story);
         assert!(!ops.write_story);
+        assert!(!ops.send_archive);
         let line = official_device_support_matrix()
             .iter()
             .find(|line| line.cohort == FirmwareCohort::Flam(FlamFirmwareCohort::Gen1))
             .expect("FLAM line");
         assert_eq!(
             line.support.write_story.reason(),
+            Some("Écriture non prouvée sur matériel réel")
+        );
+        assert_eq!(
+            line.support.send_archive.reason(),
             Some("Écriture non prouvée sur matériel réel")
         );
     }
@@ -412,6 +476,7 @@ mod tests {
             import_story: OperationSupport::Available,
             write_story: OperationSupport::NotAvailable { reason: "why" },
             delete_story: OperationSupport::Available,
+            send_archive: OperationSupport::NotAvailable { reason: "why" },
         };
         let ops = support.operations();
         assert!(ops.read_library);
@@ -419,6 +484,7 @@ mod tests {
         assert!(ops.import_story);
         assert!(!ops.write_story);
         assert!(ops.delete_story);
+        assert!(!ops.send_archive);
     }
 
     #[test]
@@ -429,6 +495,7 @@ mod tests {
             import_story: OperationSupport::NotAvailable { reason: "closed" },
             write_story: OperationSupport::Available,
             delete_story: OperationSupport::Available,
+            send_archive: OperationSupport::NotAvailable { reason: "closed" },
         };
         assert!(support
             .support_for(SupportedOperation::DeleteStory)
@@ -445,6 +512,12 @@ mod tests {
         assert!(support
             .support_for(SupportedOperation::WriteStory)
             .is_available());
+        assert_eq!(
+            support
+                .support_for(SupportedOperation::SendArchive)
+                .reason(),
+            Some("closed")
+        );
     }
 
     // ===== The lookup =====
@@ -461,6 +534,7 @@ mod tests {
                 import_story: OperationSupport::NotAvailable { reason: "custom" },
                 write_story: OperationSupport::NotAvailable { reason: "custom" },
                 delete_story: OperationSupport::NotAvailable { reason: "custom" },
+                send_archive: OperationSupport::NotAvailable { reason: "custom" },
             },
         }];
         let ops = supported_operations_in(&matrix, FirmwareCohort::Lunii(LuniiFirmwareCohort::V3));
@@ -486,6 +560,7 @@ mod tests {
                 import_story: OperationSupport::Available,
                 write_story: OperationSupport::NotAvailable { reason: "unproven" },
                 delete_story: OperationSupport::NotAvailable { reason: "unproven" },
+                send_archive: OperationSupport::NotAvailable { reason: "unproven" },
             },
         }];
         assert_eq!(

@@ -1,10 +1,12 @@
 use std::time::{Duration, Instant};
 
 use tauri::{AppHandle, Manager, State};
+use tauri_plugin_dialog::{DialogExt, FilePath};
 
 use crate::application::device::delete::DeleteDeviceStoryRequest;
 use crate::application::device::import::ImportDeviceStoryRequest;
 use crate::application::device::library::DeviceLibraryOutcome;
+use crate::application::device::send::SendArchiveRequest;
 use crate::application::device::title::{resolve_local_truth, set_user_title, LocalTruth};
 use crate::application::device::{self, ConnectedLuniiOutcome};
 use crate::domain::device::is_canonical_pack_uuid;
@@ -15,8 +17,9 @@ use crate::infrastructure::diagnostics::device_log;
 use crate::ipc::dto::{
     ConnectedDeviceDto, DeleteDeviceStoryInputDto, DeleteDeviceStoryOutcomeDto, DeviceLibraryDto,
     DeviceStoryTitleDto, ImportDeviceStoryInputDto, ImportDeviceStoryOutcomeDto,
-    ReadStoryValidationInputDto, ReadTransferPreviewInputDto, SetDeviceStoryTitleInputDto,
-    StoryValidationDto, TransferPreviewDto,
+    ReadStoryValidationInputDto, ReadTransferPreviewInputDto, SendPackToDeviceInputDto,
+    SendPackToDeviceOutcomeDto, SetDeviceStoryTitleInputDto, StoryValidationDto,
+    TransferPreviewDto,
 };
 use crate::AppState;
 
@@ -44,6 +47,16 @@ pub const IMPORT_DEVICE_STORY_BUDGET: Duration = Duration::from_secs(300);
 /// than the import budget is ample; it still covers a slow USB unlink of a
 /// large pack folder.
 pub const DELETE_DEVICE_STORY_BUDGET: Duration = Duration::from_secs(60);
+
+/// Wall-clock budget for a pack-archive send. A pack can weigh hundreds of
+/// MB and the whole pipeline (archive read, transcode, cipher, staged copy
+/// to a slow USB bus, fsync, promotion) runs inside it — same order of
+/// magnitude as the import budget, and Rust owns the bound (the frontend
+/// sets no timer of its own).
+pub const SEND_PACK_TO_DEVICE_BUDGET: Duration = Duration::from_secs(300);
+
+/// Native-dialog filter of the pack-archive picker.
+const SEND_PACK_DIALOG_FILTER_NAME: &str = "Pack d'histoires (.zip)";
 
 /// Read the currently-connected supported device (Lunii, MVP).
 ///
@@ -584,6 +597,96 @@ pub async fn delete_device_story(
     outcome.map(DeleteDeviceStoryOutcomeDto::from_outcome)
 }
 
+/// Send a STUdio-format pack archive (`.zip`) to the connected supported
+/// device identified by `deviceIdentifier` ("Envoyer un pack (.zip)").
+///
+/// A DEVICE MUTATION with the same discipline as the delete command — async +
+/// `spawn_blocking`, authoritative re-scan + capability gate BEFORE any byte
+/// is touched — PLUS the dialog discipline of the catalog import: the source
+/// archive is picked in a NATIVE dialog owned by Rust (non-blocking + channel,
+/// the GTK dialog must run on the main thread), so no path ever crosses IPC in
+/// either direction. A dismissed dialog resolves `{ kind: "cancelled" }`. The
+/// gate here is the DEDICATED `send_archive` capability, distinct from
+/// `write_story`: a V3 may receive archives even though the library
+/// round-trip stays closed.
+#[tauri::command]
+pub async fn send_pack_to_device(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    input: SendPackToDeviceInputDto,
+) -> Result<SendPackToDeviceOutcomeDto, AppError> {
+    if !is_32_lowercase_hex(&input.device_identifier) {
+        return Err(invalid_send_input("invalid_device_identifier"));
+    }
+
+    let (tx, mut rx) = tauri::async_runtime::channel::<Option<FilePath>>(1);
+    app.dialog()
+        .file()
+        .add_filter(SEND_PACK_DIALOG_FILTER_NAME, &["zip"])
+        .pick_file(move |path| {
+            let _ = tx.try_send(path);
+        });
+
+    let picked = match rx.recv().await {
+        Some(inner) => inner,
+        None => {
+            let _ = device_log::record_event(
+                &app,
+                device_log::Event::DevicePackSendFailed {
+                    source: "dialog",
+                    elapsed_ms: 0,
+                },
+            );
+            return Err(send_dialog_failed_error());
+        }
+    };
+    let Some(file_path) = picked else {
+        return Ok(SendPackToDeviceOutcomeDto::Cancelled);
+    };
+    let archive_path = file_path
+        .as_path()
+        .map(|p| p.to_path_buf())
+        .ok_or_else(send_non_filesystem_path_error)?;
+
+    let scanner = state.device_scanner.clone();
+    let writer = state.pack_writer_v3.clone();
+    let request = SendArchiveRequest {
+        device_identifier: input.device_identifier,
+        archive_path,
+    };
+    // Measure the SEND itself, not the human time spent in the picker.
+    let started = Instant::now();
+
+    let outcome = tauri::async_runtime::spawn_blocking(move || {
+        device::send::send_archive_to_device(
+            scanner.as_ref(),
+            writer.as_ref(),
+            &request,
+            SEND_PACK_TO_DEVICE_BUDGET,
+        )
+    })
+    .await
+    .map_err(|_| send_join_error())?;
+
+    let elapsed_ms = started.elapsed().as_millis() as u64;
+    let event = match &outcome {
+        Ok(sent) => device_log::Event::DevicePackSent {
+            family: sent.family.diagnostic_tag(),
+            firmware_cohort: sent.firmware_cohort.diagnostic_tag(),
+            image_count: sent.image_count as u32,
+            audio_count: sent.audio_count as u32,
+            elapsed_ms,
+        },
+        Err(err) => device_log::Event::DevicePackSendFailed {
+            source: send_failure_source(err),
+            elapsed_ms,
+        },
+    };
+    let _ = device_log::record_event(&app, event);
+
+    outcome.map(SendPackToDeviceOutcomeDto::from_outcome)
+}
+
 /// Name (or rename) a device story that no catalog recognizes.
 ///
 /// Synchronous: a single bounded SQLite write, no device I/O. Reuses the
@@ -664,6 +767,74 @@ fn delete_failure_source(err: &AppError) -> &'static str {
             "device_changed" => "device_changed",
             "capability_gate" => "capability_gate",
             "delete_rejected" => "delete_rejected",
+            "spawn_blocking_join" => "spawn_blocking_join",
+            _ => "other",
+        })
+        .unwrap_or("other")
+}
+
+/// Strict boundary validation refusal of the send input — the identifier
+/// normally comes from Rust's own detection DTO, so a malformed value is a
+/// frontend bug, refused explicitly before the dialog even opens.
+fn invalid_send_input(cause: &'static str) -> AppError {
+    AppError::device_write_failed(
+        "Envoi impossible: requête invalide.",
+        "Relance la détection de l'appareil puis réessaie.",
+    )
+    .with_details(serde_json::json!({
+        "source": "other",
+        "kind": "invalid_input",
+        "cause": cause,
+    }))
+}
+
+/// The native pack picker could not open (dialog backend failure).
+fn send_dialog_failed_error() -> AppError {
+    AppError::device_write_failed(
+        "Envoi impossible: la fenêtre de sélection n'a pas pu s'ouvrir.",
+        "Relance Rustory ; si le problème persiste, consulte les traces locales.",
+    )
+    .with_details(serde_json::json!({
+        "source": "dialog",
+        "stage": "dialog_failed",
+    }))
+}
+
+/// The picker returned a non-filesystem location (URL form) — desktop
+/// dialogs always return a local path; anything else is refused.
+fn send_non_filesystem_path_error() -> AppError {
+    AppError::device_write_failed(
+        "Envoi impossible: chemin de fichier invalide.",
+        "Choisis un fichier local classique puis réessaie.",
+    )
+    .with_details(serde_json::json!({
+        "source": "dialog",
+        "stage": "non_filesystem_path",
+    }))
+}
+
+/// The blocking send worker could not be joined (panicked or cancelled).
+fn send_join_error() -> AppError {
+    AppError::device_write_failed(
+        "Envoi impossible: tâche interrompue.",
+        "Réessaie ; si le problème persiste, redémarre Rustory.",
+    )
+    .with_details(serde_json::json!({
+        "source": "spawn_blocking_join",
+    }))
+}
+
+/// Map a send AppError to the closed diagnostic `source` set for the event.
+fn send_failure_source(err: &AppError) -> &'static str {
+    err.details
+        .as_ref()
+        .and_then(|d| d.get("source").and_then(|s| s.as_str()))
+        .map(|s| match s {
+            "device_changed" => "device_changed",
+            "capability_gate" => "capability_gate",
+            "archive" => "archive",
+            "device_write" => "device_write",
+            "dialog" => "dialog",
             "spawn_blocking_join" => "spawn_blocking_join",
             _ => "other",
         })
@@ -782,6 +953,29 @@ mod tests {
             assert_eq!(
                 err.code,
                 crate::domain::shared::AppErrorCode::ImportFailed,
+                "{err:?}"
+            );
+            assert!(!err.message.is_empty(), "refusal needs a cause: {err:?}");
+            let action = err.user_action.as_deref().unwrap_or("");
+            assert!(!action.is_empty(), "refusal needs a next gesture: {err:?}");
+        }
+    }
+
+    /// Same discipline for the pack-send command-layer refusals: a non-empty
+    /// cause AND a non-empty next gesture, all under the send flow's
+    /// `DEVICE_WRITE_FAILED` category.
+    #[test]
+    fn command_layer_send_refusals_are_actionable() {
+        let refusals = [
+            invalid_send_input("invalid_device_identifier"),
+            send_dialog_failed_error(),
+            send_non_filesystem_path_error(),
+            send_join_error(),
+        ];
+        for err in &refusals {
+            assert_eq!(
+                err.code,
+                crate::domain::shared::AppErrorCode::DeviceWriteFailed,
                 "{err:?}"
             );
             assert!(!err.message.is_empty(), "refusal needs a cause: {err:?}");

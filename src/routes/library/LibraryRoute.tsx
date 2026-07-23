@@ -5,6 +5,7 @@ import { useNavigate } from "react-router-dom";
 import {
   CatalogPanel,
   DeviceBulkImportPanel,
+  DeviceSendPanel,
   DeviceStoryCollection,
   type DeviceStorySelectionMode,
   DeviceStoryInspector,
@@ -12,6 +13,7 @@ import {
   useConnectedLunii,
   useDeviceBulkImport,
   useDeviceLibrary,
+  useDevicePackSend,
   useDeviceStoryDelete,
   useDeviceStoryImport,
   useDeviceStoryTitle,
@@ -419,6 +421,16 @@ export function LibraryRoute(): React.JSX.Element {
     effectiveDevice &&
     effectiveDevice.kind === "supported" &&
     effectiveDevice.supportedOperations.writeStory
+      ? effectiveDevice.deviceIdentifier
+      : null;
+  // The device that may RECEIVE a pack archive (.zip): the DEDICATED
+  // `sendArchive` capability (Lunii V3), independent of `writeStory` —
+  // the authoritative matrix decides, never the cohort name. `null` ⇒
+  // the send panel is not rendered.
+  const sendableDeviceId =
+    effectiveDevice &&
+    effectiveDevice.kind === "supported" &&
+    effectiveDevice.supportedOperations.sendArchive
       ? effectiveDevice.deviceIdentifier
       : null;
   const deviceLibrary = useDeviceLibrary(readableDeviceId);
@@ -1045,6 +1057,19 @@ export function LibraryRoute(): React.JSX.Element {
       ? deviceDelete.status
       : undefined;
 
+  // Pack-archive send flow (device-level, not tied to any selection). Rust
+  // owns the native `.zip` picker AND the dedicated `sendArchive` gate; on
+  // success the device inventory re-reads so the new pack appears.
+  const devicePackSend = useDevicePackSend({
+    onSent: () => {
+      deviceLibrary.refresh();
+    },
+  });
+  const handleSendPackToDevice = (): void => {
+    if (!sendableDeviceId) return;
+    void devicePackSend.triggerSend(sendableDeviceId);
+  };
+
   // Device-story naming flow (Phase B). A purely local write keyed by pack
   // UUID; on success the device inventory re-reads so the new title surfaces
   // from the single Rust-owned resolution (a user title outranks any later
@@ -1292,6 +1317,15 @@ export function LibraryRoute(): React.JSX.Element {
               onRefreshDevice={device.refresh}
               onConsultSupportProfile={openSupportProfile}
             />
+            {/* Device-level archive send — rendered ONLY when the matrix
+                opens the dedicated `sendArchive` capability (Lunii V3). */}
+            {sendableDeviceId !== null ? (
+              <DeviceSendPanel
+                status={devicePackSend.status}
+                onSend={handleSendPackToDevice}
+                onDismissStatus={devicePackSend.dismissStatus}
+              />
+            ) : null}
             <CatalogPanel catalog={officialCatalog} />
           </>
         }

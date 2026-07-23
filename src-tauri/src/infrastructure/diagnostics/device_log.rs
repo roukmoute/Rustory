@@ -149,6 +149,24 @@ pub enum Event {
         source: &'static str,
         elapsed_ms: u64,
     },
+    /// A pack archive (`.zip`) was sent to the device (transcoded, ciphered
+    /// for its `.md` key, written atomically). Carries the family/cohort tags
+    /// of the re-scanned profile and the pack's distinct asset COUNTS — never
+    /// the pack UUID or a path (the line stays PII-free and bounded).
+    DevicePackSent {
+        family: &'static str,
+        firmware_cohort: &'static str,
+        image_count: u32,
+        audio_count: u32,
+        elapsed_ms: u64,
+    },
+    /// A pack-archive send failed. `source` is the closed send taxonomy
+    /// (`device_changed`, `capability_gate`, `archive`, `device_write`,
+    /// `dialog`, `spawn_blocking_join`, `other`).
+    DevicePackSendFailed {
+        source: &'static str,
+        elapsed_ms: u64,
+    },
 }
 
 /// Append a single event to the device log. Production entry point —
@@ -452,6 +470,38 @@ mod tests {
         assert_eq!(v["source"], "staging_write");
         assert_eq!(v["kind"], "no_space");
         assert_eq!(v["elapsed_ms"], 42);
+    }
+
+    #[test]
+    fn event_device_pack_sent_carries_counts_never_the_uuid_nor_a_path() {
+        let event = Event::DevicePackSent {
+            family: "lunii",
+            firmware_cohort: "v3",
+            image_count: 117,
+            audio_count: 223,
+            elapsed_ms: 5400,
+        };
+        let v = serde_json::to_value(&event).expect("ser");
+        assert_eq!(v["category"], "device_pack_sent");
+        assert_eq!(v["family"], "lunii");
+        assert_eq!(v["firmware_cohort"], "v3");
+        assert_eq!(v["image_count"], 117);
+        assert_eq!(v["audio_count"], 223);
+        assert_eq!(v["elapsed_ms"], 5400);
+        assert!(v.get("pack_uuid").is_none());
+        assert!(v.get("path").is_none());
+    }
+
+    #[test]
+    fn event_device_pack_send_failed_carries_typed_source() {
+        let event = Event::DevicePackSendFailed {
+            source: "capability_gate",
+            elapsed_ms: 12,
+        };
+        let v = serde_json::to_value(&event).expect("ser");
+        assert_eq!(v["category"], "device_pack_send_failed");
+        assert_eq!(v["source"], "capability_gate");
+        assert_eq!(v["elapsed_ms"], 12);
     }
 
     #[test]

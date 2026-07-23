@@ -35,6 +35,7 @@ const supported = {
     importStory: true,
     writeStory: false,
     deleteStory: false,
+    sendArchive: false,
   },
 };
 

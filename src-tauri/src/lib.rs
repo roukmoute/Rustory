@@ -39,6 +39,11 @@ pub struct AppState {
     /// Behind an `Arc` + `spawn_blocking` like the other device I/O; gated by
     /// the `delete_story` capability before any mutation.
     pub pack_deleter: std::sync::Arc<dyn infrastructure::device::DevicePackDeleter>,
+    /// Writes an assembled V3 pack to the device (staging on the volume →
+    /// atomic promotion → fsync → `.pi`), used by the archive-send flow.
+    /// Behind an `Arc` + `spawn_blocking` like the other device I/O; reached
+    /// only AFTER the dedicated `send_archive` capability gate passes.
+    pub pack_writer_v3: std::sync::Arc<dyn infrastructure::device::DeviceV3PackWriter>,
     /// Source of the official catalog for the EXPLICIT fetch (story 2-6,
     /// Phase C). Behind an `Arc` + `spawn_blocking` like the other device
     /// I/O. Networked, never invoked implicitly.
@@ -472,6 +477,9 @@ pub fn run() {
                 pack_deleter: std::sync::Arc::new(
                     infrastructure::device::SystemDevicePackDeleter,
                 ),
+                pack_writer_v3: std::sync::Arc::new(
+                    infrastructure::device::SystemDeviceV3PackWriter,
+                ),
                 catalog_source: std::sync::Arc::new(
                     infrastructure::device::LuniiHttpCatalogSource::default(),
                 ),
@@ -568,6 +576,7 @@ pub fn run() {
             commands::story::remove_node_media,
             commands::story::remove_node_option,
             commands::settings::restart_for_update,
+            commands::device::send_pack_to_device,
             commands::device::set_device_story_title,
             commands::story::set_node_option_link,
             commands::transfer::start_prepare_story,

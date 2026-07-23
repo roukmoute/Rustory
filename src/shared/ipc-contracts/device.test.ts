@@ -14,6 +14,7 @@ const validSupported = {
     importStory: true,
     writeStory: false,
     deleteStory: true,
+    sendArchive: false,
   },
 };
 
@@ -27,7 +28,8 @@ const validSupportedFlam = JSON.parse(
   '{"kind":"supported","family":"flam","firmwareCohort":"flamGen1",' +
     '"deviceIdentifier":"fedcba9876543210fedcba9876543210",' +
     '"supportedOperations":{"readLibrary":true,"inspectStory":true,' +
-    '"importStory":true,"writeStory":false,"deleteStory":false}}',
+    '"importStory":true,"writeStory":false,"deleteStory":false,' +
+    '"sendArchive":false}}',
 ) as Record<string, unknown>;
 
 describe("isConnectedDeviceDto — valid payloads", () => {
@@ -51,6 +53,7 @@ describe("isConnectedDeviceDto — valid payloads", () => {
           importStory: false,
           writeStory: false,
           deleteStory: true,
+          sendArchive: false,
         },
       }),
     ).toBe(true);
@@ -101,6 +104,7 @@ describe("isConnectedDeviceDto — valid payloads", () => {
           importStory: false,
           writeStory: false,
           deleteStory: false,
+          sendArchive: false,
         },
       }),
     ).toBe(true);
@@ -288,6 +292,20 @@ describe("isConnectedDeviceDto — drift rejections", () => {
     const { supportedOperations: _drop, ...rest } = validSupported;
     void _drop;
     expect(isConnectedDeviceDto(rest)).toBe(false);
+  });
+
+  it("rejects supportedOperations missing the sendArchive flag", () => {
+    // A pre-extension wire (no `sendArchive` key) is a drift, not a
+    // tolerated legacy: the Rust serializer always emits the full set.
+    const { sendArchive: _drop, ...opsWithoutSendArchive } =
+      validSupported.supportedOperations;
+    void _drop;
+    expect(
+      isConnectedDeviceDto({
+        ...validSupported,
+        supportedOperations: opsWithoutSendArchive,
+      }),
+    ).toBe(false);
   });
 
   it("rejects unsupported with unrecognized reason", () => {

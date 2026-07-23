@@ -65,6 +65,7 @@ pub struct SupportedOperationsDto {
     pub import_story: bool,
     pub write_story: bool,
     pub delete_story: bool,
+    pub send_archive: bool,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -127,6 +128,7 @@ fn operations_dto(profile: &DeviceProfile) -> SupportedOperationsDto {
         import_story: ops.import_story,
         write_story: ops.write_story,
         delete_story: ops.delete_story,
+        send_archive: ops.send_archive,
     }
 }
 
@@ -165,6 +167,7 @@ mod tests {
                 import_story: true,
                 write_story: false,
                 delete_story: true,
+                send_archive: false,
             },
         };
         let v = serde_json::to_value(&dto).expect("ser");
@@ -195,6 +198,7 @@ mod tests {
                 import_story: false,
                 write_story: false,
                 delete_story: false,
+                send_archive: false,
             },
         };
         let v = serde_json::to_value(&dto).expect("ser");
@@ -261,6 +265,25 @@ mod tests {
         assert_eq!(v["firmwareCohort"], "v3");
         assert_eq!(v["supportedOperations"]["importStory"], false);
         assert_eq!(v["supportedOperations"]["writeStory"], false);
+        // The DEDICATED archive-send is open on V3 — while the round-trip
+        // write stays closed (independent gates by design).
+        assert_eq!(v["supportedOperations"]["sendArchive"], true);
+    }
+
+    #[test]
+    fn from_outcome_maps_supported_v1_with_send_archive_disabled() {
+        let outcome = ConnectedLuniiOutcome::Supported(
+            match crate::domain::device::classify_lunii(3, true, true, "id") {
+                crate::domain::device::DeviceProfileClassification::Supported(p) => p,
+                _ => unreachable!(),
+            },
+        );
+        let dto = ConnectedDeviceDto::from_outcome(outcome);
+        let v = serde_json::to_value(&dto).expect("ser");
+        assert_eq!(v["firmwareCohort"], "origineV1");
+        assert_eq!(v["supportedOperations"]["writeStory"], true);
+        // The V1/V2 XXTEA cipher is not ported: no archive send there.
+        assert_eq!(v["supportedOperations"]["sendArchive"], false);
     }
 
     #[test]

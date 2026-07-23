@@ -3,6 +3,7 @@ pub mod device_catalog;
 pub mod device_delete;
 pub mod device_import;
 pub mod device_library;
+pub mod device_send;
 pub mod device_title;
 pub mod import_export;
 pub mod library;
@@ -21,6 +22,7 @@ pub use device_catalog::{CatalogStatusDto, ImportOfficialCatalogOutcomeDto, Pack
 pub use device_delete::{DeleteDeviceStoryInputDto, DeleteDeviceStoryOutcomeDto};
 pub use device_import::{ImportDeviceStoryInputDto, ImportDeviceStoryOutcomeDto};
 pub use device_library::{DeviceLibraryDto, DeviceStoryDto, PackTitleSourceDto};
+pub use device_send::{SendPackToDeviceInputDto, SendPackToDeviceOutcomeDto};
 pub use device_title::{DeviceStoryTitleDto, SetDeviceStoryTitleInputDto};
 pub use import_export::{
     AcceptArchiveCreationInputDto, AcceptArtifactImportInputDto, AcceptStructuredCreationInputDto,

@@ -20,6 +20,7 @@ const mockDevice = vi.fn();
 const mockDeviceLibrary = vi.fn();
 const mockImport = vi.fn();
 const mockDeleteDevice = vi.fn();
+const mockSendPack = vi.fn();
 const mockTransferPreview = vi.fn();
 const mockStoryValidation = vi.fn();
 const mockCatalogStatus = vi.fn();
@@ -122,6 +123,16 @@ vi.mock("../../ipc/commands/device-delete", async () => {
   return {
     ...actual,
     deleteDeviceStory: (input: unknown) => mockDeleteDevice(input),
+  };
+});
+
+vi.mock("../../ipc/commands/device-send", async () => {
+  const actual = await vi.importActual<
+    typeof import("../../ipc/commands/device-send")
+  >("../../ipc/commands/device-send");
+  return {
+    ...actual,
+    sendPackToDevice: (input: unknown) => mockSendPack(input),
   };
 });
 
@@ -268,6 +279,7 @@ describe("<LibraryRoute />", () => {
     mockDeviceLibrary.mockResolvedValue({ kind: "none" });
     mockImport.mockReset();
     mockDeleteDevice.mockReset();
+    mockSendPack.mockReset();
     // Default: the transfer-preview read folds away (noDevice) so the
     // comparison stays sober unless a test opts into a readable comparison.
     mockTransferPreview.mockReset();
@@ -1615,6 +1627,7 @@ describe("<LibraryRoute />", () => {
         importStory: true,
         writeStory: false,
         deleteStory: false,
+        sendArchive: false,
       },
     });
     renderLibrary();
@@ -1842,6 +1855,7 @@ describe("<LibraryRoute />", () => {
         importStory: true,
         writeStory: false,
         deleteStory: false,
+        sendArchive: false,
       },
     });
     renderLibrary();
@@ -1898,6 +1912,7 @@ describe("<LibraryRoute />", () => {
       importStory: false,
       writeStory: false,
       deleteStory: false,
+      sendArchive: false,
     },
   };
 
@@ -2180,6 +2195,7 @@ describe("<LibraryRoute />", () => {
         importStory: false,
         writeStory: false,
         deleteStory: false,
+        sendArchive: false,
       },
     });
     mockDeviceLibrary.mockResolvedValue(readableTwo);
@@ -2254,6 +2270,7 @@ describe("<LibraryRoute />", () => {
       importStory: true,
       writeStory: false,
       deleteStory: false,
+      sendArchive: false,
     },
   };
 
@@ -2358,6 +2375,7 @@ describe("<LibraryRoute />", () => {
       supportedOperations: {
         ...supportedV3.supportedOperations,
         deleteStory: true,
+        sendArchive: false,
       },
     };
     mockDevice.mockResolvedValue(deletableV3);
@@ -2406,6 +2424,67 @@ describe("<LibraryRoute />", () => {
         within(main).queryByRole("button", { name: /identifiant 0000abcd/i }),
       ).not.toBeInTheDocument(),
     );
+  });
+
+  it("offers the pack-archive send on a sendArchive-capable V3, sends and re-reads the inventory", async () => {
+    const user = userEvent.setup();
+    mockGet.mockResolvedValue({ stories: [] });
+    // A V3 whose matrix line OPENS the dedicated archive-send while the
+    // round-trip write stays closed — the exact V3 wire Rust now emits.
+    const sendableV3 = {
+      ...supportedV3,
+      supportedOperations: {
+        ...supportedV3.supportedOperations,
+        sendArchive: true,
+      },
+    };
+    mockDevice.mockResolvedValue(sendableV3);
+    mockDeviceLibrary.mockResolvedValue(readableTwo);
+    mockSendPack.mockResolvedValue({
+      kind: "sent",
+      packUuid: "abababab-abab-abab-abab-ababfac5562d",
+      imageCount: 2,
+      audioCount: 3,
+    });
+    renderLibrary();
+
+    // The device-level affordance appears with the capability.
+    const sendButton = await screen.findByRole("button", {
+      name: "Envoyer un pack (.zip)…",
+    });
+    const readsBefore = mockDeviceLibrary.mock.calls.length;
+    await user.click(sendButton);
+
+    // The command received exactly the one identifier (the archive is
+    // picked by a Rust-owned native dialog — no path crosses IPC).
+    await waitFor(() =>
+      expect(mockSendPack).toHaveBeenCalledWith({
+        deviceIdentifier: sendableV3.deviceIdentifier,
+      }),
+    );
+    // The settled success is announced with the pack facts, and the
+    // device inventory re-reads so the new pack appears.
+    expect(
+      await screen.findByText("Pack envoyé sur l'appareil (2 images, 3 audios)."),
+    ).toBeInTheDocument();
+    await waitFor(() =>
+      expect(mockDeviceLibrary.mock.calls.length).toBeGreaterThan(readsBefore),
+    );
+  });
+
+  it("offers no pack-archive send when the matrix closes sendArchive (V1 round-trip cohort)", async () => {
+    mockGet.mockResolvedValue({ stories: [] });
+    mockDevice.mockResolvedValue(supportedOrigine);
+    mockDeviceLibrary.mockResolvedValue(readableTwo);
+    renderLibrary();
+
+    // The device section is up (the inventory listed) yet the send panel
+    // stays absent: the affordance follows the capability, not the family.
+    await screen.findByRole("main", { name: /collection d'histoires/i });
+    await screen.findByRole("button", { name: /identifiant 0000abcd/i });
+    expect(
+      screen.queryByRole("button", { name: "Envoyer un pack (.zip)…" }),
+    ).not.toBeInTheDocument();
   });
 
   it("copies a device story: authoritative re-reads on both sides, preserved selection, flipped CTA (AC1+AC2)", async () => {
@@ -2961,6 +3040,7 @@ describe("<LibraryRoute />", () => {
         importStory: false,
         writeStory: false,
         deleteStory: false,
+        sendArchive: false,
       },
     });
     renderLibrary();
@@ -3163,6 +3243,7 @@ describe("<LibraryRoute />", () => {
         importStory: false,
         writeStory: false,
         deleteStory: false,
+        sendArchive: false,
       },
     });
     renderLibrary();
@@ -3363,7 +3444,8 @@ describe("<LibraryRoute />", () => {
       '{"kind":"supported","family":"flam","firmwareCohort":"flamGen1",' +
         '"deviceIdentifier":"fedcba9876543210fedcba9876543210",' +
         '"supportedOperations":{"readLibrary":true,"inspectStory":true,' +
-        '"importStory":true,"writeStory":false,"deleteStory":false}}',
+        '"importStory":true,"writeStory":false,"deleteStory":false,' +
+        '"sendArchive":false}}',
     ) as ConnectedDeviceDto;
     const mapped = mapDeviceForPanel({ kind: "ready", device: flamDto }, false);
     expect(mapped.deviceState).toBe("idle");
@@ -3375,6 +3457,7 @@ describe("<LibraryRoute />", () => {
       importStory: true,
       writeStory: false,
       deleteStory: false,
+      sendArchive: false,
     });
   });
 
@@ -3389,6 +3472,7 @@ describe("<LibraryRoute />", () => {
       ...supportedOrigine.supportedOperations,
       writeStory: true,
       deleteStory: false,
+      sendArchive: false,
     },
   };
 
