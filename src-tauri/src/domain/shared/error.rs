@@ -15,6 +15,7 @@ pub enum AppErrorCode {
     DeviceScanFailed,
     DeviceUnsupported,
     ImportFailed,
+    DeviceDeleteFailed,
     PreparationFailed,
     TransferFailed,
     TransferOutcomeUnavailable,
@@ -145,6 +146,23 @@ impl AppError {
     pub fn import_failed(message: impl Into<String>, user_action: impl Into<String>) -> Self {
         Self {
             code: AppErrorCode::ImportFailed,
+            message: message.into(),
+            user_action: Some(user_action.into()),
+            details: None,
+        }
+    }
+
+    /// Constructed when a device-story DELETE fails: the authoritative re-scan
+    /// (device changed / absent / unsupported), the capability gate (a profile
+    /// that may not delete), or the `.pi`/content mutation itself. The stage is
+    /// carried by `details.source` (`device_changed` / `capability_gate` /
+    /// `delete_rejected`), PII-free.
+    pub fn device_delete_failed(
+        message: impl Into<String>,
+        user_action: impl Into<String>,
+    ) -> Self {
+        Self {
+            code: AppErrorCode::DeviceDeleteFailed,
             message: message.into(),
             user_action: Some(user_action.into()),
             details: None,
@@ -504,6 +522,19 @@ mod tests {
         assert_eq!(v["code"], "IMPORT_FAILED");
         assert_eq!(v["details"]["source"], "fs_read");
         assert_eq!(v["details"]["kind"], "not_found");
+    }
+
+    #[test]
+    fn device_delete_failed_serializes_with_stable_code_and_details() {
+        let err = AppError::device_delete_failed(
+            "Suppression impossible: l'appareil connecté a changé.",
+            "Rebranche l'appareil puis réessaie.",
+        )
+        .with_details(serde_json::json!({ "source": "device_changed", "cause": "device_absent" }));
+        let v = serde_json::to_value(&err).expect("serialize");
+        assert_eq!(v["code"], "DEVICE_DELETE_FAILED");
+        assert_eq!(v["details"]["source"], "device_changed");
+        assert!(v.get("user_action").is_none(), "snake_case must not leak");
     }
 
     #[test]

@@ -107,6 +107,7 @@ pub fn operation_wire_tag(operation: SupportedOperation) -> &'static str {
         SupportedOperation::InspectStory => "inspectStory",
         SupportedOperation::ImportStory => "importStory",
         SupportedOperation::WriteStory => "writeStory",
+        SupportedOperation::DeleteStory => "deleteStory",
     }
 }
 
@@ -127,6 +128,7 @@ pub fn device_capability_label(
             DeviceFamily::Lunii => "Transfert vers la Lunii",
             DeviceFamily::Flam => "Transfert vers l'appareil",
         },
+        SupportedOperation::DeleteStory => "Suppression sur l'appareil",
     }
 }
 

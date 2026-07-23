@@ -64,6 +64,7 @@ pub struct SupportedOperationsDto {
     pub inspect_story: bool,
     pub import_story: bool,
     pub write_story: bool,
+    pub delete_story: bool,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -125,6 +126,7 @@ fn operations_dto(profile: &DeviceProfile) -> SupportedOperationsDto {
         inspect_story: ops.inspect_story,
         import_story: ops.import_story,
         write_story: ops.write_story,
+        delete_story: ops.delete_story,
     }
 }
 
@@ -162,6 +164,7 @@ mod tests {
                 inspect_story: true,
                 import_story: true,
                 write_story: false,
+                delete_story: true,
             },
         };
         let v = serde_json::to_value(&dto).expect("ser");
@@ -172,6 +175,7 @@ mod tests {
         assert_eq!(v["deviceIdentifier"], "abc");
         assert_eq!(v["supportedOperations"]["readLibrary"], true);
         assert_eq!(v["supportedOperations"]["writeStory"], false);
+        assert_eq!(v["supportedOperations"]["deleteStory"], true);
         assert!(
             v.get("supported_operations").is_none(),
             "snake_case must not leak"
@@ -190,6 +194,7 @@ mod tests {
                 inspect_story: false,
                 import_story: false,
                 write_story: false,
+                delete_story: false,
             },
         };
         let v = serde_json::to_value(&dto).expect("ser");

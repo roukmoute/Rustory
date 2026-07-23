@@ -13,6 +13,7 @@ import {
 } from "../../library/validation/story-title";
 
 import { DeviceImportStatusSurface } from "./DeviceImportStatusSurface";
+import type { DeviceStoryDeleteStatus } from "../hooks/use-device-story-delete";
 import type { DeviceStoryImportStatus } from "../hooks/use-device-story-import";
 import type { SetDeviceStoryTitleStatus } from "../hooks/use-device-story-title";
 import { usePackCover } from "../hooks/use-pack-cover";
@@ -22,6 +23,7 @@ import "./DeviceStoryInspector.css";
 
 const IDLE_IMPORT_STATUS: DeviceStoryImportStatus = { kind: "idle" };
 const IDLE_TITLE_STATUS: SetDeviceStoryTitleStatus = { kind: "idle" };
+const IDLE_DELETE_STATUS: DeviceStoryDeleteStatus = { kind: "idle" };
 
 export interface DeviceStoryInspectorProps {
   /** The device story currently selected for inspection, or null when none
@@ -57,6 +59,16 @@ export interface DeviceStoryInspectorProps {
   /** Clear a previous naming failure (route-owned). Called when the user
    *  edits, cancels or reopens the editor so a stale error never lingers. */
   onDismissTitleError?: () => void;
+  /** Request the deletion of the inspected story FROM THE DEVICE. Wired by
+   *  the route ONLY when the capability gate allows it (`deleteStory ===
+   *  true`); the route owns the confirmation dialog before the delete fires.
+   *  When absent, no delete affordance is shown. */
+  onDelete?: (story: DeviceStoryDto) => void;
+  /** Status of the delete flow for the inspected pack (deleting/deleted/
+   *  failed). Defaults to idle. */
+  deleteState?: DeviceStoryDeleteStatus;
+  /** Dismiss the delete status surface (success/failure `Fermer`). */
+  onDismissDeleteStatus?: () => void;
 }
 
 /**
@@ -89,6 +101,9 @@ export function DeviceStoryInspector({
   onSetTitle,
   titleState,
   onDismissTitleError,
+  onDelete,
+  deleteState,
+  onDismissDeleteStatus,
 }: DeviceStoryInspectorProps): React.JSX.Element | null {
   const titleId = useId();
   const copyReasonId = useId();
@@ -170,6 +185,20 @@ export function DeviceStoryInspector({
   const handleImportClick = (): void => {
     if (isSoftDisabled) return;
     onImport?.(story);
+  };
+
+  // Delete-from-device affordance. Gated purely on the `deleteStory`
+  // capability + a wired handler — deletion is cohort-agnostic and needs no
+  // content presence (delisting an incomplete entry is legitimate). The route
+  // owns the confirmation dialog; this button only requests it.
+  const deleteStatus = deleteState ?? IDLE_DELETE_STATUS;
+  const isDeleting = deleteStatus.kind === "deleting";
+  const canDelete =
+    supportedOperations?.deleteStory === true && onDelete !== undefined;
+
+  const handleDeleteClick = (): void => {
+    if (!canDelete || isDeleting) return;
+    onDelete?.(story);
   };
 
   // Recognition: show the real title + its provenance when an index covers
@@ -449,6 +478,61 @@ export function DeviceStoryInspector({
         onDismiss={() => onDismissImportStatus?.()}
         onConsultSupportProfile={onConsultSupportProfile}
       />
+
+      {canDelete ? (
+        <div className="device-inspector__delete">
+          <Button
+            variant="destructive"
+            aria-busy={isDeleting || undefined}
+            aria-disabled={isDeleting || undefined}
+            onClick={handleDeleteClick}
+          >
+            Supprimer de l'appareil
+          </Button>
+          {deleteStatus.kind === "deleting" ? (
+            <p
+              className="device-inspector__note"
+              role="status"
+              aria-live="polite"
+            >
+              Suppression en cours…
+            </p>
+          ) : null}
+          {deleteStatus.kind === "deleted" ? (
+            <div
+              className="device-inspector__delete-done"
+              role="status"
+              aria-live="polite"
+            >
+              <StateChip
+                tone="success"
+                label={
+                  deleteStatus.wasPresent
+                    ? "Supprimée de l'appareil"
+                    : "Déjà absente de l'appareil"
+                }
+              />
+              <Button variant="quiet" onClick={() => onDismissDeleteStatus?.()}>
+                Fermer
+              </Button>
+            </div>
+          ) : null}
+          {deleteStatus.kind === "failed" ? (
+            <div className="device-inspector__delete-error" role="alert">
+              <StateChip tone="error" label="Suppression impossible" />
+              <p className="device-inspector__note">
+                {deleteStatus.error.message}
+                {deleteStatus.error.userAction
+                  ? ` ${deleteStatus.error.userAction}`
+                  : ""}
+              </p>
+              <Button variant="quiet" onClick={() => onDismissDeleteStatus?.()}>
+                Fermer
+              </Button>
+            </div>
+          ) : null}
+        </div>
+      ) : null}
     </SurfacePanel>
   );
 }

@@ -24,6 +24,7 @@ const validSupported = {
     inspectStory: true,
     importStory: true,
     writeStory: false,
+    deleteStory: false,
   },
 };
 

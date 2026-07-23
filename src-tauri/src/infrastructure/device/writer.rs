@@ -437,7 +437,7 @@ pub fn sweep_device_transfer_staging(mount_path: &Path) -> u32 {
 /// Read the device `.pi` payload (empty when absent — a freshly wiped Lunii).
 /// A non-regular, oversized, or fragment-trailing (corrupt) `.pi` is treated as a
 /// refused write rather than silently rewritten (F7).
-fn read_pi(pi_path: &Path) -> Result<Vec<u8>, TransferFailureCause> {
+pub(super) fn read_pi(pi_path: &Path) -> Result<Vec<u8>, TransferFailureCause> {
     let bytes = match fs::symlink_metadata(pi_path) {
         Ok(meta) if meta.is_file() => {
             if meta.len() > MAX_PACK_INDEX_BYTES {
@@ -547,7 +547,7 @@ fn copy_one_file(
 /// Atomically write `bytes` to `.pi`: a temp file ON THE DEVICE VOLUME, fsynced,
 /// then `rename`d onto `.pi`, then the mount root fsynced so the directory entry
 /// is durable.
-fn write_pi_atomically(
+pub(super) fn write_pi_atomically(
     mount_path: &Path,
     pi_path: &Path,
     bytes: &[u8],
@@ -569,7 +569,7 @@ fn write_pi_atomically(
     Ok(())
 }
 
-fn fsync_dir(path: &Path) -> std::io::Result<()> {
+pub(super) fn fsync_dir(path: &Path) -> std::io::Result<()> {
     File::open(path)?.sync_all()
 }
 
@@ -620,7 +620,7 @@ fn safe_rel_join(base: &Path, rel_path: &str) -> Result<PathBuf, TransferFailure
 /// concurrent writes to the SAME mount would race the staging sweep and the `.pi`
 /// read-modify-write (a lost index entry). One in-process lock per mount path
 /// makes each transfer atomic with respect to other transfers on that volume.
-fn mount_write_lock(mount_path: &Path) -> Arc<Mutex<()>> {
+pub(super) fn mount_write_lock(mount_path: &Path) -> Arc<Mutex<()>> {
     static LOCKS: OnceLock<Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>> = OnceLock::new();
     let map = LOCKS.get_or_init(|| Mutex::new(HashMap::new()));
     let mut guard = map.lock().unwrap_or_else(|poisoned| poisoned.into_inner());

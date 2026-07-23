@@ -18,6 +18,11 @@ export interface SupportedOperationsDto {
   inspectStory: boolean;
   importStory: boolean;
   writeStory: boolean;
+  /** Delete a story already on the device. Gated separately from
+   *  `writeStory`: deletion removes opaque bytes and needs no
+   *  pack-format ciphering, so Lunii V3 may delete even while it may
+   *  not (yet) be written to. */
+  deleteStory: boolean;
 }
 
 export type UnsupportedReasonDto =
@@ -85,7 +90,8 @@ function isSupportedOperationsDto(
     typeof c.readLibrary === "boolean" &&
     typeof c.inspectStory === "boolean" &&
     typeof c.importStory === "boolean" &&
-    typeof c.writeStory === "boolean"
+    typeof c.writeStory === "boolean" &&
+    typeof c.deleteStory === "boolean"
   );
 }
 

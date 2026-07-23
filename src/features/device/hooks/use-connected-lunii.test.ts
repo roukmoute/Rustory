@@ -34,6 +34,7 @@ const supported = {
     inspectStory: true,
     importStory: true,
     writeStory: false,
+    deleteStory: false,
   },
 };
 

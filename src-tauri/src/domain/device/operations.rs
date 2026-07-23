@@ -18,6 +18,12 @@ pub struct SupportedOperations {
     /// transfer pipeline wires the real gate — hard-coded `false`
     /// here is the fail-closed default.
     pub write_story: bool,
+    /// Delete a story already on the device (delist its `.pi` entry and
+    /// remove its content folder). A DEVICE MUTATION, gated separately
+    /// from `write_story`: deletion removes opaque bytes and needs no
+    /// pack-format ciphering, so a cohort can be allowed to delete before
+    /// it can be written to (e.g. Lunii V3).
+    pub delete_story: bool,
 }
 
 impl SupportedOperations {
@@ -29,6 +35,7 @@ impl SupportedOperations {
         inspect_story: false,
         import_story: false,
         write_story: false,
+        delete_story: false,
     };
 
     /// Lookup helper used by the capability gate to ask in a typed way:
@@ -40,6 +47,7 @@ impl SupportedOperations {
             SupportedOperation::InspectStory => self.inspect_story,
             SupportedOperation::ImportStory => self.import_story,
             SupportedOperation::WriteStory => self.write_story,
+            SupportedOperation::DeleteStory => self.delete_story,
         }
     }
 }
@@ -53,6 +61,7 @@ pub enum SupportedOperation {
     InspectStory,
     ImportStory,
     WriteStory,
+    DeleteStory,
 }
 
 impl SupportedOperation {
@@ -63,6 +72,7 @@ impl SupportedOperation {
             Self::InspectStory => "inspect_story",
             Self::ImportStory => "import_story",
             Self::WriteStory => "write_story",
+            Self::DeleteStory => "delete_story",
         }
     }
 }
@@ -78,6 +88,7 @@ mod tests {
         assert!(!ops.allows(SupportedOperation::InspectStory));
         assert!(!ops.allows(SupportedOperation::ImportStory));
         assert!(!ops.allows(SupportedOperation::WriteStory));
+        assert!(!ops.allows(SupportedOperation::DeleteStory));
     }
 
     #[test]
@@ -87,11 +98,13 @@ mod tests {
             inspect_story: false,
             import_story: false,
             write_story: false,
+            delete_story: false,
         };
         assert!(ops.allows(SupportedOperation::ReadLibrary));
         assert!(!ops.allows(SupportedOperation::InspectStory));
         assert!(!ops.allows(SupportedOperation::ImportStory));
         assert!(!ops.allows(SupportedOperation::WriteStory));
+        assert!(!ops.allows(SupportedOperation::DeleteStory));
     }
 
     #[test]
@@ -111,6 +124,10 @@ mod tests {
         assert_eq!(
             SupportedOperation::WriteStory.diagnostic_tag(),
             "write_story"
+        );
+        assert_eq!(
+            SupportedOperation::DeleteStory.diagnostic_tag(),
+            "delete_story"
         );
     }
 }

@@ -11,6 +11,7 @@
 
 pub mod automount;
 pub mod catalog_source;
+pub mod deleter;
 pub mod library_reader;
 pub mod pack_reader;
 pub mod parser;
@@ -28,6 +29,7 @@ pub use automount::{
     looks_like_lunii_candidate, try_automount_lunii_candidates, MountAttempt, MountOutcome,
 };
 pub use catalog_source::{LuniiHttpCatalogSource, OfficialCatalogSource};
+pub use deleter::{DeleteFailure, DeleteOutcome, DevicePackDeleter, SystemDevicePackDeleter};
 pub use library_reader::{DeviceLibraryReader, SystemDeviceLibraryReader};
 pub use pack_reader::{AcquiredPack, DevicePackReader, SystemDevicePackReader};
 pub use parser::{compute_device_identifier, parse_metadata_version, MetadataParseError};
@@ -41,6 +43,6 @@ pub use writer::{
 
 #[cfg(test)]
 pub use mock::{
-    MockDeviceLibraryReader, MockDevicePackReader, MockDevicePackWriter, MockDeviceScanner,
-    MockOfficialCatalogSource, MockRssFeedSource,
+    MockDeviceLibraryReader, MockDevicePackDeleter, MockDevicePackReader, MockDevicePackWriter,
+    MockDeviceScanner, MockOfficialCatalogSource, MockRssFeedSource,
 };

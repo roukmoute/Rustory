@@ -61,6 +61,7 @@ pub struct DeviceOperationsSupport {
     pub inspect_story: OperationSupport,
     pub import_story: OperationSupport,
     pub write_story: OperationSupport,
+    pub delete_story: OperationSupport,
 }
 
 impl DeviceOperationsSupport {
@@ -71,6 +72,7 @@ impl DeviceOperationsSupport {
             SupportedOperation::InspectStory => self.inspect_story,
             SupportedOperation::ImportStory => self.import_story,
             SupportedOperation::WriteStory => self.write_story,
+            SupportedOperation::DeleteStory => self.delete_story,
         }
     }
 
@@ -83,6 +85,7 @@ impl DeviceOperationsSupport {
             inspect_story: self.inspect_story.is_available(),
             import_story: self.import_story.is_available(),
             write_story: self.write_story.is_available(),
+            delete_story: self.delete_story.is_available(),
         }
     }
 }
@@ -124,6 +127,7 @@ const OFFICIAL_DEVICE_SUPPORT_MATRIX: &[DeviceSupportLine] = &[
             inspect_story: OperationSupport::Available,
             import_story: OperationSupport::Available,
             write_story: OperationSupport::Available,
+            delete_story: OperationSupport::Available,
         },
     },
     // Lunii Mid-Gen v2 (metadata v6) ✅✅✅✅ — same round-trip write
@@ -137,6 +141,7 @@ const OFFICIAL_DEVICE_SUPPORT_MATRIX: &[DeviceSupportLine] = &[
             inspect_story: OperationSupport::Available,
             import_story: OperationSupport::Available,
             write_story: OperationSupport::Available,
+            delete_story: OperationSupport::Available,
         },
     },
     // Lunii V3 (metadata v7) ✅✅❌❌ — reverse engineering is still
@@ -158,6 +163,10 @@ const OFFICIAL_DEVICE_SUPPORT_MATRIX: &[DeviceSupportLine] = &[
             write_story: OperationSupport::NotAvailable {
                 reason: V3_REVERSE_ENGINEERING_REASON,
             },
+            // Deletion removes opaque bytes (delist `.pi` + remove the content
+            // folder) — cohort-agnostic and crypto-free, so V3 can delete even
+            // while writing a pack to it stays blocked on the format work.
+            delete_story: OperationSupport::Available,
         },
     },
     // FLAM Gen1 (no documented metadata version — none is invented)
@@ -175,6 +184,12 @@ const OFFICIAL_DEVICE_SUPPORT_MATRIX: &[DeviceSupportLine] = &[
             inspect_story: OperationSupport::Available,
             import_story: OperationSupport::Available,
             write_story: OperationSupport::NotAvailable {
+                reason: FLAM_WRITE_UNPROVEN_REASON,
+            },
+            // Deletion on a real FLAM is unproven (different mount/index
+            // specifics than Lunii) — kept closed with the same frozen reason
+            // until validated on hardware.
+            delete_story: OperationSupport::NotAvailable {
                 reason: FLAM_WRITE_UNPROVEN_REASON,
             },
         },
@@ -392,12 +407,14 @@ mod tests {
             inspect_story: OperationSupport::NotAvailable { reason: "why" },
             import_story: OperationSupport::Available,
             write_story: OperationSupport::NotAvailable { reason: "why" },
+            delete_story: OperationSupport::Available,
         };
         let ops = support.operations();
         assert!(ops.read_library);
         assert!(!ops.inspect_story);
         assert!(ops.import_story);
         assert!(!ops.write_story);
+        assert!(ops.delete_story);
     }
 
     #[test]
@@ -407,7 +424,11 @@ mod tests {
             inspect_story: OperationSupport::Available,
             import_story: OperationSupport::NotAvailable { reason: "closed" },
             write_story: OperationSupport::Available,
+            delete_story: OperationSupport::Available,
         };
+        assert!(support
+            .support_for(SupportedOperation::DeleteStory)
+            .is_available());
         assert!(support
             .support_for(SupportedOperation::ReadLibrary)
             .is_available());
@@ -435,6 +456,7 @@ mod tests {
                 inspect_story: OperationSupport::NotAvailable { reason: "custom" },
                 import_story: OperationSupport::NotAvailable { reason: "custom" },
                 write_story: OperationSupport::NotAvailable { reason: "custom" },
+                delete_story: OperationSupport::NotAvailable { reason: "custom" },
             },
         }];
         let ops = supported_operations_in(&matrix, FirmwareCohort::Lunii(LuniiFirmwareCohort::V3));
@@ -459,6 +481,7 @@ mod tests {
                 inspect_story: OperationSupport::Available,
                 import_story: OperationSupport::Available,
                 write_story: OperationSupport::NotAvailable { reason: "unproven" },
+                delete_story: OperationSupport::NotAvailable { reason: "unproven" },
             },
         }];
         assert_eq!(

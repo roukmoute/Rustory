@@ -559,6 +559,36 @@ pub fn append_pack_uuid(pi_bytes: &[u8], uuid_bytes: &[u8; LUNII_PACK_UUID_BYTES
     out
 }
 
+/// Remove a pack UUID's 16-byte chunk(s) from a `.pi` index payload — the exact
+/// inverse of [`append_pack_uuid`]. A UUID present as one or more clean 16-byte
+/// chunks is removed and the remaining entries keep their reading order; an
+/// absent UUID yields the payload unchanged (idempotent, so a double delete is a
+/// no-op). A trailing partial chunk of an already-corrupt index is preserved
+/// verbatim — like the append path, we never rewrite bytes we did not author.
+///
+/// Pure: the infrastructure deleter persists the returned bytes atomically
+/// (temp + rename) and delists the pack in the `.pi` BEFORE removing its content
+/// folder — the safe inverse of the write path's "files first, index second", so
+/// an interrupted delete can only orphan a content folder (harmless, sweepable),
+/// never leave a `.pi` entry pointing at deleted content.
+pub fn remove_pack_uuid(pi_bytes: &[u8], uuid_bytes: &[u8; LUNII_PACK_UUID_BYTES]) -> Vec<u8> {
+    let index = parse_pack_index(pi_bytes);
+    if !index.uuids.iter().any(|existing| existing == uuid_bytes) {
+        return pi_bytes.to_vec();
+    }
+    let mut out = Vec::with_capacity(pi_bytes.len());
+    for existing in &index.uuids {
+        if existing != uuid_bytes {
+            out.extend_from_slice(existing);
+        }
+    }
+    // Preserve any trailing partial bytes we did not author (an already-corrupt
+    // tail): reslice them from the ORIGINAL payload at its full-chunk boundary.
+    let full_chunks_len = (pi_bytes.len() / LUNII_PACK_UUID_BYTES) * LUNII_PACK_UUID_BYTES;
+    out.extend_from_slice(&pi_bytes[full_chunks_len..]);
+    out
+}
+
 /// Ensure the prepared descriptor targets the cohort of the connected device.
 ///
 /// A mismatch means the artifacts were prepared for a DIFFERENT device than the
@@ -669,6 +699,66 @@ mod tests {
         let mut multi = other.to_vec();
         multi.extend_from_slice(&uuid);
         assert_eq!(append_pack_uuid(&multi, &uuid), multi);
+    }
+
+    #[test]
+    fn remove_pack_uuid_deletes_the_target_and_keeps_the_others_in_order() {
+        let a = pack_uuid_bytes("11111111-1111-1111-1111-111111111111").unwrap();
+        let target = pack_uuid_bytes(PACK_UUID).unwrap();
+        let c = pack_uuid_bytes("33333333-3333-3333-3333-333333333333").unwrap();
+        let mut pi = a.to_vec();
+        pi.extend_from_slice(&target);
+        pi.extend_from_slice(&c);
+
+        let out = remove_pack_uuid(&pi, &target);
+        assert_eq!(out.len(), 32, "one 16-byte entry removed");
+        assert_eq!(&out[..16], &a, "the entry before keeps its place");
+        assert_eq!(&out[16..], &c, "the entry after keeps its reading order");
+    }
+
+    #[test]
+    fn remove_pack_uuid_is_idempotent_when_absent() {
+        let present = pack_uuid_bytes("11111111-1111-1111-1111-111111111111").unwrap();
+        let absent = pack_uuid_bytes(PACK_UUID).unwrap();
+        let pi = present.to_vec();
+        assert_eq!(
+            remove_pack_uuid(&pi, &absent),
+            pi,
+            "removing an absent uuid is a no-op (double delete is safe)"
+        );
+        // Removing the last remaining entry yields an empty (validly wiped) index.
+        assert!(remove_pack_uuid(&pi, &present).is_empty());
+    }
+
+    #[test]
+    fn remove_pack_uuid_purges_every_duplicate_of_a_corrupt_index() {
+        let target = pack_uuid_bytes(PACK_UUID).unwrap();
+        let keep = pack_uuid_bytes("44444444-4444-4444-4444-444444444444").unwrap();
+        let mut pi = target.to_vec();
+        pi.extend_from_slice(&keep);
+        pi.extend_from_slice(&target); // duplicate of the target
+        let out = remove_pack_uuid(&pi, &target);
+        assert_eq!(
+            out,
+            keep.to_vec(),
+            "all duplicates of the target are delisted"
+        );
+    }
+
+    #[test]
+    fn remove_pack_uuid_preserves_a_trailing_partial_chunk() {
+        let target = pack_uuid_bytes(PACK_UUID).unwrap();
+        let keep = pack_uuid_bytes("44444444-4444-4444-4444-444444444444").unwrap();
+        let mut pi = target.to_vec();
+        pi.extend_from_slice(&keep);
+        pi.extend_from_slice(&[0xAB, 0xCD, 0xEF]); // 3 trailing bytes we did not author
+        let out = remove_pack_uuid(&pi, &target);
+        let mut expected = keep.to_vec();
+        expected.extend_from_slice(&[0xAB, 0xCD, 0xEF]);
+        assert_eq!(
+            out, expected,
+            "the unauthored trailing tail is left untouched"
+        );
     }
 
     #[test]

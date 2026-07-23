@@ -27,6 +27,13 @@ export {
 } from "./hooks/use-device-bulk-import";
 
 export {
+  useDeviceStoryDelete,
+  type DeviceStoryDeleteStatus,
+  type UseDeviceStoryDelete,
+  type UseDeviceStoryDeleteOptions,
+} from "./hooks/use-device-story-delete";
+
+export {
   useTransferPreview,
   type TransferPreviewState,
   type UseTransferPreview,

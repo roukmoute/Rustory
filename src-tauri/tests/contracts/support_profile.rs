@@ -323,6 +323,7 @@ fn the_dto_format_labels_follow_the_received_line_not_the_cohort_or_kind() {
             inspect_story: OperationSupport::Available,
             import_story: OperationSupport::Available,
             write_story: OperationSupport::Available,
+            delete_story: OperationSupport::Available,
         },
     }];
     let custom_artifacts = [LocalArtifactLine {
@@ -356,6 +357,7 @@ fn a_line_version_without_a_frozen_copy_omits_the_format_key_never_invents_one()
             inspect_story: OperationSupport::Available,
             import_story: OperationSupport::Available,
             write_story: OperationSupport::Available,
+            delete_story: OperationSupport::Available,
         },
     }];
     let dto = SupportProfileDto::from_matrices(&custom_devices, &[]);
@@ -390,6 +392,9 @@ fn every_closed_cell_serializes_a_non_empty_reason_even_on_a_custom_distribution
                 reason: "Distribution personnalisée",
             },
             write_story: OperationSupport::NotAvailable {
+                reason: "Distribution personnalisée",
+            },
+            delete_story: OperationSupport::NotAvailable {
                 reason: "Distribution personnalisée",
             },
         },

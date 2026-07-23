@@ -27,6 +27,7 @@ const importableOps = {
   inspectStory: true,
   importStory: true,
   writeStory: false,
+  deleteStory: false,
 };
 
 const importError: AppError = {
@@ -757,5 +758,108 @@ describe("<DeviceStoryInspector />", () => {
     );
     const alert = screen.getByRole("alert");
     expect(alert).toHaveTextContent(/titre trop long/i);
+  });
+
+  // --- Delete from device (#5) ---
+
+  const deletableOps = { ...importableOps, deleteStory: true };
+
+  it("offers no delete affordance when the profile may not delete", () => {
+    render(
+      <DeviceStoryInspector
+        story={baseStory}
+        supportedOperations={importableOps} // deleteStory: false
+        onDelete={vi.fn()}
+      />,
+    );
+    expect(
+      screen.queryByRole("button", { name: /supprimer de l'appareil/i }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("offers no delete affordance when no handler is wired (listing-only)", () => {
+    render(
+      <DeviceStoryInspector
+        story={baseStory}
+        supportedOperations={deletableOps}
+      />,
+    );
+    expect(
+      screen.queryByRole("button", { name: /supprimer de l'appareil/i }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("requests deletion when the capability allows it and a handler is wired", async () => {
+    const user = userEvent.setup();
+    const onDelete = vi.fn();
+    render(
+      <DeviceStoryInspector
+        story={baseStory}
+        supportedOperations={deletableOps}
+        onDelete={onDelete}
+      />,
+    );
+    await user.click(
+      screen.getByRole("button", { name: /supprimer de l'appareil/i }),
+    );
+    expect(onDelete).toHaveBeenCalledWith(baseStory);
+  });
+
+  it("soft-disables the delete button and shows progress while deleting", async () => {
+    const user = userEvent.setup();
+    const onDelete = vi.fn();
+    render(
+      <DeviceStoryInspector
+        story={baseStory}
+        supportedOperations={deletableOps}
+        onDelete={onDelete}
+        deleteState={{ kind: "deleting" }}
+      />,
+    );
+    const button = screen.getByRole("button", {
+      name: /supprimer de l'appareil/i,
+    });
+    expect(button).toHaveAttribute("aria-disabled", "true");
+    expect(screen.getByText(/suppression en cours/i)).toBeInTheDocument();
+    await user.click(button);
+    expect(onDelete).not.toHaveBeenCalled();
+  });
+
+  it("confirms a completed deletion and dismisses it", async () => {
+    const user = userEvent.setup();
+    const onDismissDeleteStatus = vi.fn();
+    render(
+      <DeviceStoryInspector
+        story={baseStory}
+        supportedOperations={deletableOps}
+        onDelete={vi.fn()}
+        deleteState={{ kind: "deleted", wasPresent: true }}
+        onDismissDeleteStatus={onDismissDeleteStatus}
+      />,
+    );
+    expect(screen.getByText(/supprimée de l'appareil/i)).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: /fermer/i }));
+    expect(onDismissDeleteStatus).toHaveBeenCalledTimes(1);
+  });
+
+  it("surfaces a delete failure as an alert with its cause", () => {
+    render(
+      <DeviceStoryInspector
+        story={baseStory}
+        supportedOperations={deletableOps}
+        onDelete={vi.fn()}
+        deleteState={{
+          kind: "failed",
+          error: {
+            code: "DEVICE_DELETE_FAILED",
+            message: "Suppression impossible: l'appareil a refusé l'écriture.",
+            userAction: "Vérifie la connexion puis réessaie.",
+            details: null,
+          },
+        }}
+      />,
+    );
+    const alert = screen.getByRole("alert");
+    expect(alert).toHaveTextContent(/refusé l'écriture/i);
   });
 });

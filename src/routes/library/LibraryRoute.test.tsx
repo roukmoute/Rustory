@@ -19,6 +19,7 @@ const mockGet = vi.fn();
 const mockDevice = vi.fn();
 const mockDeviceLibrary = vi.fn();
 const mockImport = vi.fn();
+const mockDeleteDevice = vi.fn();
 const mockTransferPreview = vi.fn();
 const mockStoryValidation = vi.fn();
 const mockCatalogStatus = vi.fn();
@@ -111,6 +112,16 @@ vi.mock("../../ipc/commands/device-import", async () => {
   return {
     ...actual,
     importDeviceStory: (input: unknown) => mockImport(input),
+  };
+});
+
+vi.mock("../../ipc/commands/device-delete", async () => {
+  const actual = await vi.importActual<
+    typeof import("../../ipc/commands/device-delete")
+  >("../../ipc/commands/device-delete");
+  return {
+    ...actual,
+    deleteDeviceStory: (input: unknown) => mockDeleteDevice(input),
   };
 });
 
@@ -256,6 +267,7 @@ describe("<LibraryRoute />", () => {
     mockDeviceLibrary.mockReset();
     mockDeviceLibrary.mockResolvedValue({ kind: "none" });
     mockImport.mockReset();
+    mockDeleteDevice.mockReset();
     // Default: the transfer-preview read folds away (noDevice) so the
     // comparison stays sober unless a test opts into a readable comparison.
     mockTransferPreview.mockReset();
@@ -1602,6 +1614,7 @@ describe("<LibraryRoute />", () => {
         inspectStory: true,
         importStory: true,
         writeStory: false,
+        deleteStory: false,
       },
     });
     renderLibrary();
@@ -1828,6 +1841,7 @@ describe("<LibraryRoute />", () => {
         inspectStory: true,
         importStory: true,
         writeStory: false,
+        deleteStory: false,
       },
     });
     renderLibrary();
@@ -1883,6 +1897,7 @@ describe("<LibraryRoute />", () => {
       inspectStory: true,
       importStory: false,
       writeStory: false,
+      deleteStory: false,
     },
   };
 
@@ -2164,6 +2179,7 @@ describe("<LibraryRoute />", () => {
         inspectStory: false,
         importStory: false,
         writeStory: false,
+        deleteStory: false,
       },
     });
     mockDeviceLibrary.mockResolvedValue(readableTwo);
@@ -2237,6 +2253,7 @@ describe("<LibraryRoute />", () => {
       inspectStory: true,
       importStory: true,
       writeStory: false,
+      deleteStory: false,
     },
   };
 
@@ -2329,6 +2346,66 @@ describe("<LibraryRoute />", () => {
     });
     // The batch reports its success tally in-context.
     expect(await within(bulk).findByText(/2 importées/i)).toBeInTheDocument();
+  });
+
+  it("deletes a device story after confirmation and re-reads the inventory (AC #5)", async () => {
+    const user = userEvent.setup();
+    mockGet.mockResolvedValue({ stories: [] });
+    // A V3 whose profile OPENS delete (crypto-free) while import/write stay
+    // closed — the exact case the user asked for.
+    const deletableV3 = {
+      ...supportedV3,
+      supportedOperations: {
+        ...supportedV3.supportedOperations,
+        deleteStory: true,
+      },
+    };
+    mockDevice.mockResolvedValue(deletableV3);
+    const afterDelete = { ...readableTwo, stories: [readableTwo.stories[1]] };
+    mockDeviceLibrary
+      .mockResolvedValueOnce(readableTwo)
+      .mockResolvedValue(afterDelete);
+    mockDeleteDevice.mockResolvedValue({ packUuid: "u1", wasPresent: true });
+    renderLibrary();
+
+    const main = await screen.findByRole("main", {
+      name: /collection d'histoires/i,
+    });
+    await user.click(
+      await within(main).findByRole("button", {
+        name: /identifiant 0000abcd/i,
+      }),
+    );
+    const inspector = screen.getByRole("region", {
+      name: /histoire sélectionnée/i,
+    });
+
+    // The delete affordance is offered (V3 may delete); clicking opens a
+    // confirmation — the destructive write is never one-click.
+    await user.click(
+      within(inspector).getByRole("button", {
+        name: /supprimer de l'appareil/i,
+      }),
+    );
+    const dialog = await screen.findByRole("dialog");
+    expect(dialog).toHaveTextContent(/retirée de l'appareil/i);
+    await user.click(
+      within(dialog).getByRole("button", { name: /supprimer de l'appareil/i }),
+    );
+
+    // The command received exactly the two identifiers, and the device
+    // inventory re-reads so the deleted entry disappears.
+    await waitFor(() =>
+      expect(mockDeleteDevice).toHaveBeenCalledWith({
+        deviceIdentifier: deletableV3.deviceIdentifier,
+        packUuid: "u1",
+      }),
+    );
+    await waitFor(() =>
+      expect(
+        within(main).queryByRole("button", { name: /identifiant 0000abcd/i }),
+      ).not.toBeInTheDocument(),
+    );
   });
 
   it("copies a device story: authoritative re-reads on both sides, preserved selection, flipped CTA (AC1+AC2)", async () => {
@@ -2883,6 +2960,7 @@ describe("<LibraryRoute />", () => {
         inspectStory: false,
         importStory: false,
         writeStory: false,
+        deleteStory: false,
       },
     });
     renderLibrary();
@@ -3084,6 +3162,7 @@ describe("<LibraryRoute />", () => {
         inspectStory: false,
         importStory: false,
         writeStory: false,
+        deleteStory: false,
       },
     });
     renderLibrary();
@@ -3284,7 +3363,7 @@ describe("<LibraryRoute />", () => {
       '{"kind":"supported","family":"flam","firmwareCohort":"flamGen1",' +
         '"deviceIdentifier":"fedcba9876543210fedcba9876543210",' +
         '"supportedOperations":{"readLibrary":true,"inspectStory":true,' +
-        '"importStory":true,"writeStory":false}}',
+        '"importStory":true,"writeStory":false,"deleteStory":false}}',
     ) as ConnectedDeviceDto;
     const mapped = mapDeviceForPanel({ kind: "ready", device: flamDto }, false);
     expect(mapped.deviceState).toBe("idle");
@@ -3295,6 +3374,7 @@ describe("<LibraryRoute />", () => {
       inspectStory: true,
       importStory: true,
       writeStory: false,
+      deleteStory: false,
     });
   });
 
@@ -3308,6 +3388,7 @@ describe("<LibraryRoute />", () => {
     supportedOperations: {
       ...supportedOrigine.supportedOperations,
       writeStory: true,
+      deleteStory: false,
     },
   };
 

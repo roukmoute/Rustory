@@ -13,6 +13,7 @@ const validSupported = {
     inspectStory: true,
     importStory: true,
     writeStory: false,
+    deleteStory: true,
   },
 };
 
@@ -26,7 +27,7 @@ const validSupportedFlam = JSON.parse(
   '{"kind":"supported","family":"flam","firmwareCohort":"flamGen1",' +
     '"deviceIdentifier":"fedcba9876543210fedcba9876543210",' +
     '"supportedOperations":{"readLibrary":true,"inspectStory":true,' +
-    '"importStory":true,"writeStory":false}}',
+    '"importStory":true,"writeStory":false,"deleteStory":false}}',
 ) as Record<string, unknown>;
 
 describe("isConnectedDeviceDto — valid payloads", () => {
@@ -49,6 +50,7 @@ describe("isConnectedDeviceDto — valid payloads", () => {
           inspectStory: true,
           importStory: false,
           writeStory: false,
+          deleteStory: true,
         },
       }),
     ).toBe(true);
@@ -98,6 +100,7 @@ describe("isConnectedDeviceDto — valid payloads", () => {
           inspectStory: false,
           importStory: false,
           writeStory: false,
+          deleteStory: false,
         },
       }),
     ).toBe(true);

@@ -7,6 +7,7 @@ use crate::domain::device::{DeviceLibrary, DeviceStoryEntry};
 use crate::domain::shared::AppError;
 
 use super::catalog_source::OfficialCatalogSource;
+use super::deleter::{DeleteFailure, DeleteOutcome, DevicePackDeleter};
 use super::library_reader::DeviceLibraryReader;
 use super::pack_reader::{AcquiredPack, DevicePackReader};
 use super::rss_source::RssFeedSource;
@@ -719,6 +720,90 @@ impl DevicePackWriter for MockDevicePackWriter {
                 Ok(outcome)
             }
             WriteScript::Failure(failure) => Err(failure),
+        }
+    }
+}
+
+/// One scripted outcome of [`MockDevicePackDeleter`].
+enum DeleteScript {
+    Success(DeleteOutcome),
+    Failure(DeleteFailure),
+}
+
+/// Programmable mock for the device delete path. Records the call count (so a
+/// test can prove the capability gate blocked the delete before any device
+/// mutation) and the pack UUIDs it was asked to delete (so bulk dispatch is
+/// assertable), and returns the next scripted outcome (FIFO); an empty queue
+/// succeeds as [`DeleteOutcome::Deleted`].
+#[derive(Clone, Default)]
+pub struct MockDevicePackDeleter {
+    queue: Arc<Mutex<Vec<DeleteScript>>>,
+    calls: Arc<Mutex<u32>>,
+    deleted_uuids: Arc<Mutex<Vec<String>>>,
+}
+
+impl MockDevicePackDeleter {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// A success constating the given outcome (delisted, or already absent).
+    pub fn enqueue_success(&self, outcome: DeleteOutcome) {
+        self.push(DeleteScript::Success(outcome));
+    }
+
+    /// A failure BEFORE any device mutation (`.pi` intact).
+    pub fn enqueue_failure(&self, cause: TransferFailureCause) {
+        self.push(DeleteScript::Failure(DeleteFailure {
+            cause,
+            reached_device_mutation: false,
+        }));
+    }
+
+    /// Number of times `delete_pack` was invoked — `0` proves the gate blocked
+    /// the delete before any device mutation.
+    pub fn call_count(&self) -> u32 {
+        *self.calls.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    /// The pack UUIDs this mock was asked to delete, in call order.
+    pub fn deleted_uuids(&self) -> Vec<String> {
+        self.deleted_uuids
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
+    }
+
+    fn push(&self, script: DeleteScript) {
+        self.queue
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .push(script);
+    }
+}
+
+impl DevicePackDeleter for MockDevicePackDeleter {
+    fn delete_pack(
+        &self,
+        _mount_path: &Path,
+        pack_uuid: &str,
+    ) -> Result<DeleteOutcome, DeleteFailure> {
+        *self.calls.lock().unwrap_or_else(|p| p.into_inner()) += 1;
+        self.deleted_uuids
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .push(pack_uuid.to_string());
+        let script = {
+            let mut g = self.queue.lock().unwrap_or_else(|p| p.into_inner());
+            if g.is_empty() {
+                DeleteScript::Success(DeleteOutcome::Deleted)
+            } else {
+                g.remove(0)
+            }
+        };
+        match script {
+            DeleteScript::Success(outcome) => Ok(outcome),
+            DeleteScript::Failure(failure) => Err(failure),
         }
     }
 }

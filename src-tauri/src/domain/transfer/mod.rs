@@ -21,7 +21,7 @@ pub use preparation::{
 };
 pub use transfer::{
     append_pack_uuid, build_write_plan, classify, classify_verify, compose_verified_summary,
-    ensure_cohort_coherent, failure_copy, pack_uuid_bytes, short_id_from_pack_uuid, ChecksumProbe,
-    PackWriteFile, PackWritePlan, TransferCompleteness, TransferFailureCause, VerifiedSummary,
-    VerifyVerdict, WriteOutcome,
+    ensure_cohort_coherent, failure_copy, pack_uuid_bytes, remove_pack_uuid,
+    short_id_from_pack_uuid, ChecksumProbe, PackWriteFile, PackWritePlan, TransferCompleteness,
+    TransferFailureCause, VerifiedSummary, VerifyVerdict, WriteOutcome,
 };

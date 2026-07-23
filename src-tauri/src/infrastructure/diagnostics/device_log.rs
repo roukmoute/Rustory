@@ -131,6 +131,24 @@ pub enum Event {
         kind: Option<String>,
         elapsed_ms: u64,
     },
+    /// A device story was deleted (delisted + content removed). Carries the
+    /// FAMILY/COHORT tags of the re-scanned profile, whether the pack was
+    /// actually present (`false` = idempotent no-op) and the wall-clock
+    /// elapsed time. NO pack UUID / short id — a deletion needs no per-pack
+    /// identifier in the trace (same PII discipline as every device event).
+    DeviceStoryDeleted {
+        family: &'static str,
+        firmware_cohort: &'static str,
+        was_present: bool,
+        elapsed_ms: u64,
+    },
+    /// A device-story delete failed. `source` is the closed delete taxonomy
+    /// (`device_changed`, `capability_gate`, `delete_rejected`,
+    /// `spawn_blocking_join`, `other`).
+    DeviceStoryDeleteFailed {
+        source: &'static str,
+        elapsed_ms: u64,
+    },
 }
 
 /// Append a single event to the device log. Production entry point —

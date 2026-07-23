@@ -14,6 +14,7 @@ fn supported_dto() -> ConnectedDeviceDto {
             inspect_story: true,
             import_story: true,
             write_story: false,
+            delete_story: true,
         },
     }
 }
@@ -24,12 +25,14 @@ fn supported_flam_dto() -> ConnectedDeviceDto {
         firmware_cohort: FirmwareCohortDto::FlamGen1,
         metadata_format_version: None,
         device_identifier: "fedcba9876543210fedcba9876543210".into(),
-        // The FLAM Gen1 matrix line: read capabilities ✅✅✅, write ❌.
+        // The FLAM Gen1 matrix line: read capabilities ✅✅✅, write ❌,
+        // delete ❌ (unproven on real FLAM hardware).
         supported_operations: SupportedOperationsDto {
             read_library: true,
             inspect_story: true,
             import_story: true,
             write_story: false,
+            delete_story: false,
         },
     }
 }
@@ -56,6 +59,7 @@ fn connected_device_supported_origine_v1_round_trip_wire_shape() {
                 "inspectStory": true,
                 "importStory": true,
                 "writeStory": false,
+                "deleteStory": true,
             },
         })
     );
@@ -73,12 +77,16 @@ fn connected_device_supported_v3_serializes_with_import_story_false() {
             inspect_story: true,
             import_story: false,
             write_story: false,
+            delete_story: true,
         },
     };
     let v = serde_json::to_value(&dto).expect("ser");
     assert_eq!(v["firmwareCohort"], "v3");
     assert_eq!(v["supportedOperations"]["importStory"], false);
     assert_eq!(v["supportedOperations"]["writeStory"], false);
+    // V3 CAN delete even while import/write stay closed — deletion is
+    // crypto-free (delist + remove opaque bytes).
+    assert_eq!(v["supportedOperations"]["deleteStory"], true);
 }
 
 #[test]
@@ -116,7 +124,13 @@ fn connected_device_ambiguous_with_2_candidates() {
 fn supported_operations_dto_uses_camel_case_only() {
     let v = serde_json::to_value(supported_dto()).expect("ser");
     let ops = &v["supportedOperations"];
-    for camel in ["readLibrary", "inspectStory", "importStory", "writeStory"] {
+    for camel in [
+        "readLibrary",
+        "inspectStory",
+        "importStory",
+        "writeStory",
+        "deleteStory",
+    ] {
         assert!(ops.get(camel).is_some(), "missing camelCase field: {camel}");
     }
     for snake in [
@@ -124,6 +138,7 @@ fn supported_operations_dto_uses_camel_case_only() {
         "inspect_story",
         "import_story",
         "write_story",
+        "delete_story",
     ] {
         assert!(
             ops.get(snake).is_none(),
@@ -200,9 +215,11 @@ fn connected_device_supported_does_not_emit_snake_case_aliases() {
 }
 
 /// Byte-for-byte INVARIANCE of the Lunii supported wire: the exact JSON
-/// string emitted before the FLAM extension, frozen as a literal. The
-/// `Option<u8>` migration of `metadataFormatVersion` must not deform the
-/// MVP wire by a single byte — key present, plain integer, same order.
+/// string frozen as a literal. `deleteStory` was appended as a deliberate
+/// wire extension (device-delete capability) AFTER `writeStory`, keeping every
+/// prior field's position and value; the `Option<u8>` migration of
+/// `metadataFormatVersion` still must not deform the wire — key present, plain
+/// integer, same order.
 #[test]
 fn connected_device_supported_lunii_wire_string_is_byte_for_byte_unchanged() {
     let s = serde_json::to_string(&supported_dto()).expect("ser");
@@ -212,7 +229,7 @@ fn connected_device_supported_lunii_wire_string_is_byte_for_byte_unchanged() {
          \"metadataFormatVersion\":3,\
          \"deviceIdentifier\":\"0123456789abcdef0123456789abcdef\",\
          \"supportedOperations\":{\"readLibrary\":true,\"inspectStory\":true,\
-         \"importStory\":true,\"writeStory\":false}}"
+         \"importStory\":true,\"writeStory\":false,\"deleteStory\":true}}"
     );
 }
 
@@ -229,7 +246,7 @@ fn connected_device_supported_flam_wire_string_omits_version_key() {
         "{\"kind\":\"supported\",\"family\":\"flam\",\"firmwareCohort\":\"flamGen1\",\
          \"deviceIdentifier\":\"fedcba9876543210fedcba9876543210\",\
          \"supportedOperations\":{\"readLibrary\":true,\"inspectStory\":true,\
-         \"importStory\":true,\"writeStory\":false}}"
+         \"importStory\":true,\"writeStory\":false,\"deleteStory\":false}}"
     );
     assert!(!s.contains("metadataFormatVersion"));
     assert!(!s.contains("null"));

@@ -109,6 +109,7 @@ describe("<LuniiDecisionPanel />", () => {
       inspectStory: false,
       importStory: false,
       writeStory: false,
+      deleteStory: false,
     };
 
     it("renders the STATIC 'Appareil reconnu — …' chip instead of 'Appareil prêt' (recognized ≠ ready)", () => {
@@ -187,6 +188,7 @@ describe("<LuniiDecisionPanel />", () => {
             inspectStory: true,
             importStory: true,
             writeStory: false,
+            deleteStory: false,
           }}
           deviceFamily="flam"
           onEdit={noop}
@@ -218,6 +220,7 @@ describe("<LuniiDecisionPanel />", () => {
             inspectStory: true,
             importStory: false,
             writeStory: false,
+            deleteStory: false,
           }}
           deviceFamily="lunii"
           onEdit={noop}
@@ -268,6 +271,7 @@ describe("<LuniiDecisionPanel />", () => {
             inspectStory: true,
             importStory: false,
             writeStory: false,
+            deleteStory: false,
           }}
           deviceFamily="lunii"
           onEdit={noop}
@@ -317,6 +321,7 @@ describe("<LuniiDecisionPanel />", () => {
       inspectStory: true,
       importStory: true,
       writeStory: false,
+      deleteStory: false,
     };
 
     it("renders 'Appareil prêt — FLAM' through the EXISTING hasAnyCapability rule", () => {
@@ -469,6 +474,7 @@ describe("<LuniiDecisionPanel />", () => {
             inspectStory: true,
             importStory: true,
             writeStory: true,
+            deleteStory: false,
           }}
           deviceFamily="lunii"
           comparison={{ kind: "none", reason: "no-device" }}
@@ -508,6 +514,7 @@ describe("<LuniiDecisionPanel />", () => {
             inspectStory: true,
             importStory: true,
             writeStory: true,
+            deleteStory: false,
           }}
           deviceFamily="lunii"
           transfer={{
@@ -705,6 +712,7 @@ describe("<LuniiDecisionPanel />", () => {
           inspectStory: true,
           importStory: true,
           writeStory: false,
+          deleteStory: false,
         }}
         onEdit={noop}
       />,

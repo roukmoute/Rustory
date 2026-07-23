@@ -35,6 +35,10 @@ pub struct AppState {
     pub device_scanner: std::sync::Arc<dyn infrastructure::device::DeviceScanner>,
     pub library_reader: std::sync::Arc<dyn infrastructure::device::DeviceLibraryReader>,
     pub pack_reader: std::sync::Arc<dyn infrastructure::device::DevicePackReader>,
+    /// Deletes a story from a writable device (delist `.pi` + remove content).
+    /// Behind an `Arc` + `spawn_blocking` like the other device I/O; gated by
+    /// the `delete_story` capability before any mutation.
+    pub pack_deleter: std::sync::Arc<dyn infrastructure::device::DevicePackDeleter>,
     /// Source of the official catalog for the EXPLICIT fetch (story 2-6,
     /// Phase C). Behind an `Arc` + `spawn_blocking` like the other device
     /// I/O. Networked, never invoked implicitly.
@@ -465,6 +469,9 @@ pub fn run() {
                 pack_reader: std::sync::Arc::new(
                     infrastructure::device::SystemDevicePackReader,
                 ),
+                pack_deleter: std::sync::Arc::new(
+                    infrastructure::device::SystemDevicePackDeleter,
+                ),
                 catalog_source: std::sync::Arc::new(
                     infrastructure::device::LuniiHttpCatalogSource::default(),
                 ),
@@ -537,6 +544,7 @@ pub fn run() {
             commands::story::get_story_detail,
             commands::catalog::import_official_catalog,
             commands::device::import_device_story,
+            commands::device::delete_device_story,
             commands::story::move_story_node,
             commands::device::read_connected_lunii,
             commands::import_export::read_content_source_policy,

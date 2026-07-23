@@ -12,6 +12,7 @@ import {
   useConnectedLunii,
   useDeviceBulkImport,
   useDeviceLibrary,
+  useDeviceStoryDelete,
   useDeviceStoryImport,
   useDeviceStoryTitle,
   useOfficialCatalog,
@@ -219,6 +220,7 @@ export function LibraryRoute(): React.JSX.Element {
     null,
   );
   const confirmDeleteId = useId();
+  const confirmDeleteDeviceId = useId();
   const handleStoryContextMenu = (id: string, x: number, y: number): void => {
     setStoryMenu({ id, x, y });
   };
@@ -1005,6 +1007,44 @@ export function LibraryRoute(): React.JSX.Element {
     void deviceBulkImport.start(readableDeviceId, packUuids);
   };
 
+  // Delete-from-device flow. On success the device inventory re-reads so the
+  // deleted entry disappears; the LOCAL library is untouched (device delete is
+  // independent of any local copy). The confirmation dialog is route-owned —
+  // a destructive device write is never one-click.
+  const deviceDelete = useDeviceStoryDelete({
+    onDeleted: () => {
+      deviceLibrary.refresh();
+    },
+  });
+  const [confirmDeleteDeviceStory, setConfirmDeleteDeviceStory] =
+    useState<DeviceStoryDto | null>(null);
+
+  // Mirror of the Rust capability gate: the delete affordance is wired only
+  // when the authoritative matrix POSITIVELY allows `deleteStory` (V3 does —
+  // deletion needs no cipher). Rust stays the authority; this only shapes UI.
+  const canDeleteDeviceStory =
+    canInspect && supportedDeviceOperations?.deleteStory === true;
+
+  const handleRequestDeleteDeviceStory = (story: DeviceStoryDto): void => {
+    // Open the confirmation; the actual delete fires on confirm.
+    setConfirmDeleteDeviceStory(story);
+  };
+
+  const handleConfirmDeleteDeviceStory = (): void => {
+    const story = confirmDeleteDeviceStory;
+    setConfirmDeleteDeviceStory(null);
+    if (!story || !readableDeviceId) return;
+    void deviceDelete.triggerDelete(readableDeviceId, story.uuid);
+  };
+
+  // Scope the delete status to the card it belongs to (like the import/title
+  // statuses), so selecting another card never shows this one's status.
+  const selectedDeviceDeleteState =
+    singleDeviceUuid !== null &&
+    singleDeviceUuid === deviceDelete.targetPackUuid
+      ? deviceDelete.status
+      : undefined;
+
   // Device-story naming flow (Phase B). A purely local write keyed by pack
   // UUID; on success the device inventory re-reads so the new title surfaces
   // from the single Rust-owned resolution (a user title outranks any later
@@ -1215,6 +1255,13 @@ export function LibraryRoute(): React.JSX.Element {
                 onSetTitle={handleSetDeviceStoryTitle}
                 titleState={selectedDeviceTitleState}
                 onDismissTitleError={deviceTitle.reset}
+                onDelete={
+                  canDeleteDeviceStory
+                    ? handleRequestDeleteDeviceStory
+                    : undefined
+                }
+                deleteState={selectedDeviceDeleteState}
+                onDismissDeleteStatus={deviceDelete.dismissStatus}
               />
             )}
             <LuniiDecisionPanel
@@ -1339,6 +1386,34 @@ export function LibraryRoute(): React.JSX.Element {
               Confirmer la suppression
             </Button>
             <Button variant="quiet" onClick={() => setConfirmDeleteIds(null)}>
+              Annuler
+            </Button>
+          </div>
+        </Dialog>
+      ) : null}
+      {confirmDeleteDeviceStory !== null ? (
+        <Dialog
+          open
+          onClose={() => setConfirmDeleteDeviceStory(null)}
+          title="Supprimer de l'appareil ?"
+          ariaDescribedBy={confirmDeleteDeviceId}
+        >
+          <p id={confirmDeleteDeviceId}>
+            {`« ${
+              confirmDeleteDeviceStory.title ?? "Cette histoire"
+            } » sera retirée de l'appareil : son entrée est délistée et son contenu supprimé du support. Cette action est définitive et ne touche pas ta bibliothèque locale.`}
+          </p>
+          <div className="library-route__confirm-actions">
+            <Button
+              variant="destructive"
+              onClick={handleConfirmDeleteDeviceStory}
+            >
+              Supprimer de l'appareil
+            </Button>
+            <Button
+              variant="quiet"
+              onClick={() => setConfirmDeleteDeviceStory(null)}
+            >
               Annuler
             </Button>
           </div>

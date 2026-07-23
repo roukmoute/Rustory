@@ -8,6 +8,7 @@
 //! the full pipeline without any runtime dependency.
 
 pub mod catalog;
+pub mod delete;
 pub mod import;
 pub mod library;
 pub mod preflight;

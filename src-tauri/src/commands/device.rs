@@ -2,6 +2,7 @@ use std::time::{Duration, Instant};
 
 use tauri::{AppHandle, Manager, State};
 
+use crate::application::device::delete::DeleteDeviceStoryRequest;
 use crate::application::device::import::ImportDeviceStoryRequest;
 use crate::application::device::library::DeviceLibraryOutcome;
 use crate::application::device::title::{resolve_local_truth, set_user_title, LocalTruth};
@@ -12,9 +13,10 @@ use crate::domain::shared::AppError;
 use crate::infrastructure::device::{MountAttempt, MountOutcome};
 use crate::infrastructure::diagnostics::device_log;
 use crate::ipc::dto::{
-    ConnectedDeviceDto, DeviceLibraryDto, DeviceStoryTitleDto, ImportDeviceStoryInputDto,
-    ImportDeviceStoryOutcomeDto, ReadStoryValidationInputDto, ReadTransferPreviewInputDto,
-    SetDeviceStoryTitleInputDto, StoryValidationDto, TransferPreviewDto,
+    ConnectedDeviceDto, DeleteDeviceStoryInputDto, DeleteDeviceStoryOutcomeDto, DeviceLibraryDto,
+    DeviceStoryTitleDto, ImportDeviceStoryInputDto, ImportDeviceStoryOutcomeDto,
+    ReadStoryValidationInputDto, ReadTransferPreviewInputDto, SetDeviceStoryTitleInputDto,
+    StoryValidationDto, TransferPreviewDto,
 };
 use crate::AppState;
 
@@ -36,6 +38,12 @@ pub const DEVICE_LIBRARY_READ_BUDGET: Duration = Duration::from_millis(5000);
 /// timer of its own (Rust owns the bound, like the export flow); the
 /// deadline is re-checked between files and between copy chunks.
 pub const IMPORT_DEVICE_STORY_BUDGET: Duration = Duration::from_secs(300);
+
+/// Wall-clock budget for a device-story delete. A delete is a small `.pi`
+/// rewrite plus a content-folder removal (no bulk copy), so a tighter bound
+/// than the import budget is ample; it still covers a slow USB unlink of a
+/// large pack folder.
+pub const DELETE_DEVICE_STORY_BUDGET: Duration = Duration::from_secs(60);
 
 /// Read the currently-connected supported device (Lunii, MVP).
 ///
@@ -521,6 +529,61 @@ pub async fn import_device_story(
     outcome.map(ImportDeviceStoryOutcomeDto::from_outcome)
 }
 
+/// Delete the device story identified by `packUuid` from the connected
+/// supported device identified by `deviceIdentifier` ("Supprimer de
+/// l'appareil").
+///
+/// A DEVICE MUTATION, so the same discipline as the import/transfer commands:
+/// async + `spawn_blocking`, an authoritative re-scan + capability gate BEFORE
+/// any byte is touched, and exactly two identifiers across the boundary (Rust
+/// re-resolves the mount path and the content folder itself — no path crosses
+/// IPC). The gate here is the `delete_story` capability, distinct from
+/// `write_story`: a V3 may delete even though it may not (yet) be written to.
+#[tauri::command]
+pub async fn delete_device_story(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    input: DeleteDeviceStoryInputDto,
+) -> Result<DeleteDeviceStoryOutcomeDto, AppError> {
+    validate_delete_input(&input)?;
+
+    let scanner = state.device_scanner.clone();
+    let deleter = state.pack_deleter.clone();
+    let request = DeleteDeviceStoryRequest {
+        device_identifier: input.device_identifier,
+        pack_uuid: input.pack_uuid,
+    };
+    let started = Instant::now();
+
+    let outcome = tauri::async_runtime::spawn_blocking(move || {
+        device::delete::delete_device_story(
+            scanner.as_ref(),
+            deleter.as_ref(),
+            &request,
+            DELETE_DEVICE_STORY_BUDGET,
+        )
+    })
+    .await
+    .map_err(|_| delete_join_error())?;
+
+    let elapsed_ms = started.elapsed().as_millis() as u64;
+    let event = match &outcome {
+        Ok(deleted) => device_log::Event::DeviceStoryDeleted {
+            family: deleted.family.diagnostic_tag(),
+            firmware_cohort: deleted.firmware_cohort.diagnostic_tag(),
+            was_present: deleted.was_present,
+            elapsed_ms,
+        },
+        Err(err) => device_log::Event::DeviceStoryDeleteFailed {
+            source: delete_failure_source(err),
+            elapsed_ms,
+        },
+    };
+    let _ = device_log::record_event(&app, event);
+
+    outcome.map(DeleteDeviceStoryOutcomeDto::from_outcome)
+}
+
 /// Name (or rename) a device story that no catalog recognizes.
 ///
 /// Synchronous: a single bounded SQLite write, no device I/O. Reuses the
@@ -555,6 +618,56 @@ fn validate_import_input(input: &ImportDeviceStoryInputDto) -> Result<(), AppErr
         return Err(invalid_import_input("invalid_pack_uuid"));
     }
     Ok(())
+}
+
+/// Strict boundary validation of the delete input — same discipline as the
+/// import: both identifiers normally come from Rust's own DTOs, so a malformed
+/// value is a frontend bug, refused explicitly before any device touch.
+fn validate_delete_input(input: &DeleteDeviceStoryInputDto) -> Result<(), AppError> {
+    if !is_32_lowercase_hex(&input.device_identifier) {
+        return Err(invalid_delete_input("invalid_device_identifier"));
+    }
+    if !is_canonical_pack_uuid(&input.pack_uuid) {
+        return Err(invalid_delete_input("invalid_pack_uuid"));
+    }
+    Ok(())
+}
+
+fn invalid_delete_input(cause: &'static str) -> AppError {
+    AppError::device_delete_failed(
+        "Suppression impossible: requête invalide.",
+        "Relance la lecture de la bibliothèque de l'appareil puis réessaie.",
+    )
+    .with_details(serde_json::json!({
+        "source": "other",
+        "kind": "invalid_input",
+        "cause": cause,
+    }))
+}
+
+fn delete_join_error() -> AppError {
+    AppError::device_delete_failed(
+        "Suppression impossible: tâche interrompue.",
+        "Réessaie ; si le problème persiste, redémarre Rustory.",
+    )
+    .with_details(serde_json::json!({
+        "source": "spawn_blocking_join",
+    }))
+}
+
+/// Map a delete AppError to the closed diagnostic `source` set for the event.
+fn delete_failure_source(err: &AppError) -> &'static str {
+    err.details
+        .as_ref()
+        .and_then(|d| d.get("source").and_then(|s| s.as_str()))
+        .map(|s| match s {
+            "device_changed" => "device_changed",
+            "capability_gate" => "capability_gate",
+            "delete_rejected" => "delete_rejected",
+            "spawn_blocking_join" => "spawn_blocking_join",
+            _ => "other",
+        })
+        .unwrap_or("other")
 }
 
 fn invalid_import_input(cause: &'static str) -> AppError {
