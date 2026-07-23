@@ -149,6 +149,18 @@
   display: flex;
   flex-direction: column;
   gap: var(--space-2);
+  /* Always-visible action bar: the export status + the Exporter / Retour
+     buttons stick to the bottom of the viewport while the editor scrolls,
+     so they are reachable without scrolling to the very end of the page.
+     The negative horizontal margin + matching padding let the opaque
+     background span the shell's gutters and cover content scrolling behind. */
+  position: sticky;
+  bottom: 0;
+  z-index: 5;
+  margin: 0 calc(-1 * var(--space-5)) calc(-1 * var(--space-5));
+  padding: var(--space-3) var(--space-5);
+  background: var(--color-surface-base);
+  border-top: 1px solid var(--color-border-subtle);
 }
 
 .story-editor-shell__actions {
