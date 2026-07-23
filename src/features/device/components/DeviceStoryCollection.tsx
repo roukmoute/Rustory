@@ -13,6 +13,13 @@ import {
 
 import "./DeviceStoryCollection.css";
 
+/** How a selection gesture changes the current set: `replace` collapses it to
+ *  the one story (single inspection); `toggle` adds/removes it (multi). Mirror
+ *  of the local library's `StoryCardSelectionMode`. */
+export type DeviceStorySelectionMode = "replace" | "toggle";
+
+const EMPTY_UUIDS: ReadonlySet<string> = new Set();
+
 export interface DeviceStoryCollectionProps {
   state: DeviceLibraryState;
   /** True while a re-read runs on top of an already-displayed snapshot. */
@@ -20,14 +27,14 @@ export interface DeviceStoryCollectionProps {
   /** Human label of the connected device (e.g. "Lunii V3"), shown in the
    *  section heading so the provenance is explicit. */
   deviceLabel?: string;
-  /** UUID of the device story currently selected for inspection, or
-   *  null/undefined when none is. Only meaningful when `onSelectStory` is
-   *  wired. */
-  selectedUuid?: string | null;
-  /** Select (or, on the already-selected card, deselect) a device story for
-   *  inspection. When omitted, the cards stay non-interactive — listing
-   *  only, the pre-inspection behavior. */
-  onSelectStory?: (uuid: string) => void;
+  /** UUIDs currently selected. Exactly one → single inspection; several →
+   *  the bulk surface. Only meaningful when `onSelectStory` is wired. */
+  selectedUuids?: ReadonlySet<string>;
+  /** Select a device story. `replace` collapses the selection to this one
+   *  (inspection); `toggle` adds/removes it (multi-selection for a bulk
+   *  action). When omitted, the cards stay non-interactive — listing only,
+   *  the pre-inspection behavior. */
+  onSelectStory?: (uuid: string, mode: DeviceStorySelectionMode) => void;
   /** Re-run the device-library read (recovery action on the error state). */
   onRetry: () => void;
 }
@@ -40,9 +47,10 @@ export interface DeviceStoryCollectionProps {
  *
  * Each entry is an opaque, "non reconnue" pack identity (the device stores
  * no title; Rustory consults no catalog in the MVP). When `onSelectStory`
- * is wired, each entry becomes single-selectable so the user can inspect it
- * before import (see ui-states.md#Device Story Inspection Contract); the
- * import flow itself is a later story.
+ * is wired, each entry becomes selectable: a plain click selects exactly one
+ * (single inspection), Ctrl/Cmd+click toggles it into a multi-selection for a
+ * bulk action (see ui-states.md#Device Story Inspection Contract). The whole
+ * gesture set mirrors the local library so the two collections feel alike.
  *
  * States map 1-to-1 to the hook:
  * - `idle`    → nothing to show (no readable device): render nothing.
@@ -55,7 +63,7 @@ export function DeviceStoryCollection({
   state,
   isRefreshing,
   deviceLabel,
-  selectedUuid,
+  selectedUuids = EMPTY_UUIDS,
   onSelectStory,
   onRetry,
 }: DeviceStoryCollectionProps): React.JSX.Element | null {
@@ -157,8 +165,18 @@ export function DeviceStoryCollection({
           >
             {isRefreshing
               ? "Actualisation…"
-              : countLabel(state.stories.length)}
+              : countLabel(state.stories.length, selectedUuids.size)}
           </p>
+          {onSelectStory !== undefined ? (
+            <p className="device-story-collection__selection-hint">
+              Clique une histoire pour l'inspecter.{" "}
+              <kbd className="device-story-collection__kbd">Ctrl</kbd>
+              <span aria-hidden="true">+</span>clic (ou{" "}
+              <kbd className="device-story-collection__kbd">Cmd</kbd>
+              <span aria-hidden="true">+</span>clic sur macOS) pour en
+              sélectionner plusieurs et les importer en une fois.
+            </p>
+          ) : null}
           <ul
             className="device-story-collection__list"
             onFocus={handleListFocus}
@@ -172,8 +190,10 @@ export function DeviceStoryCollection({
                 <DeviceStoryCard
                   story={story}
                   isSelected={
-                    onSelectStory !== undefined && story.uuid === selectedUuid
+                    onSelectStory !== undefined &&
+                    selectedUuids.has(story.uuid)
                   }
+                  selectionSize={selectedUuids.size}
                   onSelect={onSelectStory}
                 />
               </li>
@@ -188,9 +208,13 @@ export function DeviceStoryCollection({
 interface DeviceStoryCardProps {
   story: DeviceStoryDto;
   isSelected: boolean;
-  /** When provided, the card is an interactive single-selection control;
-   *  when omitted, it renders as a static, listing-only entry. */
-  onSelect?: (uuid: string) => void;
+  /** Size of the whole selection, so a plain click can preserve a
+   *  multi-selection (never silently collapse it) exactly like the local
+   *  library's card. */
+  selectionSize: number;
+  /** When provided, the card is an interactive selection control; when
+   *  omitted, it renders as a static, listing-only entry. */
+  onSelect?: (uuid: string, mode: DeviceStorySelectionMode) => void;
 }
 
 /**
@@ -198,14 +222,16 @@ interface DeviceStoryCardProps {
  * shows the real title + a provenance chip (officiel / non-officiel / saisi);
  * otherwise it falls back to "Histoire non reconnue" — reserved for genuinely
  * unknown packs (AC1). With `onSelect`, the card is a `role="button"
- * aria-pressed` focus stop whose activation (click, Space or Enter) toggles
- * its selection, signaled redundantly (border + visible `✓` prefix +
- * `aria-pressed`) so it survives grayscale and color-blindness. There is no
- * open/edit affordance here; naming happens in the inspector.
+ * aria-pressed` focus stop: plain click / Enter select exactly this one,
+ * Ctrl/Cmd+click / Space toggle it into a multi-selection. The state is
+ * signaled redundantly (border + visible `✓` prefix + `aria-pressed`) so it
+ * survives grayscale and color-blindness. There is no open/edit affordance
+ * here; naming happens in the inspector.
  */
 function DeviceStoryCard({
   story,
   isSelected,
+  selectionSize,
   onSelect,
 }: DeviceStoryCardProps): React.JSX.Element {
   const interactive = onSelect !== undefined;
@@ -225,8 +251,27 @@ function DeviceStoryCard({
   // carries the accessible name, so the image is aria-hidden.
   const coverUrl = usePackCover(story.uuid, story.thumbnail !== null);
 
-  const handleClick = (): void => {
-    onSelect?.(story.uuid);
+  const handleClick = (event: React.MouseEvent<HTMLDivElement>): void => {
+    // Shift+click (range selection) is out of scope, exactly like the local
+    // library — swallow it so it never falls through to a silent replace.
+    if (event.shiftKey) {
+      event.preventDefault();
+      return;
+    }
+    if (event.metaKey || event.ctrlKey) {
+      onSelect?.(story.uuid, "toggle");
+      return;
+    }
+    // On the already-selected card within a multi-selection, a plain click is
+    // a no-op so it never silently collapses the set to this one.
+    if (isSelected && selectionSize > 1) return;
+    // On the only selected card, a plain click toggles it off — a click should
+    // be the inverse of itself without forcing the Ctrl shortcut.
+    if (isSelected && selectionSize === 1) {
+      onSelect?.(story.uuid, "toggle");
+      return;
+    }
+    onSelect?.(story.uuid, "replace");
   };
 
   const handleKeyDown = (event: React.KeyboardEvent<HTMLDivElement>): void => {
@@ -242,13 +287,17 @@ function DeviceStoryCard({
       }
       return;
     }
-    if (
-      event.key === " " ||
-      event.key === "Spacebar" ||
-      event.key === "Enter"
-    ) {
+    // Space toggles this card into/out of the selection (multi); Enter selects
+    // exactly this one (single inspection) — the keyboard mirror of plain vs
+    // Ctrl+click.
+    if (event.key === " " || event.key === "Spacebar") {
       event.preventDefault();
-      onSelect?.(story.uuid);
+      onSelect?.(story.uuid, "toggle");
+      return;
+    }
+    if (event.key === "Enter") {
+      event.preventDefault();
+      onSelect?.(story.uuid, "replace");
     }
   };
 
@@ -325,6 +374,12 @@ function DeviceStoryCard({
   );
 }
 
-function countLabel(count: number): string {
-  return `${count} histoire${count > 1 ? "s" : ""} sur l'appareil`;
+function countLabel(count: number, selectedCount: number): string {
+  const base = `${count} histoire${count > 1 ? "s" : ""} sur l'appareil`;
+  if (selectedCount === 0) return base;
+  const selectedClause =
+    selectedCount === 1
+      ? " — 1 sélectionnée"
+      : ` — ${selectedCount} sélectionnées`;
+  return `${base}${selectedClause}`;
 }

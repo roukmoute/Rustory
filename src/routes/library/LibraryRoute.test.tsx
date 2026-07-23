@@ -2277,6 +2277,60 @@ describe("<LibraryRoute />", () => {
     expect(mockImport).not.toHaveBeenCalled();
   });
 
+  it("multi-selects device stories and bulk-imports the whole selection (AC #4)", async () => {
+    const user = userEvent.setup();
+    mockGet.mockResolvedValue({ stories: [] });
+    mockDevice.mockResolvedValue(supportedOrigine); // importStory: true
+    mockDeviceLibrary.mockResolvedValue(readableTwo); // u1 + u2, both importable
+    mockImport.mockResolvedValue(importOutcome);
+    renderLibrary();
+
+    const main = await screen.findByRole("main", {
+      name: /collection d'histoires/i,
+    });
+    // Plain click selects one → the single inspector.
+    await user.click(
+      await within(main).findByRole("button", {
+        name: /identifiant 0000abcd/i,
+      }),
+    );
+    expect(
+      screen.getByRole("region", { name: /histoire sélectionnée/i }),
+    ).toBeInTheDocument();
+
+    // Ctrl+click a second card → multi-selection; the bulk surface replaces
+    // the single inspector.
+    await user.keyboard("{Control>}");
+    await user.click(
+      within(main).getByRole("button", { name: /identifiant 0000beef/i }),
+    );
+    await user.keyboard("{/Control}");
+
+    const bulk = screen.getByRole("region", {
+      name: /2 histoires sélectionnées/i,
+    });
+    expect(
+      screen.queryByRole("region", { name: /histoire sélectionnée/i }),
+    ).not.toBeInTheDocument();
+    expect(within(bulk).getByText(/2 importables/i)).toBeInTheDocument();
+
+    // One batch action copies BOTH packs, each through the single-copy IPC.
+    await user.click(
+      within(bulk).getByRole("button", { name: /importer les 2 histoires/i }),
+    );
+    await waitFor(() => expect(mockImport).toHaveBeenCalledTimes(2));
+    expect(mockImport).toHaveBeenCalledWith({
+      deviceIdentifier: supportedOrigine.deviceIdentifier,
+      packUuid: "u1",
+    });
+    expect(mockImport).toHaveBeenCalledWith({
+      deviceIdentifier: supportedOrigine.deviceIdentifier,
+      packUuid: "u2",
+    });
+    // The batch reports its success tally in-context.
+    expect(await within(bulk).findByText(/2 importées/i)).toBeInTheDocument();
+  });
+
   it("copies a device story: authoritative re-reads on both sides, preserved selection, flipped CTA (AC1+AC2)", async () => {
     const user = userEvent.setup();
     mockGet.mockResolvedValue({ stories: [] });

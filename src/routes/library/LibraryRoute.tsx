@@ -4,10 +4,13 @@ import { useNavigate } from "react-router-dom";
 
 import {
   CatalogPanel,
+  DeviceBulkImportPanel,
   DeviceStoryCollection,
+  type DeviceStorySelectionMode,
   DeviceStoryInspector,
   invalidatePackCoverCache,
   useConnectedLunii,
+  useDeviceBulkImport,
   useDeviceLibrary,
   useDeviceStoryImport,
   useDeviceStoryTitle,
@@ -83,6 +86,10 @@ const OS_OPEN_BUSY_NOTICE =
  */
 const DROP_BUSY_NOTICE =
   "Une opération est déjà en cours dans la bibliothèque. Termine-la, puis dépose à nouveau ton fichier ou ton dossier.";
+
+/** Stable empty device selection so an "empty" render keeps referential
+ *  identity (no new Set() per render feeding the purge effect's deps). */
+const EMPTY_DEVICE_SELECTION: ReadonlySet<string> = new Set();
 
 export function LibraryRoute(): React.JSX.Element {
   const { state, retry, invalidate } = useLibraryOverview();
@@ -878,49 +885,83 @@ export function LibraryRoute(): React.JSX.Element {
     readableDeviceId !== null &&
     supportedDeviceOperations?.inspectStory === true;
 
-  // Device-story selection for inspection. Local UI state, intentionally
-  // SEPARATE from the library's `selectedStoryIds`: device truth and local
-  // truth never merge. Single selection, never persisted.
-  const [selectedDeviceStoryUuid, setSelectedDeviceStoryUuid] = useState<
-    string | null
-  >(null);
+  // Device-story selection. Local UI state, intentionally SEPARATE from the
+  // library's `selectedStoryIds`: device truth and local truth never merge.
+  // A SET so several can be picked for a bulk import; never persisted.
+  // Exactly one selected → single inspection; several → the bulk surface.
+  const [selectedDeviceUuids, setSelectedDeviceUuids] = useState<
+    ReadonlySet<string>
+  >(EMPTY_DEVICE_SELECTION);
 
-  // Resolve the selection against the CURRENT inventory so a stale id (entry
-  // gone after a re-read, device swapped, or no longer inspect-authorized)
-  // surfaces no inspector for this render — never a frozen stale target (AC3).
-  const selectedDeviceStory =
-    canInspect &&
-    selectedDeviceStoryUuid &&
-    deviceLibrary.state.kind === "ready"
-      ? deviceLibrary.state.stories.find(
-          (s) => s.uuid === selectedDeviceStoryUuid,
-        ) ?? null
+  // The lone selection, or null when zero/several are selected — the inspector
+  // and the single-copy/naming status scoping key on this so their carefully
+  // scoped behavior is preserved verbatim from the single-selection era.
+  const singleDeviceUuid =
+    selectedDeviceUuids.size === 1
+      ? selectedDeviceUuids.values().next().value ?? null
       : null;
 
-  // Drop a selection only when it can no longer be inspected (device gone /
+  // Resolve the lone selection against the CURRENT inventory so a stale id
+  // (entry gone after a re-read, device swapped, or no longer inspect-
+  // authorized) surfaces no inspector for this render — never a frozen stale
+  // target (AC3).
+  const selectedDeviceStory =
+    canInspect && singleDeviceUuid && deviceLibrary.state.kind === "ready"
+      ? deviceLibrary.state.stories.find((s) => s.uuid === singleDeviceUuid) ??
+        null
+      : null;
+
+  // The multi-selection resolved to live stories, for the bulk surface.
+  const selectedDeviceStories =
+    canInspect && deviceLibrary.state.kind === "ready"
+      ? deviceLibrary.state.stories.filter((s) =>
+          selectedDeviceUuids.has(s.uuid),
+        )
+      : [];
+
+  // Drop selected ids only when they can no longer be inspected (device gone /
   // unsupported / not authorized) OR when a FRESH authoritative inventory
-  // genuinely lacks it. A transient loading/error/refresh state keeps the
-  // selection so it survives and is restored once the entry is confirmed
-  // present again — it is never wiped on a passing state (AC3).
+  // genuinely lacks them. A transient loading/error/refresh state keeps the
+  // selection so it survives and is restored once the entries are confirmed
+  // present again — never wiped on a passing state (AC3).
   useEffect(() => {
-    if (selectedDeviceStoryUuid === null) return;
+    if (selectedDeviceUuids.size === 0) return;
     if (!canInspect) {
-      setSelectedDeviceStoryUuid(null);
+      setSelectedDeviceUuids(EMPTY_DEVICE_SELECTION);
       return;
     }
-    if (
-      deviceLibrary.state.kind === "ready" &&
-      !deviceLibrary.state.stories.some(
-        (s) => s.uuid === selectedDeviceStoryUuid,
-      )
-    ) {
-      setSelectedDeviceStoryUuid(null);
+    if (deviceLibrary.state.kind === "ready") {
+      const present = new Set(
+        deviceLibrary.state.stories.map((s) => s.uuid),
+      );
+      const kept = [...selectedDeviceUuids].filter((u) => present.has(u));
+      if (kept.length !== selectedDeviceUuids.size) {
+        setSelectedDeviceUuids(new Set(kept));
+      }
     }
-  }, [canInspect, deviceLibrary.state, selectedDeviceStoryUuid]);
+  }, [canInspect, deviceLibrary.state, selectedDeviceUuids]);
 
-  const handleSelectDeviceStory = (uuid: string): void => {
-    // Toggle: clicking the already-selected entry clears the inspection.
-    setSelectedDeviceStoryUuid((prev) => (prev === uuid ? null : uuid));
+  const handleSelectDeviceStory = (
+    uuid: string,
+    mode: DeviceStorySelectionMode,
+  ): void => {
+    setSelectedDeviceUuids((prev) => {
+      if (mode === "replace") {
+        // Clicking the only-selected entry clears it; otherwise collapse to
+        // just this one (single inspection).
+        if (prev.size === 1 && prev.has(uuid)) return EMPTY_DEVICE_SELECTION;
+        return new Set([uuid]);
+      }
+      // toggle: add/remove from the multi-selection.
+      const next = new Set(prev);
+      if (next.has(uuid)) next.delete(uuid);
+      else next.add(uuid);
+      return next;
+    });
+  };
+
+  const handleClearDeviceSelection = (): void => {
+    setSelectedDeviceUuids(EMPTY_DEVICE_SELECTION);
   };
 
   // Device-story copy flow. On success, BOTH sides re-read their
@@ -947,6 +988,23 @@ export function LibraryRoute(): React.JSX.Element {
     void deviceImport.triggerImport(readableDeviceId, story.uuid);
   };
 
+  // Bulk copy for a MULTI-selection. Same Rust-owned single-copy boundary,
+  // driven sequentially; on completion BOTH sides re-read their truth ONCE
+  // (like the single flow, batched). The selection is intentionally kept —
+  // a copy is not a move, and the copied entries flip to `alreadyImported`
+  // on the re-read so they simply leave the "importable" subset.
+  const deviceBulkImport = useDeviceBulkImport({
+    onCompleted: () => {
+      invalidate();
+      deviceLibrary.refresh();
+    },
+  });
+
+  const handleBulkImportDeviceStories = (packUuids: string[]): void => {
+    if (!readableDeviceId) return;
+    void deviceBulkImport.start(readableDeviceId, packUuids);
+  };
+
   // Device-story naming flow (Phase B). A purely local write keyed by pack
   // UUID; on success the device inventory re-reads so the new title surfaces
   // from the single Rust-owned resolution (a user title outranks any later
@@ -964,8 +1022,8 @@ export function LibraryRoute(): React.JSX.Element {
   // Scope the naming status to the card it actually belongs to, exactly like
   // the import status (`targetPackUuid`).
   const selectedDeviceTitleState =
-    selectedDeviceStoryUuid !== null &&
-    selectedDeviceStoryUuid === deviceTitle.targetPackUuid
+    singleDeviceUuid !== null &&
+    singleDeviceUuid === deviceTitle.targetPackUuid
       ? deviceTitle.status
       : undefined;
 
@@ -991,8 +1049,8 @@ export function LibraryRoute(): React.JSX.Element {
   // in flight is swallowed by the hook AND leaves the target untouched,
   // so the status can never follow the wrong card.
   const selectedDeviceImportState =
-    selectedDeviceStoryUuid !== null &&
-    selectedDeviceStoryUuid === deviceImport.targetPackUuid
+    singleDeviceUuid !== null &&
+    singleDeviceUuid === deviceImport.targetPackUuid
       ? deviceImport.status
       : undefined;
 
@@ -1097,7 +1155,7 @@ export function LibraryRoute(): React.JSX.Element {
         state={deviceLibrary.state}
         isRefreshing={deviceLibrary.isRefreshing}
         deviceLabel={deviceLabel}
-        selectedUuid={canInspect ? selectedDeviceStoryUuid : null}
+        selectedUuids={canInspect ? selectedDeviceUuids : EMPTY_DEVICE_SELECTION}
         onSelectStory={canInspect ? handleSelectDeviceStory : undefined}
         onRetry={deviceLibrary.refresh}
       />
@@ -1128,22 +1186,37 @@ export function LibraryRoute(): React.JSX.Element {
         center={center}
         rightPanel={
           <>
-            <DeviceStoryInspector
-              story={selectedDeviceStory}
-              supportedOperations={supportedDeviceOperations}
-              importState={selectedDeviceImportState}
-              onImport={
-                canImportDeviceStory ? handleImportDeviceStory : undefined
-              }
-              onRetryImport={() => {
-                void deviceImport.retryImport();
-              }}
-              onDismissImportStatus={deviceImport.dismissStatus}
-              onConsultSupportProfile={openSupportProfile}
-              onSetTitle={handleSetDeviceStoryTitle}
-              titleState={selectedDeviceTitleState}
-              onDismissTitleError={deviceTitle.reset}
-            />
+            {/* 2+ device stories selected → the bulk-import surface replaces
+                the single-story inspector; 0 or 1 → the inspector as before
+                (its own placeholder covers the empty case). */}
+            {canInspect && selectedDeviceStories.length >= 2 ? (
+              <DeviceBulkImportPanel
+                stories={selectedDeviceStories}
+                canImport={canImportDeviceStory}
+                status={deviceBulkImport.status}
+                onImport={handleBulkImportDeviceStories}
+                onClearSelection={handleClearDeviceSelection}
+                onDismissStatus={deviceBulkImport.dismiss}
+                onConsultSupportProfile={openSupportProfile}
+              />
+            ) : (
+              <DeviceStoryInspector
+                story={selectedDeviceStory}
+                supportedOperations={supportedDeviceOperations}
+                importState={selectedDeviceImportState}
+                onImport={
+                  canImportDeviceStory ? handleImportDeviceStory : undefined
+                }
+                onRetryImport={() => {
+                  void deviceImport.retryImport();
+                }}
+                onDismissImportStatus={deviceImport.dismissStatus}
+                onConsultSupportProfile={openSupportProfile}
+                onSetTitle={handleSetDeviceStoryTitle}
+                titleState={selectedDeviceTitleState}
+                onDismissTitleError={deviceTitle.reset}
+              />
+            )}
             <LuniiDecisionPanel
               deviceState={deviceState}
               deviceLabel={deviceLabel}

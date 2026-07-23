@@ -282,7 +282,7 @@ describe("<DeviceStoryCollection />", () => {
       <DeviceStoryCollection
         state={readyTwo}
         isRefreshing={false}
-        selectedUuid={null}
+        selectedUuids={new Set()}
         onSelectStory={onSelectStory}
         onRetry={() => {}}
       />,
@@ -292,7 +292,8 @@ describe("<DeviceStoryCollection />", () => {
     });
     expect(first).toHaveAttribute("aria-pressed", "false");
     await user.click(first);
-    expect(onSelectStory).toHaveBeenCalledWith("u1");
+    // Plain click on an unselected card selects exactly this one.
+    expect(onSelectStory).toHaveBeenCalledWith("u1", "replace");
   });
 
   it("reflects the selected uuid with aria-pressed and a visible non-color marker", () => {
@@ -300,7 +301,7 @@ describe("<DeviceStoryCollection />", () => {
       <DeviceStoryCollection
         state={readyTwo}
         isRefreshing={false}
-        selectedUuid="u2"
+        selectedUuids={new Set(["u2"])}
         onSelectStory={() => {}}
         onRetry={() => {}}
       />,
@@ -316,38 +317,103 @@ describe("<DeviceStoryCollection />", () => {
     expect(other).toHaveAttribute("aria-pressed", "false");
   });
 
-  it("Space toggles the selection from the keyboard", async () => {
+  it("Ctrl+click toggles a card into a multi-selection", async () => {
     const user = userEvent.setup();
     const onSelectStory = vi.fn();
     render(
       <DeviceStoryCollection
         state={readyTwo}
         isRefreshing={false}
-        selectedUuid={null}
+        selectedUuids={new Set(["u1"])}
+        onSelectStory={onSelectStory}
+        onRetry={() => {}}
+      />,
+    );
+    await user.keyboard("{Control>}");
+    await user.click(
+      screen.getByRole("button", { name: /identifiant 0000beef/i }),
+    );
+    await user.keyboard("{/Control}");
+    expect(onSelectStory).toHaveBeenCalledWith("u2", "toggle");
+  });
+
+  it("marks every selected card of a multi-selection as pressed", () => {
+    render(
+      <DeviceStoryCollection
+        state={readyTwo}
+        isRefreshing={false}
+        selectedUuids={new Set(["u1", "u2"])}
+        onSelectStory={() => {}}
+        onRetry={() => {}}
+      />,
+    );
+    expect(
+      screen.getByRole("button", { name: /identifiant 0000abcd/i }),
+    ).toHaveAttribute("aria-pressed", "true");
+    expect(
+      screen.getByRole("button", { name: /identifiant 0000beef/i }),
+    ).toHaveAttribute("aria-pressed", "true");
+    // The counter announces how many are selected.
+    expect(screen.getByText(/2 sélectionnées/i)).toBeInTheDocument();
+  });
+
+  it("shows the multi-selection hint only when a selection handler is wired", () => {
+    const { rerender } = render(
+      <DeviceStoryCollection
+        state={readyTwo}
+        isRefreshing={false}
+        onRetry={() => {}}
+      />,
+    );
+    expect(
+      screen.queryByText(/pour en sélectionner plusieurs/i),
+    ).not.toBeInTheDocument();
+    rerender(
+      <DeviceStoryCollection
+        state={readyTwo}
+        isRefreshing={false}
+        selectedUuids={new Set()}
+        onSelectStory={() => {}}
+        onRetry={() => {}}
+      />,
+    );
+    expect(
+      screen.getByText(/pour en sélectionner plusieurs/i),
+    ).toBeInTheDocument();
+  });
+
+  it("Space toggles the card into the multi-selection from the keyboard", async () => {
+    const user = userEvent.setup();
+    const onSelectStory = vi.fn();
+    render(
+      <DeviceStoryCollection
+        state={readyTwo}
+        isRefreshing={false}
+        selectedUuids={new Set()}
         onSelectStory={onSelectStory}
         onRetry={() => {}}
       />,
     );
     screen.getByRole("button", { name: /identifiant 0000abcd/i }).focus();
     await user.keyboard(" ");
-    expect(onSelectStory).toHaveBeenCalledWith("u1");
+    expect(onSelectStory).toHaveBeenCalledWith("u1", "toggle");
   });
 
-  it("Enter toggles the selection from the keyboard", async () => {
+  it("Enter selects exactly this one from the keyboard", async () => {
     const user = userEvent.setup();
     const onSelectStory = vi.fn();
     render(
       <DeviceStoryCollection
         state={readyTwo}
         isRefreshing={false}
-        selectedUuid={null}
+        selectedUuids={new Set()}
         onSelectStory={onSelectStory}
         onRetry={() => {}}
       />,
     );
     screen.getByRole("button", { name: /identifiant 0000abcd/i }).focus();
     await user.keyboard("{Enter}");
-    expect(onSelectStory).toHaveBeenCalledWith("u1");
+    expect(onSelectStory).toHaveBeenCalledWith("u1", "replace");
   });
 
   it("ignores OS key auto-repeat so a held Enter/Space does not flicker the selection", () => {
@@ -356,7 +422,7 @@ describe("<DeviceStoryCollection />", () => {
       <DeviceStoryCollection
         state={readyTwo}
         isRefreshing={false}
-        selectedUuid={null}
+        selectedUuids={new Set()}
         onSelectStory={onSelectStory}
         onRetry={() => {}}
       />,
@@ -383,7 +449,7 @@ describe("<DeviceStoryCollection />", () => {
           ],
         }}
         isRefreshing={false}
-        selectedUuid={null}
+        selectedUuids={new Set()}
         onSelectStory={() => {}}
         onRetry={() => {}}
       />,
@@ -412,7 +478,7 @@ describe("<DeviceStoryCollection />", () => {
           ],
         }}
         isRefreshing={false}
-        selectedUuid={null}
+        selectedUuids={new Set()}
         onSelectStory={() => {}}
         onRetry={() => {}}
       />,
@@ -452,7 +518,7 @@ describe("<DeviceStoryCollection />", () => {
           ],
         }}
         isRefreshing={false}
-        selectedUuid={null}
+        selectedUuids={new Set()}
         onSelectStory={() => {}}
         onRetry={() => {}}
       />,
@@ -469,7 +535,7 @@ describe("<DeviceStoryCollection />", () => {
       <DeviceStoryCollection
         state={readyTwo}
         isRefreshing={false}
-        selectedUuid="u1"
+        selectedUuids={new Set(["u1"])}
         onSelectStory={() => {}}
         onRetry={() => {}}
       />,
@@ -488,7 +554,7 @@ describe("<DeviceStoryCollection />", () => {
           stories: [makeStory({ uuid: "u2", shortId: "0000BEEF" })],
         }}
         isRefreshing={false}
-        selectedUuid="u1"
+        selectedUuids={new Set(["u1"])}
         onSelectStory={() => {}}
         onRetry={() => {}}
       />,
@@ -504,7 +570,7 @@ describe("<DeviceStoryCollection />", () => {
       <DeviceStoryCollection
         state={readyTwo}
         isRefreshing={false}
-        selectedUuid={null}
+        selectedUuids={new Set()}
         onSelectStory={() => {}}
         onRetry={() => {}}
       />,
@@ -521,7 +587,7 @@ describe("<DeviceStoryCollection />", () => {
       <DeviceStoryCollection
         state={readyTwo}
         isRefreshing={true}
-        selectedUuid="u1"
+        selectedUuids={new Set(["u1"])}
         onSelectStory={() => {}}
         onRetry={() => {}}
       />,

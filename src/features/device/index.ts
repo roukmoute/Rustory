@@ -20,6 +20,13 @@ export {
 } from "./hooks/use-device-story-import";
 
 export {
+  useDeviceBulkImport,
+  type DeviceBulkImportStatus,
+  type UseDeviceBulkImport,
+  type UseDeviceBulkImportOptions,
+} from "./hooks/use-device-bulk-import";
+
+export {
   useTransferPreview,
   type TransferPreviewState,
   type UseTransferPreview,
@@ -63,7 +70,13 @@ export {
 export {
   DeviceStoryCollection,
   type DeviceStoryCollectionProps,
+  type DeviceStorySelectionMode,
 } from "./components/DeviceStoryCollection";
+
+export {
+  DeviceBulkImportPanel,
+  type DeviceBulkImportPanelProps,
+} from "./components/DeviceBulkImportPanel";
 
 export {
   DeviceStoryInspector,
