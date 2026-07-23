@@ -242,4 +242,70 @@ mod tests {
         let after = fs::read(dir.path().join(LUNII_DEVICE_ID_MARKER)).unwrap();
         assert_eq!(before, after);
     }
+
+    /// Manual smoke against a SCRATCH COPY of a real device (never the device
+    /// itself). Point `RUSTORY_TEST_DELETE_MOUNT` at a copy holding the real
+    /// `.pi`, optionally `RUSTORY_TEST_DELETE_INDEX` (default 0) to pick which
+    /// listed pack to delete. Proves the production deleter, run on the actual
+    /// on-device `.pi` bytes, removes exactly that pack and preserves every
+    /// other one. Ignored by default (needs the env + a real copy).
+    #[test]
+    #[ignore = "manual: set RUSTORY_TEST_DELETE_MOUNT to a scratch device copy"]
+    fn real_device_copy_delete_smoke() {
+        use crate::domain::device::format_pack_uuid;
+
+        let mount = std::path::PathBuf::from(
+            std::env::var("RUSTORY_TEST_DELETE_MOUNT")
+                .expect("set RUSTORY_TEST_DELETE_MOUNT to a scratch device copy"),
+        );
+        let index: usize = std::env::var("RUSTORY_TEST_DELETE_INDEX")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0);
+
+        let pi_before = fs::read(mount.join(LUNII_DEVICE_ID_MARKER)).expect("read .pi");
+        let before = parse_pack_index(&pi_before);
+        let total = before.uuids.len();
+        assert!(index < total, "index {index} out of range ({total} packs)");
+        let target = format_pack_uuid(&before.uuids[index]);
+        let target_short = short_id_from_pack_uuid(&target).unwrap();
+        eprintln!("[smoke] {total} packs; deleting #{index} = {target} ({target_short})");
+
+        let out = SystemDevicePackDeleter
+            .delete_pack(&mount, &target)
+            .expect("delete ok");
+        assert_eq!(out, DeleteOutcome::Deleted);
+
+        // Exactly one pack removed; every OTHER uuid survives, in order.
+        let pi_after = fs::read(mount.join(LUNII_DEVICE_ID_MARKER)).expect("read .pi after");
+        let after = parse_pack_index(&pi_after);
+        assert_eq!(after.uuids.len(), total - 1, "exactly one pack delisted");
+        let expected: Vec<_> = before
+            .uuids
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| *i != index)
+            .map(|(_, u)| *u)
+            .collect();
+        assert_eq!(
+            after.uuids, expected,
+            "the other packs are untouched, in order"
+        );
+        // The target's content folder is gone; the siblings remain.
+        assert!(!mount.join(LUNII_CONTENT_DIR).join(&target_short).exists());
+        for (i, u) in before.uuids.iter().enumerate() {
+            if i == index {
+                continue;
+            }
+            let sid = short_id_from_pack_uuid(&format_pack_uuid(u)).unwrap();
+            assert!(
+                mount.join(LUNII_CONTENT_DIR).join(&sid).exists(),
+                "sibling {sid} content preserved"
+            );
+        }
+        eprintln!(
+            "[smoke] OK — {} packs remain, target content removed",
+            after.uuids.len()
+        );
+    }
 }
