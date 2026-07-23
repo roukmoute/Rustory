@@ -238,6 +238,7 @@ fn rss_creation_outcome_wire_shapes_are_frozen() {
             import_state: Some(rustory_lib::ipc::dto::ImportStateDto::NeedsReview),
             import_report: None,
             transferable: false,
+            sendable_archive: false,
         },
         report: Vec::new(),
     };

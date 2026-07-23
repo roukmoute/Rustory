@@ -286,6 +286,7 @@ fn commit_local_artifact_import(
             Some(import_report)
         },
         transferable: false,
+        sendable_archive: false,
     })
 }
 

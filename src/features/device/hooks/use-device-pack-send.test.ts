@@ -9,11 +9,10 @@ import { sendPackToDevice } from "../../../ipc/commands/device-send";
 import { useDevicePackSend } from "./use-device-pack-send";
 
 const DEVICE_ID = "0123456789abcdef0123456789abcdef";
-const PACK_UUID = "abababab-abab-abab-abab-ababfac5562d";
+const STORY_ID = "0197a5d0-0000-7000-8000-000000000000";
 
 const SENT_OUTCOME = {
-  kind: "sent" as const,
-  packUuid: PACK_UUID,
+  packUuid: "abababab-abab-abab-abab-ababfac5562d",
   imageCount: 117,
   audioCount: 223,
 };
@@ -33,38 +32,29 @@ describe("useDevicePackSend", () => {
   it("starts idle", () => {
     const { result } = renderHook(() => useDevicePackSend());
     expect(result.current.status).toEqual({ kind: "idle" });
+    expect(result.current.targetStoryId).toBeNull();
   });
 
-  it("transitions sending → sent and reports to the route", async () => {
+  it("transitions sending → sent, scopes to the story and reports to the route", async () => {
     vi.mocked(sendPackToDevice).mockResolvedValueOnce(SENT_OUTCOME);
     const onSent = vi.fn();
     const { result } = renderHook(() => useDevicePackSend({ onSent }));
     await act(async () => {
-      await result.current.triggerSend(DEVICE_ID);
+      await result.current.triggerSend(DEVICE_ID, STORY_ID);
     });
     expect(sendPackToDevice).toHaveBeenCalledWith({
       deviceIdentifier: DEVICE_ID,
+      storyId: STORY_ID,
     });
     expect(result.current.status).toEqual({
       kind: "sent",
-      packUuid: PACK_UUID,
+      packUuid: SENT_OUTCOME.packUuid,
       imageCount: 117,
       audioCount: 223,
     });
+    expect(result.current.targetStoryId).toBe(STORY_ID);
     expect(onSent).toHaveBeenCalledTimes(1);
     expect(onSent).toHaveBeenCalledWith(SENT_OUTCOME);
-  });
-
-  it("settles back to idle on a dismissed picker without calling onSent", async () => {
-    vi.mocked(sendPackToDevice).mockResolvedValueOnce({ kind: "cancelled" });
-    const onSent = vi.fn();
-    const { result } = renderHook(() => useDevicePackSend({ onSent }));
-    await act(async () => {
-      await result.current.triggerSend(DEVICE_ID);
-    });
-    // A dismissed native picker is a non-event: no status, no callback.
-    expect(result.current.status).toEqual({ kind: "idle" });
-    expect(onSent).not.toHaveBeenCalled();
   });
 
   it("surfaces a failure without calling onSent", async () => {
@@ -72,7 +62,7 @@ describe("useDevicePackSend", () => {
     const onSent = vi.fn();
     const { result } = renderHook(() => useDevicePackSend({ onSent }));
     await act(async () => {
-      await result.current.triggerSend(DEVICE_ID);
+      await result.current.triggerSend(DEVICE_ID, STORY_ID);
     });
     expect(result.current.status).toMatchObject({ kind: "failed" });
     expect(onSent).not.toHaveBeenCalled();
@@ -89,10 +79,10 @@ describe("useDevicePackSend", () => {
     const { result } = renderHook(() => useDevicePackSend());
     let first!: Promise<void>;
     act(() => {
-      first = result.current.triggerSend(DEVICE_ID);
+      first = result.current.triggerSend(DEVICE_ID, STORY_ID);
     });
     await act(async () => {
-      await result.current.triggerSend(DEVICE_ID);
+      await result.current.triggerSend(DEVICE_ID, STORY_ID);
     });
     await act(async () => {
       release?.();
@@ -105,12 +95,13 @@ describe("useDevicePackSend", () => {
     vi.mocked(sendPackToDevice).mockResolvedValue(SENT_OUTCOME);
     const { result } = renderHook(() => useDevicePackSend());
     await act(async () => {
-      await result.current.triggerSend(DEVICE_ID);
+      await result.current.triggerSend(DEVICE_ID, STORY_ID);
     });
     expect(result.current.status.kind).toBe("sent");
     act(() => {
       result.current.dismissStatus();
     });
     expect(result.current.status).toEqual({ kind: "idle" });
+    expect(result.current.targetStoryId).toBeNull();
   });
 });

@@ -5,11 +5,11 @@ import { useNavigate } from "react-router-dom";
 import {
   CatalogPanel,
   DeviceBulkImportPanel,
-  DeviceSendPanel,
   DeviceStoryCollection,
   type DeviceStorySelectionMode,
   DeviceStoryInspector,
   invalidatePackCoverCache,
+  type DevicePackSendStatus,
   useConnectedLunii,
   useDeviceBulkImport,
   useDeviceLibrary,
@@ -482,28 +482,65 @@ export function LibraryRoute(): React.JSX.Element {
   // transfer, independent of the selection (an in-flight write / recoverable
   // failure stays consultable via its card badge).
   const storyTransfer = useStoryTransfer();
-  // Transferability is a durable fact of the selected card (it owns a
-  // device-format pack), read straight from the overview — no preparation probe.
-  // A native / file-imported story is not transferable in MVP; the gate disables
-  // `Envoyer` with a dedicated reason before any write.
-  const selectedStoryTransferable =
-    singleSelectedStoryId !== null &&
-    (overview?.stories.find((s) => s.id === singleSelectedStoryId)
-      ?.transferable ??
-      false);
-  const transferView: TransferView = mapTransferView(
-    storyTransfer.state,
-    singleSelectedStoryId,
-    presentSelectedIds.size,
-    deviceState,
-    writableDeviceId !== null,
-    selectedStoryTransferable,
-  );
+  // V3 archive send — the OTHER backend behind the SAME single "Envoyer vers la
+  // Lunii" CTA. Sourced from the story's retained `.zip`; on success the device
+  // inventory re-reads so the new pack appears.
+  const devicePackSend = useDevicePackSend({
+    onSent: () => {
+      deviceLibrary.refresh();
+    },
+  });
+  // Two durable facts of the selected card, read straight from the overview (no
+  // preparation probe): `transferable` = owns a device-format pack (the V1/V2
+  // byte-copy round-trip); `sendableArchive` = retained its source `.zip` (the
+  // V3 transcode + re-cipher send). A native / file-imported story is neither.
+  const selectedCard =
+    singleSelectedStoryId !== null
+      ? overview?.stories.find((s) => s.id === singleSelectedStoryId)
+      : undefined;
+  const selectedStoryTransferable = selectedCard?.transferable ?? false;
+  const selectedStorySendable = selectedCard?.sendableArchive ?? false;
+  // ONE gesture, TWO backends chosen by the connected device's capability: a
+  // writable V1/V2 uses the round-trip (`storyTransfer`); a send-capable V3 uses
+  // the archive engine (`devicePackSend`). A device has at most one of the two.
+  // Scope the V3 send status to the card it belongs to (like the delete/import
+  // statuses): selecting another card never shows this one's terminal.
+  const scopedSendStatus: DevicePackSendStatus =
+    devicePackSend.targetStoryId !== null &&
+    devicePackSend.targetStoryId === singleSelectedStoryId
+      ? devicePackSend.status
+      : { kind: "idle" };
+  const transferView: TransferView =
+    sendableDeviceId !== null
+      ? mapArchiveSendToTransferView(
+          scopedSendStatus,
+          singleSelectedStoryId,
+          presentSelectedIds.size,
+          selectedStorySendable,
+        )
+      : mapTransferView(
+          storyTransfer.state,
+          singleSelectedStoryId,
+          presentSelectedIds.size,
+          deviceState,
+          writableDeviceId !== null,
+          selectedStoryTransferable,
+        );
   const handleSendSelected = (): void => {
-    if (singleSelectedStoryId && writableDeviceId) {
+    if (!singleSelectedStoryId) return;
+    if (writableDeviceId) {
       storyTransfer.send(singleSelectedStoryId, writableDeviceId);
+    } else if (sendableDeviceId) {
+      void devicePackSend.triggerSend(sendableDeviceId, singleSelectedStoryId);
     }
   };
+  // Dismiss / retry are backend-aware so the single CTA's terminals settle
+  // through the right hook.
+  const handleDismissTransfer = (): void => {
+    if (sendableDeviceId) devicePackSend.dismissStatus();
+    else storyTransfer.dismiss();
+  };
+  const canRetrySend = writableDeviceId !== null || sendableDeviceId !== null;
 
   // Re-hydrate the durable transfer memory for the selected story (Transfer Resume
   // Contract / AC2): on selecting a story, re-offer any remembered NON-success
@@ -1057,19 +1094,6 @@ export function LibraryRoute(): React.JSX.Element {
       ? deviceDelete.status
       : undefined;
 
-  // Pack-archive send flow (device-level, not tied to any selection). Rust
-  // owns the native `.zip` picker AND the dedicated `sendArchive` gate; on
-  // success the device inventory re-reads so the new pack appears.
-  const devicePackSend = useDevicePackSend({
-    onSent: () => {
-      deviceLibrary.refresh();
-    },
-  });
-  const handleSendPackToDevice = (): void => {
-    if (!sendableDeviceId) return;
-    void devicePackSend.triggerSend(sendableDeviceId);
-  };
-
   // Device-story naming flow (Phase B). A purely local write keyed by pack
   // UUID; on success the device inventory re-reads so the new title surfaces
   // from the single Rust-owned resolution (a user title outranks any later
@@ -1302,10 +1326,8 @@ export function LibraryRoute(): React.JSX.Element {
               onRetryValidation={storyValidation.refresh}
               transfer={transferView}
               onSend={handleSendSelected}
-              onRetryTransfer={
-                writableDeviceId !== null ? handleSendSelected : undefined
-              }
-              onDismissTransfer={storyTransfer.dismiss}
+              onRetryTransfer={canRetrySend ? handleSendSelected : undefined}
+              onDismissTransfer={handleDismissTransfer}
               onEdit={handleEditSelected}
               onDeleteSelected={() => {
                 void handleDeleteSelected();
@@ -1317,15 +1339,6 @@ export function LibraryRoute(): React.JSX.Element {
               onRefreshDevice={device.refresh}
               onConsultSupportProfile={openSupportProfile}
             />
-            {/* Device-level archive send — rendered ONLY when the matrix
-                opens the dedicated `sendArchive` capability (Lunii V3). */}
-            {sendableDeviceId !== null ? (
-              <DeviceSendPanel
-                status={devicePackSend.status}
-                onSend={handleSendPackToDevice}
-                onDismissStatus={devicePackSend.dismissStatus}
-              />
-            ) : null}
             <CatalogPanel catalog={officialCatalog} />
           </>
         }
@@ -1575,6 +1588,55 @@ export function mapStoryValidationToView(
  * apart client-side, so it is enforced by the BACKEND as a `retryable` terminal
  * (cause `deviceChanged`), surfaced in-context.
  */
+/**
+ * Map the V3 archive-send status (+ selection gating) into the SAME
+ * `TransferView` the round-trip uses, so the single "Envoyer vers la Lunii"
+ * CTA renders both backends uniformly. The status is assumed already SCOPED to
+ * the selected story by the caller. A settled/in-flight send takes precedence
+ * over gating (its terminal stays visible for the selected story); otherwise
+ * the gate decides `ready` vs a standardized `unavailable` reason. The success
+ * is `sent` (NOT `verified`): the V3 write is not re-read.
+ */
+export function mapArchiveSendToTransferView(
+  status: DevicePackSendStatus,
+  selectedStoryId: string | null,
+  selectionCount: number,
+  sendable: boolean,
+): TransferView {
+  switch (status.kind) {
+    case "sending":
+      // Indeterminate (a single awaited call has no byte-level fraction).
+      return { kind: "transferring", progress: null, phase: "transfer" };
+    case "sent":
+      return {
+        kind: "sent",
+        imageCount: status.imageCount,
+        audioCount: status.audioCount,
+      };
+    case "failed":
+      return { kind: "error", error: status.error };
+    case "idle":
+      break;
+  }
+  if (selectionCount === 0) {
+    return {
+      kind: "unavailable",
+      reason: "Envoi indisponible: aucune histoire sélectionnée",
+    };
+  }
+  if (selectionCount > 1) {
+    return { kind: "unavailable", reason: "Envoi indisponible: sélection multiple" };
+  }
+  if (selectedStoryId === null || !sendable) {
+    return {
+      kind: "unavailable",
+      reason:
+        "Envoi indisponible: pas de pack d'origine conservé (ré-importe l'histoire depuis son archive .zip)",
+    };
+  }
+  return { kind: "ready" };
+}
+
 export function mapTransferView(
   state: ReturnType<typeof useStoryTransfer>["state"],
   selectedStoryId: string | null,

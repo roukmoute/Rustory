@@ -286,6 +286,7 @@ pub fn commit_rss_story_creation(
             Some(import_report)
         },
         transferable: false,
+        sendable_archive: false,
     })
 }
 

@@ -26,15 +26,15 @@ export class SendPackToDeviceContractDriftError extends Error {
 }
 
 /**
- * Send a STUdio-format pack archive (`.zip`) to the connected device
- * identified by `deviceIdentifier` ("Envoyer un pack (.zip)"). Rust owns the
- * whole boundary: the NATIVE archive picker (no path ever crosses IPC), the
- * authoritative re-scan, the dedicated `send_archive` capability gate, the
- * transcode + per-device ciphering and the atomic on-volume write. A
- * dismissed picker resolves `{ kind: "cancelled" }` — a non-event.
+ * Send the SELECTED local story identified by `storyId` to the connected
+ * device identified by `deviceIdentifier` — the V3 branch of the single
+ * "Envoyer vers la Lunii" gesture. Rust owns the whole boundary: it resolves
+ * the story's RETAINED source archive itself (no path crosses IPC, no
+ * picker), re-scans, gates on the dedicated `send_archive` capability, then
+ * transcodes + ciphers for the target device and writes atomically.
  *
- * The input is validated client-side BEFORE the round-trip (the identifier
- * comes from a Rust DTO, so a malformed input is a frontend bug). Transport
+ * The input is validated client-side BEFORE the round-trip (both identifiers
+ * come from Rust DTOs, so a malformed input is a frontend bug). Transport
  * rejections are normalized through `toAppError`.
  *
  * Components MUST NOT call `invoke` directly — go through this facade so the
@@ -45,7 +45,7 @@ export async function sendPackToDevice(
 ): Promise<SendPackToDeviceOutcome> {
   if (!isSendPackToDeviceInput(input)) {
     throw new TypeError(
-      "send_pack_to_device input rejected client-side: deviceIdentifier must be 32 lowercase hex chars",
+      "send_pack_to_device input rejected client-side: deviceIdentifier must be 32 lowercase hex chars and storyId a canonical lowercase UUID",
     );
   }
   let raw: unknown;

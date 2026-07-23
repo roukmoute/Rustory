@@ -96,8 +96,3 @@ export {
   DeviceStoryInspector,
   type DeviceStoryInspectorProps,
 } from "./components/DeviceStoryInspector";
-
-export {
-  DeviceSendPanel,
-  type DeviceSendPanelProps,
-} from "./components/DeviceSendPanel";

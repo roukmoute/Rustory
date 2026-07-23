@@ -79,6 +79,10 @@ export type TransferView =
   | { kind: "transferring"; progress: number | null; phase: string | null }
   | { kind: "verifying" }
   | { kind: "verified"; changed: string; unchanged: string }
+  /** V3 archive send settled (transcode + re-cipher + write). Distinct from
+   *  `verified`: the send is NOT re-read/verified, so the copy says
+   *  "envoyée", never "vérifiée". Carries the pack's asset counts. */
+  | { kind: "sent"; imageCount: number; audioCount: number }
   | { kind: "partial"; message: string; userAction: string }
   | { kind: "retryable"; message: string; userAction: string }
   | { kind: "incomplete"; message: string; userAction: string }
@@ -651,6 +655,33 @@ function renderTransfer(
           <p className="lunii-panel__reason">{view.unchanged}</p>
         </div>
       );
+    case "sent":
+      // V3 archive send SUCCESS (AC): the pack was transcoded, re-ciphered for
+      // the target and written. Honest wording — "envoyée", not "vérifiée"
+      // (the send is not re-read). `aria-live` section, never a toast; the
+      // dismiss returns the CTA to `ready`.
+      return (
+        <div className="lunii-panel__transfer-verified">
+          <StateChip tone="success" label="envoyée sur la Lunii" />
+          <p className="lunii-panel__comparison-verdict">
+            Pack envoyé sur l'appareil.
+          </p>
+          <p className="lunii-panel__reason">
+            {`${view.imageCount} image${view.imageCount > 1 ? "s" : ""}, ${
+              view.audioCount
+            } audio${view.audioCount > 1 ? "s" : ""}.`}
+          </p>
+          {onDismissTransfer ? (
+            <Button
+              variant="quiet"
+              onClick={onDismissTransfer}
+              aria-label="Fermer le compte rendu d'envoi"
+            >
+              Fermer
+            </Button>
+          ) : null}
+        </div>
+      );
     case "partial":
       // `état partiel` (AC3): verify found the device mutated + present but
       // INCOHERENT. A non-success IN CONTEXT (role="alert"), never a toast, never
@@ -970,9 +1001,15 @@ function formatSupportedOperationLabels(
     ["readLibrary", "Lecture bibliothèque appareil"],
     ["inspectStory", "Inspection d'histoire"],
     ["importStory", "Copie dans la bibliothèque locale"],
-    ["writeStory", transferLabel],
   ];
-  return matrix.map(([k, label]) => `${ops[k] ? "✓" : "—"} ${label}`);
+  const lines = matrix.map(([k, label]) => `${ops[k] ? "✓" : "—"} ${label}`);
+  // The "transfer" line is checked when the device can receive a story by
+  // EITHER path — the V1/V2 byte-copy round-trip (`writeStory`) or the V3
+  // archive send (`sendArchive`). A single user-facing capability ("je peux
+  // envoyer une histoire") so the list never contradicts the enabled CTA.
+  const canSend = ops.writeStory || ops.sendArchive;
+  lines.push(`${canSend ? "✓" : "—"} ${transferLabel}`);
+  return lines;
 }
 
 function formatSendReason(

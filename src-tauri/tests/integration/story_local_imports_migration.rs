@@ -71,6 +71,9 @@ fn fresh_install_applies_v6_migration_with_canonical_columns() {
             "import_state",
             "findings_summary",
             "imported_at",
+            // Added by migration 0015: marks a structured-archive import that
+            // retained its source `.zip` (V3-sendable).
+            "source_archive_retained",
         ],
         "schema must match the canonical column set"
     );

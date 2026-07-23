@@ -170,7 +170,7 @@ pub fn prepare_structured_archive_creation(
             .map_err(|_| PrepareFailure::bare(archive_read_error("staging_write")))?;
     }
 
-    prepare_from_creatable(
+    let prepared = prepare_from_creatable(
         app_data_dir,
         staging.path(),
         &creatable,
@@ -183,7 +183,12 @@ pub fn prepare_structured_archive_creation(
             findings: outcome.analysis.findings,
         },
         MAX_ARCHIVE_TOTAL_MEDIA_BYTES,
-    )
+    )?;
+    // Retain the ORIGINAL `.zip` at commit: it carries the device-format
+    // `story.json` + assets the V3 send engine needs, which the canonical
+    // import above discards. This is what lets "Envoyer vers la Lunii" send
+    // this story to a Lunii V3 without re-picking the file.
+    Ok(prepared.with_retained_source_archive(archive_path))
     // `staging` drops here — the promotion copied what it needed into the
     // content-addressed store.
 }
@@ -500,6 +505,53 @@ mod tests {
             )
             .expect("assets count");
         assert_eq!(asset_count, 2);
+    }
+
+    #[test]
+    fn accept_retains_the_source_archive_and_marks_the_story_v3_sendable() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let app_data_dir = dir.path().join("appdata");
+        std::fs::create_dir_all(&app_data_dir).expect("appdata");
+        let zip_path = dir.path().join("Mon pack.zip");
+        let entries: &[(&str, &[u8])] = &[
+            ("story.json", CLEAN_STORY_JSON.as_bytes()),
+            ("assets/cover.png", &png_bytes()),
+            ("assets/intro.mp3", MP3_BYTES),
+        ];
+        write_zip(&zip_path, entries);
+        let source_bytes = std::fs::read(&zip_path).expect("read source zip");
+
+        let mut handle = fresh_db();
+        let card = accept_structured_archive_creation(&mut handle, &app_data_dir, &zip_path)
+            .expect("accept");
+
+        // The card returned right after import already reports V3-sendable.
+        assert!(
+            card.sendable_archive,
+            "a structured-archive import must be V3-sendable"
+        );
+
+        // The provenance flag is persisted.
+        let retained: i64 = handle
+            .conn()
+            .query_row(
+                "SELECT source_archive_retained FROM story_local_imports WHERE story_id = ?1",
+                rusqlite::params![&card.id],
+                |r| r.get(0),
+            )
+            .expect("provenance row");
+        assert_eq!(retained, 1);
+
+        // The source `.zip` is retained VERBATIM at the by-convention path —
+        // exactly what the V3 send engine will re-read (no picker).
+        let retained_path =
+            crate::infrastructure::filesystem::resolve_source_archive_path(&app_data_dir, &card.id);
+        assert!(retained_path.is_file(), "the source archive must be kept");
+        assert_eq!(
+            std::fs::read(&retained_path).expect("read retained"),
+            source_bytes,
+            "the retained archive must be byte-identical to the source"
+        );
     }
 
     #[test]

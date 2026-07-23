@@ -81,6 +81,10 @@ pub fn delete_stories(
     for id in &deleted_ids {
         let dir = crate::infrastructure::filesystem::resolve_import_story_dir(&app_data_dir, id);
         let _ = std::fs::remove_dir_all(dir);
+        // Also the retained source `.zip` (structured-archive imports) that
+        // makes a story V3-sendable — idempotent, a no-op for stories that
+        // carry none.
+        crate::infrastructure::filesystem::remove_source_archive(&app_data_dir, id);
     }
 
     Ok(DeleteStoriesOutputDto { deleted_ids })

@@ -1,7 +1,6 @@
 use std::time::{Duration, Instant};
 
 use tauri::{AppHandle, Manager, State};
-use tauri_plugin_dialog::{DialogExt, FilePath};
 
 use crate::application::device::delete::DeleteDeviceStoryRequest;
 use crate::application::device::import::ImportDeviceStoryRequest;
@@ -54,9 +53,6 @@ pub const DELETE_DEVICE_STORY_BUDGET: Duration = Duration::from_secs(60);
 /// magnitude as the import budget, and Rust owns the bound (the frontend
 /// sets no timer of its own).
 pub const SEND_PACK_TO_DEVICE_BUDGET: Duration = Duration::from_secs(300);
-
-/// Native-dialog filter of the pack-archive picker.
-const SEND_PACK_DIALOG_FILTER_NAME: &str = "Pack d'histoires (.zip)";
 
 /// Read the currently-connected supported device (Lunii, MVP).
 ///
@@ -597,18 +593,20 @@ pub async fn delete_device_story(
     outcome.map(DeleteDeviceStoryOutcomeDto::from_outcome)
 }
 
-/// Send a STUdio-format pack archive (`.zip`) to the connected supported
-/// device identified by `deviceIdentifier` ("Envoyer un pack (.zip)").
+/// Send the SELECTED local story identified by `storyId` to the connected
+/// supported device identified by `deviceIdentifier` — the V3 branch of the
+/// single "Envoyer vers la Lunii" gesture.
 ///
-/// A DEVICE MUTATION with the same discipline as the delete command — async +
-/// `spawn_blocking`, authoritative re-scan + capability gate BEFORE any byte
-/// is touched — PLUS the dialog discipline of the catalog import: the source
-/// archive is picked in a NATIVE dialog owned by Rust (non-blocking + channel,
-/// the GTK dialog must run on the main thread), so no path ever crosses IPC in
-/// either direction. A dismissed dialog resolves `{ kind: "cancelled" }`. The
-/// gate here is the DEDICATED `send_archive` capability, distinct from
-/// `write_story`: a V3 may receive archives even though the library
-/// round-trip stays closed.
+/// A DEVICE MUTATION with the same discipline as the delete command: async +
+/// `spawn_blocking`, authoritative re-scan + capability gate BEFORE any byte is
+/// touched. Exactly two identifiers cross the boundary; Rust resolves the story's
+/// RETAINED source archive (`source-archives/<storyId>.zip`, kept at import)
+/// itself — no path crosses IPC, and no file picker. The gate is the DEDICATED
+/// `send_archive` capability, distinct from `write_story`: a V3 receives packs
+/// through this engine (transcode + re-cipher for the target `.md`) while the
+/// library round-trip stays closed. A story with no retained archive (imported
+/// before the feature, or a native/other-source story) is refused with an
+/// actionable "re-import" message BEFORE any device touch.
 #[tauri::command]
 pub async fn send_pack_to_device(
     app: AppHandle,
@@ -618,35 +616,22 @@ pub async fn send_pack_to_device(
     if !is_32_lowercase_hex(&input.device_identifier) {
         return Err(invalid_send_input("invalid_device_identifier"));
     }
+    crate::commands::shared::validate_story_id(&input.story_id)
+        .map_err(|_| invalid_send_input("invalid_story_id"))?;
 
-    let (tx, mut rx) = tauri::async_runtime::channel::<Option<FilePath>>(1);
-    app.dialog()
-        .file()
-        .add_filter(SEND_PACK_DIALOG_FILTER_NAME, &["zip"])
-        .pick_file(move |path| {
-            let _ = tx.try_send(path);
-        });
-
-    let picked = match rx.recv().await {
-        Some(inner) => inner,
-        None => {
-            let _ = device_log::record_event(
-                &app,
-                device_log::Event::DevicePackSendFailed {
-                    source: "dialog",
-                    elapsed_ms: 0,
-                },
-            );
-            return Err(send_dialog_failed_error());
-        }
-    };
-    let Some(file_path) = picked else {
-        return Ok(SendPackToDeviceOutcomeDto::Cancelled);
-    };
-    let archive_path = file_path
-        .as_path()
-        .map(|p| p.to_path_buf())
-        .ok_or_else(send_non_filesystem_path_error)?;
+    let app_data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|_| send_app_data_unavailable_error())?;
+    let archive_path = crate::infrastructure::filesystem::resolve_source_archive_path(
+        &app_data_dir,
+        &input.story_id,
+    );
+    // A story with no retained source archive cannot be sent to a V3 — refused
+    // here (before any device touch) with an actionable message.
+    if !archive_path.is_file() {
+        return Err(no_source_archive_error());
+    }
 
     let scanner = state.device_scanner.clone();
     let writer = state.pack_writer_v3.clone();
@@ -654,7 +639,6 @@ pub async fn send_pack_to_device(
         device_identifier: input.device_identifier,
         archive_path,
     };
-    // Measure the SEND itself, not the human time spent in the picker.
     let started = Instant::now();
 
     let outcome = tauri::async_runtime::spawn_blocking(move || {
@@ -788,29 +772,24 @@ fn invalid_send_input(cause: &'static str) -> AppError {
     }))
 }
 
-/// The native pack picker could not open (dialog backend failure).
-fn send_dialog_failed_error() -> AppError {
+/// `app_data_dir` could not be resolved — the retained-archive store has no
+/// home to read from.
+fn send_app_data_unavailable_error() -> AppError {
     AppError::device_write_failed(
-        "Envoi impossible: la fenêtre de sélection n'a pas pu s'ouvrir.",
-        "Relance Rustory ; si le problème persiste, consulte les traces locales.",
+        "Envoi impossible: stockage local introuvable.",
+        "Vérifie les permissions de ton dossier utilisateur puis relance Rustory.",
     )
-    .with_details(serde_json::json!({
-        "source": "dialog",
-        "stage": "dialog_failed",
-    }))
+    .with_details(serde_json::json!({ "source": "other", "cause": "app_data_dir" }))
 }
 
-/// The picker returned a non-filesystem location (URL form) — desktop
-/// dialogs always return a local path; anything else is refused.
-fn send_non_filesystem_path_error() -> AppError {
+/// The selected story has no retained source archive — it was imported before
+/// this feature, or it is a native / non-archive story. Actionable: re-import.
+fn no_source_archive_error() -> AppError {
     AppError::device_write_failed(
-        "Envoi impossible: chemin de fichier invalide.",
-        "Choisis un fichier local classique puis réessaie.",
+        "Envoi impossible: cette histoire n'a pas de pack d'origine conservé.",
+        "Ré-importe l'histoire depuis son archive .zip puis réessaie l'envoi.",
     )
-    .with_details(serde_json::json!({
-        "source": "dialog",
-        "stage": "non_filesystem_path",
-    }))
+    .with_details(serde_json::json!({ "source": "no_source_archive" }))
 }
 
 /// The blocking send worker could not be joined (panicked or cancelled).
@@ -834,7 +813,7 @@ fn send_failure_source(err: &AppError) -> &'static str {
             "capability_gate" => "capability_gate",
             "archive" => "archive",
             "device_write" => "device_write",
-            "dialog" => "dialog",
+            "no_source_archive" => "no_source_archive",
             "spawn_blocking_join" => "spawn_blocking_join",
             _ => "other",
         })
@@ -968,8 +947,9 @@ mod tests {
     fn command_layer_send_refusals_are_actionable() {
         let refusals = [
             invalid_send_input("invalid_device_identifier"),
-            send_dialog_failed_error(),
-            send_non_filesystem_path_error(),
+            invalid_send_input("invalid_story_id"),
+            send_app_data_unavailable_error(),
+            no_source_archive_error(),
             send_join_error(),
         ];
         for err in &refusals {

@@ -2426,9 +2426,12 @@ describe("<LibraryRoute />", () => {
     );
   });
 
-  it("offers the pack-archive send on a sendArchive-capable V3, sends and re-reads the inventory", async () => {
+  it("sends a V3-sendable story via the SINGLE Envoyer CTA and re-reads the inventory", async () => {
     const user = userEvent.setup();
-    mockGet.mockResolvedValue({ stories: [] });
+    // A local story that RETAINED its source `.zip` at import → V3-sendable.
+    mockGet.mockResolvedValueOnce({
+      stories: [{ id: "s1", title: "Le soleil", sendableArchive: true }],
+    });
     // A V3 whose matrix line OPENS the dedicated archive-send while the
     // round-trip write stays closed — the exact V3 wire Rust now emits.
     const sendableV3 = {
@@ -2440,51 +2443,78 @@ describe("<LibraryRoute />", () => {
     };
     mockDevice.mockResolvedValue(sendableV3);
     mockDeviceLibrary.mockResolvedValue(readableTwo);
+    mockStoryValidation.mockResolvedValue(presumedTransferableValidation);
     mockSendPack.mockResolvedValue({
-      kind: "sent",
       packUuid: "abababab-abab-abab-abab-ababfac5562d",
       imageCount: 2,
       audioCount: 3,
     });
     renderLibrary();
 
-    // The device-level affordance appears with the capability.
-    const sendButton = await screen.findByRole("button", {
-      name: "Envoyer un pack (.zip)…",
+    // Select the local story, then use the ONE "Envoyer vers la Lunii" CTA —
+    // no separate panel, no file picker.
+    await user.click(await screen.findByRole("button", { name: /le soleil/i }));
+    const panel = screen.getByRole("complementary", {
+      name: /panneau de décision/i,
     });
+    const send = within(panel).getByRole("button", {
+      name: /envoyer vers la lunii/i,
+    });
+    await waitFor(() =>
+      expect(send).not.toHaveAttribute("aria-disabled", "true"),
+    );
     const readsBefore = mockDeviceLibrary.mock.calls.length;
-    await user.click(sendButton);
+    await user.click(send);
 
-    // The command received exactly the one identifier (the archive is
-    // picked by a Rust-owned native dialog — no path crosses IPC).
+    // The command received EXACTLY the two identifiers — Rust resolves the
+    // retained archive from the story id (no path crosses IPC).
     await waitFor(() =>
       expect(mockSendPack).toHaveBeenCalledWith({
         deviceIdentifier: sendableV3.deviceIdentifier,
+        storyId: "s1",
       }),
     );
-    // The settled success is announced with the pack facts, and the
-    // device inventory re-reads so the new pack appears.
+    // The settled success is announced with the pack facts, and the device
+    // inventory re-reads so the new pack appears.
     expect(
-      await screen.findByText("Pack envoyé sur l'appareil (2 images, 3 audios)."),
+      await within(panel).findByText("Pack envoyé sur l'appareil."),
     ).toBeInTheDocument();
     await waitFor(() =>
       expect(mockDeviceLibrary.mock.calls.length).toBeGreaterThan(readsBefore),
     );
   });
 
-  it("offers no pack-archive send when the matrix closes sendArchive (V1 round-trip cohort)", async () => {
-    mockGet.mockResolvedValue({ stories: [] });
-    mockDevice.mockResolvedValue(supportedOrigine);
+  it("disables the Envoyer CTA for a non-retained story on a V3 with the re-import reason", async () => {
+    const user = userEvent.setup();
+    // A local story WITHOUT a retained archive (imported before the feature).
+    mockGet.mockResolvedValueOnce({
+      stories: [{ id: "s1", title: "Le soleil" }],
+    });
+    const sendableV3 = {
+      ...supportedV3,
+      supportedOperations: {
+        ...supportedV3.supportedOperations,
+        sendArchive: true,
+      },
+    };
+    mockDevice.mockResolvedValue(sendableV3);
     mockDeviceLibrary.mockResolvedValue(readableTwo);
     renderLibrary();
 
-    // The device section is up (the inventory listed) yet the send panel
-    // stays absent: the affordance follows the capability, not the family.
-    await screen.findByRole("main", { name: /collection d'histoires/i });
-    await screen.findByRole("button", { name: /identifiant 0000abcd/i });
+    await user.click(await screen.findByRole("button", { name: /le soleil/i }));
+    const panel = screen.getByRole("complementary", {
+      name: /panneau de décision/i,
+    });
+    // ONE CTA, disabled with the actionable re-import reason — never a second
+    // entry point.
+    const send = within(panel).getByRole("button", {
+      name: /envoyer vers la lunii/i,
+    });
+    expect(send).toHaveAttribute("aria-disabled", "true");
     expect(
-      screen.queryByRole("button", { name: "Envoyer un pack (.zip)…" }),
-    ).not.toBeInTheDocument();
+      within(panel).getByText(/pas de pack d'origine conservé/i),
+    ).toBeInTheDocument();
+    expect(mockSendPack).not.toHaveBeenCalled();
   });
 
   it("copies a device story: authoritative re-reads on both sides, preserved selection, flipped CTA (AC1+AC2)", async () => {

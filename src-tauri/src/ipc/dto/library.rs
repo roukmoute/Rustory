@@ -36,10 +36,22 @@ pub struct StoryCardDto {
     /// file-imported card keeps its minimal shape.
     #[serde(skip_serializing_if = "is_not_transferable")]
     pub transferable: bool,
+    /// `true` iff the story retains its ORIGINAL source `.zip` (a
+    /// structured-archive import) and can therefore be sent to a Lunii V3 via
+    /// the single "Envoyer vers la Lunii" gesture (transcode + re-cipher for
+    /// the target). Independent of `transferable` (which is the V1/V2
+    /// byte-copy round-trip). Skipped on the wire when `false` so a card
+    /// without it keeps its minimal shape.
+    #[serde(skip_serializing_if = "is_false")]
+    pub sendable_archive: bool,
 }
 
 fn is_not_transferable(transferable: &bool) -> bool {
     !transferable
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 impl StoryCardDto {
@@ -52,6 +64,7 @@ impl StoryCardDto {
             import_state: None,
             import_report: None,
             transferable: false,
+            sendable_archive: false,
         }
     }
 
@@ -65,6 +78,7 @@ impl StoryCardDto {
             import_state: None,
             import_report: None,
             transferable: true,
+            sendable_archive: false,
         }
     }
 }
@@ -111,6 +125,7 @@ mod tests {
             import_state: Some(ImportStateDto::Recognized),
             import_report: None,
             transferable: false,
+            sendable_archive: false,
         };
         let v = serde_json::to_value(&card).expect("serialize");
         assert_eq!(
@@ -138,6 +153,7 @@ mod tests {
                     .into(),
             }]),
             transferable: false,
+            sendable_archive: false,
         };
         let v = serde_json::to_value(&card).expect("serialize");
         assert_eq!(v["importState"], "needsReview");

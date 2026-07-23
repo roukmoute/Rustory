@@ -27,7 +27,7 @@
 
 use std::collections::BTreeMap;
 use std::io::Read;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::application::story::node::gc_unreferenced_media_file;
 use crate::application::story::now_iso_ms;
@@ -146,6 +146,22 @@ pub struct PreparedCreation {
     /// what [`compensate_structured_creation`] reclaims if the commit
     /// never lands.
     promoted: Vec<(String, String)>,
+    /// The ORIGINAL source `.zip` to retain (device-format `story.json` +
+    /// assets) so the story can later be sent to a Lunii V3 WITHOUT
+    /// re-picking the file. `Some` only for the structured-ARCHIVE flow —
+    /// the folder/rss/rustory flows carry no such archive (`None`), and the
+    /// retention is a no-op for them.
+    source_archive_to_retain: Option<PathBuf>,
+}
+
+impl PreparedCreation {
+    /// Mark the ORIGINAL source `.zip` to retain at commit time, so the story
+    /// becomes sendable to a Lunii V3 without re-picking the file. Only the
+    /// structured-archive flow calls this.
+    pub(crate) fn with_retained_source_archive(mut self, archive_path: &Path) -> Self {
+        self.source_archive_to_retain = Some(archive_path.to_path_buf());
+        self
+    }
 }
 
 /// The provenance facts a creation source hands to
@@ -325,6 +341,9 @@ pub(crate) fn prepare_from_creatable(
         findings: provenance.findings,
         asset_rows,
         promoted: promoted_pairs(&promoted),
+        // Default: nothing to retain. The structured-archive flow overrides
+        // this with the source `.zip` via [`PreparedCreation::with_retained_source_archive`].
+        source_archive_to_retain: None,
     })
 }
 
@@ -454,6 +473,29 @@ pub fn commit_structured_creation(
         return Err(err);
     }
 
+    // The story is committed. If this creation carried a source `.zip`
+    // (structured-archive flow), retain it now so "Envoyer vers la Lunii"
+    // can send this story to a Lunii V3 later. BEST-EFFORT and DEGRADING:
+    // a retention failure (e.g. disk full) never undoes the successful
+    // import — the story is simply not V3-sendable (flag stays 0) until a
+    // re-import. On success the flag flips to 1 in its own small UPDATE.
+    let mut sendable_archive = false;
+    if let Some(archive_path) = prepared.source_archive_to_retain.as_deref() {
+        if crate::infrastructure::filesystem::retain_source_archive(
+            app_data_dir,
+            &story_id,
+            archive_path,
+        )
+        .is_ok()
+        {
+            let updated = db.conn().execute(
+                "UPDATE story_local_imports SET source_archive_retained = 1 WHERE story_id = ?1",
+                rusqlite::params![&story_id],
+            );
+            sendable_archive = updated.is_ok();
+        }
+    }
+
     let import_report = folder_import_report_dto(&prepared.findings);
     Ok(StoryCardDto {
         id: story_id,
@@ -465,6 +507,9 @@ pub fn commit_structured_creation(
             Some(import_report)
         },
         transferable: false,
+        // Reflects the retention that just ran: a structured-archive import
+        // whose source `.zip` was kept is immediately V3-sendable.
+        sendable_archive,
     })
 }
 

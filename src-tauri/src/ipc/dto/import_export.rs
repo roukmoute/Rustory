@@ -1817,6 +1817,7 @@ mod tests {
                 import_state: Some(ImportStateDto::NeedsReview),
                 import_report: None,
                 transferable: false,
+                sendable_archive: false,
             },
             report: vec![ImportFindingDto {
                 aspect: ImportAspectDto::Source,

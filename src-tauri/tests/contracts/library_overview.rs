@@ -40,6 +40,7 @@ fn library_overview_with_an_imported_story_carries_import_state() {
                     .into(),
             }]),
             transferable: false,
+            sendable_archive: false,
         }],
     };
     let v = serde_json::to_value(&dto).expect("serialize overview");

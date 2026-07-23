@@ -52,7 +52,8 @@ fn read_stories(db: &DbHandle) -> Result<Vec<StoryCardDto>, AppError> {
         .conn()
         .prepare(
             "SELECT s.id, s.title, li.import_state, li.findings_summary, \
-                    li.source_format, pi.story_id IS NOT NULL \
+                    li.source_format, pi.story_id IS NOT NULL, \
+                    COALESCE(li.source_archive_retained, 0) \
              FROM stories s \
              LEFT JOIN story_local_imports li ON li.story_id = s.id \
              LEFT JOIN story_imports pi ON pi.story_id = s.id \
@@ -67,6 +68,7 @@ fn read_stories(db: &DbHandle) -> Result<Vec<StoryCardDto>, AppError> {
             let findings_summary: Option<String> = row.get(3)?;
             let source_format: Option<String> = row.get(4)?;
             let device_pack: bool = row.get(5)?;
+            let sendable_archive: bool = row.get(6)?;
             Ok(project_story_card(
                 id,
                 title,
@@ -74,6 +76,7 @@ fn read_stories(db: &DbHandle) -> Result<Vec<StoryCardDto>, AppError> {
                 findings_summary,
                 source_format,
                 device_pack,
+                sendable_archive,
             ))
         })
         .map_err(map_select_error)?;
@@ -101,6 +104,7 @@ fn project_story_card(
     findings_summary: Option<String>,
     source_format: Option<String>,
     device_pack: bool,
+    sendable_archive: bool,
 ) -> StoryCardDto {
     if device_pack {
         // A device-pack story owns its writeback artifacts — transferable.
@@ -137,8 +141,13 @@ fn project_story_card(
         import_state: Some(state),
         import_report,
         // A file import (`.rustory` / folder / archive / rss) owns no
-        // device-format pack — not transferable to a device in MVP.
+        // device-format pack — not transferable via the V1/V2 byte-copy
+        // round-trip.
         transferable: false,
+        // …but a structured-archive import that RETAINED its source `.zip`
+        // CAN be sent to a Lunii V3 (transcode + re-cipher). The DB flag is
+        // the single truth (set only after a successful retention).
+        sendable_archive,
     }
 }
 
@@ -367,6 +376,7 @@ mod tests {
             None,
             Some("rustory".into()),
             false,
+            false,
         );
         assert!(card.import_state.is_none());
     }
@@ -479,11 +489,13 @@ mod tests {
         // A device-pack story is transferable; a native one and a
         // file-import one are not — the send gate's pre-click block reads
         // exactly this flag, no preparation probe needed.
-        let device = super::project_story_card("d".into(), "Pack".into(), None, None, None, true);
+        let device =
+            super::project_story_card("d".into(), "Pack".into(), None, None, None, true, false);
         assert!(device.transferable);
+        assert!(!device.sendable_archive);
 
         let native =
-            super::project_story_card("n".into(), "Native".into(), None, None, None, false);
+            super::project_story_card("n".into(), "Native".into(), None, None, None, false, false);
         assert!(!native.transferable);
 
         let file_import = super::project_story_card(
@@ -493,7 +505,23 @@ mod tests {
             None,
             Some("rustory".into()),
             false,
+            false,
         );
         assert!(!file_import.transferable);
+        assert!(!file_import.sendable_archive);
+
+        // A structured-archive import that retained its source `.zip` is
+        // V3-sendable (but still not `transferable` via the byte-copy path).
+        let archive_sendable = super::project_story_card(
+            "a".into(),
+            "Archive".into(),
+            Some("recognized".into()),
+            None,
+            Some("structured-archive".into()),
+            false,
+            true,
+        );
+        assert!(!archive_sendable.transferable);
+        assert!(archive_sendable.sendable_archive);
     }
 }

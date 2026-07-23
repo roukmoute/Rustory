@@ -30,6 +30,11 @@ export interface StoryCardDto {
    *  send gate's pre-click "native non transférable" block. Absent (falsy)
    *  on native / file-imported cards, so their shape is unchanged. */
   transferable?: boolean;
+  /** `true` iff the story retained its ORIGINAL source `.zip` (a
+   *  structured-archive import) and can be sent to a Lunii V3 via the single
+   *  "Envoyer vers la Lunii" gesture. Independent of `transferable` (the
+   *  V1/V2 round-trip). Absent (falsy) otherwise, so the shape is unchanged. */
+  sendableArchive?: boolean;
 }
 
 const CARD_IMPORT_STATES: ReadonlySet<string> = new Set([
@@ -80,6 +85,13 @@ export function isStoryCardDto(value: unknown): value is StoryCardDto {
   if (
     candidate.transferable !== undefined &&
     typeof candidate.transferable !== "boolean"
+  ) {
+    return false;
+  }
+  // Optional V3-sendability flag, same discipline (emitted only when `true`).
+  if (
+    candidate.sendableArchive !== undefined &&
+    typeof candidate.sendableArchive !== "boolean"
   ) {
     return false;
   }
