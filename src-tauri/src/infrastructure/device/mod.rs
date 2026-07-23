@@ -11,6 +11,7 @@
 
 pub mod automount;
 pub mod catalog_source;
+pub mod cipher;
 pub mod deleter;
 pub mod library_reader;
 pub mod pack_reader;
@@ -29,6 +30,10 @@ pub use automount::{
     looks_like_lunii_candidate, try_automount_lunii_candidates, MountAttempt, MountOutcome,
 };
 pub use catalog_source::{LuniiHttpCatalogSource, OfficialCatalogSource};
+pub use cipher::{
+    reverse_bytes_per_u32, v3_cipher_in_place, v3_decipher_in_place, v3_story_key_iv,
+    V3_CIPHER_REGION,
+};
 pub use deleter::{DeleteFailure, DeleteOutcome, DevicePackDeleter, SystemDevicePackDeleter};
 pub use library_reader::{DeviceLibraryReader, SystemDeviceLibraryReader};
 pub use pack_reader::{AcquiredPack, DevicePackReader, SystemDevicePackReader};

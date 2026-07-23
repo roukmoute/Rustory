@@ -54,6 +54,16 @@ zip = { version = "=4.6.1", default-features = false, features = ["deflate"] }
 rusqlite = { version = "=0.32", features = ["bundled"] }
 uuid = { version = "=1.11", features = ["v7"] }
 sha2 = "=0.10"
+# Lunii V3 pack ciphering (device write/read, story 3.x). V3 ciphers the first
+# 512 bytes of content files with AES-128-CBC (key/IV read from the device
+# `.md` at 0x40/0x50, each per-4-byte-word endianness-swapped). Pure-Rust
+# RustCrypto crates — NO C toolchain / cmake, so they respect the CI build
+# constraint (unlike aws-lc). `aes` is the block cipher, `cbc` the mode;
+# `cipher` exposes the block-padding traits (NoPadding — we cipher an exact
+# 16-byte-aligned region, never PKCS padding). Validated against a real device.
+aes = "=0.8.4"
+cbc = "=0.1.2"
+cipher = { version = "=0.4.4", features = ["block-padding"] }
 time = { version = "=0.3", features = ["formatting", "parsing", "macros", "serde"] }
 unicode-normalization = "=0.1"
 tempfile = "=3.27.0"
