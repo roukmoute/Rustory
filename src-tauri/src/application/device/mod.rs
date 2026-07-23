@@ -12,6 +12,7 @@ pub mod delete;
 pub mod import;
 pub mod library;
 pub mod preflight;
+pub mod send;
 pub mod title;
 pub mod transfer;
 

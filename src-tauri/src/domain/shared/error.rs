@@ -16,6 +16,7 @@ pub enum AppErrorCode {
     DeviceUnsupported,
     ImportFailed,
     DeviceDeleteFailed,
+    DeviceWriteFailed,
     PreparationFailed,
     TransferFailed,
     TransferOutcomeUnavailable,
@@ -163,6 +164,20 @@ impl AppError {
     ) -> Self {
         Self {
             code: AppErrorCode::DeviceDeleteFailed,
+            message: message.into(),
+            user_action: Some(user_action.into()),
+            details: None,
+        }
+    }
+
+    /// Constructed when sending a pack TO a device (V3 write) fails: the
+    /// authoritative re-scan (device changed/absent/unsupported), the capability
+    /// gate (a profile that may not be written), the source archive
+    /// (unreadable / not a structured pack), or the on-volume write itself. The
+    /// stage is carried by `details.source`, PII-free.
+    pub fn device_write_failed(message: impl Into<String>, user_action: impl Into<String>) -> Self {
+        Self {
+            code: AppErrorCode::DeviceWriteFailed,
             message: message.into(),
             user_action: Some(user_action.into()),
             details: None,
@@ -522,6 +537,16 @@ mod tests {
         assert_eq!(v["code"], "IMPORT_FAILED");
         assert_eq!(v["details"]["source"], "fs_read");
         assert_eq!(v["details"]["kind"], "not_found");
+    }
+
+    #[test]
+    fn device_write_failed_serializes_with_stable_code() {
+        let err = AppError::device_write_failed("msg", "action")
+            .with_details(serde_json::json!({ "source": "capability_gate" }));
+        let v = serde_json::to_value(&err).expect("serialize");
+        assert_eq!(v["code"], "DEVICE_WRITE_FAILED");
+        assert_eq!(v["details"]["source"], "capability_gate");
+        assert!(v.get("user_action").is_none(), "snake_case must not leak");
     }
 
     #[test]
