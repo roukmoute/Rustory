@@ -29,6 +29,8 @@ export interface StoryCollectionProps {
   preparationBadges?: ReadonlyMap<string, StoryPreparationBadge>;
   onSelectStory?: (id: string, mode: StoryCardSelectionMode) => void;
   onOpenStory?: (id: string) => void;
+  /** Right-click on a card: the parent opens a context menu at the cursor. */
+  onStoryContextMenu?: (id: string, x: number, y: number) => void;
   /** Fires when the user requests to open the "Créer une histoire" flow.
    *  When omitted, the CTA in the empty state falls back to its disabled
    *  form with the canonical "indisponible" reason. */
@@ -66,6 +68,7 @@ export function StoryCollection({
   preparationBadges,
   onSelectStory,
   onOpenStory,
+  onStoryContextMenu,
   onCreateStoryRequest,
   onImportArtifactRequest,
   isImportBusy = false,
@@ -268,6 +271,7 @@ export function StoryCollection({
                 preparationBadge={preparationBadges?.get(story.id)}
                 onSelect={handleSelect}
                 onOpen={handleOpen}
+                onContextMenu={onStoryContextMenu}
               />
             </li>
           ))}

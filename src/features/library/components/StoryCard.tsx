@@ -35,6 +35,9 @@ export interface StoryCardProps {
   preparationBadge?: StoryPreparationBadge;
   onSelect: (id: string, mode: StoryCardSelectionMode) => void;
   onOpen: (id: string) => void;
+  /** Right-click on the card: the parent opens a context menu of actions at
+   *  the cursor. When omitted, the default browser menu is left alone. */
+  onContextMenu?: (id: string, x: number, y: number) => void;
 }
 
 /**
@@ -53,7 +56,18 @@ export function StoryCard({
   preparationBadge,
   onSelect,
   onOpen,
+  onContextMenu,
 }: StoryCardProps): React.JSX.Element {
+  const handleContextMenu = (
+    event: React.MouseEvent<HTMLDivElement>,
+  ): void => {
+    if (!onContextMenu) return;
+    // Replace the browser's default menu with ours, and make this card the
+    // acted-on selection so the menu's actions target it.
+    event.preventDefault();
+    if (!isSelected) onSelect(story.id, "replace");
+    onContextMenu(story.id, event.clientX, event.clientY);
+  };
   const handleClick = (event: React.MouseEvent<HTMLDivElement>): void => {
     // Shift+click is reserved for range selection, which is explicitly out
     // of the MVP. Swallow it so power users don't get a silent `replace`.
@@ -121,6 +135,7 @@ export function StoryCard({
         aria-label={story.title}
         onClick={handleClick}
         onDoubleClick={handleDoubleClick}
+        onContextMenu={handleContextMenu}
         onKeyDown={handleKeyDown}
       >
         {isSelected ? (

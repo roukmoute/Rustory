@@ -1,5 +1,5 @@
 import type React from "react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 
 import {
@@ -57,7 +57,7 @@ import { toAppError } from "../../shared/errors/app-error";
 import type { DeviceStoryDto } from "../../shared/ipc-contracts/device-library";
 import type { ContentSourcePolicy } from "../../shared/ipc-contracts/import-export";
 import type { StoryCardDto } from "../../shared/ipc-contracts/library";
-import { Button, SurfacePanel } from "../../shared/ui";
+import { Button, ContextMenu, Dialog, SurfacePanel } from "../../shared/ui";
 import { LibraryLayout } from "../../shell/layout/LibraryLayout";
 import { useDropShell } from "../../shell/state/drop-shell-store";
 import { useLibraryShell } from "../../shell/state/library-shell-store";
@@ -181,19 +181,39 @@ export function LibraryRoute(): React.JSX.Element {
     { kind: "idle" } | { kind: "deleting" } | { kind: "failed"; message: string }
   >({ kind: "idle" });
 
-  const handleDeleteSelected = async (): Promise<void> => {
-    if (presentSelectedIds.size === 0 || deleteState.kind === "deleting") {
-      return;
-    }
+  // Core deletion, shared by the panel's Supprimer and the card context
+  // menu. All-or-nothing on the Rust side: a rejection leaves the library
+  // untouched, so the selection is kept for a retry; success clears it and
+  // re-reads the overview.
+  const deleteIds = async (ids: string[]): Promise<void> => {
+    if (ids.length === 0 || deleteState.kind === "deleting") return;
     setDeleteState({ kind: "deleting" });
     try {
-      await deleteStories({ ids: [...presentSelectedIds] });
+      await deleteStories({ ids });
       clearSelection();
       setDeleteState({ kind: "idle" });
       invalidate();
     } catch (err) {
       setDeleteState({ kind: "failed", message: toAppError(err).message });
     }
+  };
+
+  const handleDeleteSelected = (): Promise<void> =>
+    deleteIds([...presentSelectedIds]);
+
+  // Right-click context menu on a library card (id + cursor position), and
+  // the confirmation for its destructive "Supprimer" action.
+  const [storyMenu, setStoryMenu] = useState<{
+    id: string;
+    x: number;
+    y: number;
+  } | null>(null);
+  const [confirmDeleteIds, setConfirmDeleteIds] = useState<string[] | null>(
+    null,
+  );
+  const confirmDeleteId = useId();
+  const handleStoryContextMenu = (id: string, x: number, y: number): void => {
+    setStoryMenu({ id, x, y });
   };
 
   const handleCreateStoryRequest = (): void => {
@@ -1071,6 +1091,7 @@ export function LibraryRoute(): React.JSX.Element {
         preparationBadges,
         storyImport.pickAndAnalyze,
         isImportBusy || isCreateFromFolderBusy || isRssCreationActive,
+        handleStoryContextMenu,
       )}
       <DeviceStoryCollection
         state={deviceLibrary.state}
@@ -1192,6 +1213,64 @@ export function LibraryRoute(): React.JSX.Element {
         onSubmittingChange={setIsCreateSubmitting}
         contentSourcePolicy={contentSourcePolicy}
       />
+      {storyMenu !== null ? (
+        <ContextMenu
+          x={storyMenu.x}
+          y={storyMenu.y}
+          ariaLabel={`Actions pour ${
+            overview?.stories.find((s) => s.id === storyMenu.id)?.title ??
+            "l'histoire"
+          }`}
+          onClose={() => setStoryMenu(null)}
+          items={[
+            {
+              label: "Éditer",
+              onSelect: () => handleOpenStory(storyMenu.id),
+            },
+            {
+              label: "Supprimer",
+              danger: true,
+              onSelect: () => setConfirmDeleteIds([storyMenu.id]),
+            },
+          ]}
+        />
+      ) : null}
+      {confirmDeleteIds !== null ? (
+        <Dialog
+          open
+          onClose={() => setConfirmDeleteIds(null)}
+          title={
+            confirmDeleteIds.length > 1
+              ? `Supprimer ${confirmDeleteIds.length} histoires ?`
+              : "Supprimer l'histoire ?"
+          }
+          ariaDescribedBy={confirmDeleteId}
+        >
+          <p id={confirmDeleteId}>
+            {confirmDeleteIds.length === 1
+              ? `« ${
+                  overview?.stories.find((s) => s.id === confirmDeleteIds[0])
+                    ?.title ?? "Cette histoire"
+                } » sera définitivement supprimée de la bibliothèque, avec ses brouillons, médias et mémoires de transfert associés.`
+              : `Ces ${confirmDeleteIds.length} histoires seront définitivement supprimées de la bibliothèque, avec leurs brouillons, médias et mémoires de transfert associés.`}
+          </p>
+          <div className="library-route__confirm-actions">
+            <Button
+              variant="primary"
+              onClick={() => {
+                const ids = confirmDeleteIds;
+                setConfirmDeleteIds(null);
+                void deleteIds(ids);
+              }}
+            >
+              Confirmer la suppression
+            </Button>
+            <Button variant="quiet" onClick={() => setConfirmDeleteIds(null)}>
+              Annuler
+            </Button>
+          </div>
+        </Dialog>
+      ) : null}
     </>
   );
 }
@@ -1500,6 +1579,7 @@ function renderCenter(
   preparationBadges: ReadonlyMap<string, StoryPreparationBadge>,
   onImportArtifactRequest: () => void,
   isImportBusy: boolean,
+  onStoryContextMenu: (id: string, x: number, y: number) => void,
 ): React.JSX.Element {
   switch (state.kind) {
     case "error": {
@@ -1529,6 +1609,7 @@ function renderCenter(
           preparationBadges={preparationBadges}
           onSelectStory={onSelectStory}
           onOpenStory={onOpenStory}
+          onStoryContextMenu={onStoryContextMenu}
           onCreateStoryRequest={onCreateStoryRequest}
           onImportArtifactRequest={onImportArtifactRequest}
           isImportBusy={isImportBusy}
@@ -1548,6 +1629,7 @@ function renderCenter(
           preparationBadges={preparationBadges}
           onSelectStory={onSelectStory}
           onOpenStory={onOpenStory}
+          onStoryContextMenu={onStoryContextMenu}
           onCreateStoryRequest={onCreateStoryRequest}
           onImportArtifactRequest={onImportArtifactRequest}
           isImportBusy={isImportBusy}

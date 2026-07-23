@@ -16,5 +16,8 @@ export type { ProgressIndicatorProps, ProgressMode } from "./ProgressIndicator";
 export { Dialog } from "./Dialog";
 export type { DialogProps } from "./Dialog";
 
+export { ContextMenu } from "./ContextMenu";
+export type { ContextMenuItem, ContextMenuProps } from "./ContextMenu";
+
 export { Toast } from "./Toast";
 export type { ToastProps } from "./Toast";
