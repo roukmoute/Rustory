@@ -11,6 +11,7 @@ pub mod library;
 pub mod markers;
 pub mod operations;
 pub mod pack;
+pub mod pack_transcode;
 pub mod profile;
 pub mod support_matrix;
 pub mod title;
@@ -34,6 +35,7 @@ pub use pack::{
     MAX_PACK_ASSET_DEPTH, OPTIONAL_PACK_FILES, OS_CRUFT_NAMES, OS_CRUFT_PREFIX, PACK_ASSET_DIRS,
     REQUIRED_PACK_FILES,
 };
+pub use pack_transcode::{transcode_pack, StudioStoryPack, TranscodeError, TranscodedPack};
 pub use profile::{
     classify_flam, classify_lunii, DeviceProfile, DeviceProfileClassification, UnsupportedReason,
 };
