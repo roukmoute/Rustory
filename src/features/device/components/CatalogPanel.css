@@ -21,6 +21,10 @@
   line-height: var(--line-height-normal);
 }
 
+.catalog-panel__status-text {
+  margin: 0;
+}
+
 .catalog-panel__note {
   margin: 0;
   font-size: var(--font-size-meta);

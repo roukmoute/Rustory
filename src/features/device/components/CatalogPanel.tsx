@@ -1,7 +1,12 @@
 import type React from "react";
 import { useId } from "react";
 
-import { Button, StateChip, SurfacePanel } from "../../../shared/ui";
+import {
+  Button,
+  ProgressIndicator,
+  StateChip,
+  SurfacePanel,
+} from "../../../shared/ui";
 import type { UseOfficialCatalog } from "../hooks/use-official-catalog";
 
 import "./CatalogPanel.css";
@@ -27,6 +32,16 @@ export function CatalogPanel({ catalog }: CatalogPanelProps): React.JSX.Element 
   const { state, action, actionError } = catalog;
   const busy = action !== "idle";
 
+  // The long-running actions (a network refresh, a file import) have no
+  // byte-level progress from the backend — a single awaited IPC call — so the
+  // honest affordance is an INDETERMINATE bar, never a fake percentage.
+  const busyLabel =
+    action === "refreshing"
+      ? "Récupération du catalogue officiel…"
+      : action === "importing"
+        ? "Import du fichier de catalogue…"
+        : null;
+
   const statusText =
     state.kind === "loading"
       ? "Lecture du catalogue local…"
@@ -49,13 +64,13 @@ export function CatalogPanel({ catalog }: CatalogPanelProps): React.JSX.Element 
         Catalogue officiel
       </h2>
 
-      <p id={statusId} className="catalog-panel__status" aria-live="polite">
-        {action === "refreshing"
-          ? "Récupération du catalogue officiel…"
-          : action === "importing"
-            ? "Import du fichier de catalogue…"
-            : statusText}
-      </p>
+      <div id={statusId} className="catalog-panel__status" aria-live="polite">
+        {busyLabel !== null ? (
+          <ProgressIndicator mode="indeterminate" label={busyLabel} />
+        ) : (
+          <p className="catalog-panel__status-text">{statusText}</p>
+        )}
+      </div>
 
       <p className="catalog-panel__note">
         Hors-ligne par défaut : Rustory ne contacte aucun serveur sans une

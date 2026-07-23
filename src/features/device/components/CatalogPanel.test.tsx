@@ -81,6 +81,24 @@ describe("<CatalogPanel />", () => {
     expect(importFile).not.toHaveBeenCalled();
   });
 
+  it("shows an indeterminate progress bar while a refresh is in flight", () => {
+    render(<CatalogPanel catalog={makeCatalog({ action: "refreshing" })} />);
+    const bar = screen.getByRole("progressbar", {
+      name: /récupération du catalogue officiel/i,
+    });
+    // Honest: no byte-level progress from the backend ⇒ no fake percentage.
+    expect(bar).not.toHaveAttribute("aria-valuenow");
+  });
+
+  it("shows an indeterminate progress bar while a file import is in flight", () => {
+    render(<CatalogPanel catalog={makeCatalog({ action: "importing" })} />);
+    expect(
+      screen.getByRole("progressbar", {
+        name: /import du fichier de catalogue/i,
+      }),
+    ).toBeInTheDocument();
+  });
+
   it("surfaces an action error in-context (alert) with an explicit dismiss", async () => {
     const user = userEvent.setup();
     const dismissError = vi.fn();
