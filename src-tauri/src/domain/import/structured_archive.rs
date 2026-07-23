@@ -32,9 +32,22 @@ use super::recognition::{
 };
 use super::structured_folder::{
     is_sober_media_basename, CreatableStory, FolderMediaKind, MediaProbe, RetainedMediaRef,
-    StructuredFolderAnalysis, MAX_FOLDER_MEDIA_FILES, MAX_FOLDER_NODE_LABEL_CHARS,
-    MAX_FOLDER_TOTAL_MEDIA_BYTES,
+    StructuredFolderAnalysis, MAX_FOLDER_NODE_LABEL_CHARS,
 };
+
+/// Ceiling on the DISTINCT media files a community pack may reference.
+/// Real Lunii/STUdio packs carry HUNDREDS to a few thousand media (one
+/// image + one sound per stage node); the folder flow's 64-file bound was
+/// far too small and rejected legitimate packs as "structure incohérente".
+/// This bound stays only as an anti-runaway guard, sized for real packs.
+pub const MAX_ARCHIVE_MEDIA_FILES: usize = 8192;
+
+/// Ceiling on the SUM of the retained media bytes of a community pack.
+/// Real packs reach several hundred MB (a rich pack with long narration);
+/// the folder flow's 256 MiB bound rejected large-but-legitimate packs.
+/// Sized to admit the vast majority of real packs while still bounding the
+/// total acceptance I/O.
+pub const MAX_ARCHIVE_TOTAL_MEDIA_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 
 /// The exact descriptor entry name inside the archive — ONE listed name,
 /// no alias (the folder-manifest discipline).
@@ -63,7 +76,7 @@ struct ArchiveMediaReference {
 /// must probe inside the archive (and nothing else: a non-sober basename
 /// never reaches an entry lookup; the analysis discards it as `Ambiguous`
 /// on its own). An unparsable descriptor or one referencing MORE distinct
-/// files than [`MAX_FOLDER_MEDIA_FILES`] yields an EMPTY list: a
+/// files than [`MAX_ARCHIVE_MEDIA_FILES`] yields an EMPTY list: a
 /// bounds-breaking descriptor never triggers a single entry read.
 pub fn archive_referenced_media(story_json: &[u8]) -> Vec<(String, FolderMediaKind)> {
     let Ok(root) = serde_json::from_slice::<Value>(story_json) else {
@@ -163,7 +176,7 @@ pub fn analyze_structured_archive_components(
                 }
             }
         }
-        if retained_sizes.values().sum::<u64>() > MAX_FOLDER_TOTAL_MEDIA_BYTES {
+        if retained_sizes.values().sum::<u64>() > MAX_ARCHIVE_TOTAL_MEDIA_BYTES {
             structure_blocked = true;
         }
     }
@@ -448,7 +461,7 @@ fn raw_archive_media_refs(root: &Value) -> Vec<ArchiveMediaReference> {
 
 fn exceeds_media_file_bound(refs: &[ArchiveMediaReference]) -> bool {
     let distinct: BTreeSet<&str> = refs.iter().map(|r| r.basename.as_str()).collect();
-    distinct.len() > MAX_FOLDER_MEDIA_FILES
+    distinct.len() > MAX_ARCHIVE_MEDIA_FILES
 }
 
 #[cfg(test)]
@@ -779,5 +792,53 @@ mod tests {
             RecognitionCategory::Ambiguous
         );
         assert_eq!(analysis.discarded_media.len(), 2);
+    }
+
+    #[test]
+    fn a_pack_with_hundreds_of_media_is_creatable_not_structure_blocked() {
+        // Regression for the real-pack rejection: the folder flow's 64-file
+        // bound falsely blocked genuine Lunii packs (hundreds of media) as
+        // "structure incohérente". The archive bound admits them.
+        let mut stages = String::from("[");
+        let mut probes: Vec<(String, MediaProbe)> = Vec::new();
+        for i in 0..200u32 {
+            if i > 0 {
+                stages.push(',');
+            }
+            let uuid = format!("{i:08x}-0000-7000-8000-000000000000");
+            let img = format!("img{i}.png");
+            let snd = format!("snd{i}.mp3");
+            stages.push_str(&format!(
+                r#"{{"uuid":"{uuid}","squareOne":{sq},"image":"{img}","audio":"{snd}","okTransition":null,"controlSettings":{{}}}}"#,
+                sq = i == 0,
+            ));
+            probes.push((
+                img,
+                MediaProbe::Usable {
+                    kind: FolderMediaKind::Image,
+                    byte_size: 10,
+                },
+            ));
+            probes.push((
+                snd,
+                MediaProbe::Usable {
+                    kind: FolderMediaKind::Audio,
+                    byte_size: 10,
+                },
+            ));
+        }
+        stages.push(']');
+        let pack = format!(r#"{{"title":"Gros pack","stageNodes":{stages},"actionNodes":[]}}"#);
+        let probe_refs: Vec<(&str, MediaProbe)> =
+            probes.iter().map(|(n, p)| (n.as_str(), *p)).collect();
+        let analysis = analyze(&pack, &probe_refs, None);
+        assert_eq!(
+            category_of(&analysis, RecognitionAspect::Structure),
+            RecognitionCategory::Recognized,
+            "400 distinct media must not trip the structure block"
+        );
+        let creatable = analysis.creatable.expect("creatable");
+        assert_eq!(creatable.structure.nodes.len(), 200);
+        assert_eq!(creatable.retained_media.len(), 400);
     }
 }

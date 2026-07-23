@@ -230,6 +230,7 @@ pub fn prepare_structured_creation(
             state: outcome.analysis.state,
             findings: outcome.analysis.findings,
         },
+        MAX_FOLDER_TOTAL_MEDIA_BYTES,
     )
 }
 
@@ -243,6 +244,7 @@ pub(crate) fn prepare_from_creatable(
     media_base_dir: &Path,
     creatable: &crate::domain::import::CreatableStory,
     provenance: CreationProvenance,
+    max_total_media_bytes: u64,
 ) -> Result<PreparedCreation, PrepareFailure> {
     // Defensive title re-check. The re-analysis already blocks an invalid
     // title through the `Title` aspect, so this is unreachable in practice
@@ -267,7 +269,7 @@ pub(crate) fn prepare_from_creatable(
         app_data_dir,
         media_base_dir,
         &creatable.retained_media,
-        MAX_FOLDER_TOTAL_MEDIA_BYTES,
+        max_total_media_bytes,
     )?;
 
     // Wire the asset ids into the transcoded structure: one asset row per

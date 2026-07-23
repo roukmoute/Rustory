@@ -39,9 +39,9 @@ pub use rss::{
     RSS_FALLBACK_TITLE_PREFIX, RSS_SOURCE_FORMAT_VERSION,
 };
 pub use structured_archive::{
-    analyze_structured_archive_components, archive_referenced_media,
-    STRUCTURED_ARCHIVE_ASSETS_PREFIX, STRUCTURED_ARCHIVE_FORMAT_VERSION,
-    STRUCTURED_ARCHIVE_STORY_JSON_NAME,
+    analyze_structured_archive_components, archive_referenced_media, MAX_ARCHIVE_MEDIA_FILES,
+    MAX_ARCHIVE_TOTAL_MEDIA_BYTES, STRUCTURED_ARCHIVE_ASSETS_PREFIX,
+    STRUCTURED_ARCHIVE_FORMAT_VERSION, STRUCTURED_ARCHIVE_STORY_JSON_NAME,
 };
 pub use structured_folder::{
     analyze_structured_folder_components, is_sober_media_basename, is_supported_folder_source_name,

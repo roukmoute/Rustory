@@ -30,8 +30,8 @@ use std::path::Path;
 use crate::domain::import::{
     analyze_structured_archive_components, archive_referenced_media, is_artifact_checksum,
     is_supported_folder_source_name, MediaProbe, StructuredFolderAnalysis,
-    STRUCTURED_ARCHIVE_ASSETS_PREFIX, STRUCTURED_ARCHIVE_FORMAT_VERSION,
-    STRUCTURED_ARCHIVE_STORY_JSON_NAME,
+    MAX_ARCHIVE_TOTAL_MEDIA_BYTES, STRUCTURED_ARCHIVE_ASSETS_PREFIX,
+    STRUCTURED_ARCHIVE_FORMAT_VERSION, STRUCTURED_ARCHIVE_STORY_JSON_NAME,
 };
 use crate::domain::shared::AppError;
 use crate::domain::story::content_checksum_bytes;
@@ -51,7 +51,7 @@ pub const MAX_STORY_JSON_BYTES: u64 = 4 * 1024 * 1024;
 
 /// Ceiling on the archive's ENTRY COUNT (anti-DoS: bounds every directory
 /// walk before a single entry is read). Beyond it the envelope blocks.
-pub const MAX_ARCHIVE_ENTRIES: usize = 4096;
+pub const MAX_ARCHIVE_ENTRIES: usize = 32_768;
 
 /// Bytes read by the media PROBE — the sniffer's longest magic-byte need.
 const MEDIA_SNIFF_BYTES: usize = 16;
@@ -182,6 +182,7 @@ pub fn prepare_structured_archive_creation(
             state: outcome.analysis.state,
             findings: outcome.analysis.findings,
         },
+        MAX_ARCHIVE_TOTAL_MEDIA_BYTES,
     )
     // `staging` drops here — the promotion copied what it needed into the
     // content-addressed store.
@@ -570,5 +571,42 @@ mod tests {
         let outcome = analyze_structured_archive(&zip_path).expect("analyze");
         let creatable = outcome.analysis.creatable.expect("creatable");
         assert_eq!(creatable.title, "Histoire du soir");
+    }
+}
+
+#[cfg(test)]
+mod real_pack_smoke {
+    //! Ignored by default — points at a REAL community pack on disk via
+    //! `RUSTORY_TEST_ZIP`. Proves the analyzer accepts genuine large packs
+    //! (hundreds/thousands of media) rather than falsely blocking them.
+    use super::*;
+
+    #[test]
+    #[ignore = "requires RUSTORY_TEST_ZIP pointing at a real .zip pack"]
+    fn analyzes_a_real_pack_as_creatable() {
+        let path = std::env::var("RUSTORY_TEST_ZIP").expect("set RUSTORY_TEST_ZIP");
+        let outcome = analyze_structured_archive(std::path::Path::new(&path)).expect("analyze");
+        let quality = &outcome.analysis.quality;
+        let retained = outcome
+            .analysis
+            .creatable
+            .as_ref()
+            .map(|c| c.retained_media.len())
+            .unwrap_or(0);
+        let discarded = outcome.analysis.discarded_media.len();
+        let nodes = outcome
+            .analysis
+            .creatable
+            .as_ref()
+            .map(|c| c.structure.nodes.len())
+            .unwrap_or(0);
+        eprintln!(
+            "REAL PACK '{}': quality={:?} nodes={} retained_media={} discarded_media={}",
+            outcome.archive_name, quality, nodes, retained, discarded,
+        );
+        assert!(
+            outcome.analysis.creatable.is_some(),
+            "a real pack must be creatable, not blocked as unusable"
+        );
     }
 }
