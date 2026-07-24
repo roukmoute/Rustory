@@ -445,6 +445,103 @@ mod tests {
         assert_eq!(listed, 1, "the pack must be listed exactly once in .pi");
     }
 
+    /// Ground-truth harness of the WHOLE REWORKED path (single entry point):
+    /// import a `.zip` via `accept_structured_archive_creation` (which RETAINS
+    /// the source archive), then RESOLVE that retained archive by story id (as
+    /// the `send_pack_to_device` command does) and send it to the real device.
+    /// Proves retention → resolution → transcode → cipher → write end-to-end.
+    /// Same env gating, plus the import happens into a fresh temp DB +
+    /// app_data_dir (no picker, no library dependency).
+    ///
+    /// - `RUSTORY_DEVICE_MOUNT_ROOTS` — points the scanner at the real mount;
+    /// - `RUSTORY_TEST_SEND_MOUNT` — the mount dir (byte-compare target);
+    /// - `RUSTORY_TEST_SEND_ZIP` — the source pack archive to import + send;
+    /// - `RUSTORY_TEST_SEND_UUID` — the expected pack uuid;
+    /// - `RUSTORY_TEST_SEND_CONTENT_REF` — the device-truth `.content/<SHORTID>`.
+    #[test]
+    #[ignore]
+    fn imports_with_retention_then_sends_the_retained_archive_matching_device_truth() {
+        use crate::application::import_export::archive_creation::accept_structured_archive_creation;
+        use crate::infrastructure::db::{open_in_memory, run_migrations};
+        use crate::infrastructure::device::{SystemDeviceScanner, SystemDeviceV3PackWriter};
+        use crate::infrastructure::filesystem::resolve_source_archive_path;
+
+        let mount = PathBuf::from(env_or_skip("RUSTORY_TEST_SEND_MOUNT"));
+        let zip = PathBuf::from(env_or_skip("RUSTORY_TEST_SEND_ZIP"));
+        let expected_uuid = env_or_skip("RUSTORY_TEST_SEND_UUID");
+        let content_ref = PathBuf::from(env_or_skip("RUSTORY_TEST_SEND_CONTENT_REF"));
+        assert!(
+            std::env::var(crate::infrastructure::device::EXTRA_MOUNT_ROOTS_ENV).is_ok(),
+            "point RUSTORY_DEVICE_MOUNT_ROOTS at the mount"
+        );
+
+        // 1. Import the archive → the story is committed AND its source `.zip`
+        //    is retained (the rework). A fresh temp app_data_dir + DB.
+        let app_data = tempfile::tempdir().expect("app_data");
+        let mut db = open_in_memory().expect("open db");
+        run_migrations(&mut db).expect("migrate");
+        let card = accept_structured_archive_creation(&mut db, app_data.path(), &zip)
+            .expect("import the archive");
+        assert!(
+            card.sendable_archive,
+            "an imported archive must be V3-sendable"
+        );
+
+        // 2. Resolve the retained archive by story id — EXACTLY what the
+        //    `send_pack_to_device` command does (no path from the UI).
+        let retained = resolve_source_archive_path(app_data.path(), &card.id);
+        assert!(retained.is_file(), "the source archive must be retained");
+
+        // 3. Send the RETAINED archive to the real device via the whole service.
+        let scanner = SystemDeviceScanner::default();
+        let profile = match resolve_connected_lunii(&scanner, Duration::from_secs(10))
+            .expect("scan")
+            .outcome
+        {
+            ConnectedLuniiOutcome::Supported(p) => p,
+            other => panic!("expected a supported V3, got {other:?}"),
+        };
+        let out = send_archive_to_device(
+            &scanner,
+            &SystemDeviceV3PackWriter,
+            &SendArchiveRequest {
+                device_identifier: profile.device_identifier,
+                archive_path: retained,
+            },
+            Duration::from_secs(300),
+        )
+        .expect("send the retained archive");
+        assert_eq!(out.pack_uuid, expected_uuid);
+
+        // 4. Byte-compare the written pack against the device-truth capture.
+        let written = mount.join(".content").join(&out.short_id);
+        let reference = collect_files(&content_ref);
+        assert!(!reference.is_empty(), "empty reference capture");
+        let produced = collect_files(&written);
+        assert_eq!(
+            produced.keys().collect::<Vec<_>>(),
+            reference.keys().collect::<Vec<_>>(),
+            "file sets differ"
+        );
+        for (rel, ref_bytes) in &reference {
+            assert_eq!(
+                produced.get(rel).expect("present"),
+                ref_bytes,
+                "bytes differ for {rel}"
+            );
+        }
+
+        // 5. The pack is listed exactly once in `.pi` (repairs the orphan).
+        let pi = std::fs::read(mount.join(".pi")).expect("read .pi");
+        let uuid_bytes =
+            crate::domain::transfer::pack_uuid_bytes(&out.pack_uuid).expect("uuid bytes");
+        let listed = pi
+            .chunks_exact(16)
+            .filter(|c| *c == uuid_bytes.as_slice())
+            .count();
+        assert_eq!(listed, 1, "the pack must be listed exactly once in .pi");
+    }
+
     /// Read one required env var of the ground-truth harness (panics with
     /// the setup hint when absent — the test only runs explicitly).
     fn env_or_skip(name: &str) -> String {
