@@ -569,8 +569,36 @@ pub(super) fn write_pi_atomically(
     Ok(())
 }
 
+/// Fsync a directory so its just-created entries are durable.
+///
+/// Platform split — a plain `File::open` on a directory SUCCEEDS on Unix but
+/// FAILS on Windows (a directory handle needs `FILE_FLAG_BACKUP_SEMANTICS`),
+/// which would make EVERY on-volume write abort at the first staging fsync.
+/// So Windows opens with backup semantics and treats directory fsync as
+/// BEST-EFFORT (never abort the write): `FlushFileBuffers` on a directory
+/// handle is a no-op / unsupported on FAT/exFAT removable media anyway, and
+/// the volume's durability is realized on safe-eject. Unix stays STRICT: a
+/// genuine directory fsync failure there means the write is compromised.
+#[cfg(not(windows))]
 pub(super) fn fsync_dir(path: &Path) -> std::io::Result<()> {
     File::open(path)?.sync_all()
+}
+
+#[cfg(windows)]
+pub(super) fn fsync_dir(path: &Path) -> std::io::Result<()> {
+    use std::os::windows::fs::OpenOptionsExt;
+    // FILE_FLAG_BACKUP_SEMANTICS — the only way to obtain a directory handle
+    // via CreateFile on Windows (winbase.h). Best-effort throughout: a
+    // directory that cannot be opened or flushed must never fail the write.
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+    if let Ok(dir) = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+        .open(path)
+    {
+        let _ = dir.sync_all();
+    }
+    Ok(())
 }
 
 pub(super) fn fsync_tree(dir: &Path) -> std::io::Result<()> {

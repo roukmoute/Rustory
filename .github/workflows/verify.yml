@@ -95,3 +95,36 @@ jobs:
 
       - name: cargo test
         run: cargo test --all-targets
+
+  # Windows execution of the device-write path. The on-volume writer's
+  # directory fsync must open a directory handle, which behaves DIFFERENTLY on
+  # Windows (needs FILE_FLAG_BACKUP_SEMANTICS) than on Unix — a bug that only
+  # surfaces at RUNTIME on Windows, invisible to the Linux job above and to a
+  # Linux cross-compile. This job actually RUNS the writer tests on Windows so
+  # that whole class of platform divergence is caught in CI, not by users.
+  rust-windows-device-write:
+    name: Rust device-write (Windows)
+    runs-on: windows-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: src-tauri
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.95.0
+
+      - name: Cargo cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      # Run the device unit tests (writer, v3_pack_writer, deleter, …) ON
+      # Windows: they stage + promote + fsync + rewrite `.pi` on a real temp
+      # directory, so a Windows-only regression in the write path fails here.
+      - name: cargo test (device layer)
+        run: cargo test --lib infrastructure::device
