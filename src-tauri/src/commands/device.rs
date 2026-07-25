@@ -668,6 +668,26 @@ pub async fn send_pack_to_device(
     };
     let _ = device_log::record_event(&app, event);
 
+    // Best-effort: remember the sent pack's title locally (keyed by its pack
+    // UUID) so the device list recognizes it immediately — a custom pack is
+    // in no official catalog and would otherwise render "Histoire non
+    // reconnue" right after its own send. A title failure never reclassifies
+    // a committed send.
+    if let Ok(sent) = &outcome {
+        let mut db = state
+            .db
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let title: Result<String, _> = db.conn().query_row(
+            "SELECT title FROM stories WHERE id = ?1",
+            rusqlite::params![&input.story_id],
+            |row| row.get(0),
+        );
+        if let Ok(title) = title {
+            let _ = set_user_title(&mut db, &sent.pack_uuid, &title);
+        }
+    }
+
     outcome.map(SendPackToDeviceOutcomeDto::from_outcome)
 }
 
@@ -812,6 +832,7 @@ fn send_failure_source(err: &AppError) -> &'static str {
             "device_changed" => "device_changed",
             "capability_gate" => "capability_gate",
             "archive" => "archive",
+            "asset_convert" => "asset_convert",
             "device_write" => "device_write",
             "no_source_archive" => "no_source_archive",
             "spawn_blocking_join" => "spawn_blocking_join",

@@ -9,6 +9,7 @@
 //! operations) lives in `domain/device/profile.rs` and consumes these
 //! reports.
 
+pub mod asset_convert;
 pub mod automount;
 pub mod catalog_source;
 pub mod cipher;
@@ -28,6 +29,7 @@ pub mod fixtures;
 #[cfg(test)]
 pub mod mock;
 
+pub use asset_convert::{to_device_audio, to_device_image, AssetConvertError};
 pub use automount::{
     looks_like_lunii_candidate, try_automount_lunii_candidates, MountAttempt, MountOutcome,
 };

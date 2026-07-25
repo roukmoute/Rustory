@@ -2,10 +2,11 @@
 //! flow ("Envoyer un pack vers l'appareil").
 //!
 //! Composes the proven V3 engine: authoritative re-scan + `send_archive` gate →
-//! read the archive (`story.json` + assets) → [`transcode_pack`] →
-//! [`assemble_v3_pack`] (with the device `.md`) → [`DeviceV3PackWriter`]. The
-//! source archive's assets are written VERBATIM (community packs already carry
-//! device-format BMP/MP3); this flow re-keys the ciphering for the TARGET
+//! read the archive (`story.json` + assets) → [`transcode_pack`] → per-asset
+//! DEVICE NORMALIZATION ([`to_device_image`] / [`to_device_audio`]: verbatim
+//! when already device-ready, converted/stripped otherwise, refused when
+//! unprovable) → [`assemble_v3_pack`] (with the device `.md`) →
+//! [`DeviceV3PackWriter`]. This flow re-keys the ciphering for the TARGET
 //! device (its own `.md` content key), so a pack made for one device plays on
 //! another. Synchronous by design (the command hands it to `spawn_blocking`).
 
@@ -20,7 +21,8 @@ use crate::domain::device::{
 use crate::domain::shared::AppError;
 use crate::domain::transfer::short_id_from_pack_uuid;
 use crate::infrastructure::device::{
-    assemble_v3_pack, AssembleError, DeviceScanner, DeviceV3PackWriter,
+    assemble_v3_pack, to_device_audio, to_device_image, AssembleError, AssetConvertError,
+    DeviceScanner, DeviceV3PackWriter,
 };
 
 use super::{check_operation_allowed, resolve_connected_lunii, ConnectedLuniiOutcome};
@@ -102,15 +104,30 @@ pub fn send_archive_to_device(
     // 4. Transcode the graph → binary index files + ordered asset lists.
     let transcoded = transcode_pack(&pack).map_err(|_| archive_error("transcode"))?;
 
-    // 5. Read every referenced asset from the archive into memory.
+    // 5. Read every referenced asset from the archive and NORMALIZE it to the
+    //    device format: images → BMP 320×240 4-bit RLE4 (PNG/JPEG sources are
+    //    converted; already-device-ready BMPs pass verbatim), audio → bare
+    //    MP3 (ID3 tags stripped; non-conformant audio refused BEFORE any
+    //    device byte). A raw STUdio export would otherwise reach the device
+    //    as PNGs it cannot decode — a blank menu image then "Error SD Card".
     let mut assets = std::collections::HashMap::new();
-    for filename in transcoded.images.iter().chain(transcoded.audios.iter()) {
+    for filename in transcoded.images.iter() {
         if assets.contains_key(filename) {
             continue;
         }
         let bytes = read_entry(&mut archive, filename, MAX_ASSET_BYTES)
             .ok_or_else(|| asset_error(filename))?;
-        assets.insert(filename.clone(), bytes);
+        let device_ready = to_device_image(&bytes).map_err(|e| asset_convert_error(filename, e))?;
+        assets.insert(filename.clone(), device_ready);
+    }
+    for filename in transcoded.audios.iter() {
+        if assets.contains_key(filename) {
+            continue;
+        }
+        let bytes = read_entry(&mut archive, filename, MAX_ASSET_BYTES)
+            .ok_or_else(|| asset_error(filename))?;
+        let device_ready = to_device_audio(&bytes).map_err(|e| asset_convert_error(filename, e))?;
+        assets.insert(filename.clone(), device_ready);
     }
 
     // 6. The TARGET device's `.md` (content key + IV + SNU) — re-keys the pack
@@ -221,6 +238,23 @@ fn asset_error(filename: &str) -> AppError {
     .with_details(serde_json::json!({
         "source": "archive",
         "cause": "asset_missing",
+        // Only the device basename (8 hex), never a path.
+        "asset": crate::domain::device::pack_transcode::device_asset_basename(filename),
+    }))
+}
+
+/// A media exists in the archive but cannot be made device-playable (an
+/// undecodable image, or audio that is not — and cannot losslessly become —
+/// a bare mono 44100 Hz MP3). Refused BEFORE any device byte: sent as-is it
+/// would fail ON the device as an opaque "Error SD Card".
+fn asset_convert_error(filename: &str, err: AssetConvertError) -> AppError {
+    AppError::device_write_failed(
+        "Envoi impossible: un média du pack n'est pas dans un format lisible par l'appareil.",
+        "Ré-exporte le pack avec des images PNG/JPEG/BMP valides et un audio MP3 mono 44100 Hz, puis réessaie.",
+    )
+    .with_details(serde_json::json!({
+        "source": "asset_convert",
+        "cause": err.diagnostic_tag(),
         // Only the device basename (8 hex), never a path.
         "asset": crate::domain::device::pack_transcode::device_asset_basename(filename),
     }))
