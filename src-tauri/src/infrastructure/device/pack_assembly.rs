@@ -8,15 +8,17 @@
 //! (staging + atomic promotion + `.pi` append) is a separate infrastructure
 //! step that consumes this.
 //!
-//! Cleartext on device: `ni`, `nm`, `bt`. Ciphered (first 512 bytes):
-//! `li`, `ri`, `si`, and every `rf/000/*` / `sf/000/*` asset. Validated
-//! byte-for-byte against a real device by
-//! `assembles_a_real_pack_matching_the_device` — every produced file equals the
-//! device's actual file.
+//! Cleartext on device: `ni`, `nm`, `bt`. Ciphered: `li`, `ri`, `si`, and
+//! every `rf/000/*` / `sf/000/*` asset — the first 512 bytes for files of at
+//! least 512 bytes; a SHORTER file is zero-padded to the next AES-block
+//! multiple and ciphered over its whole length (see
+//! [`pad_short_ciphered_file`]). Validated byte-for-byte against a real device
+//! by `assembles_a_real_pack_matching_the_device` — every produced file equals
+//! the device's actual file.
 
 use crate::domain::device::pack_transcode::{device_asset_basename, TranscodedPack};
 
-use super::cipher::{v3_cipher_in_place, v3_forge_bt, v3_story_key_iv};
+use super::cipher::{v3_cipher_in_place, v3_forge_bt, v3_story_key_iv, V3_CIPHER_REGION};
 
 /// One file of an assembled pack, path relative to `.content/<SHORTID>/`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -35,9 +37,10 @@ pub enum AssembleError {
 }
 
 /// Assemble every file of `.content/<SHORTID>/` for a V3 device whose `.md` is
-/// `md`. `resolve_asset(filename)` returns the VERBATIM device-format bytes of
-/// an asset (community `.zip` assets are already BMP-4bit-RLE4-320x240 /
-/// MP3-mono-44100 — copied as-is, only the first 512 bytes get ciphered).
+/// `md`. `resolve_asset(filename)` returns DEVICE-FORMAT bytes of an asset
+/// (BMP-4bit-RLE4-320x240 / bare MP3 — the send layer normalizes them via
+/// `asset_convert` before handing the resolver over); they are copied as-is,
+/// then ciphered per the module-doc regime.
 ///
 /// The caller writes each returned file under the pack folder, then appends the
 /// pack UUID to the device `.pi` (files first, index second — the writer's
@@ -75,6 +78,7 @@ pub fn assemble_v3_pack(
         ("si", &transcoded.si),
     ] {
         let mut bytes = plain.clone();
+        pad_short_ciphered_file(&mut bytes);
         v3_cipher_in_place(&mut bytes, &key, &iv);
         files.push(AssembledFile {
             rel_path: name.to_string(),
@@ -88,6 +92,7 @@ pub fn assemble_v3_pack(
         for filename in assets {
             let mut bytes = resolve_asset(filename)
                 .ok_or_else(|| AssembleError::MissingAsset(filename.clone()))?;
+            pad_short_ciphered_file(&mut bytes);
             v3_cipher_in_place(&mut bytes, &key, &iv);
             files.push(AssembledFile {
                 rel_path: format!("{dir}/000/{}", device_asset_basename(filename)),
@@ -97,6 +102,25 @@ pub fn assemble_v3_pack(
     }
 
     Ok(files)
+}
+
+/// Zero-pad a TO-CIPHER file shorter than the 512-byte cipher region up to the
+/// next AES-block multiple, so the WHOLE file gets ciphered.
+///
+/// The device deciphers whole blocks: a sub-512 file whose length is not a
+/// 16-multiple would otherwise keep a CLEARTEXT tail that the device
+/// "deciphers" into garbage — its last index entries turn to nonsense and the
+/// story dies with an opaque "Error SD Card" the moment one is used. This is
+/// exactly what Lunii.QT produces (proven byte-for-byte on a real pack: `li`
+/// 68→80, `ri` 108→112, `si` 216→224, zero-padded, fully ciphered — our
+/// padded-and-ciphered bytes reproduce its files EXACTLY). Trailing zeros are
+/// invisible to the reader: `ni` carries the authoritative entry counts. Files
+/// of 512 bytes or more keep the proven first-512-prefix regime untouched.
+fn pad_short_ciphered_file(bytes: &mut Vec<u8>) {
+    if bytes.len() < V3_CIPHER_REGION && !bytes.len().is_multiple_of(16) {
+        let padded = bytes.len() + (16 - bytes.len() % 16);
+        bytes.resize(padded, 0);
+    }
 }
 
 #[cfg(test)]
@@ -154,6 +178,66 @@ mod tests {
         assert_eq!(img.len(), 600);
         assert_ne!(&img[..16], &[0xAB; 16]);
         assert_eq!(&img[512..], &[0xAB; 88]);
+    }
+
+    #[test]
+    fn short_index_files_are_zero_padded_to_the_aes_block_and_fully_ciphered() {
+        // A single-stage pack yields SHORT index files (ri = one 12-byte
+        // entry, si = one, li = empty). Every ciphered file below the
+        // 512-byte region must land ZERO-PADDED to a 16-multiple and be
+        // ciphered over its WHOLE length — the Lunii.QT-proven layout; an
+        // unaligned cleartext tail would "decipher" to garbage on the device
+        // ("Error SD Card" when its entry is used).
+        let json = r#"{
+            "version":1,"nightModeAvailable":false,
+            "stageNodes":[{"uuid":"s0","squareOne":true,"image":"aaaaaaaaaaaaaaaa1234abcd.bmp",
+                "audio":"bbbbbbbbbbbbbbbb5678ef01.mp3","okTransition":null,"homeTransition":null,
+                "controlSettings":{"wheel":true,"ok":true,"home":false,"pause":false,"autoplay":false}}],
+            "actionNodes":[]
+        }"#;
+        let pack: crate::domain::device::StudioStoryPack = serde_json::from_str(json).unwrap();
+        let transcoded = transcode_pack(&pack).unwrap();
+        assert_eq!(transcoded.ri.len(), 12, "one 12-byte ri entry");
+
+        let mut assets: HashMap<String, Vec<u8>> = HashMap::new();
+        // A SHORT asset too (a tiny file exercises the same padding rule).
+        assets.insert("aaaaaaaaaaaaaaaa1234abcd.bmp".into(), vec![0xAB; 100]);
+        assets.insert("bbbbbbbbbbbbbbbb5678ef01.mp3".into(), vec![0xCD; 600]);
+        let resolve = |f: &str| assets.get(f).cloned();
+
+        let files = assemble_v3_pack(&transcoded, &tiny_md(), &resolve).expect("assemble");
+        let by_path: HashMap<&str, &Vec<u8>> = files
+            .iter()
+            .map(|f| (f.rel_path.as_str(), &f.bytes))
+            .collect();
+
+        // ri: 12 → padded to 16, and FULLY ciphered (a cleartext ri starts
+        // with ASCII "000\" — the ciphered one must not).
+        let ri = by_path.get("ri").unwrap();
+        assert_eq!(ri.len(), 16);
+        assert_ne!(&ri[..4], b"000\\");
+        // Deciphering the whole file restores the entry + zero padding.
+        let (key, iv) = v3_story_key_iv(&tiny_md()).unwrap();
+        let mut plain = ri.to_vec();
+        super::super::cipher::v3_decipher_in_place(&mut plain, &key, &iv);
+        assert_eq!(&plain[..4], b"000\\");
+        assert_eq!(&plain[12..], &[0u8; 4], "zero padding after the entry");
+
+        // The short asset is padded to a 16-multiple and fully ciphered.
+        let img = by_path.get("rf/000/1234ABCD").unwrap();
+        assert_eq!(img.len(), 112, "100 → next 16-multiple");
+        assert_ne!(&img[..16], &[0xAB; 16], "head ciphered");
+        assert_ne!(
+            &img[96..112],
+            &[0xAB; 16],
+            "tail ciphered too (no cleartext tail)"
+        );
+
+        // A ≥512 file keeps the PROVEN prefix regime: 600 stays 600,
+        // tail past 512 cleartext.
+        let snd = by_path.get("sf/000/5678EF01").unwrap();
+        assert_eq!(snd.len(), 600);
+        assert_eq!(&snd[512..], &[0xCD; 88]);
     }
 
     #[test]
