@@ -586,49 +586,31 @@ function renderTransfer(
       // Lunii label — the family-correct helper keeps that true by derivation.
       return <Button onClick={onSend}>{formatSendCtaLabel(deviceFamily)}</Button>;
     case "transferring": {
-      // Honest progress (AC1): the phase is NAMED (preflight gate vs write); a
-      // determinate bar shows ONLY when a reliable fraction is known, never a fake
-      // percentage, and is CAPPED at 99 % — 100 % is reserved for the terminal
-      // (F6). The secondary action is a NON-destructive "Consulter le détail"
-      // disclosure naming the real phase (F5); explicit cancel is out of scope.
+      // Honest progress (AC1): a SINGLE bar whose label NAMES the real phase
+      // (device check vs write) and, when a reliable fraction is known, carries
+      // the live percent inline — capped at 99 % (100 % is reserved for the
+      // terminal, F6). No redundant status chip and no "Consulter le détail"
+      // disclosure that only restated the phase: the label says it once, clearly.
+      // Explicit cancel is out of scope.
       const phaseLabel =
         view.phase === "preflight"
-          ? "vérification de l'appareil"
+          ? "Vérification de l'appareil…"
           : view.phase === "transfer"
-            ? "envoi en cours"
+            ? "Envoi en cours…"
             : // The `prepare` phase (local re-assembly, before any device write) AND
               // the optimistic window before the 1st job:progress both name a NEUTRAL
               // "preparing" phase — never the wrong "envoi en cours" (C2/AC1).
-              "préparation de l'envoi…";
+              "Préparation de l'envoi…";
       const percent =
         view.progress != null
           ? Math.min(99, Math.round(view.progress * 100))
           : null;
-      return (
-        <>
-          <StateChip tone="neutral" label="en transfert" />
-          {percent != null ? (
-            <ProgressIndicator
-              mode="determinate"
-              label="Transfert en cours…"
-              value={percent}
-            />
-          ) : (
-            <ProgressIndicator
-              mode="indeterminate"
-              label="Transfert en cours…"
-            />
-          )}
-          <details className="lunii-panel__transfer-detail">
-            <summary>Consulter le détail</summary>
-            <p className="lunii-panel__reason">
-              Phase : {phaseLabel}.{" "}
-              {percent != null
-                ? `Avancement : ${percent} %.`
-                : "Avancement : en cours."}
-            </p>
-          </details>
-        </>
+      const label =
+        percent != null ? `${phaseLabel} ${percent} %` : phaseLabel;
+      return percent != null ? (
+        <ProgressIndicator mode="determinate" label={label} value={percent} />
+      ) : (
+        <ProgressIndicator mode="indeterminate" label={label} />
       );
     }
     case "verifying":

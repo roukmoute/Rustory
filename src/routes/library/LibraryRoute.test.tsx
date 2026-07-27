@@ -3815,7 +3815,7 @@ describe("<LibraryRoute />", () => {
     });
     mockDevice.mockResolvedValue(writableOrigine);
     mockStoryValidation.mockResolvedValue(presumedTransferableValidation);
-    // The transfer catch-up re-read stays idle so the panel holds "en transfert".
+    // The transfer catch-up re-read stays idle so the panel holds the in-flight bar.
     mockReadTransfer.mockResolvedValue({ kind: "idle" });
     renderLibrary();
 
@@ -3831,11 +3831,13 @@ describe("<LibraryRoute />", () => {
     );
     await user.click(send);
 
-    // The transfer surface shows the in-flight phase IN the panel...
+    // The transfer surface shows the in-flight bar IN the panel...
     await waitFor(() =>
       expect(
-        within(panel).getByRole("region", { name: /^transfert$/i }),
-      ).toHaveTextContent(/en transfert/i),
+        within(
+          within(panel).getByRole("region", { name: /^transfert$/i }),
+        ).getByRole("progressbar"),
+      ).toBeInTheDocument(),
     );
     // ...and the center-column library stays rendered + usable (both cards).
     expect(

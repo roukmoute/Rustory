@@ -16,6 +16,22 @@
 }
 
 /*
+ * The decision panel follows the center's scroll so its actions stay reachable
+ * without scrolling back up. `align-self: start` keeps the grid item at its
+ * content height (not stretched to the tall center column) so it has room to
+ * stick within its grid area; the offset matches the layout's top padding so
+ * there is no jump when it pins. If the panel is taller than the viewport it
+ * scrolls internally (max-height + overflow) rather than hiding its foot.
+ */
+.library-layout__panel {
+  position: sticky;
+  top: var(--space-3);
+  align-self: start;
+  max-height: calc(100vh - 2 * var(--space-3));
+  overflow-y: auto;
+}
+
+/*
  * Reduced-density mode. Exclusive upper bound (1279.98px) keeps the switch
  * point clean and avoids a 1px overlap with the standard mode rule.
  */
@@ -24,5 +40,11 @@
     grid-template-columns: 200px 1fr 300px;
     gap: var(--space-2);
     padding: var(--space-2);
+  }
+
+  /* Match the reduced padding so the pinned panel keeps aligning cleanly. */
+  .library-layout__panel {
+    top: var(--space-2);
+    max-height: calc(100vh - 2 * var(--space-2));
   }
 }

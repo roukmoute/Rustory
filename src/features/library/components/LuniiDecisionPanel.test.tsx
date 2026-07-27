@@ -1276,17 +1276,17 @@ describe("<LuniiDecisionPanel /> — transfer", () => {
     expect(screen.queryByRole("dialog")).toBeNull();
   });
 
-  it("shows the named 'en transfert' phase without a fake percentage", () => {
+  it("names the transfer phase without a fake percentage", () => {
     render(
       <LuniiDecisionPanel
         deviceState="idle"
-        transfer={{ kind: "transferring", progress: null, phase: null }}
+        transfer={{ kind: "transferring", progress: null, phase: "transfer" }}
         onEdit={noop}
       />,
     );
     const region = screen.getByRole("region", { name: /^transfert$/i });
-    expect(within(region).getByText(/en transfert/i)).toBeInTheDocument();
-    expect(within(region).getByText(/transfert en cours…/i)).toBeInTheDocument();
+    // The phase is named once, in the bar's own label — no redundant chip.
+    expect(within(region).getByText(/envoi en cours…/i)).toBeInTheDocument();
     expect(within(region).queryByText(/%/)).toBeNull();
   });
 
@@ -1578,7 +1578,7 @@ describe("<LuniiDecisionPanel /> — transfer", () => {
     expect(onDismissTransfer).toHaveBeenCalledTimes(1);
   });
 
-  it("offers a non-destructive 'Consulter le détail' during the transfer (no cancel)", () => {
+  it("shows a determinate percent during the transfer with no destructive cancel", () => {
     render(
       <LuniiDecisionPanel
         deviceState="idle"
@@ -1587,9 +1587,14 @@ describe("<LuniiDecisionPanel /> — transfer", () => {
       />,
     );
     const region = screen.getByRole("region", { name: /^transfert$/i });
+    // Phase + live percent stated once, in the bar's label.
     expect(
-      within(region).getByText(/consulter le détail/i),
+      within(region).getByText(/envoi en cours… 40\s*%/i),
     ).toBeInTheDocument();
+    expect(within(region).getByRole("progressbar")).toHaveAttribute(
+      "aria-valuenow",
+      "40",
+    );
     // Explicit cancel is out of scope — no destructive affordance.
     expect(
       within(region).queryByRole("button", { name: /annuler/i }),
@@ -1620,7 +1625,7 @@ describe("<LuniiDecisionPanel /> — transfer", () => {
     );
     const region = screen.getByRole("region", { name: /^transfert$/i });
     expect(
-      within(region).getByText(/avancement\s*:\s*99\s*%/i),
+      within(region).getByText(/envoi en cours… 99\s*%/i),
     ).toBeInTheDocument();
     expect(within(region).queryByText(/100\s*%/)).toBeNull();
   });
