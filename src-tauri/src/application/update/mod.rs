@@ -53,6 +53,20 @@ impl UpdateCheckMemo {
     pub fn new() -> Self {
         Self::default()
     }
+
+    /// Re-arm the memo to `Idle` so the NEXT [`ensure_update_availability`]
+    /// runs a FRESH consultation — the manual "Rechercher une mise à jour"
+    /// gesture (the launch memo otherwise seals one verdict per launch). Any
+    /// parked waiter is woken; a consultation racing in-flight settles into
+    /// this fresh `Idle` harmlessly (at worst one extra fetch).
+    pub fn reset(&self) {
+        let mut phase = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *phase = MemoPhase::Idle;
+        self.settled.notify_all();
+    }
 }
 
 /// Re-arms the memo if the flight ends without settling (a panicking

@@ -13,14 +13,15 @@ const SEE_DETAILS_LABEL = "Voir les détails";
 const SEE_DETAILS_ARIA_LABEL = "Consulter les détails de la mise à jour";
 
 /**
- * The library's discreet update signal (`Update Availability Contract`):
- * a compact block at the FOOT of the left navigation column, rendered
- * ONLY when the launch's verdict is `updateAvailable` — every other
- * state (including "check in flight") is INVISIBLE here: silence is the
- * rule, the positive is the exception. One gesture: `Voir les détails`
- * navigates IN-APP to `/settings` (the existing consultation-gesture
- * pattern — no external browser, no outbound link). Autonomous by
- * design (store + navigate): the route only provides the slot.
+ * The library's PROMINENT update banner (`Update Availability Contract`):
+ * a full-width block at the TOP of the library content, rendered ONLY
+ * when the launch's (or a manual re-check's) verdict is `updateAvailable`
+ * — every other state (up-to-date, unreachable, check in flight) is
+ * INVISIBLE here: silence is the rule, the positive is the exception. One
+ * gesture: `Voir les détails` navigates IN-APP to `/settings` (the
+ * consultation-gesture pattern — no external browser, no outbound link),
+ * where the full notice + the install gesture live. Autonomous by design
+ * (store + navigate): the route only provides the slot.
  */
 export function UpdateAvailabilitySignal(): React.JSX.Element | null {
   const availability = useUpdateShell((s) => s.availability);
@@ -30,9 +31,14 @@ export function UpdateAvailabilitySignal(): React.JSX.Element | null {
   }
   return (
     <div className="update-availability-signal" role="status">
-      <StateChip tone="info" label={availability.headline} />
+      <div className="update-availability-signal__text">
+        <StateChip tone="info" label={availability.headline} />
+        <span className="update-availability-signal__notice">
+          {availability.notice}
+        </span>
+      </div>
       <Button
-        variant="quiet"
+        variant="secondary"
         aria-label={SEE_DETAILS_ARIA_LABEL}
         onClick={() => {
           navigate("/settings");

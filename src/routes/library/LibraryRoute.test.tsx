@@ -1690,7 +1690,7 @@ describe("<LibraryRoute />", () => {
     expect(document.querySelector(".update-availability-signal")).toBeNull();
   });
 
-  it("renders the discreet update signal in the left navigation column on an updateAvailable verdict", async () => {
+  it("renders the prominent update banner at the top of the library content on an updateAvailable verdict", async () => {
     mockGet.mockResolvedValueOnce({ stories: [] });
     useUpdateShell.setState({
       availability: {
@@ -1703,27 +1703,31 @@ describe("<LibraryRoute />", () => {
       },
     });
     renderLibrary();
-    const nav = screen.getByRole("navigation", {
-      name: /navigation bibliothèque/i,
-    });
-    // The signal lives in the NAVIGATION column — never the central
-    // surface, never the decision panel.
+    // The banner now lives in the CENTRAL library surface (prominent), not
+    // the discreet nav foot — so it is actually noticed.
+    const main = screen.getByRole("main", { name: /collection d'histoires/i });
     expect(
-      within(nav).getByText("Nouvelle version disponible : 9.9.9."),
+      within(main).getByText("Nouvelle version disponible : 9.9.9."),
     ).toBeInTheDocument();
     expect(
-      within(nav).getByRole("button", {
+      within(main).getByRole("button", {
         name: "Consulter les détails de la mise à jour",
       }),
     ).toBeInTheDocument();
-    // Foot anchoring contract: the signal is the LAST direct child of
-    // the flex column, carrying its anchor class (`margin-top: auto`
-    // pushes it to the column's real bottom).
-    const signal = within(nav).getByRole("status");
-    expect(signal).toHaveClass("update-availability-signal");
-    expect(signal.parentElement).toBe(nav);
-    expect(nav.lastElementChild).toBe(signal);
+    const banner = within(main).getByText("Nouvelle version disponible : 9.9.9.")
+      .closest(".update-availability-signal");
+    expect(banner).not.toBeNull();
+    // The prominent banner shows the full notice, not just the headline chip.
+    expect(within(main).getByText(/Récupère la nouvelle version/)).toBeInTheDocument();
+    // It is NOT an alarm-toned alert — a calm info banner.
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    // And it is no longer in the navigation column.
+    const nav = screen.getByRole("navigation", {
+      name: /navigation bibliothèque/i,
+    });
+    expect(
+      within(nav).queryByText("Nouvelle version disponible : 9.9.9."),
+    ).not.toBeInTheDocument();
   });
 
   it("navigates to /settings through the update signal's Voir les détails gesture", async () => {

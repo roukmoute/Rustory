@@ -7,6 +7,7 @@ import { getVersion } from "@tauri-apps/api/app";
 import type { SectionRead } from "../../features/settings/components/SupportProfileView";
 import { SupportProfileView } from "../../features/settings/components/SupportProfileView";
 import { UpdateApplyZone } from "../../features/settings/components/UpdateApplyZone";
+import { UpdateCheckButton } from "../../features/settings/components/UpdateCheckButton";
 import { UpdateStatusLine } from "../../features/settings/components/UpdateStatusLine";
 import { readContentSourcePolicy } from "../../ipc/commands/import-export";
 import { readSupportProfile } from "../../ipc/commands/settings";
@@ -110,6 +111,11 @@ export function SettingsRoute(): React.JSX.Element {
               verdict exists, NOTHING before (`Update Availability
               Contract`). */}
           <UpdateStatusLine />
+          {/* On-demand re-check: the launch check is once-per-launch and
+              silent, so this lets the user look for a newer version now,
+              without relaunching. Its result flows into the shared store,
+              so the status line above (and the library banner) update. */}
+          <UpdateCheckButton />
           {/* The update-apply gesture zone, UNDER the status line:
               exists IFF the verdict is `updateAvailable` (`Update Apply
               Contract`) — the line above and the `Version {version}`

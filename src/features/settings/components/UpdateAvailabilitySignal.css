@@ -1,12 +1,28 @@
+/* Prominent, full-width update banner at the top of the library content
+ * (`Update Availability Contract`). Info-toned surface so a newer version
+ * is actually noticed, without the alarm of an error banner. */
 .update-availability-signal {
-  /* The FOOT anchor of the contract: the library's left navigation
-     column is a flex column — the auto top margin absorbs the free
-     space so the signal sits at the column's real bottom, not right
-     under the support-profile entry. */
-  margin-top: auto;
   display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: var(--space-1);
-  padding: var(--space-2);
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  margin-bottom: var(--space-3);
+  border: 1px solid var(--color-border-info, var(--color-border, #c9d6e5));
+  border-radius: var(--radius-2, 8px);
+  background: var(--color-surface-info, rgba(37, 99, 235, 0.08));
+}
+
+.update-availability-signal__text {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.update-availability-signal__notice {
+  font-size: var(--font-size-meta);
+  color: var(--color-text-secondary);
 }

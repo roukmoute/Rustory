@@ -100,6 +100,29 @@ export async function readUpdateAvailability(): Promise<UpdateAvailability> {
 }
 
 /**
+ * Re-check update availability ON DEMAND (the "Rechercher une mise à jour"
+ * gesture). Same infallible payload contract as `readUpdateAvailability`
+ * (a transport failure is the calm `checkUnavailable` STATE, never a
+ * rejection) but Rust re-arms its session memo and forces a FRESH fetch,
+ * so the user gets a real, current answer without relaunching. Same
+ * contract vocabulary — the same runtime guard and drift error apply.
+ *
+ * Components MUST NOT call `invoke` directly — go through this facade.
+ */
+export async function refreshUpdateAvailability(): Promise<UpdateAvailability> {
+  let raw: unknown;
+  try {
+    raw = await invoke<unknown>("refresh_update_availability");
+  } catch (err) {
+    throw toAppError(err);
+  }
+  if (!isUpdateAvailability(raw)) {
+    throw new UpdateAvailabilityContractDriftError(raw);
+  }
+  return raw;
+}
+
+/**
  * Error thrown when an update-apply command returns a payload that does
  * not match the wire contract. A payload outside the contract NEVER
  * renders the gesture zone — the raw response is attached for

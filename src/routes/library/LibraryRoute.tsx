@@ -1152,6 +1152,10 @@ export function LibraryRoute(): React.JSX.Element {
 
   const center = (
     <>
+      {/* Prominent update banner at the TOP of the library, full width —
+          rendered ONLY when a newer official version is available (silence
+          otherwise). Moved here from the nav foot to be actually noticed. */}
+      <UpdateAvailabilitySignal />
       {/* Persistent status region the calm-limit copies route through
           (`OS Open Contract`): mounted (empty) as long as the center
           column exists so AT reliably announces the copy when it LANDS —
@@ -1272,11 +1276,6 @@ export function LibraryRoute(): React.JSX.Element {
                 Profil de support
               </Button>
             </SurfacePanel>
-            {/* Discreet update signal at the FOOT of the navigation
-                column: autonomous (store + navigate), renders ONLY when
-                a newer official version is available — silence
-                otherwise (`Update Availability Contract`). */}
-            <UpdateAvailabilitySignal />
           </>
         }
         center={center}

@@ -14,6 +14,7 @@ import {
   readUpdateApplyPlan,
   readUpdateApplyState,
   readUpdateAvailability,
+  refreshUpdateAvailability,
   restartForUpdate,
   startUpdateApply,
 } from "./settings";
@@ -267,6 +268,47 @@ describe("readUpdateAvailability", () => {
       (e: unknown) => e,
     )) as { code: string };
     expect(err.code).toBe("UNKNOWN");
+  });
+});
+
+describe("refreshUpdateAvailability", () => {
+  beforeEach(() => {
+    vi.mocked(invoke).mockReset();
+  });
+
+  it("invokes the dedicated refresh command and resolves the fresh verdict", async () => {
+    vi.mocked(invoke).mockResolvedValueOnce({
+      status: "updateAvailable",
+      headline: "Nouvelle version disponible : 9.9.9.",
+      notice:
+        "Ta version actuelle est 0.1.0. Récupère la nouvelle version depuis la page officielle des versions : github.com/roukmoute/Rustory/releases.",
+      currentVersion: "0.1.0",
+      latestVersion: "9.9.9",
+    });
+    const verdict = await refreshUpdateAvailability();
+    // The on-demand command is DISTINCT from the launch read (it re-arms
+    // the memo + forces a fresh fetch Rust-side).
+    expect(invoke).toHaveBeenCalledWith("refresh_update_availability");
+    expect(verdict.status).toBe("updateAvailable");
+  });
+
+  it("resolves the calm unreachable STATE, never a rejection", async () => {
+    vi.mocked(invoke).mockResolvedValueOnce({
+      status: "checkUnavailable",
+      headline: "La vérification de version n'a pas pu être faite.",
+      notice:
+        "Rustory reste pleinement utilisable. La vérification réessaiera au prochain lancement.",
+      currentVersion: "0.1.0",
+    });
+    const verdict = await refreshUpdateAvailability();
+    expect(verdict.status).toBe("checkUnavailable");
+  });
+
+  it("rejects with a drift error on a drifted payload", async () => {
+    vi.mocked(invoke).mockResolvedValueOnce({ status: "updateAvailable" });
+    await expect(refreshUpdateAvailability()).rejects.toBeInstanceOf(
+      UpdateAvailabilityContractDriftError,
+    );
   });
 });
 

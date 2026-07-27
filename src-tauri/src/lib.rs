@@ -570,6 +570,7 @@ pub fn run() {
             commands::settings::read_update_apply_plan,
             commands::settings::read_update_apply_state,
             commands::settings::read_update_availability,
+            commands::settings::refresh_update_availability,
             commands::catalog::refresh_official_catalog,
             commands::story::record_draft,
             commands::story::record_node_draft,

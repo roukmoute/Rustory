@@ -187,6 +187,49 @@ pub async fn read_update_availability(app: tauri::AppHandle) -> UpdateAvailabili
     })
 }
 
+/// Re-check update availability ON DEMAND (the "Rechercher une mise à jour"
+/// gesture) — the same consultation as [`read_update_availability`] but it
+/// RE-ARMS the session memo first (so it runs a FRESH fetch instead of
+/// returning the sealed launch verdict) and FORCES the run (`Run`, never the
+/// dev-build skip): an explicit click always yields a real answer. Same
+/// infallible contract — a transport failure is the `checkUnavailable` STATE,
+/// never a wire error. The settled fresh verdict also becomes the memo's new
+/// value, so the launch surfaces (nav banner, settings status line) reflect it.
+#[tauri::command]
+pub async fn refresh_update_availability(app: tauri::AppHandle) -> UpdateAvailabilityDto {
+    let (source, memo) = {
+        let state = app.state::<crate::AppState>();
+        (
+            state.update_release_source.clone(),
+            state.update_availability.clone(),
+        )
+    };
+    let log_path = app
+        .path()
+        .app_data_dir()
+        .ok()
+        .map(|dir| update_log::log_path_for(&dir));
+
+    tauri::async_runtime::spawn_blocking(move || {
+        // Re-arm then force a fresh consultation — the manual gesture is an
+        // explicit request, never subject to the once-per-launch seal or the
+        // dev-build skip.
+        memo.reset();
+        settle_update_availability_dto(
+            env!("CARGO_PKG_VERSION"),
+            source.as_ref(),
+            UpdateCheckDecision::Run,
+            UPDATE_CHECK_BUDGET,
+            &memo,
+            log_path.as_deref(),
+        )
+    })
+    .await
+    .unwrap_or_else(|_| {
+        UpdateAvailabilityDto::check_unavailable_with_raw_version(env!("CARGO_PKG_VERSION"))
+    })
+}
+
 /// The trust chain as a COMPILATION fact of this binary: the updater
 /// public key embedded through `option_env!` (never `env!` — a keyless
 /// local build must compile), configured IFF present and non-empty
