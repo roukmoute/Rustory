@@ -1041,18 +1041,21 @@ mod tests {
                     short_id: "FAC5562D".into(),
                     hidden: false,
                     content_present: true,
+                    cover_png: None,
                 },
                 DeviceStoryEntry {
                     uuid: "11111111-1111-1111-1111-111111111111".into(),
                     short_id: "11111111".into(),
                     hidden: false,
                     content_present: true,
+                    cover_png: None,
                 },
                 DeviceStoryEntry {
                     uuid: "22222222-2222-2222-2222-222222222222".into(),
                     short_id: "22222222".into(),
                     hidden: false,
                     content_present: true,
+                    cover_png: None,
                 },
             ],
             had_trailing_bytes: false,
@@ -2091,6 +2094,7 @@ mod tests {
                 short_id: "FAC5562D".into(),
                 hidden: false,
                 content_present: true,
+                cover_png: None,
             }],
             had_trailing_bytes: false,
         }));
@@ -2144,6 +2148,7 @@ mod tests {
                 short_id: "FAC5562D".into(),
                 hidden: false,
                 content_present: true,
+                cover_png: None,
             }],
             had_trailing_bytes: false,
         }));

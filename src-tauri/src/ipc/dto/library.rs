@@ -44,6 +44,12 @@ pub struct StoryCardDto {
     /// without it keeps its minimal shape.
     #[serde(skip_serializing_if = "is_false")]
     pub sendable_archive: bool,
+    /// Asset id of the story's COVER image — the START node's image, when it
+    /// has one. The frontend loads the actual pixels through the existing
+    /// `read_node_media` command (a display PNG data URL); only the opaque
+    /// asset id crosses here. Skipped on the wire when absent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cover_asset_id: Option<String>,
 }
 
 fn is_not_transferable(transferable: &bool) -> bool {
@@ -65,6 +71,7 @@ impl StoryCardDto {
             import_report: None,
             transferable: false,
             sendable_archive: false,
+            cover_asset_id: None,
         }
     }
 
@@ -79,6 +86,7 @@ impl StoryCardDto {
             import_report: None,
             transferable: true,
             sendable_archive: false,
+            cover_asset_id: None,
         }
     }
 }
@@ -126,6 +134,7 @@ mod tests {
             import_report: None,
             transferable: false,
             sendable_archive: false,
+            cover_asset_id: None,
         };
         let v = serde_json::to_value(&card).expect("serialize");
         assert_eq!(
@@ -154,6 +163,7 @@ mod tests {
             }]),
             transferable: false,
             sendable_archive: false,
+            cover_asset_id: None,
         };
         let v = serde_json::to_value(&card).expect("serialize");
         assert_eq!(v["importState"], "needsReview");

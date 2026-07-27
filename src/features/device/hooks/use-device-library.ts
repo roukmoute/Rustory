@@ -42,6 +42,15 @@ export function invalidateDeviceLibraryCache(): void {
   cache.clear();
 }
 
+/** True for the Rust `device_changed` refusal of a library read (the
+ *  requested identifier no longer matches the live device). */
+function isDeviceChangedError(error: AppError): boolean {
+  if (typeof error.details !== "object" || error.details === null) return false;
+  return (
+    (error.details as Record<string, unknown>).source === "device_changed"
+  );
+}
+
 /**
  * Read the device-side library for the supported, read-authorized device
  * identified by `deviceIdentifier`. Pass `null` when no such device is
@@ -126,9 +135,23 @@ export function useDeviceLibrary(
         // never a silent empty list, never a touch on the local library.
         if (err instanceof ReadDeviceLibraryContractDriftError) {
           setState({ kind: "error", error: DRIFT_ERROR });
-        } else {
-          setState({ kind: "error", error: toAppError(err) });
+          return;
         }
+        const error = toAppError(err);
+        // TRANSIENT, self-healing case: the device identifier is derived
+        // from the `.pi` CONTENT, so a successful send/delete changes it —
+        // a refresh fired right after the mutation still carries the
+        // pre-mutation identifier and Rust honestly refuses with
+        // `device_changed`. The detection poll (≤3 s) delivers the fresh
+        // identifier and this id-keyed hook re-reads by itself; painting
+        // the scary red banner for that window would tell the user their
+        // own successful action broke something. Keep the displayed
+        // snapshot; a REAL device swap converges through the same
+        // detection poll anyway.
+        if (isDeviceChangedError(error)) {
+          return;
+        }
+        setState({ kind: "error", error });
       });
   }, []);
 

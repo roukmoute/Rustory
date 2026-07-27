@@ -484,9 +484,13 @@ export function LibraryRoute(): React.JSX.Element {
   const storyTransfer = useStoryTransfer();
   // V3 archive send — the OTHER backend behind the SAME single "Envoyer vers la
   // Lunii" CTA. Sourced from the story's retained `.zip`; on success the device
-  // inventory re-reads so the new pack appears.
+  // inventory re-reads so the new pack appears. RE-DETECT FIRST: appending to
+  // `.pi` changes the content-derived device identifier, and the library hook
+  // is keyed on it — the fresh identifier re-reads by itself; the direct
+  // refresh below covers the identifier-unchanged case (idempotent re-send).
   const devicePackSend = useDevicePackSend({
     onSent: () => {
+      device.refresh();
       deviceLibrary.refresh();
     },
   });
@@ -1062,6 +1066,9 @@ export function LibraryRoute(): React.JSX.Element {
   // a destructive device write is never one-click.
   const deviceDelete = useDeviceStoryDelete({
     onDeleted: () => {
+      // Delisting from `.pi` changes the content-derived device identifier —
+      // same re-detect-first discipline as the send flow.
+      device.refresh();
       deviceLibrary.refresh();
     },
   });

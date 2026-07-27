@@ -139,6 +139,41 @@ describe("useDeviceLibrary", () => {
     }
   });
 
+  it("keeps the displayed snapshot on a transient device_changed refusal (post-mutation identifier)", async () => {
+    // A send/delete rewrites `.pi`, which CHANGES the content-derived
+    // identifier: the route's immediate refresh still carries the old one
+    // and Rust refuses with `device_changed`. That window self-heals (the
+    // detection poll re-keys this hook), so the hook must NOT paint the
+    // scary error over the user's own successful action.
+    vi.mocked(readDeviceLibrary)
+      .mockReturnValueOnce(mockHandle(Promise.resolve(readable("0000ABCD"))) as never)
+      .mockReturnValueOnce(
+        mockHandle(
+          Promise.reject({
+            code: "DEVICE_SCAN_FAILED",
+            message:
+              "Lecture de la bibliothèque appareil indisponible: l'appareil connecté a changé.",
+            userAction:
+              "Rebranche l'appareil souhaité puis réessaie la lecture de la bibliothèque.",
+            details: { source: "device_changed" },
+          }),
+        ) as never,
+      );
+    const { result } = renderHook(() => useDeviceLibrary(ID_A));
+    await waitFor(() => expect(result.current.state.kind).toBe("ready"));
+
+    act(() => {
+      result.current.refresh();
+    });
+    // The refusal settles the refresh WITHOUT an error state: the ready
+    // snapshot stays on screen.
+    await waitFor(() => expect(result.current.isRefreshing).toBe(false));
+    expect(result.current.state.kind).toBe("ready");
+    if (result.current.state.kind === "ready") {
+      expect(result.current.state.stories[0].shortId).toBe("0000ABCD");
+    }
+  });
+
   it("converts a drift error into a typed DEVICE_SCAN_FAILED AppError", async () => {
     vi.mocked(readDeviceLibrary).mockReturnValueOnce(
       mockHandle(

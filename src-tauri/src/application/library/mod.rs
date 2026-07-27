@@ -53,7 +53,7 @@ fn read_stories(db: &DbHandle) -> Result<Vec<StoryCardDto>, AppError> {
         .prepare(
             "SELECT s.id, s.title, li.import_state, li.findings_summary, \
                     li.source_format, pi.story_id IS NOT NULL, \
-                    COALESCE(li.source_archive_retained, 0) \
+                    COALESCE(li.source_archive_retained, 0), s.structure_json \
              FROM stories s \
              LEFT JOIN story_local_imports li ON li.story_id = s.id \
              LEFT JOIN story_imports pi ON pi.story_id = s.id \
@@ -69,7 +69,8 @@ fn read_stories(db: &DbHandle) -> Result<Vec<StoryCardDto>, AppError> {
             let source_format: Option<String> = row.get(4)?;
             let device_pack: bool = row.get(5)?;
             let sendable_archive: bool = row.get(6)?;
-            Ok(project_story_card(
+            let structure_json: String = row.get(7)?;
+            let mut card = project_story_card(
                 id,
                 title,
                 import_state,
@@ -77,7 +78,13 @@ fn read_stories(db: &DbHandle) -> Result<Vec<StoryCardDto>, AppError> {
                 source_format,
                 device_pack,
                 sendable_archive,
-            ))
+            );
+            // Cover = the START node's image, for every card shape alike
+            // (native stories get one from the editor, imported ones from
+            // their pack). Defensive: a malformed structure yields no cover,
+            // never a failed overview.
+            card.cover_asset_id = cover_asset_id_from_structure(&structure_json);
+            Ok(card)
         })
         .map_err(map_select_error)?;
     let mut stories = Vec::new();
@@ -148,7 +155,23 @@ fn project_story_card(
         // CAN be sent to a Lunii V3 (transcode + re-cipher). The DB flag is
         // the single truth (set only after a successful retention).
         sendable_archive,
+        // Filled by the caller from the story's canonical structure.
+        cover_asset_id: None,
     }
+}
+
+/// The story's cover = its START node's image asset id, when the canonical
+/// structure parses and that node carries one. PURE + DEFENSIVE: any
+/// malformed/legacy structure yields `None` — a cover is decoration, it must
+/// never fail (or slow) the overview read.
+fn cover_asset_id_from_structure(structure_json: &str) -> Option<String> {
+    let structure: crate::domain::story::CanonicalStructure =
+        serde_json::from_str(structure_json).ok()?;
+    structure
+        .nodes
+        .iter()
+        .find(|n| n.id == structure.start_node_id)
+        .and_then(|n| n.image_asset_id.clone())
 }
 
 fn map_select_error(_err: rusqlite::Error) -> AppError {
@@ -192,6 +215,35 @@ mod tests {
     fn empty_overview_is_consistent() {
         let overview = LibraryOverviewDto::empty();
         assert!(enforce_unique_ids(&overview).is_ok());
+    }
+
+    #[test]
+    fn cover_asset_id_comes_from_the_start_node_image_and_degrades_to_none() {
+        // The start node's image is the cover; other nodes' images never are.
+        let structure = r#"{
+            "schemaVersion": 3,
+            "startNodeId": "n2",
+            "nodes": [
+                {"id":"n1","text":"","label":"","imageAssetId":"asset-OTHER","audioAssetId":null,"options":[]},
+                {"id":"n2","text":"","label":"","imageAssetId":"asset-COVER","audioAssetId":null,"options":[]}
+            ]
+        }"#;
+        assert_eq!(
+            cover_asset_id_from_structure(structure).as_deref(),
+            Some("asset-COVER")
+        );
+        // A start node WITHOUT an image → no cover.
+        let no_image = r#"{
+            "schemaVersion": 3,
+            "startNodeId": "n1",
+            "nodes": [
+                {"id":"n1","text":"","label":"","imageAssetId":null,"audioAssetId":null,"options":[]}
+            ]
+        }"#;
+        assert_eq!(cover_asset_id_from_structure(no_image), None);
+        // Malformed / legacy structures degrade to None, never an error.
+        assert_eq!(cover_asset_id_from_structure("not json"), None);
+        assert_eq!(cover_asset_id_from_structure("{}"), None);
     }
 
     #[test]

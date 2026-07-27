@@ -6,6 +6,7 @@ import type {
   ImportState,
 } from "../../../shared/ipc-contracts/import-export";
 import { StateChip, SurfacePanel } from "../../../shared/ui";
+import { useStoryCover } from "../hooks/use-story-cover";
 
 import "./StoryCard.css";
 
@@ -58,6 +59,8 @@ export function StoryCard({
   onOpen,
   onContextMenu,
 }: StoryCardProps): React.JSX.Element {
+  // The story's cover (start-node image), loaded lazily as a data URL.
+  const cover = useStoryCover(story.id, story.coverAssetId);
   const handleContextMenu = (
     event: React.MouseEvent<HTMLDivElement>,
   ): void => {
@@ -142,6 +145,11 @@ export function StoryCard({
           <span className="story-card__marker" aria-hidden="true">
             ✓
           </span>
+        ) : null}
+        {cover ? (
+          // Decorative: the accessible name stays the title (aria-label on
+          // the button), so the cover never speaks twice.
+          <img className="story-card__cover" src={cover} alt="" />
         ) : null}
         <h3 className="story-card__title">{story.title}</h3>
         {preparationBadge ? (

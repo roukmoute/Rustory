@@ -100,6 +100,27 @@ describe("isDeviceLibraryDto", () => {
     ).toBe(false);
   });
 
+  it("accepts a custom pack carrying a device-extracted coverDataUrl (no title)", () => {
+    expect(
+      isDeviceLibraryDto({
+        kind: "readable",
+        deviceIdentifier: VALID_ID,
+        // An unrecognized pack (null title) can still show a device cover.
+        stories: [story({ coverDataUrl: "data:image/png;base64,iVBORw0KGgo=" })],
+      }),
+    ).toBe(true);
+  });
+
+  it("rejects a coverDataUrl that is not a data: URL", () => {
+    expect(
+      isDeviceLibraryDto({
+        kind: "readable",
+        deviceIdentifier: VALID_ID,
+        stories: [story({ coverDataUrl: "https://evil.example/x.png" })],
+      }),
+    ).toBe(false);
+  });
+
   it("rejects a story with an extra key", () => {
     expect(
       isDeviceLibraryDto({

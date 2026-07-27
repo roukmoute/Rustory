@@ -35,6 +35,11 @@ export interface StoryCardDto {
    *  "Envoyer vers la Lunii" gesture. Independent of `transferable` (the
    *  V1/V2 round-trip). Absent (falsy) otherwise, so the shape is unchanged. */
   sendableArchive?: boolean;
+  /** Asset id of the story's cover image (the START node's image). The
+   *  pixels are loaded through the existing `read_node_media` command; only
+   *  this opaque id crosses the overview wire. Absent when the start node
+   *  has no image. */
+  coverAssetId?: string;
 }
 
 const CARD_IMPORT_STATES: ReadonlySet<string> = new Set([
@@ -92,6 +97,14 @@ export function isStoryCardDto(value: unknown): value is StoryCardDto {
   if (
     candidate.sendableArchive !== undefined &&
     typeof candidate.sendableArchive !== "boolean"
+  ) {
+    return false;
+  }
+  // Optional cover asset id: a non-empty string when present.
+  if (
+    candidate.coverAssetId !== undefined &&
+    (typeof candidate.coverAssetId !== "string" ||
+      candidate.coverAssetId.length === 0)
   ) {
     return false;
   }

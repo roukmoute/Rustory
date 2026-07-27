@@ -1818,6 +1818,7 @@ mod tests {
                 import_report: None,
                 transferable: false,
                 sendable_archive: false,
+                cover_asset_id: None,
             },
             report: vec![ImportFindingDto {
                 aspect: ImportAspectDto::Source,

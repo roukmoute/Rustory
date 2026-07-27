@@ -230,6 +230,7 @@ impl MockDeviceLibraryReader {
                 short_id: format!("000000{i:02X}"),
                 hidden: false,
                 content_present: true,
+                cover_png: None,
             })
             .collect();
         self.enqueue(Ok(DeviceLibrary {

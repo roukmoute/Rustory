@@ -1,7 +1,12 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
+vi.mock("../../../ipc/commands/story", () => ({
+  readNodeMedia: vi.fn(),
+}));
+
+import { readNodeMedia } from "../../../ipc/commands/story";
 import type { StoryCardDto } from "../../../shared/ipc-contracts/library";
 import { StoryCard } from "./StoryCard";
 
@@ -375,5 +380,49 @@ describe("StoryCard", () => {
     expect(
       screen.getByText("Le titre a été normalisé à l'import."),
     ).toBeInTheDocument();
+  });
+
+  it("renders the cover image loaded from its coverAssetId (decorative — alt empty)", async () => {
+    vi.mocked(readNodeMedia).mockReset();
+    vi.mocked(readNodeMedia).mockResolvedValueOnce({
+      dataUrl: "data:image/png;base64,COVER",
+    });
+    // A unique id keeps the module-local cover cache from serving a value
+    // seeded (or seeding) another test.
+    const storyId = "cover-test-0000-0000-0000-000000000001";
+    render(
+      <StoryCard
+        story={{ id: storyId, title: "Avec couverture", coverAssetId: "asset-cover" }}
+        isSelected={false}
+        onSelect={vi.fn()}
+        onOpen={vi.fn()}
+      />,
+    );
+    expect(readNodeMedia).toHaveBeenCalledWith({
+      storyId,
+      assetId: "asset-cover",
+    });
+    // The cover appears once loaded, decorative (empty alt so the button's
+    // aria-label stays the sole accessible name), never announced twice.
+    await waitFor(() => {
+      expect(document.querySelector("img.story-card__cover")).not.toBeNull();
+    });
+    const img = document.querySelector<HTMLImageElement>("img.story-card__cover");
+    expect(img?.getAttribute("src")).toBe("data:image/png;base64,COVER");
+    expect(img?.getAttribute("alt")).toBe("");
+  });
+
+  it("renders no cover and issues no media read when the card has no coverAssetId", () => {
+    vi.mocked(readNodeMedia).mockReset();
+    render(
+      <StoryCard
+        story={{ id: "no-cover-0000-0000-0000-000000000002", title: "Sans couverture" }}
+        isSelected={false}
+        onSelect={vi.fn()}
+        onOpen={vi.fn()}
+      />,
+    );
+    expect(readNodeMedia).not.toHaveBeenCalled();
+    expect(document.querySelector("img.story-card__cover")).toBeNull();
   });
 });

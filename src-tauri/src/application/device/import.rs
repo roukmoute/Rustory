@@ -553,6 +553,7 @@ mod tests {
                 short_id: SHORT_ID.into(),
                 hidden,
                 content_present,
+                cover_png: None,
             }],
             had_trailing_bytes: false,
         }

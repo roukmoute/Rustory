@@ -48,6 +48,17 @@
   line-height: 1;
 }
 
+/* Story cover (start-node image): same quiet sizing as the device-story
+ * cards so the two collections read as one family. Decorative — the card's
+ * accessible name stays the title. */
+.story-card__cover {
+  width: 100%;
+  max-width: 96px;
+  height: auto;
+  border-radius: var(--radius-2, 8px);
+  margin-bottom: var(--space-2);
+}
+
 .story-card__title {
   margin: 0;
   font-size: var(--font-size-h3);

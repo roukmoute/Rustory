@@ -94,6 +94,13 @@ pub struct DeviceStoryDto {
     /// image via the `read_pack_cover` command (a local read), never by
     /// rendering this value. `null` for user / local-library titles.
     pub thumbnail: Option<String>,
+    /// Cover extracted from the DEVICE pack itself (CUSTOM packs, whose
+    /// content the device's own `.md` key can decipher): a self-contained
+    /// `data:image/png;base64,…` URL. Present only when the device-side
+    /// extraction succeeded; omitted otherwise. An official pack carries no
+    /// value here — its cover rides `thumbnail` + `read_pack_cover`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cover_data_url: Option<String>,
 }
 
 impl DeviceLibraryDto {
@@ -148,6 +155,15 @@ fn story_dto(
         short_id: entry.short_id,
         hidden: entry.hidden,
         content_present: entry.content_present,
+        // A device-extracted cover (custom packs only) becomes a
+        // self-contained PNG data URL; official packs carry none here (their
+        // cover rides `thumbnail` + `read_pack_cover`).
+        cover_data_url: entry.cover_png.as_ref().map(|png| {
+            format!(
+                "data:image/png;base64,{}",
+                crate::commands::shared::base64_encode(png)
+            )
+        }),
     }
 }
 
@@ -164,6 +180,7 @@ mod tests {
             short_id: short.to_string(),
             hidden,
             content_present: present,
+            cover_png: None,
         }
     }
 

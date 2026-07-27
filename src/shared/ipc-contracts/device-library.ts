@@ -43,6 +43,11 @@ export interface DeviceStoryDto {
    *  command (a local read returning a `data:` URL), keeping offline-first.
    *  `null` for user / local-library titles and for unrecognized packs. */
   thumbnail: string | null;
+  /** Self-contained `data:` URL of the pack's cover extracted FROM THE
+   *  DEVICE (the entry image, deciphered + decoded) — the cover a CUSTOM
+   *  pack shows since it has no official catalog entry (`thumbnail` null).
+   *  Rendered directly. Absent when no device cover could be extracted. */
+  coverDataUrl?: string;
 }
 
 export type DeviceLibraryDto =
@@ -81,6 +86,7 @@ const ALLOWED_STORY_KEYS: ReadonlySet<string> = new Set([
   "title",
   "titleSource",
   "thumbnail",
+  "coverDataUrl",
 ]);
 
 const TITLE_SOURCES: ReadonlySet<string> = new Set([
@@ -128,6 +134,14 @@ function isDeviceStoryDto(value: unknown): value is DeviceStoryDto {
   } else {
     if (s.titleSource !== null) return false;
     if (s.thumbnail !== null) return false;
+  }
+  // Optional device-extracted cover: a non-empty `data:` URL when present
+  // (custom packs), regardless of the title recognition above.
+  if (
+    s.coverDataUrl !== undefined &&
+    (typeof s.coverDataUrl !== "string" || !s.coverDataUrl.startsWith("data:"))
+  ) {
+    return false;
   }
   return true;
 }

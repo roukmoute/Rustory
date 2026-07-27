@@ -64,6 +64,13 @@ pub struct DeviceStoryEntry {
     /// an orphan/ambiguous entry (referenced but absent) — surfaced, not
     /// hidden (FR33).
     pub content_present: bool,
+    /// PNG bytes of the pack's cover, extracted from the DEVICE itself
+    /// (the entry stage's image, deciphered with the device `.md` key then
+    /// decoded) — only feasible for a CUSTOM pack, whose content the `.md`
+    /// key can decipher; official packs stay `None` (their covers come from
+    /// the official catalog cache instead). Best-effort decoration: any
+    /// read/decipher/decode failure yields `None`, never an error.
+    pub cover_png: Option<Vec<u8>>,
 }
 
 /// Whole device-side inventory.

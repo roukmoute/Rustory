@@ -12,6 +12,7 @@ fn story(short_id: &str, hidden: bool, content_present: bool) -> DeviceStoryDto 
         title: None,
         title_source: None,
         thumbnail: None,
+        cover_data_url: None,
     }
 }
 
@@ -78,6 +79,7 @@ fn device_library_readable_flam_round_trips_the_same_neutral_wire_shape() {
             short_id: "55667788".into(),
             hidden: true,
             content_present: true,
+            cover_data_url: None,
             already_imported: false,
             title: None,
             title_source: None,
@@ -180,6 +182,7 @@ fn device_story_already_imported_serializes_true_when_stamped() {
             short_id: "0000ABCD".into(),
             hidden: false,
             content_present: true,
+            cover_data_url: None,
             already_imported: true,
             title: None,
             title_source: None,
@@ -199,6 +202,7 @@ fn device_story_recognized_title_serializes_with_provenance_and_cover() {
             short_id: "0000ABCD".into(),
             hidden: false,
             content_present: true,
+            cover_data_url: None,
             already_imported: false,
             title: Some("Le Loup".into()),
             title_source: Some(PackTitleSourceDto::Official),

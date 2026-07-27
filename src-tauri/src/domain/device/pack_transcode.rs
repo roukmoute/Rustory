@@ -263,6 +263,37 @@ fn write_transition_fields(
 /// stem (drop any extension), UPPERCASED. For a SHA-1-named STUdio asset
 /// (`<40 hex>.bmp`) this is the last 8 hex chars, matching the `.content`
 /// convention observed on real devices.
+/// READ back the ENTRY stage's image index from a cleartext `ni` (the exact
+/// inverse of the record layout this module writes): stage record 0 starts at
+/// the 512-byte header boundary and its first field is the i32 LE image
+/// index into `ri`; `-1` means "no image". `None` on any bound/shape
+/// violation — the caller treats a cover as pure decoration.
+pub fn ni_entry_image_index(ni: &[u8]) -> Option<usize> {
+    let record = ni.get(NI_HEADER_LEN..NI_HEADER_LEN + NI_STAGE_RECORD_LEN)?;
+    let raw = i32::from_le_bytes([record[0], record[1], record[2], record[3]]);
+    usize::try_from(raw).ok()
+}
+
+/// READ back the device asset basename of `ri` entry `index` from a
+/// DECIPHERED `ri` (12-byte ASCII entries `000\XXXXXXXX`, as written above).
+/// Validates the fixed prefix and the 8 uppercase-hex characters so a
+/// garbled index (wrong key, corrupt file) yields `None`, never a path.
+pub fn ri_entry_basename(ri_plain: &[u8], index: usize) -> Option<String> {
+    let start = index.checked_mul(12)?;
+    let entry = ri_plain.get(start..start + 12)?;
+    if &entry[..4] != b"000\\" {
+        return None;
+    }
+    let basename = &entry[4..12];
+    if !basename
+        .iter()
+        .all(|b| b.is_ascii_digit() || (b'A'..=b'F').contains(b))
+    {
+        return None;
+    }
+    Some(String::from_utf8_lossy(basename).into_owned())
+}
+
 pub fn device_asset_basename(filename: &str) -> String {
     let stem = filename
         .rsplit_once('.')
@@ -323,6 +354,65 @@ mod tests {
         assert_eq!(&out.ni[20..24], &1u32.to_le_bytes()); // sound count
         assert_eq!(out.ni[24], 1); // factory flag
         assert!(out.ni[25..512].iter().all(|&b| b == 0)); // zero pad
+    }
+
+    #[test]
+    fn ni_and_ri_parsers_round_trip_the_builder_output() {
+        // Build with the module's own writer, read back with its parsers:
+        // the entry stage's image index and its ri basename must agree.
+        let pack = StudioStoryPack {
+            version: 1,
+            night_mode_available: false,
+            stage_nodes: vec![StudioStageNode {
+                uuid: "s0".into(),
+                square_one: true,
+                image: Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaa1234abcd.png".into()),
+                audio: None,
+                ok_transition: None,
+                home_transition: None,
+                control_settings: cs(true, true),
+            }],
+            action_nodes: vec![],
+        };
+        let out = transcode_pack(&pack).expect("transcode");
+        let idx = ni_entry_image_index(&out.ni).expect("entry image index");
+        assert_eq!(idx, 0);
+        assert_eq!(
+            ri_entry_basename(&out.ri, idx).as_deref(),
+            Some("1234ABCD"),
+            "the parsed basename equals the written device basename"
+        );
+        // An entry WITHOUT an image round-trips to None (index -1).
+        let bare = StudioStoryPack {
+            version: 1,
+            night_mode_available: false,
+            stage_nodes: vec![StudioStageNode {
+                uuid: "s0".into(),
+                square_one: true,
+                image: None,
+                audio: None,
+                ok_transition: None,
+                home_transition: None,
+                control_settings: cs(true, true),
+            }],
+            action_nodes: vec![],
+        };
+        let bare_out = transcode_pack(&bare).expect("transcode");
+        assert_eq!(ni_entry_image_index(&bare_out.ni), None);
+    }
+
+    #[test]
+    fn ri_entry_basename_refuses_garbage_and_out_of_bounds() {
+        // Wrong prefix (a mis-deciphered ri) → None, never a path.
+        assert_eq!(ri_entry_basename(b"XXX\\1234ABCD", 0), None);
+        // Non-hex payload → None.
+        assert_eq!(ri_entry_basename(b"000\\1234ZZZZ", 0), None);
+        // Lowercase hex is NOT the device convention → None.
+        assert_eq!(ri_entry_basename(b"000\\1234abcd", 0), None);
+        // Out-of-bounds index → None.
+        assert_eq!(ri_entry_basename(b"000\\1234ABCD", 1), None);
+        // A short ni (no stage record) yields no entry index.
+        assert_eq!(ni_entry_image_index(&[0u8; 512]), None);
     }
 
     #[test]

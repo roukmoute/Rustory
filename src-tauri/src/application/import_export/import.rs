@@ -287,6 +287,7 @@ fn commit_local_artifact_import(
         },
         transferable: false,
         sendable_archive: false,
+        cover_asset_id: None,
     })
 }
 

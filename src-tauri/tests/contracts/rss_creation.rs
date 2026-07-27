@@ -239,6 +239,7 @@ fn rss_creation_outcome_wire_shapes_are_frozen() {
             import_report: None,
             transferable: false,
             sendable_archive: false,
+            cover_asset_id: None,
         },
         report: Vec::new(),
     };

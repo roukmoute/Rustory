@@ -287,6 +287,7 @@ pub fn commit_rss_story_creation(
         },
         transferable: false,
         sendable_archive: false,
+        cover_asset_id: None,
     })
 }
 

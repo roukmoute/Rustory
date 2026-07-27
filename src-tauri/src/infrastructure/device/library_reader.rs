@@ -29,16 +29,24 @@ use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crate::domain::device::pack_transcode::{ni_entry_image_index, ri_entry_basename};
 use crate::domain::device::{
     format_pack_uuid, pack_short_id, parse_flam_library_index, parse_pack_index, DeviceFamily,
     DeviceLibrary, DeviceStoryEntry, FLAM_CONFIG_DIR, FLAM_HIDDEN_LIBRARY_INDEX_REL,
     FLAM_HIDDEN_STORY_DIR, FLAM_LIBRARY_INDEX_REL, FLAM_PRIMARY_MARKER, FLAM_STORY_DIR,
-    LUNII_CONTENT_DIR, LUNII_DEVICE_ID_MARKER, LUNII_HIDDEN_INDEX_MARKER, MAX_PACK_INDEX_BYTES,
+    LUNII_CONTENT_DIR, LUNII_DEVICE_ID_MARKER, LUNII_HIDDEN_INDEX_MARKER, LUNII_PRIMARY_MARKER,
+    MAX_PACK_INDEX_BYTES,
 };
 use crate::domain::shared::AppError;
 use crate::infrastructure::diagnostics::jsonl::io_kind_label;
 
+use super::cipher::{v3_decipher_in_place, v3_story_key_iv};
 use super::system::{is_real_directory, read_bounded_no_follow_with_max};
+
+/// Upper bound on a cover source file read (a device entry BMP is a few kB;
+/// this is a generous ceiling that still refuses a rogue oversized file
+/// before decoding it).
+const MAX_COVER_SOURCE_BYTES: u64 = 4 * 1024 * 1024;
 
 /// Reads the story inventory at a mount path for the given family. MUST
 /// respect the `budget` wall-clock deadline so a stalled mount cannot
@@ -86,6 +94,16 @@ fn read_lunii_library(mount_path: &Path, budget: Duration) -> Result<DeviceLibra
     let mut entries: Vec<DeviceStoryEntry> = Vec::new();
     let mut had_trailing_bytes = false;
 
+    // The V3 content key/IV, read ONCE from the device `.md` — used to
+    // decipher a CUSTOM pack's entry image for its card cover. `None` on a
+    // non-v7 `.md` (V1/V2 or unreadable): no device cover, the read is
+    // otherwise unaffected. Deciphering an OFFICIAL pack with this key yields
+    // garbage that the `ri` parser rejects, so covers self-select to custom
+    // packs (no bt check needed).
+    let cover_key = std::fs::read(mount_path.join(LUNII_PRIMARY_MARKER))
+        .ok()
+        .and_then(|md| v3_story_key_iv(&md));
+
     // `.pi` is REQUIRED. Its absence or illegibility at read time is
     // exactly the AC #3 "device disappeared mid-read" branch: surface
     // a recoverable read failure rather than an empty inventory.
@@ -98,6 +116,7 @@ fn read_lunii_library(mount_path: &Path, budget: Duration) -> Result<DeviceLibra
         &pi_index.uuids,
         false,
         &content_dir,
+        cover_key.as_ref(),
         started,
         budget,
     )?;
@@ -116,6 +135,7 @@ fn read_lunii_library(mount_path: &Path, budget: Duration) -> Result<DeviceLibra
                 &hidden_index.uuids,
                 true,
                 &content_dir,
+                cover_key.as_ref(),
                 started,
                 budget,
             )?;
@@ -133,6 +153,7 @@ fn append_entries(
     uuids: &[[u8; 16]],
     hidden: bool,
     content_dir: &Path,
+    cover_key: Option<&([u8; 16], [u8; 16])>,
     started: Instant,
     budget: Duration,
 ) -> Result<(), AppError> {
@@ -141,15 +162,65 @@ fn append_entries(
             return Err(read_timeout_error(DeviceFamily::Lunii, started.elapsed()));
         }
         let short_id = pack_short_id(bytes);
-        let content_present = content_dir.join(&short_id).is_dir();
+        let pack_dir = content_dir.join(&short_id);
+        let content_present = pack_dir.is_dir();
+        // Best-effort cover: only when the content is present and the device
+        // `.md` gave a V3 key. Any failure (official pack, missing/garbled
+        // files, undecodable image) yields None — never an error, never a
+        // slower-than-bounded read.
+        let cover_png = if content_present {
+            cover_key.and_then(|(key, iv)| extract_device_cover_png(&pack_dir, key, iv))
+        } else {
+            None
+        };
         out.push(DeviceStoryEntry {
             uuid: format_pack_uuid(bytes),
             short_id,
             hidden,
             content_present,
+            cover_png,
         });
     }
     Ok(())
+}
+
+/// Extract the entry stage's image from a CUSTOM pack folder and return it as
+/// PNG bytes: read cleartext `ni` → entry image index → decipher `ri` →
+/// basename → read + decipher `rf/000/<BASENAME>` (device BMP) → decode →
+/// re-encode PNG. Every step is fallible and folds to `None`: a cover is pure
+/// decoration and must never fail (or slow) the inventory read. Bounded reads
+/// only; the deciphering uses the device `.md` V3 key, so an OFFICIAL pack
+/// (wrapped under a hardware key) yields a garbled `ri` the parser rejects.
+fn extract_device_cover_png(pack_dir: &Path, key: &[u8; 16], iv: &[u8; 16]) -> Option<Vec<u8>> {
+    let ni = read_capped(&pack_dir.join("ni"), MAX_COVER_SOURCE_BYTES)?;
+    let image_index = ni_entry_image_index(&ni)?;
+
+    let mut ri = read_capped(&pack_dir.join("ri"), MAX_COVER_SOURCE_BYTES)?;
+    v3_decipher_in_place(&mut ri, key, iv);
+    let basename = ri_entry_basename(&ri, image_index)?;
+
+    let mut bmp = read_capped(
+        &pack_dir.join("rf").join("000").join(&basename),
+        MAX_COVER_SOURCE_BYTES,
+    )?;
+    v3_decipher_in_place(&mut bmp, key, iv);
+
+    // Decode the device BMP (4-bit RLE4 320×240 — the `image` crate handles
+    // it) and re-encode as PNG for the webview.
+    let decoded = image::load_from_memory(&bmp).ok()?;
+    let mut png = std::io::Cursor::new(Vec::new());
+    decoded.write_to(&mut png, image::ImageFormat::Png).ok()?;
+    Some(png.into_inner())
+}
+
+/// Read a regular file with a hard byte cap, no-follow-ish (plain open; the
+/// pack folder is our own device path). `None` on absence/oversize/error.
+fn read_capped(path: &Path, max_bytes: u64) -> Option<Vec<u8>> {
+    let meta = std::fs::metadata(path).ok()?;
+    if !meta.is_file() || meta.len() > max_bytes {
+        return None;
+    }
+    std::fs::read(path).ok()
 }
 
 /// Read a Lunii index file, bounded to [`MAX_PACK_INDEX_BYTES`] and
@@ -280,6 +351,7 @@ fn flam_entry(bytes: &[u8; 16], hidden: bool, content_root: &Path) -> DeviceStor
         short_id: pack_short_id(bytes),
         hidden,
         content_present,
+        cover_png: None,
     }
 }
 

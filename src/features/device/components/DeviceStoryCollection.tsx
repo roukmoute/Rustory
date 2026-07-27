@@ -247,9 +247,14 @@ function DeviceStoryCard({
     recognized && story.titleSource
       ? `${story.title}, ${titleProvenancePhrase(story.titleSource)}`
       : "Histoire non reconnue";
-  // Cover from the LOCAL cache only (no network). Decorative — the title
+  // Cover, two sources, both offline. Preferred: the DEVICE-extracted cover
+  // (custom packs — the entry image already deciphered + decoded by Rust,
+  // rendered directly). Fallback: the official-catalog cache via the
+  // `read_pack_cover` command (recognized commercial packs). A custom pack
+  // has no `thumbnail`, so the two never compete. Decorative — the title
   // carries the accessible name, so the image is aria-hidden.
-  const coverUrl = usePackCover(story.uuid, story.thumbnail !== null);
+  const catalogCover = usePackCover(story.uuid, story.thumbnail !== null);
+  const coverUrl = story.coverDataUrl ?? catalogCover;
 
   const handleClick = (event: React.MouseEvent<HTMLDivElement>): void => {
     // Shift+click (range selection) is out of scope, exactly like the local

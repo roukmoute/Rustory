@@ -259,6 +259,7 @@ mod tests {
             short_id: short_id.into(),
             hidden: false,
             content_present: true,
+            cover_png: None,
         }
     }
 

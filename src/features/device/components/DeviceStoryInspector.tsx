@@ -135,8 +135,10 @@ export function DeviceStoryInspector({
     [normalizedDraft],
   );
 
-  // Cover from the LOCAL cache (no network); decorative, so aria-hidden.
-  const coverUrl = usePackCover(storyUuid ?? "", Boolean(story?.thumbnail));
+  // Cover: the DEVICE-extracted image (custom packs) wins over the
+  // official-catalog cache (recognized packs); both offline, decorative.
+  const catalogCover = usePackCover(storyUuid ?? "", Boolean(story?.thumbnail));
+  const coverUrl = story?.coverDataUrl ?? catalogCover;
 
   if (!story) {
     return null;

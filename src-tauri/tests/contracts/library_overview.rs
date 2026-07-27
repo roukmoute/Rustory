@@ -41,6 +41,7 @@ fn library_overview_with_an_imported_story_carries_import_state() {
             }]),
             transferable: false,
             sendable_archive: false,
+            cover_asset_id: None,
         }],
     };
     let v = serde_json::to_value(&dto).expect("serialize overview");
