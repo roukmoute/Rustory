@@ -147,17 +147,22 @@ describe("useDeviceLibrary", () => {
     // scary error over the user's own successful action.
     vi.mocked(readDeviceLibrary)
       .mockReturnValueOnce(mockHandle(Promise.resolve(readable("0000ABCD"))) as never)
-      .mockReturnValueOnce(
-        mockHandle(
-          Promise.reject({
-            code: "DEVICE_SCAN_FAILED",
-            message:
-              "Lecture de la bibliothèque appareil indisponible: l'appareil connecté a changé.",
-            userAction:
-              "Rebranche l'appareil souhaité puis réessaie la lecture de la bibliothèque.",
-            details: { source: "device_changed" },
-          }),
-        ) as never,
+      // Build the rejected promise AT CALL TIME (not eagerly), so the hook
+      // attaches its `.catch` in the same tick — an eagerly-constructed
+      // `Promise.reject` sitting through the `await waitFor` below would fire
+      // as an unhandled rejection (which vitest fails the run on).
+      .mockImplementationOnce(
+        () =>
+          mockHandle(
+            Promise.reject({
+              code: "DEVICE_SCAN_FAILED",
+              message:
+                "Lecture de la bibliothèque appareil indisponible: l'appareil connecté a changé.",
+              userAction:
+                "Rebranche l'appareil souhaité puis réessaie la lecture de la bibliothèque.",
+              details: { source: "device_changed" },
+            }),
+          ) as never,
       );
     const { result } = renderHook(() => useDeviceLibrary(ID_A));
     await waitFor(() => expect(result.current.state.kind).toBe("ready"));
