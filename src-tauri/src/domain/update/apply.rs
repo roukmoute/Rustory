@@ -76,21 +76,42 @@ impl UpdateApplyMode {
 
 /// PURE decision of this copy's gesture plan (the decision table of the
 /// documented contract). STRICTER than the availability gate — a
-/// MUTATION requires a PROVEN channel: a development build never gets
-/// the gesture (short-circuited before any probe — the caller must not
-/// even consult the probe, see the command-side resolver); a proven
-/// local build has no official channel; a proven system package belongs
-/// to the package manager; a silent probe is an unproven channel; a
-/// proven AppImage gets the gesture IFF the trust chain (embedded
-/// public key) is configured — fail-closed otherwise.
+/// MUTATION requires a PROVEN, SELF-REPLACEABLE channel: a development
+/// build never gets the gesture (short-circuited before any probe — the
+/// caller must not even consult the probe, see the command-side
+/// resolver).
+///
+/// The Tauri updater self-replaces exactly three artifact families:
+/// **Windows** (NSIS/MSI), **macOS** (.app) and the Linux **AppImage**.
+/// On Windows/macOS there is no Linux install kind (`install == None`),
+/// yet the platform IS self-updatable — so it gets the gesture IFF the
+/// trust chain (embedded public key) is configured, fail-closed
+/// otherwise. On Linux the install kind decides: a proven local build
+/// has no official channel; a proven system package belongs to the
+/// package manager (no deb/rpm self-update); an indeterminable Linux
+/// executable (`None`) is an unproven channel; a proven AppImage gets
+/// the gesture IFF the trust chain is configured.
 pub fn decide_update_apply(
     is_debug_build: bool,
+    is_windows_or_macos: bool,
     install: Option<LinuxInstallKind>,
     trust_chain_configured: bool,
 ) -> UpdateApplyMode {
     if is_debug_build {
         return UpdateApplyMode::Manual {
             reason: ManualUpdateReason::DevelopmentBuild,
+        };
+    }
+    // Windows & macOS: the installed app is a self-replaceable updater
+    // target (there is no Linux install kind to consult) — integrated IFF
+    // the trust chain exists, fail-closed otherwise.
+    if is_windows_or_macos {
+        return if trust_chain_configured {
+            UpdateApplyMode::Integrated
+        } else {
+            UpdateApplyMode::Manual {
+                reason: ManualUpdateReason::TrustChainNotConfigured,
+            }
         };
     }
     match install {
@@ -353,14 +374,16 @@ mod tests {
             Some(LinuxInstallKind::LocalBuild),
             None,
         ] {
-            for trust in [true, false] {
-                assert_eq!(
-                    decide_update_apply(true, install, trust),
-                    UpdateApplyMode::Manual {
-                        reason: ManualUpdateReason::DevelopmentBuild
-                    },
-                    "debug must short-circuit for {install:?}, trust={trust}"
-                );
+            for windows_or_macos in [true, false] {
+                for trust in [true, false] {
+                    assert_eq!(
+                        decide_update_apply(true, windows_or_macos, install, trust),
+                        UpdateApplyMode::Manual {
+                            reason: ManualUpdateReason::DevelopmentBuild
+                        },
+                        "debug must short-circuit for {install:?}, wm={windows_or_macos}, trust={trust}"
+                    );
+                }
             }
         }
     }
@@ -370,7 +393,7 @@ mod tests {
         // The trust chain never rescues an unproven/unofficial channel.
         for trust in [true, false] {
             assert_eq!(
-                decide_update_apply(false, Some(LinuxInstallKind::LocalBuild), trust),
+                decide_update_apply(false, false, Some(LinuxInstallKind::LocalBuild), trust),
                 UpdateApplyMode::Manual {
                     reason: ManualUpdateReason::UnofficialInstall
                 }
@@ -384,7 +407,7 @@ mod tests {
         // owns the installation, trust chain or not.
         for trust in [true, false] {
             assert_eq!(
-                decide_update_apply(false, Some(LinuxInstallKind::SystemPackage), trust),
+                decide_update_apply(false, false, Some(LinuxInstallKind::SystemPackage), trust),
                 UpdateApplyMode::Manual {
                     reason: ManualUpdateReason::PackageManagerOwned
                 }
@@ -393,15 +416,14 @@ mod tests {
     }
 
     #[test]
-    fn a_silent_probe_is_manual_as_channel_unproven() {
-        // Windows/macOS release, an indeterminable Linux executable: the
-        // STRICTER-than-information rule — a mutation requires a PROVEN
-        // channel, so the silent probe refuses the gesture (the exact
-        // inverse of the availability read, which runs on a silent
-        // probe).
+    fn an_indeterminable_linux_executable_is_manual_as_channel_unproven() {
+        // On LINUX, a `None` install kind is an indeterminable executable
+        // (the AppImage-env-without-mount edge): the STRICTER-than-
+        // information rule — a mutation requires a PROVEN, self-replaceable
+        // channel — refuses the gesture, trust chain or not.
         for trust in [true, false] {
             assert_eq!(
-                decide_update_apply(false, None, trust),
+                decide_update_apply(false, false, None, trust),
                 UpdateApplyMode::Manual {
                     reason: ManualUpdateReason::ChannelUnproven
                 }
@@ -410,9 +432,22 @@ mod tests {
     }
 
     #[test]
-    fn a_proven_appimage_without_a_trust_chain_is_manual_fail_closed() {
+    fn windows_or_macos_with_a_trust_chain_is_integrated() {
+        // The updater self-replaces the Windows installer / macOS .app —
+        // there is no Linux install kind (`None`), yet the platform is a
+        // self-updatable target: integrated when the trust chain exists.
         assert_eq!(
-            decide_update_apply(false, Some(LinuxInstallKind::AppImage), false),
+            decide_update_apply(false, true, None, true),
+            UpdateApplyMode::Integrated
+        );
+    }
+
+    #[test]
+    fn windows_or_macos_without_a_trust_chain_is_manual_fail_closed() {
+        // No embedded public key ⇒ no authenticity proof ⇒ no gesture,
+        // exactly like the keyless AppImage — the same fail-closed reason.
+        assert_eq!(
+            decide_update_apply(false, true, None, false),
             UpdateApplyMode::Manual {
                 reason: ManualUpdateReason::TrustChainNotConfigured
             }
@@ -420,9 +455,19 @@ mod tests {
     }
 
     #[test]
-    fn a_proven_appimage_with_a_trust_chain_is_the_only_integrated_path() {
+    fn a_proven_appimage_without_a_trust_chain_is_manual_fail_closed() {
         assert_eq!(
-            decide_update_apply(false, Some(LinuxInstallKind::AppImage), true),
+            decide_update_apply(false, false, Some(LinuxInstallKind::AppImage), false),
+            UpdateApplyMode::Manual {
+                reason: ManualUpdateReason::TrustChainNotConfigured
+            }
+        );
+    }
+
+    #[test]
+    fn a_proven_appimage_with_a_trust_chain_is_integrated() {
+        assert_eq!(
+            decide_update_apply(false, false, Some(LinuxInstallKind::AppImage), true),
             UpdateApplyMode::Integrated
         );
     }

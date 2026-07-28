@@ -247,13 +247,19 @@ fn trust_chain_configured() -> bool {
 /// runtime. Re-run at EVERY start — the frontend is never trusted.
 fn resolve_update_apply_mode(
     is_debug_build: bool,
+    is_windows_or_macos: bool,
     probe: impl FnOnce() -> Option<LinuxInstallKind>,
     trust_chain_configured: bool,
 ) -> UpdateApplyMode {
     if is_debug_build {
-        return decide_update_apply(true, None, trust_chain_configured);
+        return decide_update_apply(true, is_windows_or_macos, None, trust_chain_configured);
     }
-    decide_update_apply(false, probe(), trust_chain_configured)
+    // Windows/macOS have no Linux install kind to probe — the platform itself
+    // is the self-replaceable updater target (the probe closure stays unrun).
+    if is_windows_or_macos {
+        return decide_update_apply(false, true, None, trust_chain_configured);
+    }
+    decide_update_apply(false, false, probe(), trust_chain_configured)
 }
 
 /// Tauri implementation of the update-apply event sink: the only place
@@ -317,6 +323,7 @@ impl UpdateApplyEventEmitter for TauriUpdateApplyEmitter {
 pub fn read_update_apply_plan(app: tauri::AppHandle) -> UpdateApplyPlanDto {
     let mode = resolve_update_apply_mode(
         cfg!(debug_assertions),
+        cfg!(target_os = "windows") || cfg!(target_os = "macos"),
         || probe_current_install(&app),
         trust_chain_configured(),
     );
@@ -345,6 +352,7 @@ pub fn read_update_apply_state(state: tauri::State<'_, crate::AppState>) -> Upda
 pub async fn start_update_apply(app: tauri::AppHandle) -> StartUpdateApplyDto {
     let mode = resolve_update_apply_mode(
         cfg!(debug_assertions),
+        cfg!(target_os = "windows") || cfg!(target_os = "macos"),
         || probe_current_install(&app),
         trust_chain_configured(),
     );
@@ -514,6 +522,7 @@ mod tests {
             let mut probed = false;
             let mode = resolve_update_apply_mode(
                 true,
+                false,
                 || {
                     probed = true;
                     Some(LinuxInstallKind::AppImage)
@@ -535,6 +544,7 @@ mod tests {
         let mut probed = false;
         let mode = resolve_update_apply_mode(
             false,
+            false,
             || {
                 probed = true;
                 Some(LinuxInstallKind::AppImage)
@@ -543,17 +553,45 @@ mod tests {
         );
         assert!(probed, "a release copy decides on the probe's verdict");
         assert_eq!(mode, UpdateApplyMode::Integrated);
-        // The stricter-than-information rule: a silent probe REFUSES the
-        // gesture (while the availability check runs on it).
+        // On LINUX, an indeterminable executable REFUSES the gesture (while
+        // the availability check would still run on it).
         assert_eq!(
-            resolve_update_apply_mode(false, || None, true),
+            resolve_update_apply_mode(false, false, || None, true),
             UpdateApplyMode::Manual {
                 reason: ManualUpdateReason::ChannelUnproven
             }
         );
-        // And the trust chain gates the only integrated path.
+        // And the trust chain gates the AppImage integrated path.
         assert_eq!(
-            resolve_update_apply_mode(false, || Some(LinuxInstallKind::AppImage), false),
+            resolve_update_apply_mode(false, false, || Some(LinuxInstallKind::AppImage), false),
+            UpdateApplyMode::Manual {
+                reason: ManualUpdateReason::TrustChainNotConfigured
+            }
+        );
+    }
+
+    #[test]
+    fn windows_or_macos_is_integrated_without_ever_probing_a_linux_kind() {
+        // The platform IS the self-replaceable updater target: the Linux
+        // probe closure must never run, and the trust chain alone gates the
+        // gesture (integrated with it, fail-closed without).
+        let mut probed = false;
+        let mode = resolve_update_apply_mode(
+            false,
+            true,
+            || {
+                probed = true;
+                None
+            },
+            true,
+        );
+        assert!(
+            !probed,
+            "Windows/macOS never consults the Linux install probe"
+        );
+        assert_eq!(mode, UpdateApplyMode::Integrated);
+        assert_eq!(
+            resolve_update_apply_mode(false, true, || None, false),
             UpdateApplyMode::Manual {
                 reason: ManualUpdateReason::TrustChainNotConfigured
             }
