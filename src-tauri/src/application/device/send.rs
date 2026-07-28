@@ -42,7 +42,11 @@ const MAX_ARCHIVE_ENTRIES: usize = 200_000;
 /// then the device write fills [`ASSET_SEGMENT`] → [`WRITE_SEGMENT_END`] %. The
 /// cheap in-between steps (transcode, cipher — only 512-byte prefixes) ride the
 /// boundary. 100 % is reserved for the settled terminal, never the in-flight bar.
-const ASSET_SEGMENT: u8 = 45;
+///
+/// The split is weighted toward the WRITE: on real hardware the device write
+/// dominates the wall-clock of a big pack, so assets get a small head (15 %)
+/// and the write the long tail — the bar then tracks the felt time far better.
+const ASSET_SEGMENT: u8 = 15;
 const WRITE_SEGMENT_END: u8 = 99;
 
 /// Input of [`send_archive_to_device`]. `device_identifier` is validated at the
