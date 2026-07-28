@@ -83,7 +83,15 @@ export function CreateFromArchiveSurface({
 
       {status.kind === "creating" ? (
         <div className="create-from-archive__pending">
-          <ProgressIndicator mode="indeterminate" label="Création en cours…" />
+          {status.progress != null ? (
+            <ProgressIndicator
+              mode="determinate"
+              label={`Import en cours… ${status.progress} %`}
+              value={status.progress}
+            />
+          ) : (
+            <ProgressIndicator mode="indeterminate" label="Import en cours…" />
+          )}
         </div>
       ) : null}
 

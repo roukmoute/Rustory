@@ -76,18 +76,20 @@ describe("UpdateCheckButton", () => {
 
   it("swallows a re-entrant click while a check is in flight", async () => {
     const user = userEvent.setup();
-    let release: (() => void) | null = null;
+    let release: () => void = () => {};
     vi.mocked(refreshUpdateAvailability).mockImplementation(
       () =>
-        new Promise((resolve) => {
-          release = () =>
-            resolve({
-              status: "upToDate",
-              headline: "Tu as la dernière version.",
-              notice: "…",
-              currentVersion: "0.8.0",
-            });
-        }),
+        new Promise<Awaited<ReturnType<typeof refreshUpdateAvailability>>>(
+          (resolve) => {
+            release = () =>
+              resolve({
+                status: "upToDate",
+                headline: "Tu as la dernière version.",
+                notice: "…",
+                currentVersion: "0.8.0",
+              });
+          },
+        ),
     );
     render(<UpdateCheckButton />);
     const button = screen.getByRole("button", {
@@ -95,7 +97,7 @@ describe("UpdateCheckButton", () => {
     });
     await user.click(button);
     await user.click(button);
-    release?.();
+    release();
     await waitFor(() =>
       expect(refreshUpdateAvailability).toHaveBeenCalledTimes(1),
     );

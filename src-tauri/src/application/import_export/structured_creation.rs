@@ -247,6 +247,7 @@ pub fn prepare_structured_creation(
             findings: outcome.analysis.findings,
         },
         MAX_FOLDER_TOTAL_MEDIA_BYTES,
+        &|_, _| {},
     )
 }
 
@@ -261,6 +262,10 @@ pub(crate) fn prepare_from_creatable(
     creatable: &crate::domain::import::CreatableStory,
     provenance: CreationProvenance,
     max_total_media_bytes: u64,
+    // Called after each DISTINCT media is promoted, as `(done, total_distinct)`,
+    // so a caller can surface real promotion progress. A no-op for callers that
+    // do not stream progress.
+    on_promote: &dyn Fn(usize, usize),
 ) -> Result<PreparedCreation, PrepareFailure> {
     // Defensive title re-check. The re-analysis already blocks an invalid
     // title through the `Title` aspect, so this is unreachable in practice
@@ -281,11 +286,18 @@ pub(crate) fn prepare_from_creatable(
     // FILES FIRST — promote each DISTINCT retained basename into the
     // content-addressed store, re-applying the TOTAL byte bound on the
     // bytes actually read. No DB handle exists here by construction.
+    let total_distinct = creatable
+        .retained_media
+        .iter()
+        .map(|m| m.basename.as_str())
+        .collect::<std::collections::BTreeSet<_>>()
+        .len();
     let promoted = promote_retained_media(
         app_data_dir,
         media_base_dir,
         &creatable.retained_media,
         max_total_media_bytes,
+        &|done| on_promote(done, total_distinct),
     )?;
 
     // Wire the asset ids into the transcoded structure: one asset row per
@@ -357,6 +369,7 @@ fn promote_retained_media(
     folder_path: &Path,
     retained_media: &[RetainedMediaRef],
     max_total_bytes: u64,
+    on_media: &dyn Fn(usize),
 ) -> Result<BTreeMap<String, StoredMedia>, PrepareFailure> {
     let mut promoted: BTreeMap<String, StoredMedia> = BTreeMap::new();
     let mut total_bytes: u64 = 0;
@@ -391,6 +404,9 @@ fn promote_retained_media(
             });
         }
         promoted.insert(retained.basename.clone(), stored);
+        // Honest progress: the count of DISTINCT media actually promoted.
+        // Transcoding images / copying audio is the heavy step of a big pack.
+        on_media(promoted.len());
     }
     Ok(promoted)
 }
@@ -1506,7 +1522,7 @@ mod tests {
         // A total bound the FIRST file already exhausts: the second
         // promotion trips the re-summed total.
         let failure =
-            promote_retained_media(app_data.path(), tmp.path(), &retained, MP3.len() as u64)
+            promote_retained_media(app_data.path(), tmp.path(), &retained, MP3.len() as u64, &|_| {})
                 .expect_err("the re-summed total must refuse");
         let v = serde_json::to_value(&failure.error).expect("ser");
         assert_eq!(v["details"]["source"], "file_read");

@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { Channel, invoke } from "@tauri-apps/api/core";
 
 import { toAppError } from "../../shared/errors/app-error";
 import type {
@@ -359,14 +359,29 @@ export async function analyzeStructuredArchiveForCreation(): Promise<ArchiveCrea
  * Commit an analyzed structured archive (phase 2). Sends the archive
  * pointer back; Rust RE-ANALYZES the archive from zero and returns the
  * created local Story Card.
+ *
+ * `onProgress`, when given, receives the import's integer percent (0..99)
+ * as the archive is extracted then its media promoted — a SIGNAL only, over
+ * a Tauri channel; the created card is the resolved value. Out-of-range or
+ * non-finite ticks are clamped/ignored.
  */
 export async function acceptStructuredArchiveCreation(
   input: AcceptArchiveCreationInput,
+  onProgress?: (percent: number) => void,
 ): Promise<StoryCardDto> {
+  const channel = new Channel<number>();
+  if (onProgress) {
+    channel.onmessage = (percent) => {
+      if (typeof percent === "number" && Number.isFinite(percent)) {
+        onProgress(Math.max(0, Math.min(99, Math.round(percent))));
+      }
+    };
+  }
   let raw: unknown;
   try {
     raw = await invoke<unknown>("accept_structured_archive_creation", {
       input,
+      onProgress: channel,
     });
   } catch (err) {
     throw toAppError(err);

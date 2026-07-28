@@ -56,6 +56,14 @@ pub const MAX_ARCHIVE_ENTRIES: usize = 32_768;
 /// Bytes read by the media PROBE — the sniffer's longest magic-byte need.
 const MEDIA_SNIFF_BYTES: usize = 16;
 
+/// Import progress splits into two MEASURABLE segments so a big pack never
+/// looks frozen: extracting every retained media from the zip fills
+/// 0 → [`EXTRACT_SEGMENT`] %, then promoting them (transcoding images /
+/// copying audio into the store — the heavy step) fills up to
+/// [`PROMOTE_SEGMENT_END`] %. 100 % is the committed terminal.
+const EXTRACT_SEGMENT: u8 = 30;
+const PROMOTE_SEGMENT_END: u8 = 99;
+
 /// The application-level outcome of analyzing a picked archive: the typed
 /// domain verdict + the provenance facts the accept phase re-derives.
 #[derive(Debug, Clone)]
@@ -125,6 +133,7 @@ pub fn analyze_structured_archive(archive_path: &Path) -> Result<ArchiveCreation
 pub fn prepare_structured_archive_creation(
     app_data_dir: &Path,
     archive_path: &Path,
+    on_progress: &dyn Fn(u8),
 ) -> Result<PreparedCreation, PrepareFailure> {
     if !archive_path.is_absolute() {
         return Err(PrepareFailure::bare(invalid_archive_path_error()));
@@ -159,6 +168,12 @@ pub fn prepare_structured_archive_creation(
     let Some(mut archive) = open_archive_bounded(archive_path) else {
         return Err(PrepareFailure::bare(revalidation_error()));
     };
+    let total_media = creatable
+        .retained_media
+        .iter()
+        .map(|m| m.basename.as_str())
+        .collect::<std::collections::BTreeSet<_>>()
+        .len();
     let mut extracted: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
     for retained in &creatable.retained_media {
         if !extracted.insert(retained.basename.as_str()) {
@@ -168,6 +183,11 @@ pub fn prepare_structured_archive_creation(
             .ok_or_else(|| PrepareFailure::bare(archive_read_error("entry_read")))?;
         std::fs::write(staging.path().join(&retained.basename), bytes)
             .map_err(|_| PrepareFailure::bare(archive_read_error("staging_write")))?;
+        if total_media > 0 {
+            let pct =
+                ((extracted.len() as f32 / total_media as f32) * EXTRACT_SEGMENT as f32).round();
+            on_progress((pct as u8).min(EXTRACT_SEGMENT));
+        }
     }
 
     let prepared = prepare_from_creatable(
@@ -183,6 +203,14 @@ pub fn prepare_structured_archive_creation(
             findings: outcome.analysis.findings,
         },
         MAX_ARCHIVE_TOTAL_MEDIA_BYTES,
+        // Promotion (transcoding / copying) rides the [EXTRACT_SEGMENT, 99] tail.
+        &|done, total| {
+            if total > 0 {
+                let span = (PROMOTE_SEGMENT_END - EXTRACT_SEGMENT) as f32;
+                let pct = EXTRACT_SEGMENT as f32 + (done as f32 / total as f32) * span;
+                on_progress((pct.round() as u8).min(PROMOTE_SEGMENT_END));
+            }
+        },
     )?;
     // Retain the ORIGINAL `.zip` at commit: it carries the device-format
     // `story.json` + assets the V3 send engine needs, which the canonical
@@ -201,7 +229,7 @@ pub fn accept_structured_archive_creation(
     app_data_dir: &Path,
     archive_path: &Path,
 ) -> Result<StoryCardDto, AppError> {
-    match prepare_structured_archive_creation(app_data_dir, archive_path) {
+    match prepare_structured_archive_creation(app_data_dir, archive_path, &|_| {}) {
         Ok(prepared) => commit_structured_creation(db, app_data_dir, prepared),
         Err(failure) => {
             compensate_structured_creation(db, app_data_dir, &failure.promoted);

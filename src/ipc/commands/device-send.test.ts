@@ -42,16 +42,15 @@ describe("sendPackToDevice", () => {
   });
 
   it("forwards the streamed percent, clamping out-of-range and dropping non-finite ticks", async () => {
-    vi.mocked(invoke).mockImplementationOnce(
-      async (_cmd: string, args?: Record<string, unknown>) => {
-        const channel = args?.onProgress as ChannelLike;
-        channel.onmessage?.(10);
-        channel.onmessage?.(150); // out of range → clamped to 99
-        channel.onmessage?.(Number.NaN); // non-finite → dropped
-        channel.onmessage?.(0.6); // rounded to 1
-        return VALID_OUTCOME;
-      },
-    );
+    vi.mocked(invoke).mockImplementationOnce(async (_cmd, args) => {
+      const channel = (args as { onProgress?: ChannelLike } | undefined)
+        ?.onProgress;
+      channel?.onmessage?.(10);
+      channel?.onmessage?.(150); // out of range → clamped to 99
+      channel?.onmessage?.(Number.NaN); // non-finite → dropped
+      channel?.onmessage?.(0.6); // rounded to 1
+      return VALID_OUTCOME;
+    });
     const seen: number[] = [];
     const out = await sendPackToDevice(VALID_INPUT, (p) => seen.push(p));
     expect(out).toEqual(VALID_OUTCOME);

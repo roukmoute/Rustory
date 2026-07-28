@@ -148,14 +148,49 @@ describe("useArchiveCreation", () => {
     await act(async () => {
       await result.current.acceptCreation();
     });
-    expect(acceptStructuredArchiveCreation).toHaveBeenCalledWith({
-      archivePath: ARCHIVE_ANALYZED_CLEAN.archivePath,
-    });
+    expect(acceptStructuredArchiveCreation).toHaveBeenCalledWith(
+      {
+        archivePath: ARCHIVE_ANALYZED_CLEAN.archivePath,
+      },
+      expect.any(Function),
+    );
     expect(invalidateLibraryOverviewCache).toHaveBeenCalledTimes(1);
     expect(result.current.status).toEqual({
       kind: "created",
       story: CREATED_CARD,
     });
+  });
+
+  it("streams the import percent into the creating state", async () => {
+    vi.mocked(analyzeStructuredArchiveForCreation).mockResolvedValueOnce(
+      ARCHIVE_ANALYZED_CLEAN,
+    );
+    let emit!: (p: number) => void;
+    let finish!: () => void;
+    vi.mocked(acceptStructuredArchiveCreation).mockImplementation(
+      (_input, onProgress) =>
+        new Promise((resolve) => {
+          emit = (p) => onProgress?.(p);
+          finish = () => resolve(CREATED_CARD);
+        }),
+    );
+    const { result } = renderHook(() => useArchiveCreation());
+    await act(async () => {
+      await result.current.pickAndAnalyze();
+    });
+    let pending!: Promise<void>;
+    act(() => {
+      pending = result.current.acceptCreation();
+    });
+    // Before the first tick the bar is honestly indeterminate.
+    expect(result.current.status).toEqual({ kind: "creating", progress: null });
+    act(() => emit(55));
+    expect(result.current.status).toEqual({ kind: "creating", progress: 55 });
+    await act(async () => {
+      finish();
+      await pending;
+    });
+    expect(result.current.status).toMatchObject({ kind: "created" });
   });
 
   it("a blocked verdict has nothing to accept", async () => {
@@ -310,9 +345,12 @@ describe("useArchiveCreation", () => {
     await act(async () => {
       await result.current.acceptCreation();
     });
-    expect(acceptStructuredArchiveCreation).toHaveBeenCalledWith({
-      archivePath: ARCHIVE_ANALYZED_CLEAN.archivePath,
-    });
+    expect(acceptStructuredArchiveCreation).toHaveBeenCalledWith(
+      {
+        archivePath: ARCHIVE_ANALYZED_CLEAN.archivePath,
+      },
+      expect.any(Function),
+    );
     expect(result.current.status.kind).toBe("created");
   });
 
