@@ -522,6 +522,76 @@ mod tests {
         assert_eq!(format_release_version(version(0, 1, 0)), "0.1.0");
     }
 
+    #[test]
+    fn round_trip_format_parse_with_u64_max() {
+        // Test pour chaque composante (major, minor, patch)
+        let test_cases = [
+            ReleaseVersion {
+                major: u64::MAX,
+                minor: 0,
+                patch: 0,
+            },
+            ReleaseVersion {
+                major: 0,
+                minor: u64::MAX,
+                patch: 0,
+            },
+            ReleaseVersion {
+                major: 0,
+                minor: 0,
+                patch: u64::MAX,
+            },
+        ];
+        for version in test_cases {
+            let formatted = format_release_version(version);
+            let parsed = parse_release_version(&formatted);
+            assert_eq!(
+                parsed,
+                Some(version),
+                "aller-retour échoué pour {formatted}"
+            );
+        }
+    }
+
+    #[test]
+    fn format_release_version_never_prefix_v() {
+        // Vérifier que le rendu ne contient jamais de préfixe « v »
+        let test_cases = [
+            ReleaseVersion {
+                major: 1,
+                minor: 2,
+                patch: 3,
+            },
+            ReleaseVersion {
+                major: 0,
+                minor: 1,
+                patch: 0,
+            },
+            ReleaseVersion {
+                major: u64::MAX,
+                minor: 0,
+                patch: 0,
+            },
+            ReleaseVersion {
+                major: 0,
+                minor: u64::MAX,
+                patch: 0,
+            },
+            ReleaseVersion {
+                major: 0,
+                minor: 0,
+                patch: u64::MAX,
+            },
+        ];
+        for version in test_cases {
+            let formatted = format_release_version(version);
+            assert!(
+                !formatted.starts_with('v'),
+                "le formatage de {formatted} doit commencer par un chiffre, pas par 'v'"
+            );
+        }
+    }
+
     // ===== Wire tags (tripwire) =====
 
     #[test]
