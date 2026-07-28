@@ -33,6 +33,7 @@ import {
 } from "../../features/library/components/LuniiDecisionPanel";
 import { useStoryTransfer } from "../../features/transfer";
 import { CreateFromArchiveSurface } from "../../features/import-export/components/CreateFromArchiveSurface";
+import { DropAnalyzingOverlay } from "../../features/import-export/components/DropAnalyzingOverlay";
 import { CreateFromFolderSurface } from "../../features/import-export/components/CreateFromFolderSurface";
 import { CreateFromRssSurface } from "../../features/import-export/components/CreateFromRssSurface";
 import { ImportArtifactSurface } from "../../features/import-export/components/ImportArtifactSurface";
@@ -1264,6 +1265,10 @@ export function LibraryRoute(): React.JSX.Element {
 
   return (
     <>
+      {/* Fills the post-drop gap: while a big dropped pack is being analyzed
+          (recognition review), signal that work is happening (the decorative
+          hover overlay is already gone by then). */}
+      <DropAnalyzingOverlay active={storyImport.isDropSettling} />
       <LibraryLayout
         leftNav={
           <>

@@ -29,3 +29,28 @@
   line-height: var(--line-height-tight);
   text-align: center;
 }
+
+/*
+ * Post-drop analysis feedback (announced, not decorative): a solid-bordered
+ * panel over the same backdrop, carrying the "Analyse en cours…" title and an
+ * indeterminate bar while the recognition review runs on a big dropped pack.
+ */
+.drop-overlay__panel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  min-width: min(360px, 80vw);
+  padding: var(--space-4) var(--space-5);
+  border: 2px solid var(--color-action-primary);
+  border-radius: var(--radius-lg);
+  background: var(--color-surface-raised);
+  color: var(--color-text-primary);
+}
+
+.drop-overlay__title {
+  margin: 0;
+  font-size: var(--font-size-h3);
+  font-weight: var(--font-weight-medium);
+  line-height: var(--line-height-tight);
+  text-align: center;
+}
