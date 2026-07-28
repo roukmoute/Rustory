@@ -209,8 +209,17 @@ describe("CreateFromFolderSurface", () => {
   });
 
   it("shows the creating progress", () => {
-    renderSurface({ kind: "creating" });
+    renderSurface({ kind: "creating", progress: null });
     expect(screen.getByText("Création en cours…")).toBeInTheDocument();
+  });
+
+  it("shows a determinate percent once the creation reports progress", () => {
+    renderSurface({ kind: "creating", progress: 40 });
+    expect(screen.getByText("Création en cours… 40 %")).toBeInTheDocument();
+    expect(screen.getByRole("progressbar")).toHaveAttribute(
+      "aria-valuenow",
+      "40",
+    );
   });
 
   it("renders the sober created state with the title and an explicit Fermer", async () => {

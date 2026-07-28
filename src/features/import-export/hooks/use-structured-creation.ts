@@ -27,7 +27,9 @@ export type StructuredCreationStatus =
   | { kind: "idle" }
   | { kind: "analyzing" }
   | { kind: "review"; verdict: AnalyzedFolderVerdict }
-  | { kind: "creating" }
+  // `progress` is the integer percent (0..99) streamed while the folder's
+  // media is promoted, or `null` before the first tick.
+  | { kind: "creating"; progress: number | null }
   | { kind: "created"; story: StoryCardDto }
   | { kind: "failed"; error: AppError };
 
@@ -224,13 +226,25 @@ export function useStructuredCreation(): UseStructuredCreation {
       try {
         if (mountedRef.current) {
           setFailedPhase(null);
-          setStatus({ kind: "creating" });
+          setStatus({ kind: "creating", progress: null });
         }
         let story: StoryCardDto;
         try {
-          story = await acceptStructuredCreation({
-            folderPath: verdict.folderPath,
-          });
+          story = await acceptStructuredCreation(
+            {
+              folderPath: verdict.folderPath,
+            },
+            (percent) => {
+              if (!mountedRef.current) return;
+              // Only refresh the in-flight bar — a late tick after the flow
+              // settled must never resurrect "creating".
+              setStatus((prev) =>
+                prev.kind === "creating"
+                  ? { kind: "creating", progress: percent }
+                  : prev,
+              );
+            },
+          );
         } catch (err) {
           if (!mountedRef.current) return;
           setStatus({ kind: "failed", error: toAppError(err) });

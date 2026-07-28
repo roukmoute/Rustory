@@ -318,10 +318,22 @@ export async function analyzeStructuredFolderForCreation(): Promise<StructuredCr
  */
 export async function acceptStructuredCreation(
   input: AcceptStructuredCreationInput,
+  onProgress?: (percent: number) => void,
 ): Promise<StoryCardDto> {
+  const channel = new Channel<number>();
+  if (onProgress) {
+    channel.onmessage = (percent) => {
+      if (typeof percent === "number" && Number.isFinite(percent)) {
+        onProgress(Math.max(0, Math.min(99, Math.round(percent))));
+      }
+    };
+  }
   let raw: unknown;
   try {
-    raw = await invoke<unknown>("accept_structured_creation", { input });
+    raw = await invoke<unknown>("accept_structured_creation", {
+      input,
+      onProgress: channel,
+    });
   } catch (err) {
     throw toAppError(err);
   }

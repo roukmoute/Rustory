@@ -80,7 +80,15 @@ export function CreateFromFolderSurface({
 
       {status.kind === "creating" ? (
         <div className="create-from-folder__pending">
-          <ProgressIndicator mode="indeterminate" label="Création en cours…" />
+          {status.progress != null ? (
+            <ProgressIndicator
+              mode="determinate"
+              label={`Création en cours… ${status.progress} %`}
+              value={status.progress}
+            />
+          ) : (
+            <ProgressIndicator mode="indeterminate" label="Création en cours…" />
+          )}
         </div>
       ) : null}
 

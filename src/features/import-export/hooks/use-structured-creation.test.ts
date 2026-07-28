@@ -175,9 +175,12 @@ describe("useStructuredCreation", () => {
     await act(async () => {
       await result.current.acceptCreation();
     });
-    expect(acceptStructuredCreation).toHaveBeenCalledWith({
-      folderPath: "/home/user/mon-dossier",
-    });
+    expect(acceptStructuredCreation).toHaveBeenCalledWith(
+      {
+        folderPath: "/home/user/mon-dossier",
+      },
+      expect.any(Function),
+    );
     expect(invalidateLibraryOverviewCache).toHaveBeenCalledTimes(1);
     expect(result.current.status).toEqual({
       kind: "created",
@@ -358,9 +361,12 @@ describe("useStructuredCreation", () => {
     await act(async () => {
       await result.current.acceptCreation();
     });
-    expect(acceptStructuredCreation).toHaveBeenCalledWith({
-      folderPath: "/home/user/mon-dossier",
-    });
+    expect(acceptStructuredCreation).toHaveBeenCalledWith(
+      {
+        folderPath: "/home/user/mon-dossier",
+      },
+      expect.any(Function),
+    );
     expect(result.current.status).toEqual({
       kind: "created",
       story: CREATED_CARD,
@@ -395,9 +401,12 @@ describe("useStructuredCreation", () => {
       await result.current.retryAccept();
     });
     expect(acceptStructuredCreation).toHaveBeenCalledTimes(2);
-    expect(acceptStructuredCreation).toHaveBeenLastCalledWith({
-      folderPath: "/home/user/mon-dossier",
-    });
+    expect(acceptStructuredCreation).toHaveBeenLastCalledWith(
+      {
+        folderPath: "/home/user/mon-dossier",
+      },
+      expect.any(Function),
+    );
     expect(result.current.status).toEqual({
       kind: "created",
       story: CREATED_CARD,
@@ -476,7 +485,7 @@ describe("useStructuredCreation", () => {
     act(() => {
       pendingCommit = result.current.acceptCreation();
     });
-    expect(result.current.status).toEqual({ kind: "creating" });
+    expect(result.current.status).toEqual({ kind: "creating", progress: null });
 
     // B's verdict settles mid-commit: DECLINED, nothing touched.
     const NEWER = {
@@ -489,7 +498,7 @@ describe("useStructuredCreation", () => {
       accepted = result.current.injectDropVerdict(NEWER);
     });
     expect(accepted).toBe(false);
-    expect(result.current.status).toEqual({ kind: "creating" });
+    expect(result.current.status).toEqual({ kind: "creating", progress: null });
 
     // The commit FAILS: the preserved verdict must still drive retryAccept
     // (never a silent no-op — "Errors must preserve dignity").
@@ -504,9 +513,12 @@ describe("useStructuredCreation", () => {
       await result.current.retryAccept();
     });
     expect(acceptStructuredCreation).toHaveBeenCalledTimes(2);
-    expect(acceptStructuredCreation).toHaveBeenLastCalledWith({
-      folderPath: "/home/user/mon-dossier",
-    });
+    expect(acceptStructuredCreation).toHaveBeenLastCalledWith(
+      {
+        folderPath: "/home/user/mon-dossier",
+      },
+      expect.any(Function),
+    );
     expect(result.current.status).toEqual({
       kind: "created",
       story: CREATED_CARD,
@@ -535,7 +547,7 @@ describe("useStructuredCreation", () => {
       result.current.clearDropReview();
     });
     // The commit screen survives; its settlement lands normally.
-    expect(result.current.status).toEqual({ kind: "creating" });
+    expect(result.current.status).toEqual({ kind: "creating", progress: null });
     await act(async () => {
       resolveCommit(CREATED_CARD);
       await pendingCommit;

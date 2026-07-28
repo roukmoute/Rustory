@@ -2,6 +2,12 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn(),
+  // The progress-streaming facades construct `new Channel<number>()`; the
+  // command mock ignores it, so a bare stand-in with the `.onmessage` slot
+  // is enough.
+  Channel: class {
+    onmessage: ((msg: number) => void) | null = null;
+  },
 }));
 
 import { invoke } from "@tauri-apps/api/core";
@@ -496,6 +502,7 @@ describe("acceptStructuredCreation", () => {
     });
     expect(invoke).toHaveBeenCalledWith("accept_structured_creation", {
       input: { folderPath: "/home/user/mon-dossier" },
+      onProgress: expect.anything(),
     });
     expect(card.title).toBe("Le voyage de Nour");
   });

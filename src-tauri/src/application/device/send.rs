@@ -343,8 +343,9 @@ mod tests {
             device_identifier: "0123456789abcdef0123456789abcdef".into(),
             archive_path: PathBuf::from("/nonexistent.zip"),
         };
-        let err = send_archive_to_device(&scanner, &writer, &req, Duration::from_millis(200), &|_| {})
-            .expect_err("absent device refuses");
+        let err =
+            send_archive_to_device(&scanner, &writer, &req, Duration::from_millis(200), &|_| {})
+                .expect_err("absent device refuses");
         assert_eq!(
             serde_json::to_value(&err).unwrap()["code"],
             "DEVICE_WRITE_FAILED"
@@ -367,8 +368,9 @@ mod tests {
             device_identifier: mock_identifier(),
             archive_path: PathBuf::from("/nonexistent.zip"),
         };
-        let err = send_archive_to_device(&scanner, &writer, &req, Duration::from_millis(200), &|_| {})
-            .expect_err("V1 must refuse the archive send");
+        let err =
+            send_archive_to_device(&scanner, &writer, &req, Duration::from_millis(200), &|_| {})
+                .expect_err("V1 must refuse the archive send");
         let v = serde_json::to_value(&err).unwrap();
         assert_eq!(v["code"], "DEVICE_UNSUPPORTED");
         assert_eq!(v["details"]["source"], "capability_gate");
@@ -391,8 +393,9 @@ mod tests {
             device_identifier: mock_identifier(),
             archive_path: PathBuf::from("/nonexistent.zip"),
         };
-        let err = send_archive_to_device(&scanner, &writer, &req, Duration::from_millis(200), &|_| {})
-            .expect_err("missing archive refuses");
+        let err =
+            send_archive_to_device(&scanner, &writer, &req, Duration::from_millis(200), &|_| {})
+                .expect_err("missing archive refuses");
         let v = serde_json::to_value(&err).unwrap();
         assert_eq!(v["code"], "DEVICE_WRITE_FAILED");
         assert_eq!(v["details"]["source"], "archive");

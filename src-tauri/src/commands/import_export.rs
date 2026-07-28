@@ -560,6 +560,9 @@ pub async fn accept_structured_creation(
     app: AppHandle,
     state: State<'_, AppState>,
     input: AcceptStructuredCreationInputDto,
+    // Streams the creation's integer percent (0..99) as media is promoted, so a
+    // media-heavy folder never looks frozen. Signal only; the card is returned.
+    on_progress: Channel<u8>,
 ) -> Result<StoryCardDto, AppError> {
     let app_data_dir = app
         .path()
@@ -568,7 +571,15 @@ pub async fn accept_structured_creation(
     let db = state.db.clone();
     async_runtime::spawn_blocking(move || -> Result<StoryCardDto, AppError> {
         let folder = Path::new(&input.folder_path);
-        match import_export::prepare_structured_creation(&app_data_dir, folder) {
+        // Forward only on an integer-percent CHANGE (bounded IPC).
+        let last = std::cell::Cell::new(-1i16);
+        let forward = |pct: u8| {
+            if i16::from(pct) != last.get() {
+                last.set(i16::from(pct));
+                let _ = on_progress.send(pct);
+            }
+        };
+        match import_export::prepare_structured_creation(&app_data_dir, folder, &forward) {
             Ok(prepared) => {
                 let mut guard = db.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
                 import_export::commit_structured_creation(&mut guard, &app_data_dir, prepared)

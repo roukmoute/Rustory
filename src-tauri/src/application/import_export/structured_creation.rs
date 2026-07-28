@@ -205,6 +205,10 @@ impl PrepareFailure {
 pub fn prepare_structured_creation(
     app_data_dir: &Path,
     folder_path: &Path,
+    // Called with the import's integer percent (0..99) as media is promoted
+    // (transcoding / copying — the whole cost of a folder creation, which has
+    // no extraction step). A no-op for callers that do not stream progress.
+    on_progress: &dyn Fn(u8),
 ) -> Result<PreparedCreation, PrepareFailure> {
     // A forged pointer must at least be an absolute path — the system
     // dialog never returns anything else (empty/relative strings are a
@@ -247,7 +251,13 @@ pub fn prepare_structured_creation(
             findings: outcome.analysis.findings,
         },
         MAX_FOLDER_TOTAL_MEDIA_BYTES,
-        &|_, _| {},
+        // No extraction step for a folder — promotion fills the whole bar.
+        &|done, total| {
+            if total > 0 {
+                let pct = ((done as f32 / total as f32) * 99.0).round();
+                on_progress((pct as u8).min(99));
+            }
+        },
     )
 }
 
@@ -560,7 +570,7 @@ pub fn accept_structured_creation(
     app_data_dir: &Path,
     folder_path: &Path,
 ) -> Result<StoryCardDto, AppError> {
-    match prepare_structured_creation(app_data_dir, folder_path) {
+    match prepare_structured_creation(app_data_dir, folder_path, &|_| {}) {
         Ok(prepared) => commit_structured_creation(db, app_data_dir, prepared),
         Err(failure) => {
             compensate_structured_creation(db, app_data_dir, &failure.promoted);
@@ -1521,9 +1531,14 @@ mod tests {
 
         // A total bound the FIRST file already exhausts: the second
         // promotion trips the re-summed total.
-        let failure =
-            promote_retained_media(app_data.path(), tmp.path(), &retained, MP3.len() as u64, &|_| {})
-                .expect_err("the re-summed total must refuse");
+        let failure = promote_retained_media(
+            app_data.path(),
+            tmp.path(),
+            &retained,
+            MP3.len() as u64,
+            &|_| {},
+        )
+        .expect_err("the re-summed total must refuse");
         let v = serde_json::to_value(&failure.error).expect("ser");
         assert_eq!(v["details"]["source"], "file_read");
         assert_eq!(v["details"]["stage"], "oversize_total");
