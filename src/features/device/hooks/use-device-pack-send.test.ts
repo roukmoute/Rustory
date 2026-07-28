@@ -42,10 +42,13 @@ describe("useDevicePackSend", () => {
     await act(async () => {
       await result.current.triggerSend(DEVICE_ID, STORY_ID);
     });
-    expect(sendPackToDevice).toHaveBeenCalledWith({
-      deviceIdentifier: DEVICE_ID,
-      storyId: STORY_ID,
-    });
+    expect(sendPackToDevice).toHaveBeenCalledWith(
+      {
+        deviceIdentifier: DEVICE_ID,
+        storyId: STORY_ID,
+      },
+      expect.any(Function),
+    );
     expect(result.current.status).toEqual({
       kind: "sent",
       packUuid: SENT_OUTCOME.packUuid,
@@ -55,6 +58,32 @@ describe("useDevicePackSend", () => {
     expect(result.current.targetStoryId).toBe(STORY_ID);
     expect(onSent).toHaveBeenCalledTimes(1);
     expect(onSent).toHaveBeenCalledWith(SENT_OUTCOME);
+  });
+
+  it("streams the percent into the in-flight sending state", async () => {
+    let emit!: (p: number) => void;
+    let finish!: () => void;
+    vi.mocked(sendPackToDevice).mockImplementation(
+      (_input, onProgress) =>
+        new Promise((resolve) => {
+          emit = (p) => onProgress?.(p);
+          finish = () => resolve(SENT_OUTCOME);
+        }),
+    );
+    const { result } = renderHook(() => useDevicePackSend());
+    let pending!: Promise<void>;
+    act(() => {
+      pending = result.current.triggerSend(DEVICE_ID, STORY_ID);
+    });
+    // Before the first tick the bar is honestly indeterminate.
+    expect(result.current.status).toEqual({ kind: "sending", progress: null });
+    act(() => emit(42));
+    expect(result.current.status).toEqual({ kind: "sending", progress: 42 });
+    await act(async () => {
+      finish();
+      await pending;
+    });
+    expect(result.current.status).toMatchObject({ kind: "sent" });
   });
 
   it("surfaces a failure without calling onSent", async () => {

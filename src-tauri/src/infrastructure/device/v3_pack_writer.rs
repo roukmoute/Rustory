@@ -29,17 +29,22 @@ use crate::domain::transfer::{
 use super::pack_assembly::AssembledFile;
 use super::writer::{
     fsync_dir, fsync_tree, mount_write_lock, promote, read_pi, safe_rel_join, write_pi_atomically,
-    DEVICE_REPLACED_PREFIX, DEVICE_STAGING_PREFIX,
+    WriteProgress, DEVICE_REPLACED_PREFIX, DEVICE_STAGING_PREFIX,
 };
 
 /// Writes an assembled pack to a device. A trait keeps the application layer
 /// testable without a real volume.
 pub trait DeviceV3PackWriter: Send + Sync + 'static {
+    /// Writes `files` under `.content/<short_id>` and indexes the UUID. `progress`
+    /// is called during the measurable staging copy with a monotone
+    /// [`WriteProgress`] (bounded by the file bytes total) — the honest signal a
+    /// big-pack send needs so it never looks frozen.
     fn write_pack(
         &self,
         mount_path: &Path,
         pack_uuid: &str,
         files: &[AssembledFile],
+        progress: &dyn Fn(WriteProgress),
     ) -> Result<(), TransferFailureCause>;
 }
 
@@ -53,6 +58,7 @@ impl DeviceV3PackWriter for SystemDeviceV3PackWriter {
         mount_path: &Path,
         pack_uuid: &str,
         files: &[AssembledFile],
+        progress: &dyn Fn(WriteProgress),
     ) -> Result<(), TransferFailureCause> {
         let uuid_bytes = pack_uuid_bytes(pack_uuid).ok_or(TransferFailureCause::WriteRejected)?;
         let short_id =
@@ -67,12 +73,21 @@ impl DeviceV3PackWriter for SystemDeviceV3PackWriter {
             .prefix(DEVICE_STAGING_PREFIX)
             .tempdir_in(mount_path)
             .map_err(|_| TransferFailureCause::WriteRejected)?;
+        let bytes_total: u64 = files.iter().map(|f| f.bytes.len() as u64).sum();
+        let mut bytes_done: u64 = 0;
         for file in files {
             let path = safe_rel_join(staging.path(), &file.rel_path)?;
             if let Some(parent) = path.parent() {
                 fs::create_dir_all(parent).map_err(|_| TransferFailureCause::WriteRejected)?;
             }
             fs::write(&path, &file.bytes).map_err(|_| TransferFailureCause::WriteRejected)?;
+            // Honest progress: report ONLY the measurable content copy (staging),
+            // monotone and bounded by the total — like the round-trip writer.
+            bytes_done = bytes_done.saturating_add(file.bytes.len() as u64);
+            progress(WriteProgress {
+                bytes_done,
+                bytes_total,
+            });
         }
         // 2. Durability of the staged tree before any promotion.
         fsync_tree(staging.path()).map_err(|_| TransferFailureCause::WriteRejected)?;
@@ -140,6 +155,8 @@ mod tests {
         ]
     }
 
+    fn noop_progress(_: WriteProgress) {}
+
     #[test]
     fn writes_the_files_and_indexes_the_uuid() {
         let dir = tempdir().unwrap();
@@ -147,7 +164,7 @@ mod tests {
         fs::write(dir.path().join(LUNII_DEVICE_ID_MARKER), []).unwrap();
 
         SystemDeviceV3PackWriter
-            .write_pack(dir.path(), UUID, &files())
+            .write_pack(dir.path(), UUID, &files(), &noop_progress)
             .expect("write");
 
         let content = dir.path().join(LUNII_CONTENT_DIR).join(SHORT);
@@ -191,7 +208,7 @@ mod tests {
         let mount = PathBuf::from(std::env::var("RUSTORY_TEST_WRITE_MOUNT").unwrap());
         let uuid = std::env::var("RUSTORY_TEST_UUID").unwrap();
         SystemDeviceV3PackWriter
-            .write_pack(&mount, &uuid, &files)
+            .write_pack(&mount, &uuid, &files, &noop_progress)
             .expect("write to scratch");
 
         let short = short_id_from_pack_uuid(&uuid).unwrap();
@@ -229,7 +246,7 @@ mod tests {
         fs::write(dir.path().join(LUNII_DEVICE_ID_MARKER), []).unwrap();
         // First write.
         SystemDeviceV3PackWriter
-            .write_pack(dir.path(), UUID, &files())
+            .write_pack(dir.path(), UUID, &files(), &noop_progress)
             .expect("first write");
         // Second write with DIFFERENT content replaces it.
         let new_files = vec![AssembledFile {
@@ -237,7 +254,7 @@ mod tests {
             bytes: vec![7, 7, 7, 7],
         }];
         SystemDeviceV3PackWriter
-            .write_pack(dir.path(), UUID, &new_files)
+            .write_pack(dir.path(), UUID, &new_files, &noop_progress)
             .expect("replace");
 
         let content = dir.path().join(LUNII_CONTENT_DIR).join(SHORT);

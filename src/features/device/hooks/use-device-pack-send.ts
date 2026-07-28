@@ -6,7 +6,9 @@ import type { SendPackToDeviceOutcome } from "../../../shared/ipc-contracts/devi
 
 export type DevicePackSendStatus =
   | { kind: "idle" }
-  | { kind: "sending" }
+  // `progress` is the integer percent (0..99) streamed by the send, or `null`
+  // before the first tick (a fresh send with no reliable fraction yet).
+  | { kind: "sending"; progress: number | null }
   | { kind: "sent"; packUuid: string; imageCount: number; audioCount: number }
   | { kind: "failed"; error: AppError };
 
@@ -65,11 +67,23 @@ export function useDevicePackSend(
       try {
         if (mountedRef.current) {
           setTargetStoryId(storyId);
-          setStatus({ kind: "sending" });
+          setStatus({ kind: "sending", progress: null });
         }
         let outcome: SendPackToDeviceOutcome;
         try {
-          outcome = await sendPackToDevice({ deviceIdentifier, storyId });
+          outcome = await sendPackToDevice(
+            { deviceIdentifier, storyId },
+            (percent) => {
+              if (!mountedRef.current) return;
+              // Only refresh the in-flight bar — a late tick after the flow
+              // settled (sent / failed) must never resurrect "sending".
+              setStatus((prev) =>
+                prev.kind === "sending"
+                  ? { kind: "sending", progress: percent }
+                  : prev,
+              );
+            },
+          );
         } catch (err) {
           if (!mountedRef.current) return;
           setStatus({ kind: "failed", error: toAppError(err) });

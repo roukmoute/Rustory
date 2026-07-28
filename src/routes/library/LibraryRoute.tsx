@@ -1611,8 +1611,14 @@ export function mapArchiveSendToTransferView(
 ): TransferView {
   switch (status.kind) {
     case "sending":
-      // Indeterminate (a single awaited call has no byte-level fraction).
-      return { kind: "transferring", progress: null, phase: "transfer" };
+      // The send streams an integer percent (0..99) over a channel as the pack
+      // is normalized then written; convert to the fraction the bar expects.
+      // `null` before the first tick keeps the bar honestly indeterminate.
+      return {
+        kind: "transferring",
+        progress: status.progress == null ? null : status.progress / 100,
+        phase: "transfer",
+      };
     case "sent":
       return {
         kind: "sent",

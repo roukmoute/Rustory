@@ -22,7 +22,7 @@ use crate::domain::shared::AppError;
 use crate::domain::transfer::short_id_from_pack_uuid;
 use crate::infrastructure::device::{
     assemble_v3_pack, to_device_audio, to_device_image, AssembleError, AssetConvertError,
-    DeviceScanner, DeviceV3PackWriter,
+    DeviceScanner, DeviceV3PackWriter, WriteProgress,
 };
 
 use super::{check_operation_allowed, resolve_connected_lunii, ConnectedLuniiOutcome};
@@ -36,6 +36,14 @@ const MAX_STORY_JSON_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_ASSET_BYTES: u64 = 64 * 1024 * 1024;
 /// Bound on the archive's entry count.
 const MAX_ARCHIVE_ENTRIES: usize = 200_000;
+
+/// The send reports progress over two MEASURABLE segments so a big pack never
+/// looks frozen: reading + normalizing every asset fills 0 → [`ASSET_SEGMENT`] %,
+/// then the device write fills [`ASSET_SEGMENT`] → [`WRITE_SEGMENT_END`] %. The
+/// cheap in-between steps (transcode, cipher — only 512-byte prefixes) ride the
+/// boundary. 100 % is reserved for the settled terminal, never the in-flight bar.
+const ASSET_SEGMENT: u8 = 45;
+const WRITE_SEGMENT_END: u8 = 99;
 
 /// Input of [`send_archive_to_device`]. `device_identifier` is validated at the
 /// IPC boundary; `archive_path` is the user-picked `.zip`.
@@ -62,6 +70,7 @@ pub fn send_archive_to_device(
     writer: &dyn DeviceV3PackWriter,
     request: &SendArchiveRequest,
     budget: Duration,
+    on_progress: &dyn Fn(u8),
 ) -> Result<SentToDevice, AppError> {
     let started = Instant::now();
     let remaining = |started: Instant| budget.saturating_sub(started.elapsed());
@@ -111,23 +120,33 @@ pub fn send_archive_to_device(
     //    device byte). A raw STUdio export would otherwise reach the device
     //    as PNGs it cannot decode — a blank menu image then "Error SD Card".
     let mut assets = std::collections::HashMap::new();
-    for filename in transcoded.images.iter() {
-        if assets.contains_key(filename) {
-            continue;
+    let total_assets = transcoded.images.len() + transcoded.audios.len();
+    let report_asset = |done: usize| {
+        if total_assets > 0 {
+            let pct = ((done as f32 / total_assets as f32) * ASSET_SEGMENT as f32).round() as u8;
+            on_progress(pct.min(ASSET_SEGMENT));
         }
-        let bytes = read_entry(&mut archive, filename, MAX_ASSET_BYTES)
-            .ok_or_else(|| asset_error(filename))?;
-        let device_ready = to_device_image(&bytes).map_err(|e| asset_convert_error(filename, e))?;
-        assets.insert(filename.clone(), device_ready);
+    };
+    for (i, filename) in transcoded.images.iter().enumerate() {
+        if !assets.contains_key(filename) {
+            let bytes = read_entry(&mut archive, filename, MAX_ASSET_BYTES)
+                .ok_or_else(|| asset_error(filename))?;
+            let device_ready =
+                to_device_image(&bytes).map_err(|e| asset_convert_error(filename, e))?;
+            assets.insert(filename.clone(), device_ready);
+        }
+        report_asset(i + 1);
     }
-    for filename in transcoded.audios.iter() {
-        if assets.contains_key(filename) {
-            continue;
+    let images_len = transcoded.images.len();
+    for (j, filename) in transcoded.audios.iter().enumerate() {
+        if !assets.contains_key(filename) {
+            let bytes = read_entry(&mut archive, filename, MAX_ASSET_BYTES)
+                .ok_or_else(|| asset_error(filename))?;
+            let device_ready =
+                to_device_audio(&bytes).map_err(|e| asset_convert_error(filename, e))?;
+            assets.insert(filename.clone(), device_ready);
         }
-        let bytes = read_entry(&mut archive, filename, MAX_ASSET_BYTES)
-            .ok_or_else(|| asset_error(filename))?;
-        let device_ready = to_device_audio(&bytes).map_err(|e| asset_convert_error(filename, e))?;
-        assets.insert(filename.clone(), device_ready);
+        report_asset(images_len + j + 1);
     }
 
     // 6. The TARGET device's `.md` (content key + IV + SNU) — re-keys the pack
@@ -142,9 +161,20 @@ pub fn send_archive_to_device(
             AssembleError::MissingAsset(f) => asset_error(&f),
         })?;
 
-    // 8. Write to the device (atomic staging + promotion + `.pi`).
+    // 8. Write to the device (atomic staging + promotion + `.pi`). The writer's
+    //    per-file byte progress maps onto the [ASSET_SEGMENT, WRITE_SEGMENT_END]
+    //    tail so the bar keeps moving through the (I/O-bound) device write.
+    let write_report = |p: WriteProgress| {
+        if p.bytes_total == 0 {
+            return;
+        }
+        let frac = (p.bytes_done as f32 / p.bytes_total as f32).min(1.0);
+        let span = (WRITE_SEGMENT_END - ASSET_SEGMENT) as f32;
+        let pct = ASSET_SEGMENT as f32 + frac * span;
+        on_progress((pct.round() as u8).min(WRITE_SEGMENT_END));
+    };
     writer
-        .write_pack(&mount_path, &pack_uuid, &files)
+        .write_pack(&mount_path, &pack_uuid, &files, &write_report)
         .map_err(|_| device_write_error("write_rejected"))?;
 
     Ok(SentToDevice {
@@ -294,6 +324,7 @@ mod tests {
             _mount: &Path,
             pack_uuid: &str,
             files: &[crate::infrastructure::device::AssembledFile],
+            _progress: &dyn Fn(WriteProgress),
         ) -> Result<(), crate::domain::transfer::TransferFailureCause> {
             self.calls
                 .lock()
@@ -312,7 +343,7 @@ mod tests {
             device_identifier: "0123456789abcdef0123456789abcdef".into(),
             archive_path: PathBuf::from("/nonexistent.zip"),
         };
-        let err = send_archive_to_device(&scanner, &writer, &req, Duration::from_millis(200))
+        let err = send_archive_to_device(&scanner, &writer, &req, Duration::from_millis(200), &|_| {})
             .expect_err("absent device refuses");
         assert_eq!(
             serde_json::to_value(&err).unwrap()["code"],
@@ -336,7 +367,7 @@ mod tests {
             device_identifier: mock_identifier(),
             archive_path: PathBuf::from("/nonexistent.zip"),
         };
-        let err = send_archive_to_device(&scanner, &writer, &req, Duration::from_millis(200))
+        let err = send_archive_to_device(&scanner, &writer, &req, Duration::from_millis(200), &|_| {})
             .expect_err("V1 must refuse the archive send");
         let v = serde_json::to_value(&err).unwrap();
         assert_eq!(v["code"], "DEVICE_UNSUPPORTED");
@@ -360,7 +391,7 @@ mod tests {
             device_identifier: mock_identifier(),
             archive_path: PathBuf::from("/nonexistent.zip"),
         };
-        let err = send_archive_to_device(&scanner, &writer, &req, Duration::from_millis(200))
+        let err = send_archive_to_device(&scanner, &writer, &req, Duration::from_millis(200), &|_| {})
             .expect_err("missing archive refuses");
         let v = serde_json::to_value(&err).unwrap();
         assert_eq!(v["code"], "DEVICE_WRITE_FAILED");
@@ -445,6 +476,7 @@ mod tests {
                 archive_path: zip,
             },
             Duration::from_secs(300),
+            &|_| {},
         )
         .expect("send the archive");
         assert_eq!(out.pack_uuid, expected_uuid);
@@ -543,6 +575,7 @@ mod tests {
                 archive_path: retained,
             },
             Duration::from_secs(300),
+            &|_| {},
         )
         .expect("send the retained archive");
         assert_eq!(out.pack_uuid, expected_uuid);

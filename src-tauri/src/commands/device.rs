@@ -1,5 +1,6 @@
 use std::time::{Duration, Instant};
 
+use tauri::ipc::Channel;
 use tauri::{AppHandle, Manager, State};
 
 use crate::application::device::delete::DeleteDeviceStoryRequest;
@@ -612,6 +613,10 @@ pub async fn send_pack_to_device(
     app: AppHandle,
     state: State<'_, AppState>,
     input: SendPackToDeviceInputDto,
+    // Streams the send's integer percent (0..99) so a big pack never looks
+    // frozen. Progress is a SIGNAL only — the settled outcome is the return
+    // value; a dropped channel never changes what was written.
+    on_progress: Channel<u8>,
 ) -> Result<SendPackToDeviceOutcomeDto, AppError> {
     if !is_32_lowercase_hex(&input.device_identifier) {
         return Err(invalid_send_input("invalid_device_identifier"));
@@ -642,11 +647,21 @@ pub async fn send_pack_to_device(
     let started = Instant::now();
 
     let outcome = tauri::async_runtime::spawn_blocking(move || {
+        // Forward only on an integer-percent CHANGE — the send already reports
+        // integers, so this just dedups (bounded IPC, no per-file flood).
+        let last = std::cell::Cell::new(-1i16);
+        let forward = |pct: u8| {
+            if i16::from(pct) != last.get() {
+                last.set(i16::from(pct));
+                let _ = on_progress.send(pct);
+            }
+        };
         device::send::send_archive_to_device(
             scanner.as_ref(),
             writer.as_ref(),
             &request,
             SEND_PACK_TO_DEVICE_BUDGET,
+            &forward,
         )
     })
     .await
