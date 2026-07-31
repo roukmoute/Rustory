@@ -100,6 +100,8 @@ pub struct RssItem {
     /// The item references a remote enclosure (podcast audio…). NEVER
     /// downloaded — becomes the `(Media, Missing)` finding at ingestion.
     pub has_enclosure: bool,
+    /// The URL of the remote enclosure, if present.
+    pub enclosure_url: Option<String>,
 }
 
 /// The stable reference of one previewed item, round-tripped by the
@@ -334,6 +336,7 @@ pub fn parse_rss(bytes: &[u8]) -> RssAnalysis {
         guid: Option<String>,
         link: Option<String>,
         has_enclosure: bool,
+        enclosure_url: Option<String>,
     }
 
     fn is_item_path(stack: &[Vec<u8>]) -> bool {
@@ -378,6 +381,7 @@ pub fn parse_rss(bytes: &[u8]) -> RssAnalysis {
             guid,
             link,
             has_enclosure: draft.has_enclosure,
+            enclosure_url: draft.enclosure_url,
         })
     }
 
@@ -506,6 +510,14 @@ pub fn parse_rss(bytes: &[u8]) -> RssAnalysis {
                 if current.is_some() && is_item_path(&stack) && name == b"enclosure" {
                     if let Some(draft) = current.as_mut() {
                         draft.has_enclosure = true;
+                        // Extract url attribute from enclosure
+                        for attr in start.attributes() {
+                            let Ok(attr) = attr else { continue };
+                            if attr.key.as_ref() == b"url" {
+                                let Ok(value) = attr.normalized_value(quick_xml::XmlVersion::Implicit1_0) else { continue };
+                                draft.enclosure_url = Some(value.trim().to_string());
+                            }
+                        }
                     }
                 }
                 stack.push(name);
@@ -535,6 +547,14 @@ pub fn parse_rss(bytes: &[u8]) -> RssAnalysis {
                 {
                     if let Some(draft) = current.as_mut() {
                         draft.has_enclosure = true;
+                        // Extract url attribute from enclosure (self-closing tag)
+                        for attr in start.attributes() {
+                            let Ok(attr) = attr else { continue };
+                            if attr.key.as_ref() == b"url" {
+                                let Ok(value) = attr.normalized_value(quick_xml::XmlVersion::Implicit1_0) else { continue };
+                                draft.enclosure_url = Some(value.trim().to_string());
+                            }
+                        }
                     }
                 }
             }
@@ -1111,6 +1131,7 @@ mod tests {
             guid: Some("g1".into()),
             link: None,
             has_enclosure: false,
+            enclosure_url: None,
         }
     }
 
