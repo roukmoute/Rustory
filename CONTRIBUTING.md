@@ -54,5 +54,14 @@ Rustory est en **livraison manuelle** tant que la chaîne officielle n'est pas e
 - Une unité de travail = **un seul commit** Git. Si la CI GitHub échoue, corriger localement puis `git commit --amend --no-edit` (cf. [`docs/project-context.md`](docs/project-context.md)).
 - Le commit n'est prêt à revue que si (a) les tests locaux pertinents sont verts et (b) la CI GitHub est verte sur ce commit.
 
-Les versions de release suivent la convention stricte `MAJOR.MINOR.PATCH` : exactement trois composantes, chiffres ASCII uniquement, zéros de tête refusés (excepté le bare `0`). Un préfixe `v` est toléré au parsing mais jamais affiché à l'utilisateur. Le parsing est fail-closed : un tag hors convention ne produit JAMAIS de verdict de mise à jour. Voir [`src-tauri/src/domain/update/availability.rs`](src-tauri/src/domain/update/availability.rs) pour l'implémentation.
+## Convention de versioning
+
+Les versions de release suivent la convention stricte `MAJOR.MINOR.PATCH` :
+- exactement **trois composantes** séparées par des points (`.),
+- chaque composante est un **chiffre ASCII** (0-9), **zéros de tête refusés** (ex. `01`, `007` invalides),
+- un préfixe `v` est **toléré au parse** mais **jamais affiché à l'utilisateur**,
+- le parsing est **fail-closed** : un tag hors convention ne produit **JAMAIS** de verdict de mise à jour.
+
+Voir [`src-tauri/src/domain/update/availability.rs`](src-tauri/src/domain/update/availability.rs) pour l'implémentation.
+
 
