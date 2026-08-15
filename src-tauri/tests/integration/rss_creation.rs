@@ -168,6 +168,7 @@ fn journey_1_preview_is_pure_then_the_accept_lands_a_reviewable_draft() {
         &RssItemRef::Guid("g-1".into()),
         &fingerprint_in(&nominal_feed(), "g-1"),
         BUDGET,
+        None,
     )
     .expect("accept");
     let RssCreationOutcome::Created { story } = outcome else {
@@ -258,6 +259,7 @@ fn an_enclosure_item_lands_partial_with_the_missing_media_finding() {
         &RssItemRef::Guid("g-p".into()),
         &fingerprint_in(&body, "g-p"),
         BUDGET,
+        None,
     )
     .expect("accept");
     let RssCreationOutcome::Created { story } = outcome else {
@@ -292,6 +294,7 @@ fn transport_failures_reject_and_create_nothing_on_both_phases() {
         &RssItemRef::Guid("g-1".into()),
         &"0".repeat(64),
         BUDGET,
+        None,
     )
     .expect_err("accept transport");
     assert_eq!(err.code, AppErrorCode::RssSourceUnreachable);
@@ -334,6 +337,7 @@ fn blocked_feeds_are_typed_verdicts_and_create_nothing() {
             &RssItemRef::Guid("g-1".into()),
             &"0".repeat(64),
             BUDGET,
+            None,
         )
         .expect("a refusal, not an error");
         assert!(matches!(outcome, RssCreationOutcome::SourceChanged));
@@ -363,6 +367,7 @@ fn a_source_that_changed_between_preview_and_accept_refuses_honestly() {
         &RssItemRef::Guid("g-1".into()),
         &fingerprint_in(&nominal_feed(), "g-1"),
         BUDGET,
+        None,
     )
     .expect("a refusal, not an error");
     assert!(matches!(outcome, RssCreationOutcome::SourceChanged));
@@ -394,6 +399,7 @@ fn a_resolvable_item_whose_content_diverged_refuses_honestly() {
         &RssItemRef::Guid("g-1".into()),
         &fingerprint_in(&previewed, "g-1"),
         BUDGET,
+        None,
     )
     .expect("a refusal, not an error");
     assert!(matches!(outcome, RssCreationOutcome::SourceChanged));
@@ -417,6 +423,7 @@ fn the_created_card_surfaces_on_the_overview_projection_with_the_rss_report() {
         &RssItemRef::Guid("g-2".into()),
         &fingerprint_in(&nominal_feed(), "g-2"),
         BUDGET,
+        None,
     )
     .expect("accept");
     let RssCreationOutcome::Created { story } = outcome else {

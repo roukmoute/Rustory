@@ -564,11 +564,11 @@ pub async fn accept_structured_creation(
     // media-heavy folder never looks frozen. Signal only; the card is returned.
     on_progress: Channel<u8>,
 ) -> Result<StoryCardDto, AppError> {
+    let db = state.db.clone();
     let app_data_dir = app
         .path()
         .app_data_dir()
         .map_err(|_| structured_creation::app_data_unavailable_error())?;
-    let db = state.db.clone();
     async_runtime::spawn_blocking(move || -> Result<StoryCardDto, AppError> {
         let folder = Path::new(&input.folder_path);
         // Forward only on an integer-percent CHANGE (bounded IPC).
@@ -673,11 +673,11 @@ pub async fn accept_structured_archive_creation(
     // card is the return value.
     on_progress: Channel<u8>,
 ) -> Result<StoryCardDto, AppError> {
+    let db = state.db.clone();
     let app_data_dir = app
         .path()
         .app_data_dir()
         .map_err(|_| structured_creation::app_data_unavailable_error())?;
-    let db = state.db.clone();
     async_runtime::spawn_blocking(move || -> Result<StoryCardDto, AppError> {
         let archive = Path::new(&input.archive_path);
         // Forward only on an integer-percent CHANGE (bounded IPC).
@@ -782,6 +782,10 @@ pub async fn accept_rss_story_creation(
 ) -> Result<RssCreationOutcomeDto, AppError> {
     let source = state.rss_source.clone();
     let db = state.db.clone();
+    let app_data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|_| structured_creation::app_data_unavailable_error())?;
     // Cloned raw, parsed only AFTER the outcome (see the preview command):
     // a policy refusal must reject before ANY address analysis, boundary
     // included.
@@ -796,6 +800,7 @@ pub async fn accept_rss_story_creation(
             &reference,
             &expected_fingerprint,
             RSS_FETCH_BUDGET,
+            Some(app_data_dir.as_ref()),
         )? {
             RssAcceptPhase::SourceChanged => Ok(RssCreationOutcome::SourceChanged),
             RssAcceptPhase::Prepared(prepared) => {

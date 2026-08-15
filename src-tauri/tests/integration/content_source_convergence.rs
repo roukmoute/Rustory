@@ -101,7 +101,7 @@ fn fingerprint_in(feed: &str, guid: &str) -> String {
 
 /// Create ONE story through the REAL RSS acceptance (official matrix,
 /// scripted feed) and return its id.
-fn create_rss_story(db: &Mutex<DbHandle>) -> String {
+fn create_rss_story(db: &Mutex<DbHandle>, app_data: &Path) -> String {
     let source = ScriptedRssSource::new();
     source.enqueue_body(nominal_feed());
     let fingerprint = fingerprint_in(&nominal_feed(), "g-c");
@@ -115,6 +115,7 @@ fn create_rss_story(db: &Mutex<DbHandle>) -> String {
             &RssItemRef::Guid("g-c".into()),
             &fingerprint,
             budget(),
+            Some(app_data),
         )
         .expect("accept")
     };
@@ -225,7 +226,7 @@ fn an_rss_created_story_converges_through_the_existing_pipeline_like_a_native_tw
     let db = Mutex::new(open_db(&db_tmp));
 
     // Stage 0 — the REAL creation from the enabled source (official matrix).
-    let rss_story_id = create_rss_story(&db);
+    let rss_story_id = create_rss_story(&db, app_data.path());
     insert_native_twin(&db, &rss_story_id, "twin-native");
 
     // One writable V1 target mount, shared by every stage — the SAME
@@ -405,6 +406,7 @@ fn a_policy_refusal_fetches_nothing_and_creates_nothing() {
             &RssItemRef::Guid("g-c".into()),
             &"0".repeat(64),
             budget(),
+            None,
         )
         .expect_err("policy refusal")
     };

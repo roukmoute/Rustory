@@ -100,10 +100,13 @@ pub enum ImportState {
 /// A single recognition finding: a closed `(aspect, category)` pair. The
 /// IPC layer maps the pair to exactly one canonical FR message + impact —
 /// the UI branches on this discriminant, never on free-form text.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecognitionFinding {
     pub aspect: RecognitionAspect,
     pub category: RecognitionCategory,
+    /// Optional custom message for specific error details (e.g. enclosure download failure).
+    /// When Some, it overrides the canonical message derived from (aspect, category).
+    pub message: Option<String>,
 }
 
 impl RecognitionFinding {
@@ -111,6 +114,7 @@ impl RecognitionFinding {
         Self {
             aspect,
             category: RecognitionCategory::Recognized,
+            message: None,
         }
     }
 
@@ -118,6 +122,7 @@ impl RecognitionFinding {
         Self {
             aspect,
             category: RecognitionCategory::Ambiguous,
+            message: None,
         }
     }
 
@@ -125,6 +130,15 @@ impl RecognitionFinding {
         Self {
             aspect,
             category: RecognitionCategory::Blocking,
+            message: None,
+        }
+    }
+
+    pub fn blocking_with_message(aspect: RecognitionAspect, message: String) -> Self {
+        Self {
+            aspect,
+            category: RecognitionCategory::Blocking,
+            message: Some(message),
         }
     }
 }
@@ -244,6 +258,7 @@ mod tests {
         RecognitionFinding {
             aspect,
             category: RecognitionCategory::Missing,
+            message: None,
         }
     }
 

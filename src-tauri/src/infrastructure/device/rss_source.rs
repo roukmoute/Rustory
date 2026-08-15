@@ -25,6 +25,7 @@ use std::io::Read;
 use std::time::Duration;
 
 use crate::domain::shared::AppError;
+use crate::infrastructure::filesystem::MAX_MEDIA_BYTES;
 
 /// Hard ceiling on the fetched feed body. A real RSS document is a few
 /// hundred kB; 8 MiB bounds a hostile/runaway response without truncating
@@ -42,6 +43,19 @@ const MAX_RSS_REDIRECTS: usize = 5;
 /// caps the WHOLE request, connection to last body byte.
 pub trait RssFeedSource: Send + Sync + 'static {
     fn fetch(&self, url: &str, budget: Duration) -> Result<Vec<u8>, AppError>;
+
+    /// Explicit fetch of ONE enclosure referenced by an ACCEPTED item —
+    /// same disciplines as [`Self::fetch`] (whole-request budget, cap+1
+    /// bounded read, PII-free stage tokens) with the MEDIA ceiling
+    /// ([`MAX_MEDIA_BYTES`]) : un podcast légitime dépasse largement les
+    /// 8 MiB du flux. The bytes are UNTRUSTED — validated downstream by
+    /// the media sniff/transcode (`store_media`). The default refuses:
+    /// a source that never learned enclosures degrades honestly to the
+    /// « média distant non récupéré » verdict instead of lying.
+    fn fetch_enclosure(&self, url: &str, budget: Duration) -> Result<Vec<u8>, AppError> {
+        let _ = (url, budget);
+        Err(fetch_error("enclosure_unsupported"))
+    }
 }
 
 /// Production source: blocking HTTPS (system OpenSSL via `native-tls`).
@@ -89,19 +103,33 @@ impl RssFeedSource for HttpRssFeedSource {
             .send()
             .and_then(|r| r.error_for_status())
             .map_err(|_| fetch_error("request"))?;
-        read_bytes_capped(resp)
+        read_bytes_capped(resp, MAX_RSS_RESPONSE_BYTES)
+    }
+
+    fn fetch_enclosure(&self, url: &str, budget: Duration) -> Result<Vec<u8>, AppError> {
+        if budget.is_zero() {
+            return Err(fetch_error("budget"));
+        }
+        let resp = self
+            .client
+            .get(url)
+            .timeout(budget)
+            .send()
+            .and_then(|r| r.error_for_status())
+            .map_err(|_| fetch_error("request"))?;
+        read_bytes_capped(resp, MAX_MEDIA_BYTES as u64)
     }
 }
 
-/// Read the response body bounded to [`MAX_RSS_RESPONSE_BYTES`]: reads one
-/// byte past the cap so an overflow is detectable, then refuses it. Keeps
-/// a hostile or runaway feed from buffering unboundedly.
-fn read_bytes_capped(resp: reqwest::blocking::Response) -> Result<Vec<u8>, AppError> {
+/// Read the response body bounded to `cap` bytes: reads one byte past the
+/// cap so an overflow is detectable, then refuses it. Keeps a hostile or
+/// runaway response from buffering unboundedly.
+fn read_bytes_capped(resp: reqwest::blocking::Response, cap: u64) -> Result<Vec<u8>, AppError> {
     let mut buf = Vec::new();
-    resp.take(MAX_RSS_RESPONSE_BYTES + 1)
+    resp.take(cap + 1)
         .read_to_end(&mut buf)
         .map_err(|_| fetch_error("read"))?;
-    if buf.len() as u64 > MAX_RSS_RESPONSE_BYTES {
+    if buf.len() as u64 > cap {
         return Err(fetch_error("response_oversize"));
     }
     Ok(buf)

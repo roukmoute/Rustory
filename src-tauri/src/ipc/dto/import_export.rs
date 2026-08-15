@@ -1872,6 +1872,7 @@ mod tests {
             RecognitionFinding {
                 aspect: RecognitionAspect::Media,
                 category: RecognitionCategory::Missing,
+                message: None,
             },
         ];
         let summary = serialize_findings_summary(&findings).expect("summary");

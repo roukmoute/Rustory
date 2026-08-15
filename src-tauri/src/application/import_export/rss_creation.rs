@@ -20,9 +20,13 @@
 //!    structured-folder creation)
 //!    and the provenance row (`source_format = 'rss'`, host-only source
 //!    name, checksum of the SECOND fetch's bytes — the bytes actually
-//!    ingested). No media is ever downloaded, so there is nothing to
-//!    promote and nothing to compensate: a failed transaction rolls back
-//!    fully and leaves NOTHING.
+//!    ingested). The item's ENCLOSURE, when it references one, is
+//!    downloaded through the same injected source during the DB-free
+//!    phase, promoted into the node-media store and wired into the start
+//!    node (its `assets` row joins the transaction) — a failed download
+//!    is a CONTENT verdict (`(Media, Missing)`, état `partial`), never a
+//!    refusal. A failed transaction rolls back fully and compensates the
+//!    promoted file best-effort: nothing durable remains.
 
 use std::time::Duration;
 
@@ -40,6 +44,9 @@ use crate::domain::story::{
 };
 use crate::infrastructure::db::DbHandle;
 use crate::infrastructure::device::RssFeedSource;
+use crate::infrastructure::filesystem::{
+    ensure_node_media_store, store_media, MediaKind, StoredMedia,
+};
 use crate::ipc::dto::import_export::{
     rss_import_report_dto, serialize_findings_summary, state_db_tag, state_dto,
 };
@@ -118,6 +125,42 @@ pub struct PreparedRssCreation {
     feed_checksum: String,
     state: crate::domain::import::ImportState,
     findings: Vec<crate::domain::import::RecognitionFinding>,
+    /// The downloaded-and-promoted enclosure, ready for its `assets` row —
+    /// `None` when the item has none, the caller gave no store root, or the
+    /// download degraded to the `(Media, Missing)` verdict.
+    asset: Option<PreparedRssAsset>,
+}
+
+/// One promoted enclosure: everything its `assets` row needs, plus the
+/// promoted file path so a failed commit can compensate the store.
+#[derive(Debug)]
+struct PreparedRssAsset {
+    asset_id: String,
+    content_hash: String,
+    media_type: &'static str,
+    media_format: &'static str,
+    byte_size: u64,
+    file_name: String,
+    promoted_path: std::path::PathBuf,
+}
+
+/// Download ONE enclosure through the injected source and PROMOTE it into
+/// the node-media store. `None` on ANY failure — transport, unsupported
+/// bytes, store I/O : le média distant reste honnêtement « non récupéré »
+/// (finding `(Media, Missing)`, état `partial`) et la création continue,
+/// exactly the pre-download behavior. A CONTENT problem never becomes an
+/// `AppError` here — the module's contract.
+fn promote_enclosure(
+    source: &dyn RssFeedSource,
+    url: &str,
+    budget: Duration,
+    app_data_dir: &std::path::Path,
+) -> Option<(StoredMedia, std::path::PathBuf)> {
+    let bytes = source.fetch_enclosure(url, budget).ok()?;
+    let (media_dir, staging_dir) = ensure_node_media_store(app_data_dir).ok()?;
+    let stored = store_media(&media_dir, &staging_dir, &bytes).ok()?;
+    let promoted_path = media_dir.join(&stored.file_name);
+    Some((stored, promoted_path))
 }
 
 /// The typed outcome of the DB-free accept phase: the honest refusal, or
@@ -144,6 +187,7 @@ pub fn prepare_rss_story_creation(
     item_ref: &RssItemRef,
     expected_fingerprint: &str,
     budget: Duration,
+    app_data_dir: Option<&std::path::Path>,
 ) -> Result<RssAcceptPhase, AppError> {
     ensure_rss_source_enabled(sources)?;
     let source_host = feed_url_host(url).ok_or_else(invalid_feed_url_error)?;
@@ -166,9 +210,53 @@ pub fn prepare_rss_story_creation(
         return Ok(RssAcceptPhase::SourceChanged);
     }
 
-    // The ingested item's findings and durable state (never `recognized`;
-    // an enclosure derives `partial`).
-    let findings = rss_item_findings(item);
+    // A BIRTH: the canonical v3 minimal structure whose start node carries
+    // the cleaned item text. `canonical_structure_json` keeps the bytes
+    // deterministic, so the checksum covers the ingested text exactly like
+    // any other canonical byte.
+    let mut structure = CanonicalStructure::minimal();
+    structure.nodes[0].text = item.text.clone();
+
+    // The referenced enclosure — when the caller provided a store root —
+    // is downloaded and PROMOTED here, the network phase, so the DB lock
+    // (phase 2b) never waits on a fetch. The promoted media is wired into
+    // the start node (the library derives the card cover from it) and its
+    // `assets` row travels in the prepared creation. A failed download or
+    // unsupported bytes is a CONTENT verdict, never an `AppError`: the
+    // item keeps its honest `(Media, Missing)` finding (state `partial`,
+    // « média distant non récupéré ») and the story is still created.
+    let asset = match (item.has_enclosure, &item.enclosure_url, app_data_dir) {
+        (true, Some(enclosure_url), Some(app_dir)) => {
+            promote_enclosure(source, enclosure_url, budget, app_dir).map(
+                |(stored, promoted_path)| {
+                    let asset_id = uuid::Uuid::now_v7().to_string();
+                    match stored.kind {
+                        MediaKind::Image => {
+                            structure.nodes[0].image_asset_id = Some(asset_id.clone());
+                        }
+                        MediaKind::Audio => {
+                            structure.nodes[0].audio_asset_id = Some(asset_id.clone());
+                        }
+                    }
+                    PreparedRssAsset {
+                        asset_id,
+                        content_hash: stored.content_hash,
+                        media_type: stored.kind.as_str(),
+                        media_format: stored.format,
+                        byte_size: stored.byte_size,
+                        file_name: stored.file_name,
+                        promoted_path,
+                    }
+                },
+            )
+        }
+        _ => None,
+    };
+
+    // The ingested item's findings and durable state: a downloaded
+    // enclosure is `(Media, Recognized)`, a missing/failed one keeps the
+    // `(Media, Missing)` finding that derives `partial`.
+    let findings = rss_item_findings(item, asset.is_some());
     let state = rss_import_state(&findings);
 
     // Title: the cleaned candidate when it survives the canonical
@@ -181,12 +269,6 @@ pub fn prepare_rss_story_creation(
         format!("{RSS_FALLBACK_TITLE_PREFIX}{source_host}")
     };
 
-    // A BIRTH: the canonical v3 minimal structure whose start node carries
-    // the cleaned item text. `canonical_structure_json` keeps the bytes
-    // deterministic, so the checksum covers the ingested text exactly like
-    // any other canonical byte.
-    let mut structure = CanonicalStructure::minimal();
-    structure.nodes[0].text = item.text.clone();
     let structure_json = canonical_structure_json(&structure);
     let checksum = content_checksum(&structure_json);
     let now_iso = now_iso_ms().map_err(|_| clock_unavailable_error())?;
@@ -200,13 +282,16 @@ pub fn prepare_rss_story_creation(
         feed_checksum,
         state,
         findings,
+        asset,
     })))
 }
 
-/// Phase 2b — the single atomic transaction (`stories` + provenance).
-/// This is the ONLY part of the accept that needs the DB lock. A failed
-/// transaction rolls back fully: nothing remains (no media was ever
-/// downloaded, so there is nothing to compensate).
+/// Phase 2b — the single atomic transaction (`stories` + provenance + the
+/// promoted enclosure's `assets` row, when one exists). This is the ONLY
+/// part of the accept that needs the DB lock. A failed transaction rolls
+/// back fully; the promoted media file — the only pre-transaction mutation
+/// — is then compensated best-effort, exactly like the structured flows
+/// compensate their promoted packs.
 pub fn commit_rss_story_creation(
     db: &mut DbHandle,
     prepared: PreparedRssCreation,
@@ -220,8 +305,45 @@ pub fn commit_rss_story_creation(
         feed_checksum,
         state,
         findings,
+        asset,
     } = prepared;
-    let findings_summary = serialize_findings_summary(&findings);
+    let result = commit_rss_story_creation_tx(
+        db,
+        &title,
+        &structure_json,
+        &checksum,
+        &now_iso,
+        &source_host,
+        &feed_checksum,
+        state,
+        &findings,
+        asset.as_ref(),
+    );
+    if result.is_err() {
+        if let Some(asset) = &asset {
+            // The transaction left nothing in the DB; the promoted file is
+            // the only remnant. Best-effort removal — a leftover is only a
+            // content-addressed orphan, never a corruption.
+            let _ = std::fs::remove_file(&asset.promoted_path);
+        }
+    }
+    result
+}
+
+#[allow(clippy::too_many_arguments)]
+fn commit_rss_story_creation_tx(
+    db: &mut DbHandle,
+    title: &str,
+    structure_json: &str,
+    checksum: &str,
+    now_iso: &str,
+    source_host: &str,
+    feed_checksum: &str,
+    state: crate::domain::import::ImportState,
+    findings: &[crate::domain::import::RecognitionFinding],
+    asset: Option<&PreparedRssAsset>,
+) -> Result<StoryCardDto, AppError> {
+    let findings_summary = serialize_findings_summary(findings);
     let story_id = uuid::Uuid::now_v7().to_string();
 
     let tx = db
@@ -241,6 +363,23 @@ pub fn commit_rss_story_creation(
         ],
     )
     .map_err(|err| db_commit_error(&err, "insert_story"))?;
+    if let Some(asset) = asset {
+        tx.execute(
+            "INSERT INTO assets (id, story_id, content_hash, media_type, media_format, byte_size, file_name, created_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            rusqlite::params![
+                &asset.asset_id,
+                &story_id,
+                &asset.content_hash,
+                asset.media_type,
+                asset.media_format,
+                asset.byte_size,
+                &asset.file_name,
+                &now_iso,
+            ],
+        )
+        .map_err(|err| db_commit_error(&err, "insert_asset"))?;
+    }
     tx.execute(
         "INSERT INTO story_local_imports (story_id, source_format, source_format_version, source_name, artifact_checksum, import_state, findings_summary, imported_at) \
          VALUES (?1, 'rss', ?2, ?3, ?4, ?5, ?6, ?7)",
@@ -275,10 +414,10 @@ pub fn commit_rss_story_creation(
     }
     tx.commit().map_err(|err| db_commit_error(&err, "commit"))?;
 
-    let import_report = rss_import_report_dto(&findings);
+    let import_report = rss_import_report_dto(findings);
     Ok(StoryCardDto {
         id: story_id,
-        title,
+        title: title.to_string(),
         import_state: Some(state_dto(state)),
         import_report: if import_report.is_empty() {
             None
@@ -295,6 +434,7 @@ pub fn commit_rss_story_creation(
 /// single-threaded callers). The IPC command does NOT use this — it runs
 /// [`prepare_rss_story_creation`] before taking the DB lock and only locks
 /// for [`commit_rss_story_creation`].
+#[allow(clippy::too_many_arguments)]
 pub fn accept_rss_story_creation(
     db: &mut DbHandle,
     sources: &[ContentSourceLine],
@@ -303,9 +443,17 @@ pub fn accept_rss_story_creation(
     item_ref: &RssItemRef,
     expected_fingerprint: &str,
     budget: Duration,
+    app_data_dir: Option<&std::path::Path>,
 ) -> Result<RssCreationOutcome, AppError> {
-    match prepare_rss_story_creation(sources, source, url, item_ref, expected_fingerprint, budget)?
-    {
+    match prepare_rss_story_creation(
+        sources,
+        source,
+        url,
+        item_ref,
+        expected_fingerprint,
+        budget,
+        app_data_dir,
+    )? {
         RssAcceptPhase::SourceChanged => Ok(RssCreationOutcome::SourceChanged),
         RssAcceptPhase::Prepared(prepared) => commit_rss_story_creation(db, *prepared)
             .map(|story| RssCreationOutcome::Created { story }),
@@ -378,7 +526,7 @@ mod tests {
     use crate::domain::shared::AppErrorCode;
     use crate::infrastructure::db;
     use crate::infrastructure::device::MockRssFeedSource;
-    use crate::ipc::dto::import_export::ImportStateDto;
+    use crate::ipc::dto::import_export::{ImportAspectDto, ImportCategoryDto, ImportStateDto};
 
     const BUDGET: Duration = Duration::from_secs(30);
     const FEED_URL: &str = "https://exemple.fr/flux.xml";
@@ -479,6 +627,7 @@ mod tests {
             &RssItemRef::Guid("g-1".into()),
             &"0".repeat(64),
             BUDGET,
+            None,
         )
         .expect_err("policy must refuse");
         assert_policy_refusal(&err);
@@ -502,6 +651,7 @@ mod tests {
             &RssItemRef::Guid("g-1".into()),
             &"0".repeat(64),
             BUDGET,
+            None,
         )
         .expect_err("policy must refuse");
         assert_policy_refusal(&err);
@@ -578,6 +728,7 @@ mod tests {
             &RssItemRef::Guid("g-2".into()),
             &fingerprint,
             BUDGET,
+            None,
         )
         .expect("accept");
         let RssCreationOutcome::Created { story } = outcome else {
@@ -647,6 +798,7 @@ mod tests {
             &RssItemRef::Guid("g-2".into()),
             &fingerprint,
             BUDGET,
+            None,
         )
         .expect("accept");
         let RssCreationOutcome::Created { story } = outcome else {
@@ -678,6 +830,7 @@ mod tests {
             &RssItemRef::Guid("disparu".into()),
             &"0".repeat(64),
             BUDGET,
+            None,
         )
         .expect("a refusal, not an error");
         assert!(matches!(outcome, RssCreationOutcome::SourceChanged));
@@ -713,6 +866,7 @@ mod tests {
             &reference,
             &fingerprint,
             BUDGET,
+            None,
         )
         .expect("accept");
         let RssCreationOutcome::Created { story } = outcome else {
@@ -751,6 +905,7 @@ mod tests {
             &RssItemRef::Guid("g-1".into()),
             &previewed_fingerprint,
             BUDGET,
+            None,
         )
         .expect("a refusal, not an error");
         assert!(matches!(outcome, RssCreationOutcome::SourceChanged));
@@ -770,6 +925,7 @@ mod tests {
             &RssItemRef::Guid("g-1".into()),
             &"0".repeat(64),
             BUDGET,
+            None,
         )
         .expect("a refusal, not an error");
         assert!(matches!(outcome, RssCreationOutcome::SourceChanged));
@@ -791,6 +947,7 @@ mod tests {
             &RssItemRef::Guid("g-1".into()),
             &"0".repeat(64),
             BUDGET,
+            None,
         )
         .expect_err("transport");
         assert_eq!(err.code, AppErrorCode::RssSourceUnreachable);
@@ -815,6 +972,7 @@ mod tests {
             &RssItemRef::Guid("g-a".into()),
             &fingerprint,
             BUDGET,
+            None,
         )
         .expect("accept");
         let RssCreationOutcome::Created { story } = outcome else {
@@ -853,6 +1011,7 @@ mod tests {
             &RssItemRef::Guid("g-n".into()),
             &fingerprint,
             BUDGET,
+            None,
         )
         .expect("accept");
         let RssCreationOutcome::Created { story } = outcome else {
@@ -885,6 +1044,7 @@ mod tests {
             &RssItemRef::Guid("g-1".into()),
             &fingerprint,
             BUDGET,
+            None,
         )
         .expect("accept");
         let RssCreationOutcome::Created { story } = outcome else {
@@ -917,6 +1077,7 @@ mod tests {
             &RssItemRef::Guid("g".into()),
             &"0".repeat(64),
             BUDGET,
+            None,
         )
         .expect_err("must refuse");
         let v = serde_json::to_value(&err).expect("ser");
@@ -928,5 +1089,144 @@ mod tests {
         db.conn()
             .query_row("SELECT COUNT(*) FROM stories", [], |row| row.get(0))
             .expect("count")
+    }
+
+    // ===== the enclosure download (the media completion of FR31) =====
+
+    fn feed_with_enclosure() -> String {
+        feed_xml(
+            "<item><title>Episode audio</title><description>Texte.</description><guid>g-enc</guid>\
+             <enclosure url=\"https://exemple.fr/ep.wav\" type=\"audio/wav\" length=\"128\"/></item>",
+        )
+    }
+
+    /// A minimal RIFF/WAVE container: enough for the magic-byte sniff, and
+    /// audio is stored VERBATIM (never decoded) — the smallest honest
+    /// storeable media.
+    fn tiny_wav() -> Vec<u8> {
+        let mut bytes = b"RIFF".to_vec();
+        bytes.extend_from_slice(&[36, 0, 0, 0]);
+        bytes.extend_from_slice(b"WAVEfmt ");
+        bytes.extend_from_slice(&[16, 0, 0, 0]);
+        bytes.extend_from_slice(&[1, 0, 1, 0, 0x44, 0xAC, 0, 0, 0x88, 0x58, 1, 0, 2, 0, 16, 0]);
+        bytes.extend_from_slice(b"data");
+        bytes.extend_from_slice(&[0, 0, 0, 0]);
+        bytes
+    }
+
+    #[test]
+    fn an_accepted_enclosure_is_downloaded_promoted_and_wired() {
+        let mut db = fresh_db();
+        let feed = feed_with_enclosure();
+        let fingerprint = fingerprint_in(&feed, "g-enc");
+        let source = MockRssFeedSource::new();
+        source.enqueue_body(feed.clone());
+        source.enqueue_enclosure_body(tiny_wav());
+        let store_root = tempfile::tempdir().expect("tempdir");
+
+        let outcome = accept_rss_story_creation(
+            &mut db,
+            official_content_sources(),
+            &source,
+            FEED_URL,
+            &RssItemRef::Guid("g-enc".into()),
+            &fingerprint,
+            BUDGET,
+            Some(store_root.path()),
+        )
+        .expect("creation");
+        let RssCreationOutcome::Created { story } = outcome else {
+            panic!("expected a creation");
+        };
+
+        // The enclosure was fetched THROUGH the injected source (never an
+        // ambient client), with the enclosure URL exactly.
+        let enclosure_requests = source.enclosure_requests();
+        assert_eq!(enclosure_requests.len(), 1);
+        assert_eq!(enclosure_requests[0].0, "https://exemple.fr/ep.wav");
+
+        // One `assets` row, audio, wired into the start node of the
+        // committed structure — the library derives playback from it.
+        let (asset_id, media_type, file_name): (String, String, String) = db
+            .conn()
+            .query_row(
+                "SELECT id, media_type, file_name FROM assets WHERE story_id = ?1",
+                rusqlite::params![&story.id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("one assets row");
+        assert_eq!(media_type, "audio");
+        let structure_json: String = db
+            .conn()
+            .query_row(
+                "SELECT structure_json FROM stories WHERE id = ?1",
+                rusqlite::params![&story.id],
+                |row| row.get(0),
+            )
+            .expect("structure");
+        let structure: serde_json::Value =
+            serde_json::from_str(&structure_json).expect("canonical json");
+        assert_eq!(
+            structure["nodes"][0]["audioAssetId"].as_str(),
+            Some(asset_id.as_str()),
+            "the start node must reference the promoted asset"
+        );
+
+        // The promoted file exists in the node-media store.
+        let promoted = store_root.path().join("node-media").join(&file_name);
+        assert!(promoted.is_file(), "promoted media file must exist");
+
+        // The media finding is `Recognized`: no `Missing` remains, so the
+        // durable state climbs from `partial` to `needs_review` (the
+        // ambiguity floor keeps an RSS ingestion below `recognized`).
+        assert_eq!(story.import_state, Some(ImportStateDto::NeedsReview));
+        let report = story.import_report.expect("report");
+        assert!(
+            report.iter().any(|f| f.aspect == ImportAspectDto::Media
+                && f.category == ImportCategoryDto::Recognized),
+            "the media finding must be recognized, got {report:?}"
+        );
+    }
+
+    #[test]
+    fn a_failed_enclosure_download_degrades_to_missing_media_and_still_creates() {
+        let mut db = fresh_db();
+        let feed = feed_with_enclosure();
+        let fingerprint = fingerprint_in(&feed, "g-enc");
+        let source = MockRssFeedSource::new();
+        source.enqueue_body(feed.clone());
+        // No programmed enclosure response: the mock refuses like the trait
+        // default — the transport failure must stay a CONTENT verdict.
+        let store_root = tempfile::tempdir().expect("tempdir");
+
+        let outcome = accept_rss_story_creation(
+            &mut db,
+            official_content_sources(),
+            &source,
+            FEED_URL,
+            &RssItemRef::Guid("g-enc".into()),
+            &fingerprint,
+            BUDGET,
+            Some(store_root.path()),
+        )
+        .expect("the creation must survive a failed download");
+        let RssCreationOutcome::Created { story } = outcome else {
+            panic!("expected a creation");
+        };
+
+        let assets: i64 = db
+            .conn()
+            .query_row("SELECT COUNT(*) FROM assets", [], |row| row.get(0))
+            .expect("count");
+        assert_eq!(assets, 0, "no asset row without a downloaded media");
+        assert_eq!(story.import_state, Some(ImportStateDto::Partial));
+        let report = story.import_report.expect("report");
+        assert!(
+            report
+                .iter()
+                .any(|f| f.aspect == ImportAspectDto::Media
+                    && f.category == ImportCategoryDto::Missing),
+            "the media finding must stay missing, got {report:?}"
+        );
     }
 }

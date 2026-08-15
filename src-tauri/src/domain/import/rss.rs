@@ -102,6 +102,8 @@ pub struct RssItem {
     pub has_enclosure: bool,
     /// The URL of the remote enclosure, if present.
     pub enclosure_url: Option<String>,
+    /// The MIME type of the enclosure (audio/*, image/*, etc.), if present.
+    pub enclosure_type: Option<String>,
 }
 
 /// The stable reference of one previewed item, round-tripped by the
@@ -209,7 +211,7 @@ fn exploitable_flow_findings() -> Vec<RecognitionFinding> {
 /// the `(Source, Ambiguous)` floor is always present, the item's own
 /// adjustments surface as ambiguities, and a referenced enclosure is the
 /// `(Media, Missing)` finding (state `Partial`).
-pub fn rss_item_findings(item: &RssItem) -> Vec<RecognitionFinding> {
+pub fn rss_item_findings(item: &RssItem, media_downloaded: bool) -> Vec<RecognitionFinding> {
     let mut findings = vec![
         RecognitionFinding::recognized(RecognitionAspect::Envelope),
         RecognitionFinding::recognized(RecognitionAspect::FormatVersion),
@@ -228,7 +230,12 @@ pub fn rss_item_findings(item: &RssItem) -> Vec<RecognitionFinding> {
     if item.has_enclosure {
         findings.push(RecognitionFinding {
             aspect: RecognitionAspect::Media,
-            category: RecognitionCategory::Missing,
+            category: if media_downloaded {
+                RecognitionCategory::Recognized
+            } else {
+                RecognitionCategory::Missing
+            },
+            message: None,
         });
     }
     findings
@@ -258,6 +265,8 @@ pub fn rss_item_fingerprint(item: &RssItem) -> String {
         item.guid,
         item.link,
         item.has_enclosure,
+        item.enclosure_url,
+        item.enclosure_type,
     ]);
     // Serializing a small array of plain scalars cannot fail in practice.
     let bytes = serde_json::to_vec(&canonical).unwrap_or_default();
@@ -337,6 +346,7 @@ pub fn parse_rss(bytes: &[u8]) -> RssAnalysis {
         link: Option<String>,
         has_enclosure: bool,
         enclosure_url: Option<String>,
+        enclosure_type: Option<String>,
     }
 
     fn is_item_path(stack: &[Vec<u8>]) -> bool {
@@ -382,6 +392,7 @@ pub fn parse_rss(bytes: &[u8]) -> RssAnalysis {
             link,
             has_enclosure: draft.has_enclosure,
             enclosure_url: draft.enclosure_url,
+            enclosure_type: draft.enclosure_type,
         })
     }
 
@@ -514,8 +525,19 @@ pub fn parse_rss(bytes: &[u8]) -> RssAnalysis {
                         for attr in start.attributes() {
                             let Ok(attr) = attr else { continue };
                             if attr.key.as_ref() == b"url" {
-                                let Ok(value) = attr.normalized_value(quick_xml::XmlVersion::Implicit1_0) else { continue };
+                                let Ok(value) =
+                                    attr.normalized_value(quick_xml::XmlVersion::Implicit1_0)
+                                else {
+                                    continue;
+                                };
                                 draft.enclosure_url = Some(value.trim().to_string());
+                            } else if attr.key.as_ref() == b"type" {
+                                let Ok(value) =
+                                    attr.normalized_value(quick_xml::XmlVersion::Implicit1_0)
+                                else {
+                                    continue;
+                                };
+                                draft.enclosure_type = Some(value.trim().to_string());
                             }
                         }
                     }
@@ -551,8 +573,19 @@ pub fn parse_rss(bytes: &[u8]) -> RssAnalysis {
                         for attr in start.attributes() {
                             let Ok(attr) = attr else { continue };
                             if attr.key.as_ref() == b"url" {
-                                let Ok(value) = attr.normalized_value(quick_xml::XmlVersion::Implicit1_0) else { continue };
+                                let Ok(value) =
+                                    attr.normalized_value(quick_xml::XmlVersion::Implicit1_0)
+                                else {
+                                    continue;
+                                };
                                 draft.enclosure_url = Some(value.trim().to_string());
+                            } else if attr.key.as_ref() == b"type" {
+                                let Ok(value) =
+                                    attr.normalized_value(quick_xml::XmlVersion::Implicit1_0)
+                                else {
+                                    continue;
+                                };
+                                draft.enclosure_type = Some(value.trim().to_string());
                             }
                         }
                     }
@@ -1132,12 +1165,13 @@ mod tests {
             link: None,
             has_enclosure: false,
             enclosure_url: None,
+            enclosure_type: None,
         }
     }
 
     #[test]
     fn item_findings_always_carry_the_source_ambiguity_floor() {
-        let findings = rss_item_findings(&plain_item());
+        let findings = rss_item_findings(&plain_item(), false);
         assert!(findings
             .iter()
             .any(|f| f.aspect == RecognitionAspect::Source
@@ -1151,7 +1185,7 @@ mod tests {
             title_adjusted: true,
             ..plain_item()
         };
-        let findings = rss_item_findings(&item);
+        let findings = rss_item_findings(&item, false);
         assert!(findings.iter().any(|f| f.aspect == RecognitionAspect::Title
             && f.category == RecognitionCategory::Ambiguous));
     }
@@ -1162,7 +1196,7 @@ mod tests {
             text_adjusted: true,
             ..plain_item()
         };
-        let findings = rss_item_findings(&item);
+        let findings = rss_item_findings(&item, false);
         assert!(findings
             .iter()
             .any(|f| f.aspect == RecognitionAspect::Structure
@@ -1175,7 +1209,7 @@ mod tests {
             has_enclosure: true,
             ..plain_item()
         };
-        let findings = rss_item_findings(&item);
+        let findings = rss_item_findings(&item, false);
         assert!(findings
             .iter()
             .any(|f| f.aspect == RecognitionAspect::Media
@@ -1202,6 +1236,7 @@ mod tests {
             RecognitionFinding {
                 aspect: RecognitionAspect::Media,
                 category: RecognitionCategory::Missing,
+                message: None,
             },
             RecognitionFinding::blocking(RecognitionAspect::Structure),
         ];
@@ -1424,7 +1459,7 @@ mod tests {
         // cleaned markup would.
         assert!(item.title_adjusted, "stripped title markup must flag");
         assert!(item.text_adjusted, "stripped text markup must flag");
-        let findings = rss_item_findings(item);
+        let findings = rss_item_findings(item, false);
         assert!(findings.iter().any(|f| f.aspect == RecognitionAspect::Title
             && f.category == RecognitionCategory::Ambiguous));
         assert!(findings

@@ -579,6 +579,7 @@ pub fn analyze_structured_folder_components(
             RecognitionFinding {
                 aspect: RecognitionAspect::Media,
                 category: RecognitionCategory::Missing,
+                message: None,
             }
         } else if media_ambiguous {
             RecognitionFinding::ambiguous(RecognitionAspect::Media)

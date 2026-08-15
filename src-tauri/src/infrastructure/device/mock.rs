@@ -521,6 +521,8 @@ type RssFetchResult = Result<Vec<u8>, AppError>;
 pub struct MockRssFeedSource {
     queue: Arc<Mutex<Vec<RssFetchResult>>>,
     requests: Arc<Mutex<Vec<(String, Duration)>>>,
+    enclosure_queue: Arc<Mutex<Vec<RssFetchResult>>>,
+    enclosure_requests: Arc<Mutex<Vec<(String, Duration)>>>,
 }
 
 impl MockRssFeedSource {
@@ -557,6 +559,24 @@ impl MockRssFeedSource {
             .unwrap_or_else(|p| p.into_inner())
             .len()
     }
+
+    /// Program the next `fetch_enclosure` response (FIFO). Without any, the
+    /// mock keeps the trait's default refusal — the degraded « média non
+    /// récupéré » path costs a test nothing.
+    pub fn enqueue_enclosure_body(&self, body: impl Into<Vec<u8>>) {
+        self.enclosure_queue
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .push(Ok(body.into()));
+    }
+
+    /// Every `(url, budget)` received by `fetch_enclosure`, in call order.
+    pub fn enclosure_requests(&self) -> Vec<(String, Duration)> {
+        self.enclosure_requests
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
+    }
 }
 
 impl RssFeedSource for MockRssFeedSource {
@@ -568,6 +588,24 @@ impl RssFeedSource for MockRssFeedSource {
         let mut g = self.queue.lock().unwrap_or_else(|p| p.into_inner());
         if g.is_empty() {
             Ok(Vec::new())
+        } else {
+            g.remove(0)
+        }
+    }
+
+    fn fetch_enclosure(&self, url: &str, budget: Duration) -> Result<Vec<u8>, AppError> {
+        self.enclosure_requests
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .push((url.to_string(), budget));
+        let mut g = self
+            .enclosure_queue
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        if g.is_empty() {
+            // Mirror the trait default: an unprogrammed enclosure fetch
+            // refuses, and the flow degrades to `(Media, Missing)`.
+            Err(super::rss_source::fetch_error("enclosure_unsupported"))
         } else {
             g.remove(0)
         }
