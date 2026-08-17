@@ -1114,6 +1114,18 @@ mod tests {
         bytes
     }
 
+    fn tiny_webp() -> Vec<u8> {
+        let image = image::RgbaImage::from_pixel(2, 2, image::Rgba([12, 34, 56, 255]));
+        let mut bytes = Vec::new();
+        image::DynamicImage::ImageRgba8(image)
+            .write_to(
+                &mut std::io::Cursor::new(&mut bytes),
+                image::ImageFormat::WebP,
+            )
+            .expect("encode webp");
+        bytes
+    }
+
     #[test]
     fn an_accepted_enclosure_is_downloaded_promoted_and_wired() {
         let mut db = fresh_db();
@@ -1186,6 +1198,52 @@ mod tests {
                 && f.category == ImportCategoryDto::Recognized),
             "the media finding must be recognized, got {report:?}"
         );
+    }
+
+    #[test]
+    fn a_webp_enclosure_advertised_as_jpeg_is_promoted_as_png() {
+        let mut db = fresh_db();
+        let feed = feed_xml(
+            "<item><title>Episode illustré</title><description>Texte.</description><guid>g-webp</guid>\
+             <enclosure url=\"https://exemple.fr/image?webp=false\" type=\"image/jpeg\" length=\"128\"/></item>",
+        );
+        let fingerprint = fingerprint_in(&feed, "g-webp");
+        let source = MockRssFeedSource::new();
+        source.enqueue_body(feed);
+        source.enqueue_enclosure_body(tiny_webp());
+        let store_root = tempfile::tempdir().expect("tempdir");
+
+        let outcome = accept_rss_story_creation(
+            &mut db,
+            official_content_sources(),
+            &source,
+            FEED_URL,
+            &RssItemRef::Guid("g-webp".into()),
+            &fingerprint,
+            BUDGET,
+            Some(store_root.path()),
+        )
+        .expect("creation");
+        let RssCreationOutcome::Created { story } = outcome else {
+            panic!("expected a creation");
+        };
+
+        let (media_type, media_format, file_name): (String, String, String) = db
+            .conn()
+            .query_row(
+                "SELECT media_type, media_format, file_name FROM assets WHERE story_id = ?1",
+                rusqlite::params![&story.id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("one assets row");
+        assert_eq!(media_type, "image");
+        assert_eq!(media_format, "png");
+        assert!(file_name.ends_with(".png"));
+        assert!(store_root
+            .path()
+            .join("node-media")
+            .join(file_name)
+            .is_file());
     }
 
     #[test]

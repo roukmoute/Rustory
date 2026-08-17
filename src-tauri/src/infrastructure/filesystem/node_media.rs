@@ -17,7 +17,8 @@
 //! IMAGES are TRANSCODED on store to the Lunii display format — decoded, fit
 //! within 320×240 preserving aspect ratio, re-encoded as PNG — so an added
 //! photo is never kept raw (a 10 MB source becomes a small PNG) and a
-//! community-pack BMP image becomes a usable PNG. AUDIO is stored as-is.
+//! community-pack BMP image or a Radio France WebP enclosure becomes a usable
+//! PNG. AUDIO is stored as-is.
 
 use std::path::{Path, PathBuf};
 
@@ -127,8 +128,8 @@ pub fn ensure_node_media_store(app_data_dir: &Path) -> Result<(PathBuf, PathBuf)
 }
 
 /// Recognize a media by its magic bytes → [`SniffedMedia`]. Returns `None` for
-/// anything that is not a supported image (PNG / JPEG) or audio (MP3 / WAV /
-/// OGG), so an unsupported file is refused rather than stored.
+/// anything that is not a supported image (PNG / JPEG / BMP / WebP) or audio
+/// (MP3 / WAV / OGG), so an unsupported file is refused rather than stored.
 pub fn sniff_media(bytes: &[u8]) -> Option<SniffedMedia> {
     // Images.
     if bytes.starts_with(&[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]) {
@@ -157,6 +158,17 @@ pub fn sniff_media(bytes: &[u8]) -> Option<SniffedMedia> {
             format: "bmp",
             ext: "bmp",
             mime: "image/bmp",
+        });
+    }
+    // WebP is a RIFF container tagged `WEBP`. In particular, Radio France can
+    // advertise an enclosure as `image/jpeg` while serving WebP bytes, so the
+    // magic bytes — not the feed MIME or URL suffix — remain authoritative.
+    if bytes.len() >= 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        return Some(SniffedMedia {
+            kind: MediaKind::Image,
+            format: "webp",
+            ext: "webp",
+            mime: "image/webp",
         });
     }
     // Audio. WAV is a RIFF container tagged `WAVE`; OGG starts with `OggS`.
@@ -413,6 +425,12 @@ mod tests {
     fn sniffs_every_supported_format() {
         assert_eq!(sniff_media(PNG).unwrap().format, "png");
         assert_eq!(sniff_media(JPEG).unwrap().format, "jpeg");
+        assert_eq!(
+            sniff_media(&real_image(1, 1, image::ImageFormat::WebP))
+                .unwrap()
+                .format,
+            "webp"
+        );
         assert_eq!(sniff_media(&wav()).unwrap().format, "wav");
         assert_eq!(sniff_media(OGG).unwrap().format, "ogg");
         assert_eq!(sniff_media(MP3_ID3).unwrap().format, "mp3");
@@ -483,6 +501,22 @@ mod tests {
         assert_eq!(mime, "image/png");
         let (w, h) = png_dimensions(&bytes);
         assert!(w <= 320 && h <= 240, "{w}x{h}");
+    }
+
+    #[test]
+    fn transcodes_a_webp_source_into_a_display_png() {
+        let tmp = TempDir::new().unwrap();
+        let (media, staging) = store(&tmp);
+        let stored = store_media(
+            &media,
+            &staging,
+            &real_image(640, 480, image::ImageFormat::WebP),
+        )
+        .expect("store webp");
+        assert_eq!(stored.format, "png", "webp is transcoded to png");
+        let (bytes, mime) = read_media(&media, &stored.file_name).expect("read");
+        assert_eq!(mime, "image/png");
+        assert_eq!(png_dimensions(&bytes), (320, 240));
     }
 
     #[test]
