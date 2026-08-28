@@ -62,6 +62,22 @@ pub enum Event {
     /// [`Event::RssSourceUnreachable`] (network) nor
     /// [`Event::RssCreationFailed`] (local).
     ContentSourceBlocked { kind: String },
+    /// A web podcast preview fetch+parse settled. `state` is the verdict tag of the
+    /// flow analysis (`needs_review` for an exploitable page, `blocked`
+    /// for a typed content verdict — nothing was persisted either way).
+    WebPreviewSettled {
+        host: String,
+        state: &'static str,
+        item_count: usize,
+    },
+    /// A web podcast preview fetch+parse failed. `code` and `source` mirror
+    /// the upstream `AppError` details closed sets. STRICTLY the
+    /// `RSS_SOURCE_UNREACHABLE` or `IMPORT_FAILED` code.
+    WebPreviewFailed {
+        host: String,
+        code: String,
+        source: String,
+    },
     /// An OS-open intent's file read failed at analysis time (the
     /// `IMPORT_FAILED` / `file_read` transport regime): `source` / `stage`
     /// mirror the upstream `AppError` details closed sets. STRICTLY
@@ -243,5 +259,53 @@ mod tests {
         record_event_at_path(&log, Event::DropSignalEmitFailed).expect("write");
         let content = std::fs::read_to_string(&log).expect("read");
         assert!(content.contains("\"category\":\"drop_signal_emit_failed\""));
+    }
+
+    #[test]
+    fn web_preview_settled_serializes_host_and_item_count() {
+        let dir = TempDir::new().expect("tempdir");
+        let log = dir.path().join("import.jsonl");
+        record_event_at_path(
+            &log,
+            Event::WebPreviewSettled {
+                host: "exemple.fr".into(),
+                state: "needs_review",
+                item_count: 5,
+            },
+        )
+        .expect("write");
+        let content = std::fs::read_to_string(&log).expect("read");
+        let lines: Vec<&str> = content.lines().collect();
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].contains("\"category\":\"web_preview_settled\""));
+        assert!(lines[0].contains("\"host\":\"exemple.fr\""));
+        assert!(lines[0].contains("\"state\":\"needs_review\""));
+        assert!(lines[0].contains("\"item_count\":5"));
+        // Host only — never a scheme/path fragment of the full address.
+        assert!(!content.contains("http"));
+    }
+
+    #[test]
+    fn web_preview_failed_serializes_host_and_error() {
+        let dir = TempDir::new().expect("tempdir");
+        let log = dir.path().join("import.jsonl");
+        record_event_at_path(
+            &log,
+            Event::WebPreviewFailed {
+                host: "exemple.fr".into(),
+                code: "RssSourceUnreachable".to_string(),
+                source: "request".to_string(),
+            },
+        )
+        .expect("write");
+        let content = std::fs::read_to_string(&log).expect("read");
+        let lines: Vec<&str> = content.lines().collect();
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].contains("\"category\":\"web_preview_failed\""));
+        assert!(lines[0].contains("\"host\":\"exemple.fr\""));
+        assert!(lines[0].contains("\"code\":\"RssSourceUnreachable\""));
+        assert!(lines[0].contains("\"source\":\"request\""));
+        // Host only — never a scheme/path fragment of the full address.
+        assert!(!content.contains("http"));
     }
 }

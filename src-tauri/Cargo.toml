@@ -67,6 +67,7 @@ cipher = { version = "=0.4.4", features = ["block-padding"] }
 time = { version = "=0.3", features = ["formatting", "parsing", "macros", "serde"] }
 unicode-normalization = "=0.1"
 tempfile = "=3.27.0"
+scraper = "=0.22"
 # Cross-platform USB Mass Storage volume enumeration for the Lunii
 # detection scan (story 2-1). Maintained by sysinfo-rs/sysinfo, widely
 # deployed, no GUI/runtime dep, no transitive C deps beyond OS APIs.

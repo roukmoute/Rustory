@@ -1,16 +1,13 @@
 use serde::{Deserialize, Serialize};
 
+use crate::application::import_export::WebEpisode;
 use crate::domain::import::{
     ArtifactAnalysis, ContentSourceActivation, ContentSourceKind, ContentSourceLine, ImportState,
     ImportableContent, RecognitionAspect, RecognitionCategory, RecognitionFinding,
     RecognitionQuality, RssItemRef, StructuredFolderAnalysis,
 };
 use crate::domain::story::normalize_title;
-
-/// Input accepted by the `export_story_with_save_dialog` Tauri command.
 /// `deny_unknown_fields` fails the deserialization if the UI ever adds a
-/// field ahead of the Rust contract, so the boundary stays authoritative.
-///
 /// `suggested_filename` is the default text pre-filled in the native save
 /// dialog (typically `{sanitizedTitle}.rustory`). The frontend never
 /// constructs the actual destination path — the dialog returns it, and
@@ -791,6 +788,7 @@ pub fn content_source_label(kind: ContentSourceKind) -> &'static str {
         ContentSourceKind::Rss => "Flux RSS",
         ContentSourceKind::Atom => "Flux Atom",
         ContentSourceKind::JsonFeed => "Flux JSON Feed",
+        ContentSourceKind::Web => "Page web",
     }
 }
 
@@ -1919,5 +1917,44 @@ mod tests {
             state_db_tag(crate::domain::import::ImportState::Blocked),
             "needs_review"
         );
+    }
+}
+
+// ===== Web podcast preview DTOs =====
+
+/// One extracted episode from a web podcast page.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct WebPreviewItemDto {
+    pub title: String,
+    pub summary: String,
+    pub audio_url: Option<String>,
+    pub image_url: Option<String>,
+}
+
+/// The typed outcome of `fetch_web_podcast_preview`: the source HOST (the
+/// only address fragment that ever crosses), the selectable items.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct WebPreviewDto {
+    pub source_host: String,
+    pub items: Vec<WebPreviewItemDto>,
+}
+
+impl WebPreviewDto {
+    /// Map the domain outcome to the wire preview.
+    pub fn from_outcome(source_host: String, items: Vec<WebEpisode>) -> Self {
+        Self {
+            source_host,
+            items: items
+                .iter()
+                .map(|item| WebPreviewItemDto {
+                    title: item.title.clone(),
+                    summary: item.summary.clone(),
+                    audio_url: item.audio_url.clone(),
+                    image_url: item.image_url.clone(),
+                })
+                .collect(),
+        }
     }
 }

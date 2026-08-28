@@ -24,6 +24,7 @@ fn kind_labels_are_frozen() {
         content_source_label(ContentSourceKind::JsonFeed),
         "Flux JSON Feed"
     );
+    assert_eq!(content_source_label(ContentSourceKind::Web), "Page web");
 }
 
 #[test]
@@ -108,6 +109,12 @@ fn the_official_policy_serializes_exactly() {
                     "label": "Flux JSON Feed",
                     "activation": "notActivated",
                     "reason": "Source indisponible: non activée dans la distribution officielle",
+                },
+                {
+                    "kind": "web",
+                    "label": "Page web",
+                    "activation": "enabled",
+                    "activationMarker": "Activée par la distribution officielle",
                 },
             ]
         })

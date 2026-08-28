@@ -547,6 +547,7 @@ pub fn run() {
             commands::transfer::discard_transfer_outcome,
             commands::import_export::export_story_with_save_dialog,
             commands::import_export::fetch_rss_source_preview,
+            commands::import_export::fetch_web_podcast_preview,
             commands::library::get_library_overview,
             commands::catalog::get_official_catalog_status,
             commands::story::get_story_detail,

@@ -5,6 +5,7 @@ pub mod import;
 pub mod os_open;
 pub mod rss_creation;
 pub mod structured_creation;
+pub mod web_episode_extraction;
 
 pub use archive_creation::{
     accept_structured_archive_creation, analyze_structured_archive,
@@ -26,4 +27,8 @@ pub use structured_creation::{
     accept_structured_creation, analyze_structured_folder, commit_structured_creation,
     compensate_structured_creation, prepare_structured_creation, PrepareFailure, PreparedCreation,
     StructuredCreationOutcome, MAX_MANIFEST_BYTES,
+};
+pub use web_episode_extraction::{
+    commit_web_story_creation, prepare_web_story_creation, preview_web_podcast, WebAcceptPhase,
+    WebEpisode, WebPreviewOutcome,
 };

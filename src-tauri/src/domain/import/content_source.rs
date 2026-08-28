@@ -19,15 +19,17 @@ pub enum ContentSourceKind {
     Rss,
     Atom,
     JsonFeed,
+    Web,
 }
 
 /// Every known kind, in the stable rendering order of the creation
 /// dialog. Tripwire: a new enum variant fails the exhaustive `match`
 /// below, forcing an explicit matrix decision for it.
-pub const ALL_CONTENT_SOURCE_KINDS: [ContentSourceKind; 3] = [
+pub const ALL_CONTENT_SOURCE_KINDS: [ContentSourceKind; 4] = [
     ContentSourceKind::Rss,
     ContentSourceKind::Atom,
     ContentSourceKind::JsonFeed,
+    ContentSourceKind::Web,
 ];
 
 impl ContentSourceKind {
@@ -38,6 +40,7 @@ impl ContentSourceKind {
             Self::Rss => "rss",
             Self::Atom => "atom",
             Self::JsonFeed => "jsonFeed",
+            Self::Web => "web",
         }
     }
 }
@@ -110,6 +113,11 @@ const OFFICIAL_CONTENT_SOURCES: &[ContentSourceLine] = &[
         kind: ContentSourceKind::JsonFeed,
         activation: ContentSourceActivation::NotActivated,
     },
+    // Web podcast page extraction
+    ContentSourceLine {
+        kind: ContentSourceKind::Web,
+        activation: ContentSourceActivation::Enabled,
+    },
 ];
 
 /// The official matrix, as a borrowed slice: callers hand it to the
@@ -166,6 +174,13 @@ mod tests {
         );
     }
 
+    #[test]
+    fn official_matrix_enables_web() {
+        assert_eq!(
+            content_source_activation(official_content_sources(), ContentSourceKind::Web),
+            ContentSourceActivation::Enabled
+        );
+    }
     #[test]
     fn official_matrix_carries_every_known_kind_exactly_once() {
         for kind in ALL_CONTENT_SOURCE_KINDS {
@@ -258,7 +273,7 @@ mod tests {
             .iter()
             .map(|kind| kind.wire_tag())
             .collect();
-        assert_eq!(tags, vec!["rss", "atom", "jsonFeed"]);
+        assert_eq!(tags, vec!["rss", "atom", "jsonFeed", "web"]);
     }
 
     #[test]
