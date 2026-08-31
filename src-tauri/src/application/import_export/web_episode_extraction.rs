@@ -19,7 +19,7 @@ use crate::domain::story::{canonical_structure_json, CanonicalStructure};
 use crate::infrastructure::db::DbHandle;
 use crate::ipc::dto::import_export::{state_db_tag, ImportFindingDto};
 use crate::ipc::dto::StoryCardDto;
-use scraper::{Html, Selector};
+use scraper::{Element, ElementRef, Html, Selector};
 use sha2::{Digest, Sha256};
 use serde_json::Value;
 
@@ -208,11 +208,42 @@ fn audio_content_url(node: &Value) -> Option<String> {
     }
 }
 
+/// The image url of an episode node: the `image` field as a plain
+/// string, an `ImageObject` carrying a `url`, or an array whose first
+/// element is one of the two — carried as-is (no resolution, mirroring
+/// the audio `contentUrl`), trimmed and non-empty, or `None`.
+fn jsonld_image_url(node: &Value) -> Option<String> {
+    node.get("image").and_then(image_url_from_jsonld_value)
+}
+
+fn image_url_from_jsonld_value(value: &Value) -> Option<String> {
+    match value {
+        Value::String(url) => trimmed_url(url),
+        Value::Object(fields) => fields
+            .get("url")
+            .and_then(Value::as_str)
+            .and_then(trimmed_url),
+        Value::Array(images) => images.first().and_then(image_url_from_jsonld_value),
+        _ => None,
+    }
+}
+
+/// A trimmed, non-empty url string, or `None`.
+fn trimmed_url(url: &str) -> Option<String> {
+    let trimmed = url.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_owned())
+    }
+}
+
 /// One episode from one JSON-LD node, or `None` when the node is not a
 /// recognized episode type, carries no non-empty `name`, or no audio
 /// `contentUrl` — the extraction emits only honest episodes (no title
-/// fallback, no invented media). The image stays `None` for now: the
-/// image extraction joins in TDD-4.
+/// fallback, no invented media). The image, when the node provides one
+/// (`image` as a string, an `ImageObject`, or an array), is carried on
+/// the episode as-is — never resolved, mirroring the audio url.
 fn episode_from_jsonld_node(node: &Value) -> Option<WebEpisode> {
     if !jsonld_type(node).is_some_and(|ty| EPISODE_JSONLD_TYPES.contains(&ty)) {
         return None;
@@ -229,11 +260,12 @@ fn episode_from_jsonld_node(node: &Value) -> Option<WebEpisode> {
         .and_then(Value::as_str)
         .map(|text| text.trim().to_owned())
         .unwrap_or_default();
+    let image_url = jsonld_image_url(node);
     Some(WebEpisode {
         title,
         summary,
         audio_url: Some(audio_url),
-        image_url: None,
+        image_url,
     })
 }
 
@@ -346,100 +378,145 @@ fn extract_web_episodes(
 ) -> Vec<WebEpisode> {
     let mut episodes = episodes_from_item_list(document, base_url, budget);
     if episodes.is_empty() {
-        episodes = parse_web_episodes(html);
+        episodes = parse_web_episodes(html, base_url);
     }
     episodes
 }
 
-/// Parse HTML content and extract podcast episodes.
-/// Looks for common patterns: <item>, <episode>, <article> with audio links.
-fn parse_web_episodes(html_content: &str) -> Vec<WebEpisode> {
+/// Parse an HTML page and extract its episodes honestly: one episode per
+/// titled audio media present in the page — an `<a>` whose href ends with
+/// a known audio extension, or an `<audio>` (or its `<source>`) carrying
+/// a src — in DOCUMENT ORDER. The title is the media's own anchor text or
+/// aria-label, never a heading and never an invented fallback: a media
+/// without any title is not an episode and is skipped. The audio url is
+/// resolved against the page and kept once per url; the image of the
+/// media's container is carried only when the page provides one.
+fn parse_web_episodes(html_content: &str, base_url: &str) -> Vec<WebEpisode> {
     let mut episodes = Vec::new();
     let document = Html::parse_document(html_content);
 
-    // Try to find items using item tags
-    if let Ok(item_selector) = Selector::parse("item") {
-        for item in document.select(&item_selector) {
-            let title = item
-                .select(&Selector::parse("title").unwrap_or_else(|_| Selector::parse("*").unwrap()))
-                .next()
-                .map(|t| t.text().collect::<String>().trim().to_string())
-                .unwrap_or_else(|| "Épisode sans titre".to_string());
-
-            let audio_url = item
-                .select(&Selector::parse("enclosure[url]").unwrap_or_else(|_| Selector::parse("a").unwrap()))
-                .next()
-                .and_then(|e| e.value().attr("url").map(|s| s.to_string()))
-                .or_else(|| {
-                    item.select(&Selector::parse("a[href$='.mp3'], a[href$='.m4a'], a[href$='.wav'], a[href$='.podcast']").unwrap())
-                        .next()
-                        .and_then(|a| a.value().attr("href").map(|s| s.to_string()))
-                });
-
-            let summary = item
-                .select(
-                    &Selector::parse("description, summary, p")
-                        .unwrap_or_else(|_| Selector::parse("p").unwrap()),
-                )
-                .next()
-                .map(|p| p.text().collect::<String>().trim().to_string())
-                .unwrap_or_default();
-
-            let image_url = item
-                .select(
-                    &Selector::parse("image, img")
-                        .unwrap_or_else(|_| Selector::parse("img").unwrap()),
-                )
-                .next()
-                .and_then(|img| img.value().attr("src").map(|s| s.to_string()));
-
-            episodes.push(WebEpisode {
-                title,
-                summary,
-                audio_url,
-                image_url,
-            });
+    let media_selector = match Selector::parse("a[href], audio[src], audio source[src]") {
+        Ok(selector) => selector,
+        Err(_) => return Vec::new(),
+    };
+    let mut seen_audio_urls: Vec<String> = Vec::new();
+    for media in document.select(&media_selector) {
+        let Some((title, raw_audio)) = dom_episode_media(&media) else {
+            continue;
+        };
+        let Some(audio_url) = resolve_url(base_url, raw_audio) else {
+            continue;
+        };
+        if seen_audio_urls.contains(&audio_url) {
+            continue;
         }
-    } else {
-        // Fallback: try article tags
-        if let Ok(article_selector) = Selector::parse("article") {
-            for article in document.select(&article_selector) {
-                let title = article
-                    .select(
-                        &Selector::parse("h1, h2, h3, .title, .episode-title")
-                            .unwrap_or_else(|_| Selector::parse("h1").unwrap()),
-                    )
-                    .next()
-                    .map(|h| h.text().collect::<String>().trim().to_string())
-                    .unwrap_or_else(|| "Épisode sans titre".to_string());
+        seen_audio_urls.push(audio_url.clone());
+        let container = media_container(&media);
+        let image_url = container
+            .as_ref()
+            .and_then(|container| container_image_url(container, base_url));
+        let summary = container.as_ref().map_or_else(String::new, container_summary);
+        episodes.push(WebEpisode {
+            title,
+            summary,
+            audio_url: Some(audio_url),
+            image_url,
+        });
+    }
+    episodes
+}
 
-                let audio_url = article
-                    .select(&Selector::parse("a[href$='.mp3'], a[href$='.m4a'], a[href$='.wav'], a[href$='.podcast']").unwrap())
-                    .next()
-                    .and_then(|a| a.value().attr("href").map(|s| s.to_string()));
+/// The known audio file extensions of an `<a>` media link, compared in
+/// lower case against the end of the href.
+const DOM_AUDIO_EXTENSIONS: [&str; 6] = [".mp3", ".m4a", ".ogg", ".wav", ".aac", ".opus"];
 
-                let summary = article
-                    .select(&Selector::parse("p").unwrap())
-                    .next()
-                    .map(|p| p.text().collect::<String>().trim().to_string())
-                    .unwrap_or_default();
-
-                let image_url = article
-                    .select(&Selector::parse("img").unwrap())
-                    .next()
-                    .and_then(|img| img.value().attr("src").map(|s| s.to_string()));
-
-                episodes.push(WebEpisode {
-                    title,
-                    summary,
-                    audio_url,
-                    image_url,
-                });
+/// The honest (title, raw audio url) pair of one matched media element,
+/// or `None` when the media cannot be titled: the title is the anchor
+/// text for an `<a>` (else its `aria-label`), the `aria-label` of the
+/// media for an `<audio>`, and of its `<audio>` parent for a `<source>`;
+/// an empty title or an empty url yields `None` — nothing is invented.
+fn dom_episode_media<'a>(media: &ElementRef<'a>) -> Option<(String, &'a str)> {
+    let name = media.value().name();
+    let title = match name {
+        "a" => {
+            let text = media.text().collect::<String>().trim().to_owned();
+            if text.is_empty() {
+                aria_label(media)?
+            } else {
+                text
             }
         }
-    }
+        "audio" => aria_label(media)?,
+        "source" => aria_label(&media.parent_element()?)?,
+        _ => return None,
+    };
+    let raw_audio = match name {
+        "a" => {
+            let raw = media.attr("href")?.trim();
+            let lower = raw.to_ascii_lowercase();
+            if !DOM_AUDIO_EXTENSIONS.iter().any(|ext| lower.ends_with(ext)) {
+                return None;
+            }
+            raw
+        }
+        "audio" | "source" => {
+            let raw = media.attr("src")?.trim();
+            if raw.is_empty() {
+                return None;
+            }
+            raw
+        }
+        _ => return None,
+    };
+    Some((title, raw_audio))
+}
 
-    episodes
+/// The trimmed, non-empty `aria-label` of an element, or `None`.
+fn aria_label(element: &ElementRef<'_>) -> Option<String> {
+    element
+        .attr("aria-label")
+        .map(str::trim)
+        .filter(|label| !label.is_empty())
+        .map(str::to_owned)
+}
+
+/// The container of a matched media: its closest parent element — except
+/// for a `<source>`, whose container is the parent of its `<audio>` (the
+/// `<audio>` belongs to the media, not to its container).
+fn media_container<'a>(media: &ElementRef<'a>) -> Option<ElementRef<'a>> {
+    let parent = media.parent_element()?;
+    if media.value().name() == "source" {
+        parent.parent_element()
+    } else {
+        Some(parent)
+    }
+}
+
+/// The image of a media container: the first `img[src]` it carries with a
+/// non-empty src, resolved against the page — `None` when the page
+/// provides none: the image stays optional and is never invented.
+fn container_image_url(container: &ElementRef<'_>, base_url: &str) -> Option<String> {
+    let selector = Selector::parse("img[src]").ok()?;
+    container.select(&selector).find_map(|img| {
+        img.attr("src")
+            .map(str::trim)
+            .filter(|src| !src.is_empty())
+            .and_then(|src| resolve_url(base_url, src))
+    })
+}
+
+/// The summary of a media container: the text of its first `<p>`,
+/// trimmed, empty when absent.
+fn container_summary(container: &ElementRef<'_>) -> String {
+    let selector = match Selector::parse("p") {
+        Ok(selector) => selector,
+        Err(_) => return String::new(),
+    };
+    container
+        .select(&selector)
+        .next()
+        .map(|paragraph| paragraph.text().collect::<String>().trim().to_owned())
+        .unwrap_or_default()
 }
 
 /// Phase 1 — preview a web podcast page and extract episode references.
@@ -483,7 +560,7 @@ pub fn prepare_web_story_creation(
     let source_host = validate_web_entry_url(web_url)?;
 
     let html_content = fetch_html(web_url, budget)?;
-    let episodes = parse_web_episodes(&html_content);
+    let episodes = parse_web_episodes(&html_content, web_url);
 
     let episode = episodes
         .iter()
@@ -833,7 +910,7 @@ mod tests {
     #[test]
     fn test_parse_web_episodes_returns_empty_on_no_episode() {
         let html = "<html><body><p>No episodes here</p></body></html>";
-        let episodes = parse_web_episodes(html);
+        let episodes = parse_web_episodes(html, "https://fixture.example.org/page");
         assert!(episodes.is_empty());
     }
 
@@ -1144,5 +1221,193 @@ mod tests {
         );
         assert_eq!(outcome.items[0].title, "Episode dupliqué");
         assert_eq!(outcome.items[1].title, "Episode unique");
+    }
+
+    // ===== Honest DOM extraction + optional image (TDD-4) =====
+    //
+    // S1/S3: the episodes of a page are extracted IN DOCUMENT ORDER with
+    // a real non-empty title, the audio media really present in the
+    // page, and an OPTIONAL image — carried when the page provides it,
+    // absent otherwise, never a blocker and never invented.
+
+    /// S1/S3 (DOM): one episode per titled audio media of the page, in
+    /// document order — the link text as title, the media url as audio,
+    /// the container image when present and nothing when absent, the
+    /// first `<p>` of the container as summary, a `<source>` titled by
+    /// its `<audio>` aria-label; a media without any title is not emitted.
+    #[test]
+    fn test_parse_web_episodes_extracts_dom_episodes_in_document_order() {
+        let html = "<html><body>\
+            <h1>Ma sélection</h1>\
+            <section>\
+              <a href=\"https://fixture.example.org/media/episode-un.m4a\">Episode un</a>\
+              <img src=\"https://fixture.example.org/images/episode-un.jpg\" alt=\"Episode un\">\
+            </section>\
+            <section>\
+              <a href=\"https://fixture.example.org/media/episode-deux.ogg\">Episode deux</a>\
+              <p>Résumé deux.</p>\
+            </section>\
+            <section>\
+              <audio src=\"https://fixture.example.org/media/episode-trois.wav\" aria-label=\"Episode trois\"></audio>\
+            </section>\
+            <section>\
+              <audio aria-label=\"Episode source\"><source src=\"https://fixture.example.org/media/episode-source.opus\"></source></audio>\
+            </section>\
+            <a href=\"https://fixture.example.org/media/sans-titre.mp3\"></a>\
+          </body></html>";
+        let episodes = parse_web_episodes(html, "https://fixture.example.org/page");
+        assert_eq!(
+            episodes.len(),
+            4,
+            "one episode per titled audio media, in document order, got: {episodes:?}"
+        );
+        assert_eq!(episodes[0].title, "Episode un");
+        assert_eq!(
+            episodes[0].audio_url.as_deref(),
+            Some("https://fixture.example.org/media/episode-un.m4a")
+        );
+        assert_eq!(
+            episodes[0].image_url.as_deref(),
+            Some("https://fixture.example.org/images/episode-un.jpg")
+        );
+        assert_eq!(episodes[1].title, "Episode deux");
+        assert_eq!(
+            episodes[1].audio_url.as_deref(),
+            Some("https://fixture.example.org/media/episode-deux.ogg")
+        );
+        assert_eq!(
+            episodes[1].summary,
+            "Résumé deux.",
+            "the first <p> of the container is the summary, never invented"
+        );
+        assert!(
+            episodes[1].image_url.is_none(),
+            "an absent image must stay absent, not invented"
+        );
+        assert_eq!(episodes[2].title, "Episode trois");
+        assert_eq!(
+            episodes[2].audio_url.as_deref(),
+            Some("https://fixture.example.org/media/episode-trois.wav")
+        );
+        assert!(episodes[2].image_url.is_none());
+        assert_eq!(episodes[3].title, "Episode source");
+        assert_eq!(
+            episodes[3].audio_url.as_deref(),
+            Some("https://fixture.example.org/media/episode-source.opus"),
+            "a <source> without src on its <audio> is still one honest episode"
+        );
+        assert!(episodes[3].image_url.is_none());
+    }
+
+    /// S1 (honesty): an audio media without any title (empty link text,
+    /// no aria-label) is NOT emitted — the extraction never falls back
+    /// to an invented "Épisode sans titre".
+    #[test]
+    fn test_parse_web_episodes_never_invents_a_fallback_title() {
+        let html = "<html><body>\
+            <article>\
+              <a href=\"https://fixture.example.org/media/orphelin.mp3\"></a>\
+            </article>\
+          </body></html>";
+        let episodes = parse_web_episodes(html, "https://fixture.example.org/page");
+        assert!(
+            !episodes
+                .iter()
+                .any(|episode| episode.title == "Épisode sans titre"),
+            "no invented fallback title may be emitted, got: {episodes:?}"
+        );
+        assert!(
+            episodes.is_empty(),
+            "an untitled media is not an episode, got: {episodes:?}"
+        );
+    }
+
+    /// S2/S3 (JSON-LD): the episode image is carried on its episode when
+    /// the page provides it — `image` as an ImageObject url, a plain
+    /// string, or an array — and stays absent otherwise; in every case
+    /// the extraction succeeds.
+    #[test]
+    fn test_episode_page_image_is_carried_when_provided_and_absent_otherwise() {
+        let server = start_fixture_http_server(|base| {
+            let list = format!(
+                "<html><head><script type=\"application/ld+json\">{{\
+                 \"@context\":\"https://schema.org\",\
+                 \"@graph\":[{{\"@type\":\"ItemList\",\"name\":\"Image fixture\",\
+                 \"itemListElement\":[\
+                 {{\"@type\":\"ListItem\",\"position\":1,\"url\":\"{base}/episodes/avec-image\"}},\
+                 {{\"@type\":\"ListItem\",\"position\":2,\"url\":\"{base}/episodes/image-string\"}},\
+                 {{\"@type\":\"ListItem\",\"position\":3,\"url\":\"{base}/episodes/image-array\"}},\
+                 {{\"@type\":\"ListItem\",\"position\":4,\"url\":\"{base}/episodes/sans-image\"}}]}}]}}\
+                 </script></head><body></body></html>"
+            );
+            let with_image = format!(
+                "<html><head><script type=\"application/ld+json\">{{\
+                 \"@context\":\"https://schema.org\",\
+                 \"@graph\":[{{\"@type\":\"RadioEpisode\",\"name\":\"Episode avec image\",\
+                 \"image\":{{\"@type\":\"ImageObject\",\"url\":\"{base}/images/avec-image.jpg\"}},\
+                 \"mainEntity\":{{\"@type\":\"AudioObject\",\"contentUrl\":\"{base}/media/avec-image.m4a\"}}}}]}}\
+                 </script></head><body><h1>Episode avec image</h1></body></html>"
+            );
+            let image_string = format!(
+                "<html><head><script type=\"application/ld+json\">{{\
+                 \"@context\":\"https://schema.org\",\
+                 \"@graph\":[{{\"@type\":\"RadioEpisode\",\"name\":\"Episode image string\",\
+                 \"image\":\"{base}/images/image-string.jpg\",\
+                 \"mainEntity\":{{\"@type\":\"AudioObject\",\"contentUrl\":\"{base}/media/image-string.m4a\"}}}}]}}\
+                 </script></head><body></body></html>"
+            );
+            let image_array = format!(
+                "<html><head><script type=\"application/ld+json\">{{\
+                 \"@context\":\"https://schema.org\",\
+                 \"@graph\":[{{\"@type\":\"RadioEpisode\",\"name\":\"Episode image array\",\
+                 \"image\":[\"{base}/images/image-array.jpg\"],\
+                 \"mainEntity\":{{\"@type\":\"AudioObject\",\"contentUrl\":\"{base}/media/image-array.m4a\"}}}}]}}\
+                 </script></head><body></body></html>"
+            );
+            let without_image =
+                episode_page_html(base, "Episode sans image", "/media/sans-image.m4a", "Resume sans image.");
+            vec![
+                ("/liste-image".to_owned(), 200, list),
+                ("/episodes/avec-image".to_owned(), 200, with_image),
+                ("/episodes/image-string".to_owned(), 200, image_string),
+                ("/episodes/image-array".to_owned(), 200, image_array),
+                ("/episodes/sans-image".to_owned(), 200, without_image),
+            ]
+        });
+        let url = format!("{}/liste-image", server.base);
+        let outcome = preview_web_podcast(
+            official_content_sources(),
+            &url,
+            Duration::from_secs(30),
+        )
+        .expect("the fixture list page must preview");
+        assert_eq!(
+            outcome.items.len(),
+            4,
+            "all four fixture episodes must be extracted, got: {outcome:?}"
+        );
+        assert_eq!(outcome.items[0].title, "Episode avec image");
+        assert_eq!(
+            outcome.items[0].image_url.as_deref(),
+            Some(format!("{}/images/avec-image.jpg", server.base).as_str()),
+            "the page-provided image must be carried on its episode"
+        );
+        assert_eq!(outcome.items[1].title, "Episode image string");
+        assert_eq!(
+            outcome.items[1].image_url.as_deref(),
+            Some(format!("{}/images/image-string.jpg", server.base).as_str()),
+            "a plain-string image must be carried as-is"
+        );
+        assert_eq!(outcome.items[2].title, "Episode image array");
+        assert_eq!(
+            outcome.items[2].image_url.as_deref(),
+            Some(format!("{}/images/image-array.jpg", server.base).as_str()),
+            "an array image must carry its first element"
+        );
+        assert_eq!(outcome.items[3].title, "Episode sans image");
+        assert!(
+            outcome.items[3].image_url.is_none(),
+            "an episode without image must stay image-less without error"
+        );
     }
 }

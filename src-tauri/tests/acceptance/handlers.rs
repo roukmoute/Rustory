@@ -28,6 +28,13 @@ pub struct SharedState {
     s1_url: Option<String>,
     /// S1: the web preview outcome, kept verbatim (Ok: items; Err: refusal).
     s1_preview: Option<Result<web_episode_extraction::WebPreviewOutcome, AppError>>,
+    /// S3: the local fixture server carrying the documented episode page
+    /// (title + audio media, no image), kept alive until the scenario ends.
+    s3_server: Option<FixtureHttpServer>,
+    /// S3: the fixture page url.
+    s3_page_url: Option<String>,
+    /// S3: the web preview outcome of the fixture page.
+    s3_preview: Option<Result<web_episode_extraction::WebPreviewOutcome, AppError>>,
     /// S4: the invalid addresses documented by the Given step.
     s4_invalid_urls: Vec<String>,
     /// S4: the (address, motivated refusal) pairs collected by the When step.
@@ -64,6 +71,23 @@ impl SharedState {
         &mut self,
     ) -> &mut Option<Result<web_episode_extraction::WebPreviewOutcome, AppError>> {
         &mut self.s1_preview
+    }
+    fn s3_server_mut(&mut self) -> &mut Option<FixtureHttpServer> {
+        &mut self.s3_server
+    }
+    fn s3_page_url(&self) -> &Option<String> {
+        &self.s3_page_url
+    }
+    fn s3_page_url_mut(&mut self) -> &mut Option<String> {
+        &mut self.s3_page_url
+    }
+    fn s3_preview(&self) -> &Option<Result<web_episode_extraction::WebPreviewOutcome, AppError>> {
+        &self.s3_preview
+    }
+    fn s3_preview_mut(
+        &mut self,
+    ) -> &mut Option<Result<web_episode_extraction::WebPreviewOutcome, AppError>> {
+        &mut self.s3_preview
     }
     fn s4_invalid_urls(&self) -> &[String] {
         &self.s4_invalid_urls
@@ -223,6 +247,18 @@ pub fn handle(world: &mut World, scenario: &str, step: &str) {
         }
         ("Importer une page web publique non-RSS", "l'absence d'image n'empêche pas l'import") => {
             s1_assert_image_optional(world)
+        }
+        ("Importer un épisode sans image", "un épisode possède un titre et un média audio valides, sans image") => {
+            s3_document_episode(world)
+        }
+        ("Importer un épisode sans image", "je lance l'import de la page") => {
+            s3_run_import(world)
+        }
+        ("Importer un épisode sans image", "l'épisode est importé sans erreur") => {
+            s3_assert_imported_without_error(world)
+        }
+        ("Importer un épisode sans image", "son champ image reste vide") => {
+            s3_assert_image_field_empty(world)
         }
         ("Refuser une URL mal formée", "l'adresse fournie n'est pas une URL http(s) valide") => {
             *world.state.s4_invalid_urls_mut() =
@@ -485,20 +521,91 @@ fn s1_assert_episode_audio(world: &mut World) {
     }
 }
 
-/// S1 today: the extraction does not read images yet (TDD-4), so the
-/// import must succeed with every image left ABSENT — and nothing may be
-/// invented. When the image extraction lands in TDD-4, this handler
-/// becomes "Some exactly when the page provides one, None otherwise".
+/// S1: the image is OPTIONAL — when the page provides one, it is
+/// carried on its episode as a non-empty url (never invented); when it
+/// does not, the field stays absent; either way the import succeeds.
 fn s1_assert_image_optional(world: &mut World) {
-    assert!(
-        s1_preview(world)
-            .items
-            .iter()
-            .all(|item| item.image_url.is_none()),
-        "an absent image must not block the import, and no image may be invented"
-    );
+    for item in &s1_preview(world).items {
+        assert!(
+            item
+                .image_url
+                .as_deref()
+                .map_or(true, |image| !image.trim().is_empty()),
+            "a carried image must be a non-empty url, got: {:?}",
+            item.image_url
+        );
+    }
 }
 
+// ===== S3 image optionnelle (TDD-4) =====
+//
+// S3 : un épisode documenté avec un titre et un média audio valides et
+// PAS d'image doit s'importer sans erreur, son champ image restant
+// vide. Le fixture est une page locale portant un seul lien audio
+// titré et aucun élément image (pas de table Examples : le vocabulaire
+// appartient au handler).
+
+fn s3_document_episode(world: &mut World) {
+    let server = start_fixture_http_server(|base| {
+        let page = format!(
+            "<html><body>\
+             <h1>Sélection sans image</h1>\
+             <section>\
+             <a href=\"{base}/media/episode-sans-image.m4a\">Episode sans image</a>\
+             </section>\
+             </body></html>"
+        );
+        vec![("/page".to_owned(), 200, page.into_bytes())]
+    });
+    let page_url = format!("{}/page", server.base);
+    *world.state.s3_page_url_mut() = Some(page_url);
+    *world.state.s3_server_mut() = Some(server);
+}
+
+fn s3_run_import(world: &mut World) {
+    let url = world
+        .state
+        .s3_page_url()
+        .clone()
+        .expect("the S3 Given step must document the fixture page");
+    *world.state.s3_preview_mut() = Some(web_episode_extraction::preview_web_podcast(
+        official_content_sources(),
+        &url,
+        IMPORT_BUDGET,
+    ));
+}
+
+fn s3_preview(world: &World) -> &web_episode_extraction::WebPreviewOutcome {
+    world
+        .state
+        .s3_preview()
+        .as_ref()
+        .expect("the S3 When step must have run the import")
+        .as_ref()
+        .expect("the fixture page must preview without error — S3 tests the error-free import")
+}
+
+fn s3_assert_imported_without_error(world: &mut World) {
+    match world.state.s3_preview().as_ref() {
+        Some(Ok(outcome)) => assert!(
+            !outcome.items.is_empty(),
+            "the documented episode must be imported"
+        ),
+        Some(Err(error)) => panic!(
+            "the image-less episode must import without error: {error:?}"
+        ),
+        None => panic!("the S3 When step must have run the import"),
+    }
+}
+
+fn s3_assert_image_field_empty(world: &mut World) {
+    for item in &s3_preview(world).items {
+        assert!(
+            item.image_url.is_none(),
+            "the documented episode carries no image: its image field must stay empty, got: {item:?}"
+        );
+    }
+}
 // ===== S7 regression (TDD-3) =====
 //
 // S7: the RSS path must stay unchanged END-TO-END. A valid LOCAL fixture
