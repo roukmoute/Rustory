@@ -1200,8 +1200,21 @@ mod tests {
 
     #[test]
     fn test_fetch_web_podcast_preview_propagates_network_error() {
-        // Network errors should be propagated
-        assert!(true); // Placeholder - real test would require mocking
+        // S5 through the preview facade: a valid address whose page is
+        // unreachable (RFC 2606) must surface the motivated refusal — the
+        // `request` stage proves the failure happened in the transport and
+        // the message carries the user-facing reason.
+        let url = "https://import-test-non-rss.exemple.invalid/";
+        let err = web_episode_extraction::preview_web_podcast(
+            official_content_sources(),
+            url,
+            WEB_FETCH_BUDGET,
+        )
+        .expect_err("an unreachable page must never produce a preview");
+        assert_eq!(err.code, AppErrorCode::RssSourceUnreachable);
+        let value = serde_json::to_value(&err).expect("ser");
+        assert_eq!(value["details"]["stage"], "request");
+        assert!(!err.message.trim().is_empty());
     }
 
     #[test]

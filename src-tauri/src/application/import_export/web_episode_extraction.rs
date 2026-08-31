@@ -66,57 +66,78 @@ fn validate_web_entry_url(web_url: &str) -> Result<String, AppError> {
     feed_url_host(web_url).ok_or_else(invalid_web_url_error)
 }
 
-/// Fetch HTML content from a URL using reqwest blocking client.
-fn fetch_html(url: &str, budget: Duration) -> Result<String, AppError> {
-    let client = reqwest::blocking::Client::builder()
-        .timeout(budget)
-        .build()
-        .map_err(|_| {
-            AppError::import_failed(
+/// Motivated access failures of the web fetch path — one variant per case
+/// so each failure keeps a DISTINCT user-facing reason (S5: the system
+/// states the reason and stops). The diagnostic stage is carried in the
+/// error details.
+enum WebFetchFailure {
+    ClientBuild,
+    Request(String),
+    StatusCheck(u16),
+    ReadText(String),
+}
+
+impl WebFetchFailure {
+    fn into_app_error(self) -> AppError {
+        match self {
+            WebFetchFailure::ClientBuild => AppError::import_failed(
                 "Récupération de la page impossible.",
                 "Réessaie ; si le problème persiste, consulte les traces locales.",
             )
             .with_details(serde_json::json!({
                 "source": "network",
                 "stage": "client_build",
-            }))
-        })?;
+            })),
+            WebFetchFailure::Request(error) => AppError::rss_source_unreachable(
+                "La page est injoignable.",
+                "Vérifie ta connexion puis réessaie.",
+            )
+            .with_details(serde_json::json!({
+                "source": "network",
+                "stage": "request",
+                "error": error,
+            })),
+            WebFetchFailure::StatusCheck(status) => AppError::rss_source_unreachable(
+                format!("Le serveur a répondu avec une erreur HTTP {status}."),
+                "Réessaie plus tard ; si le problème persiste, la page est peut-être indisponible.",
+            )
+            .with_details(serde_json::json!({
+                "source": "network",
+                "stage": "status_check",
+                "status": status,
+            })),
+            WebFetchFailure::ReadText(error) => AppError::import_failed(
+                "Impossible de lire le contenu de la page.",
+                "Réessaie ; si le problème persiste, consulte les traces locales.",
+            )
+            .with_details(serde_json::json!({
+                "source": "network",
+                "stage": "read_text",
+                "error": error,
+            })),
+        }
+    }
+}
 
-    let response = client.get(url).send().map_err(|e| {
-        AppError::rss_source_unreachable(
-            "Récupération de la page impossible.",
-            "Vérifie ta connexion puis réessaie.",
-        )
-        .with_details(serde_json::json!({
-            "source": "network",
-            "stage": "request",
-            "error": e.to_string(),
-        }))
-    })?;
+/// Fetch HTML content from a URL using reqwest blocking client.
+fn fetch_html(url: &str, budget: Duration) -> Result<String, AppError> {
+    let client = reqwest::blocking::Client::builder()
+        .timeout(budget)
+        .build()
+        .map_err(|_| WebFetchFailure::ClientBuild.into_app_error())?;
+
+    let response = client
+        .get(url)
+        .send()
+        .map_err(|error| WebFetchFailure::Request(error.to_string()).into_app_error())?;
 
     if !response.status().is_success() {
-        return Err(AppError::rss_source_unreachable(
-            "Récupération de la page impossible.",
-            "Le serveur a répondu avec une erreur.",
-        )
-        .with_details(serde_json::json!({
-            "source": "network",
-            "stage": "status_check",
-            "status": response.status().as_u16(),
-        })));
+        return Err(WebFetchFailure::StatusCheck(response.status().as_u16()).into_app_error());
     }
 
-    response.text().map_err(|e| {
-        AppError::import_failed(
-            "Récupération de la page impossible.",
-            "Impossible de lire le contenu de la page.",
-        )
-        .with_details(serde_json::json!({
-            "source": "network",
-            "stage": "read_text",
-            "error": e.to_string(),
-        }))
-    })
+    response
+        .text()
+        .map_err(|error| WebFetchFailure::ReadText(error.to_string()).into_app_error())
 }
 
 /// Parse HTML content and extract podcast episodes.
@@ -461,21 +482,119 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_fetch_html_rejects_timeout() {
-        // Using an invalid port to force a timeout-like error
-        let url = "http://127.0.0.1:59999/timeout";
-        let result = fetch_html(url, Duration::from_millis(100));
-        // Expect an error (connection refused or timeout)
-        assert!(result.is_err());
+    // ===== Motivated access failures (TDD-2) =====
+    //
+    // S5: a VALID address whose page is unreachable (injoignable) or that
+    // answers with an HTTP error must produce a DISTINCT user-facing reason
+    // per case. Neither path may create a story: the preview never touches
+    // the library, and the S5 acceptance handler asserts the story count.
+
+    /// Minimal one-shot HTTP server on 127.0.0.1 for deterministic status tests.
+    struct LocalHttpServer {
+        url: String,
+        stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl Drop for LocalHttpServer {
+        fn drop(&mut self) {
+            self.stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    fn start_local_http_server(status: u16, body: &str) -> LocalHttpServer {
+        use std::io::{Read, Write};
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind 127.0.0.1:0");
+        let addr = listener.local_addr().expect("local address");
+        let url = format!("http://{addr}/page");
+        let stop = Arc::new(AtomicBool::new(false));
+        let worker_stop = stop.clone();
+        let body = body.to_owned();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                if worker_stop.load(Ordering::SeqCst) {
+                    break;
+                }
+                let Ok(mut stream) = stream else {
+                    continue
+                };
+                let _ = stream.set_read_timeout(Some(Duration::from_secs(1)));
+                let mut request = [0u8; 4096];
+                let _ = stream.read(&mut request);
+                let reason = match status {
+                    200 => "OK",
+                    404 => "Not Found",
+                    500 => "Internal Server Error",
+                    _ => "Error",
+                };
+                let response = format!(
+                    "HTTP/1.1 {status} {reason}\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(response.as_bytes());
+                let _ = stream.flush();
+            }
+        });
+        LocalHttpServer { url, stop }
+    }
+
+    fn fetch_error_stage(err: &AppError) -> String {
+        serde_json::to_value(err)
+            .expect("AppError serializes")
+            .get("details")
+            .and_then(|details| details.get("stage"))
+            .and_then(|stage| stage.as_str())
+            .unwrap_or("<absent>")
+            .to_owned()
     }
 
     #[test]
-    fn test_fetch_html_rejects_non_200_status() {
-        // Using httpstat.us which returns 404
-        let url = "http://httpstat.us/404";
-        let result = fetch_html(url, Duration::from_secs(10));
-        assert!(result.is_err());
+    fn test_fetch_html_rejects_unreachable_host_with_distinct_reason() {
+        // RFC 2606 reserved TLD: the address is syntactically valid but can
+        // never be resolved — the "injoignable" variant of S5.
+        let url = "https://import-test-non-rss.exemple.invalid/";
+        let err = fetch_html(url, Duration::from_secs(10))
+            .expect_err("an unreachable page must never yield content");
+        assert_eq!(fetch_error_stage(&err), "request");
+        assert!(
+            err.message.contains("injoignable"),
+            "the user-facing reason must say the page is unreachable, got: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn test_fetch_html_rejects_http_error_status_with_distinct_reason() {
+        let server = start_local_http_server(500, "<html><body>boom</body></html>");
+        let err = fetch_html(&server.url, Duration::from_secs(10))
+            .expect_err("an HTTP error status must never yield content");
+        drop(server);
+        assert_eq!(fetch_error_stage(&err), "status_check");
+        let value = serde_json::to_value(&err).expect("AppError serializes");
+        assert_eq!(value["details"]["status"], 500);
+        assert!(
+            err.message.contains("erreur HTTP") && err.message.contains("500"),
+            "the user-facing reason must state the HTTP error, got: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn test_fetch_html_failure_reasons_are_distinct_per_case() {
+        let unreachable = fetch_html(
+            "https://import-test-non-rss.exemple.invalid/",
+            Duration::from_secs(10),
+        )
+        .expect_err("unreachable host");
+        let server = start_local_http_server(500, "boom");
+        let http_error = fetch_html(&server.url, Duration::from_secs(10)).expect_err("http error");
+        drop(server);
+        assert_ne!(
+            unreachable.message, http_error.message,
+            "S5 requires a distinct user-facing reason per access failure case"
+        );
     }
 
     #[test]

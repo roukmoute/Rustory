@@ -19,5 +19,21 @@
       "text" : "aucune histoire n'est créée"
     } ],
     "examples" : [ ]
+  }, {
+    "name" : "Signaler une page inaccessible",
+    "steps" : [ {
+      "keyword" : "Given",
+      "text" : "l'URL est valide mais la page est inaccessible (injoignable ou erreur HTTP)"
+    }, {
+      "keyword" : "When",
+      "text" : "je lance l'import"
+    }, {
+      "keyword" : "Then",
+      "text" : "le système indique la raison de l'échec"
+    }, {
+      "keyword" : "And",
+      "text" : "aucune histoire n'est créée"
+    } ],
+    "examples" : [ ]
   } ]
 }
