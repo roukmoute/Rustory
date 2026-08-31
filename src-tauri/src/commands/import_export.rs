@@ -1152,19 +1152,50 @@ mod tests {
         );
     }
 
-    // ===== Tests for web podcast preview mutation coverage =====
+    // ===== Web podcast preview — the entry guard (TDD-1) =====
+    //
+    // Every one of these addresses must be refused WITH THE MOTIVATED
+    // `url_invalid` verdict BEFORE any network dispatch: the stage tag is
+    // the proof — a refusal that escaped the guard would surface as a
+    // `request` / `status_check` / `client_build` stage instead.
+
 
     #[test]
     fn test_fetch_web_podcast_preview_rejects_empty_url() {
-        // Empty URL should be rejected by URL validation in preview_web_podcast
-        // but the command itself should handle empty input gracefully
-        assert!(true); // Placeholder - real test would require mocking
+        let err = web_episode_extraction::preview_web_podcast(
+            official_content_sources(),
+            "",
+            WEB_FETCH_BUDGET,
+        )
+        .expect_err("an empty address must be refused before any network dispatch");
+        assert_eq!(err.code, AppErrorCode::RssSourceUnreachable);
+        let value = serde_json::to_value(&err).expect("ser");
+        assert_eq!(value["details"]["stage"], "url_invalid");
     }
 
     #[test]
     fn test_fetch_web_podcast_preview_rejects_invalid_scheme() {
-        // URL without http/https scheme should be rejected
-        assert!(true); // Placeholder - real test would require mocking
+        for url in [
+            "pas-une-url",
+            "ftp://exemplo.fr/flux",
+            "file:///etc/passwd",
+            // Scheme present but the address is malformed: the legacy
+            // prefix check (`starts_with("http://")`) let these through to
+            // a network call — the guard must refuse them as addresses.
+            "http://",
+            "https://",
+            "http://:8080",
+        ] {
+            let err = web_episode_extraction::preview_web_podcast(
+                official_content_sources(),
+                url,
+                WEB_FETCH_BUDGET,
+            )
+            .expect_err(&format!("the malformed address `{url}` must be refused"));
+            assert_eq!(err.code, AppErrorCode::RssSourceUnreachable);
+            let value = serde_json::to_value(&err).expect("ser");
+            assert_eq!(value["details"]["stage"], "url_invalid");
+        }
     }
 
     #[test]

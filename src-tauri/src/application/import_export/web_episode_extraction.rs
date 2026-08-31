@@ -57,6 +57,15 @@ fn ensure_web_source_enabled(sources: &[ContentSourceLine]) -> Result<(), AppErr
     }
 }
 
+/// The entry guard, consulted by BOTH web facades (preview AND accept)
+/// right after the policy gate: the address must survive the STRICT url
+/// authority (http/https only, sober host, bounded) BEFORE any network
+/// dispatch — a malformed address never builds a client or sends a byte.
+/// Returns the sober host of the validated address.
+fn validate_web_entry_url(web_url: &str) -> Result<String, AppError> {
+    feed_url_host(web_url).ok_or_else(invalid_web_url_error)
+}
+
 /// Fetch HTML content from a URL using reqwest blocking client.
 fn fetch_html(url: &str, budget: Duration) -> Result<String, AppError> {
     let client = reqwest::blocking::Client::builder()
@@ -210,10 +219,8 @@ pub fn preview_web_podcast(
     // Policy gate: check if web source is enabled before any network dispatch
     ensure_web_source_enabled(sources)?;
 
-    // Validate URL format (basic check: must have http/https scheme)
-    if !web_url.starts_with("http://") && !web_url.starts_with("https://") {
-        return Err(invalid_web_url_error());
-    }
+    // Entry guard BEFORE any network dispatch.
+    let source_host = validate_web_entry_url(web_url)?;
 
     let html_content = fetch_html(web_url, budget)?;
     let episodes = parse_web_episodes(&html_content);
@@ -224,7 +231,7 @@ pub fn preview_web_podcast(
     let page_checksum = format!("{:x}", hasher.finalize());
 
     Ok(WebPreviewOutcome {
-        source_host: feed_url_host(web_url).unwrap_or_else(|| "unknown".to_string()),
+        source_host,
         page_checksum,
         items: episodes,
     })
@@ -237,13 +244,10 @@ pub fn prepare_web_story_creation(
     selected_episode_title: &str,
     budget: Duration,
 ) -> Result<WebAcceptPhase, AppError> {
-    // Policy gate
     ensure_web_source_enabled(sources)?;
 
-    // Validate URL format
-    if !web_url.starts_with("http://") && !web_url.starts_with("https://") {
-        return Err(invalid_web_url_error());
-    }
+    // Entry guard BEFORE any network dispatch.
+    let source_host = validate_web_entry_url(web_url)?;
 
     let html_content = fetch_html(web_url, budget)?;
     let episodes = parse_web_episodes(&html_content);
@@ -281,7 +285,7 @@ pub fn prepare_web_story_creation(
         structure_json: canonical_structure_json(&CanonicalStructure::minimal()),
         checksum: episode_checksum,
         now_iso,
-        source_host: feed_url_host(web_url).unwrap_or_else(|| "unknown".to_string()),
+        source_host: source_host.clone(),
         page_checksum,
         state: ImportState::NeedsReview,
         findings: vec![RecognitionFinding::ambiguous(RecognitionAspect::Source)],

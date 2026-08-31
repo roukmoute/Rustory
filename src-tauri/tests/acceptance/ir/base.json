@@ -1,0 +1,23 @@
+{
+  "name" : "Importer des épisodes depuis une page web non-RSS",
+  "scenarios" : [ {
+    "name" : "Refuser une URL mal formée",
+    "steps" : [ {
+      "keyword" : "Given",
+      "text" : "l'adresse fournie n'est pas une URL http(s) valide"
+    }, {
+      "keyword" : "When",
+      "text" : "je lance l'import"
+    }, {
+      "keyword" : "Then",
+      "text" : "aucune requête réseau n'est effectuée"
+    }, {
+      "keyword" : "And",
+      "text" : "le système indique la raison de l'échec"
+    }, {
+      "keyword" : "And",
+      "text" : "aucune histoire n'est créée"
+    } ],
+    "examples" : [ ]
+  } ]
+}
