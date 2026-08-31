@@ -1,6 +1,36 @@
 {
   "name" : "Importer des épisodes depuis une page web non-RSS",
   "scenarios" : [ {
+    "name" : "Importer une page web publique non-RSS",
+    "steps" : [ {
+      "keyword" : "Given",
+      "text" : "l'URL \"<url>\" pointe vers une page HTML publique contenant au moins un épisode",
+      "parameters" : [ "url" ]
+    }, {
+      "keyword" : "When",
+      "text" : "je lance l'import de cette URL"
+    }, {
+      "keyword" : "Then",
+      "text" : "la source est reconnue comme une page web non-RSS"
+    }, {
+      "keyword" : "And",
+      "text" : "au moins un épisode est identifié"
+    }, {
+      "keyword" : "And",
+      "text" : "chaque épisode identifié a un titre non vide"
+    }, {
+      "keyword" : "And",
+      "text" : "chaque épisode identifié a un média audio"
+    }, {
+      "keyword" : "And",
+      "text" : "l'absence d'image n'empêche pas l'import"
+    } ],
+    "examples" : [ {
+      "url" : "https://www.radiofrance.fr/radiofrance/podcasts/selection-pour-partir-a-l-aventure"
+    }, {
+      "url" : "https://www.radiofrance.fr/franceinter/podcasts/serie-tina-et-le-serpent-a-plumes"
+    } ]
+  }, {
     "name" : "Refuser une URL mal formée",
     "steps" : [ {
       "keyword" : "Given",
@@ -33,6 +63,22 @@
     }, {
       "keyword" : "And",
       "text" : "aucune histoire n'est créée"
+    } ],
+    "examples" : [ ]
+  }, {
+    "name" : "Continuer d'importer un flux RSS",
+    "steps" : [ {
+      "keyword" : "Given",
+      "text" : "l'URL fournie correspond à un flux RSS valide"
+    }, {
+      "keyword" : "When",
+      "text" : "je lance l'import de cette URL"
+    }, {
+      "keyword" : "Then",
+      "text" : "la source est reconnue comme un flux RSS"
+    }, {
+      "keyword" : "And",
+      "text" : "les épisodes sont importés par le comportement existant, sans changement"
     } ],
     "examples" : [ ]
   } ]

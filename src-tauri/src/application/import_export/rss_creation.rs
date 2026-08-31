@@ -1287,4 +1287,129 @@ mod tests {
             "the media finding must stay missing, got {report:?}"
         );
     }
+
+    // ===== S7 regression lock (TDD-3) =====
+    //
+    // The existing RSS path must stay unchanged: a VALID local fixture feed
+    // (channel title, two items, one enclosure) previews through the
+    // production `HttpRssFeedSource` with no external network.
+
+    struct FixtureHttpServer {
+        base: String,
+        stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl Drop for FixtureHttpServer {
+        fn drop(&mut self) {
+            self.stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    fn start_fixture_http_server<F>(make_routes: F) -> FixtureHttpServer
+    where
+        F: FnOnce(&str) -> Vec<(String, u16, Vec<u8>)> + Send + 'static,
+    {
+        use std::io::{Read, Write};
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind 127.0.0.1:0");
+        let addr = listener.local_addr().expect("local address");
+        let base = format!("http://{addr}");
+        let routes = make_routes(&base);
+        let stop = Arc::new(AtomicBool::new(false));
+        let worker_stop = stop.clone();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                if worker_stop.load(Ordering::SeqCst) {
+                    break;
+                }
+                let Ok(mut stream) = stream else {
+                    continue
+                };
+                let _ = stream.set_read_timeout(Some(Duration::from_secs(1)));
+                let mut request = [0u8; 4096];
+                let read = stream.read(&mut request).unwrap_or(0);
+                let path = String::from_utf8_lossy(&request[..read])
+                    .split_whitespace()
+                    .nth(1)
+                    .unwrap_or("/")
+                    .to_owned();
+                let (status, body) = routes
+                    .iter()
+                    .find(|(route, _, _)| *route == path)
+                    .map(|(_, status, body)| (*status, body.clone()))
+                    .unwrap_or((404, Vec::from("not found")));
+                let reason = match status {
+                    200 => "OK",
+                    404 => "Not Found",
+                    500 => "Internal Server Error",
+                    _ => "Error",
+                };
+                let response = format!(
+                    "HTTP/1.1 {status} {reason}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = stream.write_all(response.as_bytes());
+                let _ = stream.write_all(&body);
+                let _ = stream.flush();
+            }
+        });
+        FixtureHttpServer { base, stop }
+    }
+
+    fn s7_fixture_feed(base: &str) -> Vec<u8> {
+        format!(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+             <rss version=\"2.0\"><channel><title>Flux fixture</title>\
+             <item><title>Episode un</title><description>Premier texte de l'episode.</description>\
+             <guid>fixture-1</guid>\
+             <enclosure url=\"{base}/media/episode-1.wav\" type=\"audio/wav\" length=\"20\"/></item>\
+             <item><title>Episode deux</title><description>Deuxieme texte de l'episode.</description>\
+             <guid>fixture-2</guid></item>\
+             </channel></rss>"
+        )
+        .into_bytes()
+    }
+
+    /// The 20-byte WAV fixture: magic `RIFF`/`WAVE` only — enough for the
+    /// store's sniff to promote it as an audio media.
+    fn s7_fixture_wav() -> Vec<u8> {
+        let mut bytes = b"RIFF".to_vec();
+        bytes.extend_from_slice(&[0u8; 4]);
+        bytes.extend_from_slice(b"WAVE");
+        bytes.extend_from_slice(&[0u8; 8]);
+        bytes
+    }
+
+    /// Green from the start: the RSS preview path (S7) reads a valid local
+    /// fixture feed unchanged — channel title, item count, enclosure.
+    #[test]
+    fn test_preview_rss_source_reads_local_fixture_feed() {
+        let server = start_fixture_http_server(|base| {
+            vec![
+                ("/flux".to_owned(), 200, s7_fixture_feed(base)),
+                ("/media/episode-1.wav".to_owned(), 200, s7_fixture_wav()),
+            ]
+        });
+        let url = format!("{}/flux", server.base);
+        let source = crate::infrastructure::device::rss_source::HttpRssFeedSource::default();
+        let outcome = preview_rss_source(
+            official_content_sources(),
+            &source,
+            &url,
+            Duration::from_secs(30),
+        )
+        .expect("the local fixture feed must preview");
+        assert_eq!(outcome.source_host, "127.0.0.1");
+        assert!(!outcome.analysis.is_blocked(), "the fixture feed must not be blocked");
+        assert_eq!(outcome.analysis.channel_title.as_deref(), Some("Flux fixture"));
+        assert_eq!(outcome.analysis.items.len(), 2);
+        assert_eq!(outcome.analysis.items[0].title, "Episode un");
+        assert!(
+            outcome.analysis.items[0].has_enclosure,
+            "the first item must keep its enclosure reference"
+        );
+        assert_eq!(outcome.analysis.items[1].title, "Episode deux");
+    }
 }

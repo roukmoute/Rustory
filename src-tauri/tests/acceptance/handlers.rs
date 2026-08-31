@@ -10,16 +10,24 @@ use std::time::Duration;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use rustory_lib::application::import_export::web_episode_extraction;
-use rustory_lib::domain::import::official_content_sources;
+use rustory_lib::application::import_export::{rss_creation, web_episode_extraction};
+use rustory_lib::domain::import::{
+    feed_url_host, official_content_sources, rss_item_fingerprint, RssItemRef,
+};
 use rustory_lib::domain::shared::{AppError, AppErrorCode};
+use rustory_lib::domain::story::CanonicalStructure;
 use rustory_lib::infrastructure::db;
+use rustory_lib::infrastructure::device::rss_source::HttpRssFeedSource;
 
 use crate::runtime::World;
 
 /// Cross-step state of one scenario execution.
 #[derive(Default)]
 pub struct SharedState {
+    /// S1: the sample page url documented by the Given step (Examples cell).
+    s1_url: Option<String>,
+    /// S1: the web preview outcome, kept verbatim (Ok: items; Err: refusal).
+    s1_preview: Option<Result<web_episode_extraction::WebPreviewOutcome, AppError>>,
     /// S4: the invalid addresses documented by the Given step.
     s4_invalid_urls: Vec<String>,
     /// S4: the (address, motivated refusal) pairs collected by the When step.
@@ -28,12 +36,35 @@ pub struct SharedState {
     /// Given step.
     s5_cases: Vec<(String, S5Case)>,
     /// S5: the local 500 server kept alive until the scenario ends.
-    s5_server: Option<LocalHttpServer>,
+    s5_server: Option<FixtureHttpServer>,
     /// S5: the (case, motivated refusal) pairs collected by the When step.
     s5_refusals: Vec<(S5Case, AppError)>,
+    /// S7: the local fixture feed server kept alive until the scenario
+    /// ends (the accept re-fetches feed and enclosure).
+    s7_server: Option<FixtureHttpServer>,
+    /// S7: the fixture feed url.
+    s7_feed_url: Option<String>,
+    /// S7: the RSS preview outcome.
+    s7_preview: Option<rss_creation::RssPreviewOutcome>,
+    /// S7: the committed import proof read back from the DB rows.
+    s7_proof: Option<S7ImportProof>,
 }
 
 impl SharedState {
+    fn s1_url(&self) -> &Option<String> {
+        &self.s1_url
+    }
+    fn s1_url_mut(&mut self) -> &mut Option<String> {
+        &mut self.s1_url
+    }
+    fn s1_preview(&self) -> &Option<Result<web_episode_extraction::WebPreviewOutcome, AppError>> {
+        &self.s1_preview
+    }
+    fn s1_preview_mut(
+        &mut self,
+    ) -> &mut Option<Result<web_episode_extraction::WebPreviewOutcome, AppError>> {
+        &mut self.s1_preview
+    }
     fn s4_invalid_urls(&self) -> &[String] {
         &self.s4_invalid_urls
     }
@@ -52,7 +83,7 @@ impl SharedState {
     fn s5_cases_mut(&mut self) -> &mut Vec<(String, S5Case)> {
         &mut self.s5_cases
     }
-    fn s5_server_mut(&mut self) -> &mut Option<LocalHttpServer> {
+    fn s5_server_mut(&mut self) -> &mut Option<FixtureHttpServer> {
         &mut self.s5_server
     }
     fn s5_refusals(&self) -> &[(S5Case, AppError)] {
@@ -60,6 +91,27 @@ impl SharedState {
     }
     fn s5_refusals_mut(&mut self) -> &mut Vec<(S5Case, AppError)> {
         &mut self.s5_refusals
+    }
+    fn s7_server_mut(&mut self) -> &mut Option<FixtureHttpServer> {
+        &mut self.s7_server
+    }
+    fn s7_feed_url(&self) -> &Option<String> {
+        &self.s7_feed_url
+    }
+    fn s7_feed_url_mut(&mut self) -> &mut Option<String> {
+        &mut self.s7_feed_url
+    }
+    fn s7_preview(&self) -> &Option<rss_creation::RssPreviewOutcome> {
+        &self.s7_preview
+    }
+    fn s7_preview_mut(&mut self) -> &mut Option<rss_creation::RssPreviewOutcome> {
+        &mut self.s7_preview
+    }
+    fn s7_proof(&self) -> &Option<S7ImportProof> {
+        &self.s7_proof
+    }
+    fn s7_proof_mut(&mut self) -> &mut Option<S7ImportProof> {
+        &mut self.s7_proof
     }
 }
 
@@ -84,28 +136,32 @@ enum S5Case {
     HttpError(u16),
 }
 
-/// One-shot HTTP server on 127.0.0.1 for the S5 "erreur HTTP" case (same
-/// shape as the web module unit tests).
-struct LocalHttpServer {
-    url: String,
+/// One-shot multi-route HTTP server on 127.0.0.1 for deterministic
+/// fixtures: the routes are built AFTER the bind so the fixture documents
+/// can reference the local base URL (same shape as the module unit tests).
+struct FixtureHttpServer {
+    base: String,
     stop: Arc<AtomicBool>,
 }
 
-impl Drop for LocalHttpServer {
+impl Drop for FixtureHttpServer {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::SeqCst);
     }
 }
 
-fn start_local_http_server(status: u16, body: &str) -> LocalHttpServer {
+fn start_fixture_http_server<F>(make_routes: F) -> FixtureHttpServer
+where
+    F: FnOnce(&str) -> Vec<(String, u16, Vec<u8>)> + Send + 'static,
+{
     use std::io::{Read, Write};
 
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind 127.0.0.1:0");
     let addr = listener.local_addr().expect("local address");
-    let url = format!("http://{addr}/page");
+    let base = format!("http://{addr}");
+    let routes = make_routes(&base);
     let stop = Arc::new(AtomicBool::new(false));
     let worker_stop = stop.clone();
-    let body = body.to_owned();
     std::thread::spawn(move || {
         for stream in listener.incoming() {
             if worker_stop.load(Ordering::SeqCst) {
@@ -116,7 +172,17 @@ fn start_local_http_server(status: u16, body: &str) -> LocalHttpServer {
             };
             let _ = stream.set_read_timeout(Some(Duration::from_secs(1)));
             let mut request = [0u8; 4096];
-            let _ = stream.read(&mut request);
+            let read = stream.read(&mut request).unwrap_or(0);
+            let path = String::from_utf8_lossy(&request[..read])
+                .split_whitespace()
+                .nth(1)
+                .unwrap_or("/")
+                .to_owned();
+            let (status, body) = routes
+                .iter()
+                .find(|(route, _, _)| *route == path)
+                .map(|(_, status, body)| (*status, body.clone()))
+                .unwrap_or((404, Vec::from("not found")));
             let reason = match status {
                 200 => "OK",
                 404 => "Not Found",
@@ -124,18 +190,40 @@ fn start_local_http_server(status: u16, body: &str) -> LocalHttpServer {
                 _ => "Error",
             };
             let response = format!(
-                "HTTP/1.1 {status} {reason}\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                "HTTP/1.1 {status} {reason}\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                 body.len()
             );
             let _ = stream.write_all(response.as_bytes());
+            let _ = stream.write_all(&body);
             let _ = stream.flush();
         }
     });
-    LocalHttpServer { url, stop }
+    FixtureHttpServer { base, stop }
 }
 
 pub fn handle(world: &mut World, scenario: &str, step: &str) {
     match (scenario, step) {
+        ("Importer une page web publique non-RSS", "l'URL \"<url>\" pointe vers une page HTML publique contenant au moins un épisode") => {
+            s1_document_page(world)
+        }
+        ("Importer une page web publique non-RSS", "je lance l'import de cette URL") => {
+            s1_run_import(world)
+        }
+        ("Importer une page web publique non-RSS", "la source est reconnue comme une page web non-RSS") => {
+            s1_assert_source_recognized(world)
+        }
+        ("Importer une page web publique non-RSS", "au moins un épisode est identifié") => {
+            s1_assert_episodes_identified(world)
+        }
+        ("Importer une page web publique non-RSS", "chaque épisode identifié a un titre non vide") => {
+            s1_assert_episode_titles(world)
+        }
+        ("Importer une page web publique non-RSS", "chaque épisode identifié a un média audio") => {
+            s1_assert_episode_audio(world)
+        }
+        ("Importer une page web publique non-RSS", "l'absence d'image n'empêche pas l'import") => {
+            s1_assert_image_optional(world)
+        }
         ("Refuser une URL mal formée", "l'adresse fournie n'est pas une URL http(s) valide") => {
             *world.state.s4_invalid_urls_mut() =
                 S4_INVALID_URLS.iter().map(|url| (*url).to_owned()).collect();
@@ -156,6 +244,18 @@ pub fn handle(world: &mut World, scenario: &str, step: &str) {
             s5_assert_reason(world)
         }
         ("Signaler une page inaccessible", "aucune histoire n'est créée") => assert_no_story_created(),
+        ("Continuer d'importer un flux RSS", "l'URL fournie correspond à un flux RSS valide") => {
+            s7_document_feed(world)
+        }
+        ("Continuer d'importer un flux RSS", "je lance l'import de cette URL") => {
+            s7_run_import(world)
+        }
+        ("Continuer d'importer un flux RSS", "la source est reconnue comme un flux RSS") => {
+            s7_assert_source_recognized(world)
+        }
+        ("Continuer d'importer un flux RSS", "les épisodes sont importés par le comportement existant, sans changement") => {
+            s7_assert_import_proof(world)
+        }
         _ => panic!(
             "no acceptance handler for step `{step}` of scenario `{scenario}` — the vocabulary is closed by the frozen feature"
         ),
@@ -219,8 +319,10 @@ fn s5_document_inaccessible_pages(world: &mut World) {
     let unreachable = "https://import-test-non-rss.exemple.invalid/".to_owned();
     // Case 2: a local server that answers with an HTTP error status (the
     // "erreur HTTP" case), kept alive until the scenario ends.
-    let server = start_local_http_server(500, "<html><body>service indisponible</body></html>");
-    let http_url = server.url.clone();
+    let server = start_fixture_http_server(|_| {
+        vec![("/page".to_owned(), 500, Vec::from("<html><body>service indisponible</body></html>"))]
+    });
+    let http_url = format!("{}/page", server.base);
     *world.state.s5_server_mut() = Some(server);
     world.state.s5_cases_mut().push((unreachable, S5Case::Unreachable));
     world.state.s5_cases_mut().push((http_url, S5Case::HttpError(500)));
@@ -304,6 +406,316 @@ fn s5_assert_reason(world: &mut World) {
     assert_ne!(
         seen_messages[0], seen_messages[1],
         "S5 requires a distinct user-facing reason per access-failure case"
+    );
+}
+
+// ===== S1 reconnaissance (TDD-3) =====
+//
+// S1 (exemples faisant foi E1/E2) : une page HTML publique non-RSS doit
+// prévisualiser comme source web portant SON propre hôte, avec au moins
+// un épisode identifié, chaque épisode identifié portant un titre non
+// vide et un média audio. L'image est optionnelle : son absence ne doit
+// jamais bloquer l'import.
+
+fn s1_document_page(world: &mut World) {
+    let url = world.require_example("url");
+    *world.state.s1_url_mut() = Some(url);
+}
+
+fn s1_run_import(world: &mut World) {
+    let url = world
+        .state
+        .s1_url()
+        .clone()
+        .expect("the S1 Given step must document the page url");
+    *world.state.s1_preview_mut() = Some(web_episode_extraction::preview_web_podcast(
+        official_content_sources(),
+        &url,
+        IMPORT_BUDGET,
+    ));
+}
+
+fn s1_preview(world: &World) -> &web_episode_extraction::WebPreviewOutcome {
+    world
+        .state
+        .s1_preview()
+        .as_ref()
+        .expect("the S1 When step must have run the import")
+        .as_ref()
+        .expect("the sample page must preview — a refusal is the failure under test")
+}
+
+fn s1_assert_source_recognized(world: &mut World) {
+    let url = world
+        .state
+        .s1_url()
+        .clone()
+        .expect("the S1 Given step must document the page url");
+    let expected_host = feed_url_host(&url)
+        .unwrap_or_else(|| panic!("the sample address must be a sober http(s) url: {url}"));
+    assert_eq!(
+        s1_preview(world).source_host,
+        expected_host,
+        "the preview must be recognized as the page's own web source, not a foreign one"
+    );
+}
+
+fn s1_assert_episodes_identified(world: &mut World) {
+    assert!(
+        !s1_preview(world).items.is_empty(),
+        "at least one episode must be identified on the sample page"
+    );
+}
+
+fn s1_assert_episode_titles(world: &mut World) {
+    for item in &s1_preview(world).items {
+        assert!(
+            !item.title.trim().is_empty(),
+            "every identified episode must carry a non-empty title"
+        );
+    }
+}
+
+fn s1_assert_episode_audio(world: &mut World) {
+    for item in &s1_preview(world).items {
+        assert!(
+            item.audio_url.is_some(),
+            "every identified episode must carry an audio media"
+        );
+    }
+}
+
+/// S1 today: the extraction does not read images yet (TDD-4), so the
+/// import must succeed with every image left ABSENT — and nothing may be
+/// invented. When the image extraction lands in TDD-4, this handler
+/// becomes "Some exactly when the page provides one, None otherwise".
+fn s1_assert_image_optional(world: &mut World) {
+    assert!(
+        s1_preview(world)
+            .items
+            .iter()
+            .all(|item| item.image_url.is_none()),
+        "an absent image must not block the import, and no image may be invented"
+    );
+}
+
+// ===== S7 regression (TDD-3) =====
+//
+// S7: the RSS path must stay unchanged END-TO-END. A valid LOCAL fixture
+// feed (no external network) is previewed AND accepted through the
+// production `HttpRssFeedSource`; the import proof is read back from the
+// committed rows (story, provenance, asset, start-node audio wiring).
+
+/// The committed import proof of S7: what the DB rows prove after the
+/// existing RSS behavior ran unchanged.
+#[derive(Debug)]
+struct S7ImportProof {
+    stories_count: i64,
+    story_title: String,
+    source_format: String,
+    source_name: String,
+    assets_count: i64,
+    media_format: Option<String>,
+    start_node_audio_asset_id: Option<String>,
+}
+
+fn s7_document_feed(world: &mut World) {
+    let server = start_fixture_http_server(|base| {
+        vec![
+            ("/flux".to_owned(), 200, s7_fixture_feed(base)),
+            ("/media/episode-1.wav".to_owned(), 200, s7_fixture_wav()),
+        ]
+    });
+    let feed_url = format!("{}/flux", server.base);
+    *world.state.s7_server_mut() = Some(server);
+    *world.state.s7_feed_url_mut() = Some(feed_url);
+}
+
+/// The S7 fixture feed: RSS 2.0, one channel title, two items (the first
+/// with a `fixture-1` guid + a local WAV enclosure). ASCII titles so
+/// `normalize_title` keeps them verbatim.
+fn s7_fixture_feed(base: &str) -> Vec<u8> {
+    format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+         <rss version=\"2.0\"><channel><title>Flux fixture</title>\
+         <item><title>Episode un</title><description>Premier texte de l'episode.</description>\
+         <guid>fixture-1</guid>\
+         <enclosure url=\"{base}/media/episode-1.wav\" type=\"audio/wav\" length=\"20\"/></item>\
+         <item><title>Episode deux</title><description>Deuxieme texte de l'episode.</description>\
+         <guid>fixture-2</guid></item>\
+         </channel></rss>"
+    )
+    .into_bytes()
+}
+
+/// The 20-byte WAV fixture: magic `RIFF`/`WAVE` only — enough for the
+/// store's sniff to promote it as audio media `wav`.
+fn s7_fixture_wav() -> Vec<u8> {
+    let mut bytes = b"RIFF".to_vec();
+    bytes.extend_from_slice(&[0u8; 4]);
+    bytes.extend_from_slice(b"WAVE");
+    bytes.extend_from_slice(&[0u8; 8]);
+    bytes
+}
+
+fn s7_run_import(world: &mut World) {
+    let url = world
+        .state
+        .s7_feed_url()
+        .clone()
+        .expect("the S7 Given step must document the feed url");
+    let source = HttpRssFeedSource::default();
+    let preview = rss_creation::preview_rss_source(
+        official_content_sources(),
+        &source,
+        &url,
+        IMPORT_BUDGET,
+    )
+    .expect("the local fixture feed must preview");
+    let item = preview
+        .analysis
+        .items
+        .iter()
+        .find(|item| item.guid.as_deref() == Some("fixture-1"))
+        .expect("the fixture feed must carry its first item guid");
+    let fingerprint = rss_item_fingerprint(item);
+    *world.state.s7_preview_mut() = Some(preview);
+
+    let mut library = db::open_in_memory().expect("fresh in-memory library");
+    db::run_migrations(&mut library).expect("migrations must apply");
+    let store_root = std::env::temp_dir().join(format!("rustory-accept-s7-{}", std::process::id()));
+    std::fs::create_dir_all(&store_root).expect("the media store root must be creatable");
+    let outcome = rss_creation::accept_rss_story_creation(
+        &mut library,
+        official_content_sources(),
+        &source,
+        &url,
+        &RssItemRef::Guid("fixture-1".into()),
+        &fingerprint,
+        IMPORT_BUDGET,
+        Some(&store_root),
+    )
+    .expect("the fixture import must not fail");
+    let rss_creation::RssCreationOutcome::Created { story } = outcome else {
+        panic!("the fixture feed is local and stable: the accept must never see a source change")
+    };
+    let story_id = story.id;
+    let stories_count: i64 = library
+        .conn()
+        .query_row("SELECT count(*) FROM stories", [], |row| row.get(0))
+        .expect("the stories table must exist");
+    let (story_title, structure_json): (String, String) = library
+        .conn()
+        .query_row(
+            "SELECT title, structure_json FROM stories WHERE id = ?1",
+            [&story_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("the created story row must exist");
+    let (source_format, source_name): (String, String) = library
+        .conn()
+        .query_row(
+            "SELECT source_format, source_name FROM story_local_imports WHERE story_id = ?1",
+            [&story_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("the provenance row must exist");
+    let assets_count: i64 = library
+        .conn()
+        .query_row(
+            "SELECT count(*) FROM assets WHERE story_id = ?1",
+            [&story_id],
+            |row| row.get(0),
+        )
+        .expect("the assets table must exist");
+    let media_format = (assets_count > 0).then(|| {
+        library
+            .conn()
+            .query_row(
+                "SELECT media_format FROM assets WHERE story_id = ?1",
+                [&story_id],
+                |row| row.get(0),
+            )
+            .expect("the asset row must exist")
+    });
+    let structure: CanonicalStructure =
+        serde_json::from_str(&structure_json).expect("the story structure must be canonical JSON");
+    let start_node = structure
+        .nodes
+        .iter()
+        .find(|node| node.id == structure.start_node_id)
+        .expect("the structure must carry its start node");
+    *world.state.s7_proof_mut() = Some(S7ImportProof {
+        stories_count,
+        story_title,
+        source_format,
+        source_name,
+        assets_count,
+        media_format,
+        start_node_audio_asset_id: start_node.audio_asset_id.clone(),
+    });
+}
+
+fn s7_assert_source_recognized(world: &mut World) {
+    let preview = world
+        .state
+        .s7_preview()
+        .as_ref()
+        .expect("the S7 When step must have run the import");
+    assert!(
+        !preview.analysis.is_blocked(),
+        "the fixture feed must be recognized as a valid RSS source"
+    );
+    assert_eq!(
+        preview.source_host, "127.0.0.1",
+        "the preview must carry the feed's own host"
+    );
+    assert_eq!(
+        preview.analysis.channel_title.as_deref(),
+        Some("Flux fixture"),
+        "the channel title must be read from the feed"
+    );
+    assert_eq!(
+        preview.analysis.items.len(),
+        2,
+        "both fixture items must be parsed"
+    );
+}
+
+/// S7: the import ran through the EXISTING RSS behavior, unchanged — one
+/// story for the accepted item, `rss` provenance naming the feed host,
+/// the enclosure stored as a `wav` asset wired to the start node.
+fn s7_assert_import_proof(world: &mut World) {
+    let proof = world
+        .state
+        .s7_proof()
+        .as_ref()
+        .expect("the S7 When step must have proven the import");
+    assert_eq!(proof.stories_count, 1, "the import must create exactly one story");
+    assert_eq!(
+        proof.story_title, "Episode un",
+        "the story must keep the accepted episode's own title"
+    );
+    assert_eq!(
+        proof.source_format, "rss",
+        "the provenance must stay the rss source format"
+    );
+    assert_eq!(
+        proof.source_name, "127.0.0.1",
+        "the provenance must name the feed host"
+    );
+    assert_eq!(
+        proof.assets_count, 1,
+        "the episode enclosure must be stored as exactly one asset"
+    );
+    assert_eq!(
+        proof.media_format.as_deref(),
+        Some("wav"),
+        "the stored media must keep its sniffed wav format"
+    );
+    assert!(
+        proof.start_node_audio_asset_id.is_some(),
+        "the start node must reference the stored audio asset"
     );
 }
 
