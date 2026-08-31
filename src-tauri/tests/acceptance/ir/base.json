@@ -82,6 +82,22 @@
     } ],
     "examples" : [ ]
   }, {
+    "name" : "Signaler une page sans épisode audio",
+    "steps" : [ {
+      "keyword" : "Given",
+      "text" : "la page est accessible mais ne contient aucun épisode avec un média audio"
+    }, {
+      "keyword" : "When",
+      "text" : "je lance l'import"
+    }, {
+      "keyword" : "Then",
+      "text" : "le système signale qu'aucun média audio n'a été trouvé"
+    }, {
+      "keyword" : "And",
+      "text" : "aucune histoire n'est créée"
+    } ],
+    "examples" : [ ]
+  }, {
     "name" : "Continuer d'importer un flux RSS",
     "steps" : [ {
       "keyword" : "Given",

@@ -46,6 +46,13 @@ pub struct SharedState {
     s5_server: Option<FixtureHttpServer>,
     /// S5: the (case, motivated refusal) pairs collected by the When step.
     s5_refusals: Vec<(S5Case, AppError)>,
+    /// S6: the reachable fixture server serving the audio-less page,
+    /// kept alive until the scenario ends.
+    s6_server: Option<FixtureHttpServer>,
+    /// S6: the fixture page url.
+    s6_page_url: Option<String>,
+    /// S6: the motivated refusal collected by the When step.
+    s6_refusal: Option<AppError>,
     /// S7: the local fixture feed server kept alive until the scenario
     /// ends (the accept re-fetches feed and enclosure).
     s7_server: Option<FixtureHttpServer>,
@@ -115,6 +122,21 @@ impl SharedState {
     }
     fn s5_refusals_mut(&mut self) -> &mut Vec<(S5Case, AppError)> {
         &mut self.s5_refusals
+    }
+    fn s6_server_mut(&mut self) -> &mut Option<FixtureHttpServer> {
+        &mut self.s6_server
+    }
+    fn s6_page_url(&self) -> &Option<String> {
+        &self.s6_page_url
+    }
+    fn s6_page_url_mut(&mut self) -> &mut Option<String> {
+        &mut self.s6_page_url
+    }
+    fn s6_refusal(&self) -> &Option<AppError> {
+        &self.s6_refusal
+    }
+    fn s6_refusal_mut(&mut self) -> &mut Option<AppError> {
+        &mut self.s6_refusal
     }
     fn s7_server_mut(&mut self) -> &mut Option<FixtureHttpServer> {
         &mut self.s7_server
@@ -280,6 +302,14 @@ pub fn handle(world: &mut World, scenario: &str, step: &str) {
             s5_assert_reason(world)
         }
         ("Signaler une page inaccessible", "aucune histoire n'est créée") => assert_no_story_created(),
+        ("Signaler une page sans épisode audio", "la page est accessible mais ne contient aucun épisode avec un média audio") => {
+            s6_document_audioless_page(world)
+        }
+        ("Signaler une page sans épisode audio", "je lance l'import") => s6_run_import(world),
+        ("Signaler une page sans épisode audio", "le système signale qu'aucun média audio n'a été trouvé") => {
+            s6_assert_report(world)
+        }
+        ("Signaler une page sans épisode audio", "aucune histoire n'est créée") => assert_no_story_created(),
         ("Continuer d'importer un flux RSS", "l'URL fournie correspond à un flux RSS valide") => {
             s7_document_feed(world)
         }
@@ -442,6 +472,69 @@ fn s5_assert_reason(world: &mut World) {
     assert_ne!(
         seen_messages[0], seen_messages[1],
         "S5 requires a distinct user-facing reason per access-failure case"
+    );
+}
+
+// ===== S6 page sans média audio (TDD-5) =====
+//
+// S6 : une page ACCESSIBLE qui ne porte aucun média audio doit être
+// signalée comme telle (« aucun média audio n'a été trouvé ») — jamais
+// laissée filer en aperçu vide, jamais muette.
+
+/// S6 — Given: the local fixture page is reachable (HTTP 200) but
+/// carries no audio media at all: no audio link, no `<audio>` element,
+/// no JSON-LD contentUrl.
+fn s6_document_audioless_page(world: &mut World) {
+    let server = start_fixture_http_server(|_| {
+        let page = "<html><head><title>Page sans média</title></head>\
+                    <body><h1>Page sans média</h1><p>Aucun épisode ici.</p></body></html>"
+            .as_bytes()
+            .to_vec();
+        vec![("/page".to_owned(), 200, page)]
+    });
+    let url = format!("{}/page", server.base);
+    *world.state.s6_server_mut() = Some(server);
+    *world.state.s6_page_url_mut() = Some(url);
+}
+
+/// S6 — When: the import on the audio-less page is refused with the
+/// dedicated report; a successful (even empty) preview would be a
+/// contract violation.
+fn s6_run_import(world: &mut World) {
+    let url = world
+        .state
+        .s6_page_url()
+        .clone()
+        .expect("the S6 Given step must document the page url");
+    let outcome = web_episode_extraction::preview_web_podcast(
+        official_content_sources(),
+        &url,
+        IMPORT_BUDGET,
+    );
+    match outcome {
+        Err(err) => *world.state.s6_refusal_mut() = Some(err),
+        Ok(_) => panic!("a page without any audio media must never produce a preview"),
+    }
+}
+
+/// S6 — Then: the report states that no audio media was found — the
+/// user-facing message is the contract wording, and the `no_audio_media`
+/// stage tag is the observable proof of the dedicated failure mode.
+fn s6_assert_report(world: &mut World) {
+    let err = world
+        .state
+        .s6_refusal()
+        .clone()
+        .expect("the S6 When step must have collected the refusal");
+    assert_eq!(
+        err.message,
+        "Aucun média audio n'a été trouvé.",
+        "the report must state that no audio media was found"
+    );
+    let value = serde_json::to_value(&err).expect("ser");
+    assert_eq!(
+        value["details"]["stage"], "no_audio_media",
+        "the refusal must carry its dedicated stage tag"
     );
 }
 

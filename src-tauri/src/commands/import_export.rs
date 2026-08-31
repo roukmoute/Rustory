@@ -1217,10 +1217,70 @@ mod tests {
         assert!(!err.message.trim().is_empty());
     }
 
+    /// TDD-5: the minimal one-route local server serving the S6 page —
+    /// a reachable page that carries no audio media at all.
+    struct S6FixtureServer {
+        base: String,
+        stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl Drop for S6FixtureServer {
+        fn drop(&mut self) {
+            self.stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    fn start_s6_fixture_server() -> S6FixtureServer {
+        use std::io::{Read, Write};
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind 127.0.0.1:0");
+        let addr = listener.local_addr().expect("local address");
+        let base = format!("http://{addr}");
+        let stop = Arc::new(AtomicBool::new(false));
+        let worker_stop = stop.clone();
+        std::thread::spawn(move || {
+            let page = "<html><head><title>Page sans média</title></head>\
+                        <body><h1>Page sans média</h1><p>Aucun épisode ici.</p></body></html>";
+            for stream in listener.incoming() {
+                if worker_stop.load(Ordering::SeqCst) {
+                    break;
+                }
+                let Ok(mut stream) = stream else {
+                    continue
+                };
+                let _ = stream.set_read_timeout(Some(Duration::from_secs(1)));
+                let mut request = [0u8; 4096];
+                let _ = stream.read(&mut request).unwrap_or(0);
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    page.len()
+                );
+                let _ = stream.write_all(response.as_bytes());
+                let _ = stream.write_all(page.as_bytes());
+                let _ = stream.flush();
+            }
+        });
+        S6FixtureServer { base, stop }
+    }
+
     #[test]
-    fn test_fetch_web_podcast_preview_propagates_parsing_error() {
-        // Parsing errors should be propagated
-        assert!(true); // Placeholder - real test would require mocking
+    fn test_fetch_web_podcast_preview_reports_page_without_audio_media() {
+        // TDD-5: this replaces the former `propagates_parsing_error`
+        // placeholder — a reachable page without any audio media must
+        // surface the dedicated report, not an empty preview.
+        let server = start_s6_fixture_server();
+        let url = format!("{}/page", server.base);
+        let err = web_episode_extraction::preview_web_podcast(
+            official_content_sources(),
+            &url,
+            WEB_FETCH_BUDGET,
+        )
+        .expect_err("a page without any audio media must never produce a preview");
+        assert_eq!(err.code, AppErrorCode::ImportFailed);
+        assert_eq!(err.message, "Aucun média audio n'a été trouvé.");
+        let value = serde_json::to_value(&err).expect("ser");
+        assert_eq!(value["details"]["stage"], "no_audio_media");
     }
 }
 
@@ -1258,13 +1318,22 @@ pub async fn fetch_web_podcast_preview(
                 },
             );
         }
-        Err(_err) => {
+        Err(err) => {
+            // The diagnostics mirror the ACTUAL error: the wire code and
+            // the `details.source` closed set — a page without any audio
+            // media reports `IMPORT_FAILED` / `parsing`, a transport
+            // failure keeps `RSS_SOURCE_UNREACHABLE` / its transport
+            // source. The hardcoded `request` tag would have lied here.
+            let code = serde_json::to_value(&err.code)
+                .ok()
+                .and_then(|value| value.as_str().map(str::to_string))
+                .unwrap_or_else(|| "UNKNOWN".to_string());
             let _ = import_log::record_event(
                 &app,
                 import_log::Event::WebPreviewFailed {
                     host: feed_url_host(&web_url_for_log).unwrap_or_default(),
-                    code: "RssSourceUnreachable".to_string(),
-                    source: "request".to_string(),
+                    code,
+                    source: error_detail(&err, "source"),
                 },
             );
         }

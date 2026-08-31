@@ -519,6 +519,37 @@ fn container_summary(container: &ElementRef<'_>) -> String {
         .unwrap_or_default()
 }
 
+/// An extracted episode reaches the preview only when it is honest end
+/// to end: a non-empty title (after trim) AND a present, non-empty audio
+/// media url. Untitled or audio-less elements are rejected here, before
+/// the preview — the preview never carries an episode it could not play.
+fn keep_valid_episodes(episodes: Vec<WebEpisode>) -> Vec<WebEpisode> {
+    episodes
+        .into_iter()
+        .filter(|episode| {
+            !episode.title.trim().is_empty()
+                && episode
+                    .audio_url
+                    .as_deref()
+                    .map(|url| !url.trim().is_empty())
+                    .unwrap_or(false)
+        })
+        .collect()
+}
+
+/// S6 dedicated report: the page is reachable but carries no usable
+/// audio media — the import stops here, no story can be built.
+fn no_audio_media_error() -> AppError {
+    AppError::import_failed(
+        "Aucun média audio n'a été trouvé.",
+        "Vérifie que la page contient des épisodes audio puis réessaie.",
+    )
+    .with_details(serde_json::json!({
+        "source": "parsing",
+        "stage": "no_audio_media",
+    }))
+}
+
 /// Phase 1 — preview a web podcast page and extract episode references.
 pub fn preview_web_podcast(
     sources: &[ContentSourceLine],
@@ -534,6 +565,10 @@ pub fn preview_web_podcast(
     let html_content = fetch_html(web_url, budget)?;
     let document = Html::parse_document(&html_content);
     let episodes = extract_web_episodes(&document, web_url, &html_content, budget);
+    let episodes = keep_valid_episodes(episodes);
+    if episodes.is_empty() {
+        return Err(no_audio_media_error());
+    }
 
     // Compute checksum of the page content (not the full URL, only host + path for PII)
     let mut hasher = Sha256::new();
@@ -1009,8 +1044,12 @@ mod tests {
     /// as a non-RSS web source carrying its own host.
     #[test]
     fn test_preview_web_podcast_carries_page_host_as_source() {
+        // TDD-5: the fixture now carries one honest episode — a reachable
+        // page WITHOUT any audio media is a S6 refusal, not a preview.
         let server = start_fixture_http_server(|_| {
-            vec![("/page".to_owned(), 200, "<html><body><p>page sans episode</p></body></html>".to_owned())]
+            let page = "<html><body><section><a href=\"https://fixture.example.org/media/episode.wav\">Episode</a></section></body></html>"
+                .to_owned();
+            vec![("/page".to_owned(), 200, page)]
         });
         let url = format!("{}/page", server.base);
         let outcome =
@@ -1409,5 +1448,73 @@ mod tests {
             outcome.items[3].image_url.is_none(),
             "an episode without image must stay image-less without error"
         );
+    }
+
+    /// S6: an accessible page that carries no audio media at all must
+    /// never settle as an empty preview — the dedicated report stops
+    /// the import before any story could be built.
+    #[test]
+    fn test_preview_web_podcast_reports_no_audio_media_when_page_has_none() {
+        let server = start_fixture_http_server(|_base| {
+            let page = "<html><head><title>Page sans média</title></head>\
+                        <body><h1>Page sans média</h1><p>Aucun épisode ici.</p></body></html>"
+                .to_owned();
+            vec![("/page".to_owned(), 200, page)]
+        });
+        let url = format!("{}/page", server.base);
+        let err = preview_web_podcast(
+            official_content_sources(),
+            &url,
+            Duration::from_secs(30),
+        )
+        .expect_err("a page without any audio media must never produce an empty preview");
+        assert_eq!(
+            err.code,
+            crate::domain::shared::AppErrorCode::ImportFailed
+        );
+        assert_eq!(err.message, "Aucun média audio n'a été trouvé.");
+        let value = serde_json::to_value(&err).expect("ser");
+        assert_eq!(value["details"]["source"], "parsing");
+        assert_eq!(value["details"]["stage"], "no_audio_media");
+    }
+
+    /// The preview filter keeps an episode only when the title is
+    /// non-empty (after trim) AND a non-empty audio url is present:
+    /// untitled or audio-less elements never reach the preview.
+    #[test]
+    fn test_keep_valid_episodes_rejects_untitled_and_audioless_items() {
+        let episodes = vec![
+            WebEpisode {
+                title: "Valide".to_owned(),
+                summary: String::new(),
+                audio_url: Some("https://fixture.example.org/media/valide.m4a".to_owned()),
+                image_url: None,
+            },
+            WebEpisode {
+                title: String::new(),
+                summary: String::new(),
+                audio_url: Some("https://fixture.example.org/media/sans-titre.m4a".to_owned()),
+                image_url: None,
+            },
+            WebEpisode {
+                title: "   ".to_owned(),
+                summary: String::new(),
+                audio_url: Some("https://fixture.example.org/media/blanc.m4a".to_owned()),
+                image_url: None,
+            },
+            WebEpisode {
+                title: "Sans audio".to_owned(),
+                summary: String::new(),
+                audio_url: None,
+                image_url: None,
+            },
+        ];
+        let kept = keep_valid_episodes(episodes);
+        assert_eq!(
+            kept.len(),
+            1,
+            "only the honest episode survives, got: {kept:?}"
+        );
+        assert_eq!(kept[0].title, "Valide");
     }
 }
