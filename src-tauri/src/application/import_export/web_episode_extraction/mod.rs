@@ -267,12 +267,18 @@ fn no_audio_media_error() -> AppError {
     }))
 }
 
-/// Phase 1 — preview a web podcast page and extract episode references.
-pub fn preview_web_podcast(
+/// The sequence shared by both web facades, in the frozen order: the
+/// policy gate (no network while the source is disabled), the entry URL
+/// guard (still before any network dispatch), fetch, parse, extract
+/// (the JSON-LD `ItemList` pass, then the DOM fallback), the validity
+/// filter — and the S6 refusal when the page carries no usable audio.
+/// Returns the entry host, the fetched page bytes (the provenance
+/// artifact) and the valid episodes in page order.
+fn fetch_extracted_episodes(
     sources: &[ContentSourceLine],
     web_url: &str,
     budget: Duration,
-) -> Result<WebPreviewOutcome, AppError> {
+) -> Result<(String, String, Vec<WebEpisode>), AppError> {
     // Policy gate: check if web source is enabled before any network dispatch
     ensure_source_enabled(sources, ContentSourceKind::Web)?;
 
@@ -286,6 +292,18 @@ pub fn preview_web_podcast(
     if episodes.is_empty() {
         return Err(no_audio_media_error());
     }
+
+    Ok((source_host, html_content, episodes))
+}
+
+/// Phase 1 — preview a web podcast page and extract episode references.
+pub fn preview_web_podcast(
+    sources: &[ContentSourceLine],
+    web_url: &str,
+    budget: Duration,
+) -> Result<WebPreviewOutcome, AppError> {
+    let (source_host, _html_content, episodes) =
+        fetch_extracted_episodes(sources, web_url, budget)?;
 
     // The fingerprint of the PREVIEWED episode set (title + resolved audio +
     // resolved image, in page order) — the accept re-proves exactly this.
@@ -324,18 +342,8 @@ pub fn prepare_web_story_creation(
     budget: Duration,
     app_data_dir: Option<&Path>,
 ) -> Result<WebAcceptPhase, AppError> {
-    ensure_source_enabled(sources, ContentSourceKind::Web)?;
-
-    // Entry guard BEFORE any network dispatch.
-    let source_host = validate_web_entry_url(web_url)?;
-
-    let html_content = fetch_html(web_url, budget)?;
-    let document = Html::parse_document(&html_content);
-    let episodes = extract_web_episodes(&document, web_url, budget);
-    let episodes = keep_valid_episodes(episodes);
-    if episodes.is_empty() {
-        return Err(no_audio_media_error());
-    }
+    let (source_host, html_content, episodes) =
+        fetch_extracted_episodes(sources, web_url, budget)?;
     if page_checksum_of(&episodes, web_url) != expected_page_checksum {
         // The page diverged since the preview — refuse honestly, promote
         // NOTHING (the store is not even touched on this path).
