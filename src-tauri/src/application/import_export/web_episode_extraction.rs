@@ -416,17 +416,16 @@ fn episodes_from_item_list(
 fn extract_web_episodes(
     document: &Html,
     base_url: &str,
-    html: &str,
     budget: Duration,
 ) -> Vec<WebEpisode> {
     let mut episodes = episodes_from_item_list(document, base_url, budget);
     if episodes.is_empty() {
-        episodes = parse_web_episodes(html, base_url);
+        episodes = parse_web_episodes(document, base_url);
     }
     episodes
 }
 
-/// Parse an HTML page and extract its episodes honestly: one episode per
+/// Extract the episodes of an already-parsed page honestly: one episode per
 /// titled audio media present in the page — an `<a>` whose href ends with
 /// a known audio extension, or an `<audio>` (or its `<source>`) carrying
 /// a src — in DOCUMENT ORDER. The title is the media's own anchor text or
@@ -434,10 +433,8 @@ fn extract_web_episodes(
 /// without any title is not an episode and is skipped. The audio url is
 /// resolved against the page and kept once per url; the image of the
 /// media's container is carried only when the page provides one.
-fn parse_web_episodes(html_content: &str, base_url: &str) -> Vec<WebEpisode> {
+fn parse_web_episodes(document: &Html, base_url: &str) -> Vec<WebEpisode> {
     let mut episodes = Vec::new();
-    let document = Html::parse_document(html_content);
-
     let media_selector = match Selector::parse("a[href], audio[src], audio source[src]") {
         Ok(selector) => selector,
         Err(_) => return Vec::new(),
@@ -655,7 +652,7 @@ pub fn preview_web_podcast(
 
     let html_content = fetch_html(web_url, budget)?;
     let document = Html::parse_document(&html_content);
-    let episodes = extract_web_episodes(&document, web_url, &html_content, budget);
+    let episodes = extract_web_episodes(&document, web_url, budget);
     let episodes = keep_valid_episodes(episodes);
     if episodes.is_empty() {
         return Err(no_audio_media_error());
@@ -705,7 +702,7 @@ pub fn prepare_web_story_creation(
 
     let html_content = fetch_html(web_url, budget)?;
     let document = Html::parse_document(&html_content);
-    let episodes = extract_web_episodes(&document, web_url, &html_content, budget);
+    let episodes = extract_web_episodes(&document, web_url, budget);
     let episodes = keep_valid_episodes(episodes);
     if episodes.is_empty() {
         return Err(no_audio_media_error());
@@ -1207,7 +1204,7 @@ mod tests {
     fn test_parse_web_episodes_returns_empty_on_no_episode() {
 
         let html = "<html><body><p>No episodes here</p></body></html>";
-        let episodes = parse_web_episodes(html, "https://fixture.example.org/page");
+        let episodes = parse_web_episodes(&Html::parse_document(html), "https://fixture.example.org/page");
         assert!(episodes.is_empty());
     }
 
@@ -1631,7 +1628,7 @@ mod tests {
             </section>\
             <a href=\"https://fixture.example.org/media/sans-titre.mp3\"></a>\
           </body></html>";
-        let episodes = parse_web_episodes(html, "https://fixture.example.org/page");
+        let episodes = parse_web_episodes(&Html::parse_document(html), "https://fixture.example.org/page");
         assert_eq!(
             episodes.len(),
             4,
@@ -1685,7 +1682,7 @@ mod tests {
               <a href=\"https://fixture.example.org/media/orphelin.mp3\"></a>\
             </article>\
           </body></html>";
-        let episodes = parse_web_episodes(html, "https://fixture.example.org/page");
+        let episodes = parse_web_episodes(&Html::parse_document(html), "https://fixture.example.org/page");
         assert!(
             !episodes
                 .iter()
