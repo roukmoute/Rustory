@@ -32,9 +32,9 @@ use std::time::Duration;
 
 use crate::application::story::now_iso_ms;
 use crate::domain::import::{
-    content_source_activation, feed_url_host, parse_rss, resolve_rss_item, rss_import_state,
-    rss_item_findings, rss_item_fingerprint, ContentSourceActivation, ContentSourceKind,
-    ContentSourceLine, RssAnalysis, RssItemRef, RSS_FALLBACK_TITLE_PREFIX,
+    feed_url_host, parse_rss, resolve_rss_item, rss_import_state, rss_item_findings,
+    rss_item_fingerprint, ContentSourceKind, ContentSourceLine, RssAnalysis, RssItemRef,
+    RSS_FALLBACK_TITLE_PREFIX,
     RSS_SOURCE_FORMAT_VERSION,
 };
 use crate::domain::shared::AppError;
@@ -52,6 +52,8 @@ use crate::ipc::dto::import_export::{
 };
 use crate::ipc::dto::StoryCardDto;
 
+use super::creation_common::{db_commit_error, ensure_source_enabled};
+
 /// The application-level outcome of previewing a feed: the HOST (the only
 /// address fragment that ever crosses further), the SHA-256 fingerprint of
 /// the fetched bytes and the typed domain analysis.
@@ -60,23 +62,6 @@ pub struct RssPreviewOutcome {
     pub source_host: String,
     pub feed_checksum: String,
     pub analysis: RssAnalysis,
-}
-
-/// The content-source policy gate, consulted by BOTH facades (preview AND
-/// accept) BEFORE the address validation and BEFORE any network dispatch:
-/// a policy refusal never produces a byte of traffic (the recording mock
-/// proves zero fetch). The matrix travels as a parameter — the commands
-/// hand `official_content_sources()`, tests inject custom distributions —
-/// so the policy stays consulted in one place per flow. Fail-closed: a
-/// kind missing from the received matrix refuses exactly like a
-/// `NotActivated` one (the gate never enables by default).
-fn ensure_rss_source_enabled(sources: &[ContentSourceLine]) -> Result<(), AppError> {
-    match content_source_activation(sources, ContentSourceKind::Rss) {
-        ContentSourceActivation::Enabled => Ok(()),
-        ContentSourceActivation::NotActivated | ContentSourceActivation::BlockedByPolicy => {
-            Err(AppError::content_source_unavailable(ContentSourceKind::Rss))
-        }
-    }
 }
 
 /// Phase 1 — fetch + parse with ZERO mutation. Only TRANSPORT failures
@@ -90,7 +75,7 @@ pub fn preview_rss_source(
     url: &str,
     budget: Duration,
 ) -> Result<RssPreviewOutcome, AppError> {
-    ensure_rss_source_enabled(sources)?;
+    ensure_source_enabled(sources, ContentSourceKind::Rss)?;
     let source_host = feed_url_host(url).ok_or_else(invalid_feed_url_error)?;
     let bytes = source.fetch(url, budget)?;
     let feed_checksum = content_checksum_bytes(&bytes);
@@ -189,7 +174,7 @@ pub fn prepare_rss_story_creation(
     budget: Duration,
     app_data_dir: Option<&std::path::Path>,
 ) -> Result<RssAcceptPhase, AppError> {
-    ensure_rss_source_enabled(sources)?;
+    ensure_source_enabled(sources, ContentSourceKind::Rss)?;
     let source_host = feed_url_host(url).ok_or_else(invalid_feed_url_error)?;
     // RE-fetch + re-parse from zero: the reference is a pointer, never an
     // authority; the checksum persisted below fingerprints THESE bytes.
@@ -475,15 +460,6 @@ pub fn invalid_feed_url_error() -> AppError {
     }))
 }
 
-/// The blocking worker task could not be joined (command layer).
-pub fn spawn_blocking_join_error() -> AppError {
-    AppError::import_failed(
-        "Création interrompue de façon inattendue.",
-        "Réessaie ; si le problème persiste, redémarre Rustory.",
-    )
-    .with_details(serde_json::json!({ "source": "spawn_blocking_join" }))
-}
-
 /// The system clock could not produce the birth timestamp. Same closed
 /// `IMPORT_FAILED` taxonomy as the sibling creation flows — the network
 /// code stays STRICTLY transport.
@@ -498,31 +474,12 @@ fn clock_unavailable_error() -> AppError {
     }))
 }
 
-fn db_commit_error(err: &rusqlite::Error, stage: &'static str) -> AppError {
-    let kind = match err {
-        rusqlite::Error::SqliteFailure(code, _) => match code.code {
-            rusqlite::ErrorCode::ConstraintViolation => "constraint_violation",
-            rusqlite::ErrorCode::DatabaseBusy => "busy",
-            rusqlite::ErrorCode::DatabaseLocked => "locked",
-            _ => "other",
-        },
-        _ => "other",
-    };
-    AppError::import_failed(
-        "Création impossible: enregistrement local refusé.",
-        "Réessaie ; si le problème persiste, consulte les traces locales.",
-    )
-    .with_details(serde_json::json!({
-        "source": "db_commit",
-        "stage": stage,
-        "kind": kind,
-    }))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::import::{official_content_sources, rss_item_ref, ImportState};
+    use crate::domain::import::{
+        official_content_sources, rss_item_ref, ContentSourceActivation, ImportState,
+    };
     use crate::domain::shared::AppErrorCode;
     use crate::infrastructure::db;
     use crate::infrastructure::device::MockRssFeedSource;

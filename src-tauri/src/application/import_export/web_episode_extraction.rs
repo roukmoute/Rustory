@@ -12,8 +12,8 @@ use std::time::Duration;
 
 use crate::application::story::now_iso_ms;
 use crate::domain::import::{
-    content_source_activation, feed_url_host, rss_import_state, ContentSourceActivation,
-    ContentSourceKind, ContentSourceLine, ImportState, RecognitionAspect, RecognitionCategory,
+    feed_url_host, rss_import_state, ContentSourceKind, ContentSourceLine, ImportState,
+    RecognitionAspect, RecognitionCategory,
     RecognitionFinding, RSS_FALLBACK_TITLE_PREFIX,
 };
 use crate::domain::shared::AppError;
@@ -29,6 +29,8 @@ use crate::ipc::dto::import_export::{
     import_report_dto, serialize_findings_summary, state_db_tag, state_dto,
 };
 use crate::ipc::dto::StoryCardDto;
+
+use super::creation_common::{db_commit_error, ensure_source_enabled};
 use scraper::{Element, ElementRef, Html, Selector};
 use sha2::{Digest, Sha256};
 use serde_json::Value;
@@ -48,17 +50,6 @@ pub struct WebEpisode {
     pub summary: String,
     pub audio_url: Option<String>,
     pub image_url: Option<String>,
-}
-
-/// The content-source policy gate, consulted by BOTH facades (preview AND
-/// accept) BEFORE the address validation and BEFORE any network dispatch.
-fn ensure_web_source_enabled(sources: &[ContentSourceLine]) -> Result<(), AppError> {
-    match content_source_activation(sources, ContentSourceKind::Web) {
-        ContentSourceActivation::Enabled => Ok(()),
-        ContentSourceActivation::NotActivated | ContentSourceActivation::BlockedByPolicy => {
-            Err(AppError::content_source_unavailable(ContentSourceKind::Web))
-        }
-    }
 }
 
 /// The entry guard, consulted by BOTH web facades (preview AND accept)
@@ -639,7 +630,7 @@ pub fn preview_web_podcast(
     budget: Duration,
 ) -> Result<WebPreviewOutcome, AppError> {
     // Policy gate: check if web source is enabled before any network dispatch
-    ensure_web_source_enabled(sources)?;
+    ensure_source_enabled(sources, ContentSourceKind::Web)?;
 
     // Entry guard BEFORE any network dispatch.
     let source_host = validate_web_entry_url(web_url)?;
@@ -689,7 +680,7 @@ pub fn prepare_web_story_creation(
     budget: Duration,
     app_data_dir: Option<&Path>,
 ) -> Result<WebAcceptPhase, AppError> {
-    ensure_web_source_enabled(sources)?;
+    ensure_source_enabled(sources, ContentSourceKind::Web)?;
 
     // Entry guard BEFORE any network dispatch.
     let source_host = validate_web_entry_url(web_url)?;
@@ -849,28 +840,6 @@ fn prepare_asset(stored: StoredMedia, media_dir: &Path) -> PreparedWebAsset {
         file_name: stored.file_name.clone(),
         promoted_path: media_dir.join(stored.file_name),
     }
-}
-
-/// The error when a db commit fails.
-fn db_commit_error(err: &rusqlite::Error, stage: &'static str) -> AppError {
-    let kind = match err {
-        rusqlite::Error::SqliteFailure(code, _) => match code.code {
-            rusqlite::ErrorCode::ConstraintViolation => "constraint_violation",
-            rusqlite::ErrorCode::DatabaseBusy => "busy",
-            rusqlite::ErrorCode::DatabaseLocked => "locked",
-            _ => "other",
-        },
-        _ => "other",
-    };
-    AppError::import_failed(
-        "Création impossible: enregistrement local refusé.",
-        "Réessaie ; si le problème persiste, consulte les traces locales.",
-    )
-    .with_details(serde_json::json!({
-        "source": "db_commit",
-        "stage": stage,
-        "kind": kind,
-    }))
 }
 
 /// Phase 2b — the single atomic transaction (`stories` + the provenance
@@ -1063,15 +1032,6 @@ pub fn invalid_web_url_error() -> AppError {
     }))
 }
 
-/// The error when a spawn_blocking join fails.
-pub fn spawn_blocking_join_error() -> AppError {
-    AppError::import_failed(
-        "Création interrompue de façon inattendue.",
-        "Réessaie ; si le problème persiste, redémarre Rustory.",
-    )
-    .with_details(serde_json::json!({ "source": "spawn_blocking_join" }))
-}
-
 /// The fully re-proven, ready-to-commit ingestion — everything the atomic
 /// DB transaction needs, produced WITHOUT any DB access
 /// ([`prepare_web_story_creation`]) so the network fetch never serializes
@@ -1116,38 +1076,6 @@ mod tests {
         assert_eq!(
             err.code,
             crate::domain::shared::AppErrorCode::RssSourceUnreachable
-        );
-    }
-
-    #[test]
-    fn test_spawn_blocking_join_error() {
-        let err = spawn_blocking_join_error();
-        assert_eq!(err.code, crate::domain::shared::AppErrorCode::ImportFailed);
-    }
-
-    #[test]
-    fn test_ensure_web_source_enabled_rejects_not_activated() {
-        let sources = vec![ContentSourceLine {
-            kind: ContentSourceKind::Web,
-            activation: ContentSourceActivation::NotActivated,
-        }];
-        let err = ensure_web_source_enabled(&sources).expect_err("must reject");
-        assert_eq!(
-            err.code,
-            crate::domain::shared::AppErrorCode::ContentSourceUnavailable
-        );
-    }
-
-    #[test]
-    fn test_ensure_web_source_enabled_rejects_blocked() {
-        let sources = vec![ContentSourceLine {
-            kind: ContentSourceKind::Web,
-            activation: ContentSourceActivation::BlockedByPolicy,
-        }];
-        let err = ensure_web_source_enabled(&sources).expect_err("must reject");
-        assert_eq!(
-            err.code,
-            crate::domain::shared::AppErrorCode::ContentSourceUnavailable
         );
     }
 

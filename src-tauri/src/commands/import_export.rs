@@ -7,7 +7,8 @@ use tauri_plugin_dialog::{DialogExt, FilePath};
 
 use crate::application::import_export::import::read_artifact_bounded;
 use crate::application::import_export::{
-    self, import, rss_creation, structured_creation, web_episode_extraction, ExportStoryInput,
+    self, creation_common, import, rss_creation, structured_creation, web_episode_extraction,
+    ExportStoryInput,
     ImportAnalysis, RssAcceptPhase, RssCreationOutcome, WebCreationOutcome,
 };
 use crate::application::story::get_story_detail;
@@ -742,7 +743,7 @@ pub async fn fetch_rss_source_preview(
         )
     })
     .await
-    .map_err(|_| rss_creation::spawn_blocking_join_error())?;
+    .map_err(|_| creation_common::spawn_blocking_join_error())?;
 
     match &outcome {
         Ok(preview) => {
@@ -811,7 +812,7 @@ pub async fn accept_rss_story_creation(
         }
     })
     .await
-    .map_err(|_| rss_creation::spawn_blocking_join_error())?;
+    .map_err(|_| creation_common::spawn_blocking_join_error())?;
 
     match &outcome {
         Ok(RssCreationOutcome::Created { story }) => {
@@ -1362,7 +1363,7 @@ pub async fn fetch_web_podcast_preview(
         )
     })
     .await
-    .map_err(|_| web_episode_extraction::spawn_blocking_join_error())?;
+    .map_err(|_| creation_common::spawn_blocking_join_error())?;
 
     match &outcome {
         Ok(preview) => {
@@ -1446,7 +1447,7 @@ pub async fn accept_web_podcast_creation(
             }
         })
         .await
-        .map_err(|_| web_episode_extraction::spawn_blocking_join_error())?;
+        .map_err(|_| creation_common::spawn_blocking_join_error())?;
 
     match &outcome {
         Ok(WebCreationOutcome::Created { story }) => {
