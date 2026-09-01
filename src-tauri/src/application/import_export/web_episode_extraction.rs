@@ -593,23 +593,40 @@ fn no_audio_media_error() -> AppError {
     }))
 }
 
-/// The stable fingerprint of a previewed episode SET: the ordered SHA-256
-/// of every episode's `title`, RESOLVED audio url and RESOLVED image url
-/// (document order, `\0` separated). Preview and accept compute it on the
-/// SAME extraction, so a diverged page (an added, removed or re-pointed
-/// episode) is the honest `SourceChanged` refusal — the preview is a
-/// pointer to this exact state, never content.
-fn page_checksum_of(episodes: &[WebEpisode], base_url: &str) -> String {
-    let mut hasher = Sha256::new();
+/// The self-delimiting frame of an ordered episode SET: the episode
+/// count as a big-endian u32, then — per episode, in document order —
+/// the three fingerprint fields, each prefixed by its byte length as a
+/// big-endian u32 (`title`, resolved audio url, resolved image url).
+/// A carried byte (U+0000 included) can never be mistaken for a field
+/// boundary, so the frame round-trips to exactly ONE episode set —
+/// two DIFFERENT episode sets always frame to different bytes.
+fn framed_episode_set(episodes: &[WebEpisode], base_url: &str) -> Vec<u8> {
+    let mut frame = Vec::new();
+    frame.extend_from_slice(&(episodes.len() as u32).to_be_bytes());
     for episode in episodes {
-        hasher.update(episode.title.as_bytes());
-        hasher.update([0u8]);
-        hasher.update(resolved_media_field(episode.audio_url.as_deref(), base_url).as_bytes());
-        hasher.update([0u8]);
-        hasher.update(resolved_media_field(episode.image_url.as_deref(), base_url).as_bytes());
-        hasher.update([0u8]);
+        let audio = resolved_media_field(episode.audio_url.as_deref(), base_url);
+        let image = resolved_media_field(episode.image_url.as_deref(), base_url);
+        for field in [
+            episode.title.as_bytes(),
+            audio.as_bytes(),
+            image.as_bytes(),
+        ] {
+            frame.extend_from_slice(&(field.len() as u32).to_be_bytes());
+            frame.extend_from_slice(field);
+        }
     }
-    format!("{:x}", hasher.finalize())
+    frame
+}
+
+/// The stable fingerprint of a previewed episode SET: the SHA-256 (hex)
+/// of its self-delimiting [`framed_episode_set`] — every episode's
+/// `title`, RESOLVED audio url and RESOLVED image url in document
+/// order. Preview and accept compute it on the SAME extraction, so a
+/// diverged page (an added, removed or re-pointed episode) is the
+/// honest `SourceChanged` refusal — the preview is a pointer to this
+/// exact state, never content.
+fn page_checksum_of(episodes: &[WebEpisode], base_url: &str) -> String {
+    format!("{:x}", Sha256::digest(framed_episode_set(episodes, base_url)))
 }
 
 /// One episode media reference, absolute: `resolve_url` is idempotent on
@@ -1349,6 +1366,74 @@ mod tests {
         assert_eq!(resolve_url(base, "   "), None);
     }
 
+    /// Property (architect-audit): over every GENERATED (base, raw) shape
+    /// — scheme × sober host[:port] × path shape × url branch — the
+    /// resolution is an absolute http(s) url, STABLE under re-resolution
+    /// (idempotent), and keeps the base authority: a protocol-relative
+    /// raw is the only override. The shapes are generated, not picked:
+    /// this pins the resolver's invariants beyond the hand-picked
+    /// examples of `test_resolve_url_pins_every_relative_branch`.
+    #[test]
+    fn test_resolve_url_property_absolute_idempotent_authority_stable() {
+        let schemes = ["http", "https"];
+        let hosts = ["host.example", "www.example.fr:8080", "sub.domain.example:443"];
+        let paths = ["", "/", "/shows", "/shows/selection", "/a/b/c"];
+        let raws = [
+            "https://other.example.org/x/y.m4a",
+            "http://other.example.org/z.ogg",
+            "//cdn.example.org/track.m4a",
+            "/root/relative.mp3",
+            "bare.m4a",
+            "sub/dir/file.m4a",
+        ];
+        for scheme in schemes {
+            for host in hosts {
+                for path in paths {
+                    let base = format!("{scheme}://{host}{path}");
+                    for raw in raws {
+                        let resolved = resolve_url(&base, raw)
+                            .unwrap_or_else(|| panic!("a sober base and a non-blank raw must resolve: base={base:?} raw={raw:?}"));
+                        assert!(
+                            resolved.starts_with("http://") || resolved.starts_with("https://"),
+                            "a resolved url must be absolute http(s): base={base:?} raw={raw:?} got {resolved:?}"
+                        );
+                        // Idempotency: resolving an already-resolved url is the identity.
+                        assert_eq!(
+                            resolve_url(&base, &resolved),
+                            Some(resolved.clone()),
+                            "re-resolution must be the identity: base={base:?} raw={raw:?}"
+                        );
+                        // Authority: the base authority, unless a
+                        // protocol-relative raw overrides it.
+                        let expected_authority = if raw.starts_with("http://")
+                            || raw.starts_with("https://")
+                            || raw.starts_with("//")
+                        {
+                            raw
+                                .trim_start_matches("https://")
+                                .trim_start_matches("http://")
+                                .trim_start_matches("//")
+                                .split('/')
+                                .next()
+                                .unwrap_or("")
+                        } else {
+                            host
+                        };
+                        let authority = resolved
+                            .strip_prefix("http://")
+                            .or_else(|| resolved.strip_prefix("https://"))
+                            .and_then(|rest| rest.split('/').next())
+                            .unwrap_or("");
+                        assert_eq!(
+                            authority, expected_authority,
+                            "authority must be preserved (protocol-relative is the only override): base={base:?} raw={raw:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     /// An episode page whose `@type` is an array (a valid JSON-LD shape)
     /// must be recognized exactly like the string shape.
     #[test]
@@ -1769,6 +1854,284 @@ mod tests {
             "only the honest episode survives, got: {kept:?}"
         );
         assert_eq!(kept[0].title, "Valide");
+    }
+
+    /// Property (architect-audit): the honesty filter is an ORDER-
+    /// PRESERVING SUBSEQUENCE — every kept episode passed the predicate
+    /// (non-empty trimmed title AND non-empty trimmed audio url) at its
+    /// input position, and every passing input episode is kept. The
+    /// titles and audio urls are generated (absent, empty, blank,
+    /// valid), not only the four hand-picked examples.
+    #[test]
+    fn test_keep_valid_episodes_property_order_preserving_subsequence() {
+        let titles = ["", "   ", "Titre", "  Espacé  "];
+        let audios: [Option<&str>; 4] = [None, Some(""), Some("   "), Some("https://fixture.example.org/x.m4a")];
+        for title in titles {
+            for audio in audios {
+                let episode = WebEpisode {
+                    title: title.to_owned(),
+                    summary: String::new(),
+                    audio_url: audio.map(str::to_owned),
+                    image_url: None,
+                };
+                let expected = !episode.title.trim().is_empty()
+                    && episode
+                        .audio_url
+                        .as_deref()
+                        .is_some_and(|url| !url.trim().is_empty());
+                let kept = keep_valid_episodes(vec![episode]);
+                assert_eq!(
+                    kept.len(),
+                    usize::from(expected),
+                    "single-episode predicate: title={title:?} audio={audio:?}"
+                );
+            }
+        }
+        // Order preservation over a mixed generated set.
+        let generated: Vec<WebEpisode> = (0..16)
+            .map(|index| match index % 4 {
+                0 => WebEpisode {
+                    title: String::new(),
+                    summary: String::new(),
+                    audio_url: None,
+                    image_url: None,
+                },
+                1 => WebEpisode {
+                    title: "Valide".to_owned(),
+                    summary: String::new(),
+                    audio_url: Some(format!("https://fixture.example.org/{index}.m4a")),
+                    image_url: None,
+                },
+                2 => WebEpisode {
+                    title: "   ".to_owned(),
+                    summary: String::new(),
+                    audio_url: Some("   ".to_owned()),
+                    image_url: None,
+                },
+                _ => WebEpisode {
+                    title: format!("T{index}"),
+                    summary: String::new(),
+                    audio_url: Some(String::new()),
+                    image_url: None,
+                },
+            })
+            .collect();
+        let kept = keep_valid_episodes(generated.clone());
+        let expected_kept = generated
+            .iter()
+            .filter(|episode| {
+                !episode.title.trim().is_empty()
+                    && episode
+                        .audio_url
+                        .as_deref()
+                        .is_some_and(|url| !url.trim().is_empty())
+            })
+            .map(|episode| (episode.title.as_str(), episode.audio_url.as_deref()))
+            .collect::<Vec<_>>();
+        let kept_pairs = kept
+            .iter()
+            .map(|episode| (episode.title.as_str(), episode.audio_url.as_deref()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            kept_pairs, expected_kept,
+            "the kept set must be exactly the passing subsequence, in input order"
+        );
+    }
+
+    // ===== Preview fingerprint (architect-audit) =====
+    //
+    // The page checksum is the PREVIEW POINTER the accept re-proves
+    // against: two DIFFERENT episode sets must never share it, whatever
+    // bytes the page's fields carry.
+
+    /// RED (architect-audit): a JSON-LD `name` or url may carry U+0000
+    /// (serde_json accepts `\u0000`). The preview pointer must still
+    /// distinguish every episode set: a NUL inside one field must never
+    /// shift the next field's boundary into the same digest.
+    ///
+    /// Set A: episode 1's image ENDS with a NUL (`i\0`). Set B: the
+    /// image keeps only `i` and episode 2's title STARTS with that
+    /// NUL (`\0t2`). Under the NUL-separated framing both sets
+    /// fingerprint to the byte-identical stream `…/i NUL NUL t2 …`
+    /// (separator and carried NUL are the same byte 0x00) — two
+    /// genuinely DIFFERENT episode sets, both passing `keep_valid`.
+    #[test]
+    fn test_page_checksum_distinguishes_sets_with_nul_carried_fields() {
+        let base = "https://fixture.example.org/page";
+        let set_a = vec![
+            WebEpisode {
+                title: "t1".to_owned(),
+                summary: String::new(),
+                audio_url: Some("a1".to_owned()),
+                image_url: Some("i\0".to_owned()),
+            },
+            WebEpisode {
+                title: "t2".to_owned(),
+                summary: String::new(),
+                audio_url: Some("a2".to_owned()),
+                image_url: None,
+            },
+        ];
+        let set_b = vec![
+            WebEpisode {
+                title: "t1".to_owned(),
+                summary: String::new(),
+                audio_url: Some("a1".to_owned()),
+                image_url: Some("i".to_owned()),
+            },
+            WebEpisode {
+                title: "\0t2".to_owned(),
+                summary: String::new(),
+                audio_url: Some("a2".to_owned()),
+                image_url: None,
+            },
+        ];
+        assert_ne!(
+            page_checksum_of(&set_a, base),
+            page_checksum_of(&set_b, base),
+            "a NUL inside a field must not shift the next episode's field boundary into the same checksum: {base:?}"
+        );
+    }
+
+    /// Inverse of [`framed_episode_set`] — the honest decoder the
+    /// round-trip property is asserted against: a big-endian u32
+    /// count, then per episode three (len u32 BE, bytes) fields.
+    fn decode_episode_set_frame(frame: &[u8]) -> Option<Vec<(String, String, String)>> {
+        let mut pos = 0usize;
+        let read_u32 = |pos: &mut usize| -> Option<u32> {
+            let end = pos.checked_add(4)?;
+            if end > frame.len() {
+                return None;
+            }
+            let value = u32::from_be_bytes(frame[*pos..end].try_into().ok()?);
+            *pos = end;
+            Some(value)
+        };
+        let count = read_u32(&mut pos)? as usize;
+        let mut decoded = Vec::with_capacity(count);
+        for _ in 0..count {
+            let mut fields = Vec::with_capacity(3);
+            for _ in 0..3 {
+                let length = read_u32(&mut pos)? as usize;
+                let end = pos.checked_add(length)?;
+                if end > frame.len() {
+                    return None;
+                }
+                fields.push(String::from_utf8(frame[pos..end].to_vec()).ok()?);
+                pos = end;
+            }
+            decoded.push((fields.remove(0), fields.remove(0), fields.remove(0)));
+        }
+        (pos == frame.len()).then_some(decoded)
+    }
+
+    /// GREEN (architect-audit): the frame is SELF-DELIMITING — over a
+    /// GENERATED pool of episode sets (titles/urls carrying NUL,
+    /// blankness, unicode, absent/empty values, relative, root-relative
+    /// and absolute shapes, 0..=2 episodes) every frame decodes back to
+    /// exactly its own (title, resolved audio, resolved image) triples.
+    /// A round-trip over the whole generated domain implies INJECTIVITY
+    /// there: two different sets sharing a frame would both decode
+    /// from it, which is impossible.
+    #[test]
+    fn test_framed_episode_set_property_roundtrip_injective_over_generated_sets() {
+        let base = "https://fixture.example.org/page";
+        let titles = [
+            "t1",
+            "Époqué",
+            "  spaces  ",
+            "nul\0inside",
+            "",
+        ];
+        let audios: [Option<&str>; 5] = [
+            None,
+            Some(""),
+            Some("   "),
+            Some("a1"),
+            Some("//cdn.example.org/track.m4a"),
+        ];
+        let images: [Option<&str>; 4] = [
+            None,
+            Some("img\0"),
+            Some("/root-relative.png"),
+            Some("https://other.example.org/abs.png"),
+        ];
+
+        let mut sets: Vec<Vec<WebEpisode>> = Vec::new();
+        sets.push(Vec::new());
+        for title in titles {
+            for audio in audios {
+                for image in images {
+                    let episode = WebEpisode {
+                        title: title.to_owned(),
+                        summary: String::new(),
+                        audio_url: audio.map(str::to_owned),
+                        image_url: image.map(str::to_owned),
+                    };
+                    sets.push(vec![episode.clone()]);
+                    sets.push(vec![
+                        episode,
+                        WebEpisode {
+                            title: "t2".to_owned(),
+                            summary: String::new(),
+                            audio_url: Some("a2".to_owned()),
+                            image_url: None,
+                        },
+                    ]);
+                }
+            }
+        }
+
+        for set in &sets {
+            let frame = framed_episode_set(set, base);
+            let decoded = decode_episode_set_frame(&frame)
+                .unwrap_or_else(|| panic!("the frame must always decode: {set:?}"));
+            let expected: Vec<(String, String, String)> = set
+                .iter()
+                .map(|episode| {
+                    (
+                        episode.title.clone(),
+                        resolved_media_field(episode.audio_url.as_deref(), base),
+                        resolved_media_field(episode.image_url.as_deref(), base),
+                    )
+                })
+                .collect();
+            assert_eq!(
+                decoded, expected,
+                "the frame must round-trip to exactly one episode set: {set:?}"
+            );
+        }
+    }
+
+    /// The exact WIRE FORMAT of the frame is pinned byte for byte: a
+    /// big-endian u32 count, then per episode the title, resolved audio
+    /// and resolved image — each prefixed by its own big-endian u32
+    /// byte length, an absent reference contributing an empty field. A
+    /// silent re-layout would change the preview pointer the accept
+    /// re-proves against.
+    #[test]
+    fn test_framed_episode_set_pins_count_and_length_prefix_wire_format() {
+        let base = "https://fixture.example.org/page";
+        let set = vec![WebEpisode {
+            title: "a".to_owned(),
+            summary: String::new(),
+            audio_url: Some("https://fixture.example.org/x.m4a".to_owned()),
+            image_url: None,
+        }];
+        let frame = framed_episode_set(&set, base);
+        let expected: [u8; 50] = [
+            0, 0, 0, 1, // count = 1
+            0, 0, 0, 1, b'a', // title
+            0, 0, 0, 33, // resolved audio length
+            b'h', b't', b't', b'p', b's', b':', b'/', b'/', b'f', b'i', b'x', b't',
+            b'u', b'r', b'e', b'.', b'e', b'x', b'a', b'm', b'p', b'l', b'e', b'.',
+            b'o', b'r', b'g', b'/', b'x', b'.', b'm', b'4', b'a',
+            0, 0, 0, 0, // absent image -> empty field
+        ];
+        assert_eq!(
+            frame, expected.to_vec(),
+            "the frame layout is count u32 BE + per-episode len-prefixed title/audio/image"
+        );
     }
 
     // ===== Accept/commit multi-épisodes (TDD-6) =====
