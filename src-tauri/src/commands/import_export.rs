@@ -1391,7 +1391,7 @@ pub async fn fetch_web_podcast_preview(
                 import_log::Event::WebPreviewFailed {
                     host: feed_url_host(&web_url_for_log).unwrap_or_default(),
                     code,
-                    source: error_detail(&err, "source"),
+                    source: error_detail(err, "source"),
                 },
             );
         }

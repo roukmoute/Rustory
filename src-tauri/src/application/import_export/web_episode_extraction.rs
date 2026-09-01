@@ -376,7 +376,7 @@ fn episodes_from_item_list(
         collect_jsonld_nodes(payload, &mut nodes);
     }
     let mut entries: Vec<(u64, String)> = Vec::new();
-    for node in nodes.iter().filter(|node| jsonld_type(*node) == Some("ItemList")) {
+    for node in nodes.iter().filter(|node| jsonld_type(node) == Some("ItemList")) {
         let Some(elements) = node.get("itemListElement").and_then(Value::as_array) else {
             continue;
         };
