@@ -545,6 +545,80 @@ export function isRssPreview(value: unknown): value is RssPreview {
   return true;
 }
 
+// ===== Web external-source creation (page → new canonical story) =====
+//
+// Mirror of `src-tauri/src/ipc/dto/import_export.rs` (web side). Rust is
+// authoritative; these guards refuse a drifted wire shape so the creation
+// surface never renders against an arbitrary object.
+
+/** One extracted episode of a previewed web page. The preview only
+ *  carries HONEST episodes (Rust rejects the rest before the wire): a
+ *  non-empty title and a non-empty audio url; the image stays optional. */
+export interface WebPreviewItem {
+  title: string;
+  summary: string;
+  audioUrl: string;
+  imageUrl: string | null;
+}
+
+/** The typed outcome of `fetch_web_podcast_preview`. `sourceHost` is the
+ *  only address fragment that ever crosses; `pageChecksum` is the
+ *  fingerprint the accept phase re-proves against (a diverged page is the
+ *  typed `sourceChanged` refusal — nothing was created). A transport
+ *  failure rejects with a normalized `AppError` instead: the content
+ *  verdict is NEVER an error, and a page without any audio media rejects
+ *  with the motivated `IMPORT_FAILED` refusal. */
+export interface WebPreview {
+  sourceHost: string;
+  pageChecksum: string;
+  items: WebPreviewItem[];
+}
+
+/** Tagged outcome of `accept_web_podcast_creation`: the created card +
+ *  its report, or the honest recoverable refusal (`sourceChanged`). The
+ *  `story` payload is validated by the facade with the library card
+ *  guard (no contract-module cycle). */
+export type WebCreationOutcome<Story = unknown> =
+  | { kind: "created"; story: Story; report: ImportFinding[] }
+  | { kind: "sourceChanged" };
+
+function isWebPreviewItem(value: unknown): value is WebPreviewItem {
+  if (typeof value !== "object" || value === null) return false;
+  const c = value as Record<string, unknown>;
+  return (
+    typeof c.title === "string" &&
+    c.title.length > 0 &&
+    typeof c.summary === "string" &&
+    typeof c.audioUrl === "string" &&
+    c.audioUrl.length > 0 &&
+    (c.imageUrl === null || typeof c.imageUrl === "string")
+  );
+}
+
+/**
+ * Runtime guard for an [`WebPreview`] payload: the host is HOST-ONLY
+ * (bounded, free of URL structure), the checksum is the SHA-256 proof of
+ * the previewed episode set, and the items are the HONEST episodes only
+ * (a preview with zero items, or an audio-less one, is a drift — Rust
+ * refuses both BEFORE the wire: the no-media page is the motivated
+ * `IMPORT_FAILED` rejection, never an empty preview).
+ */
+export function isWebPreview(value: unknown): value is WebPreview {
+  if (typeof value !== "object" || value === null) return false;
+  const c = value as Record<string, unknown>;
+  if (typeof c.sourceHost !== "string" || !isHostOnly(c.sourceHost)) {
+    return false;
+  }
+  if (
+    typeof c.pageChecksum !== "string" ||
+    !SHA256_HEX_PATTERN.test(c.pageChecksum)
+  ) {
+    return false;
+  }
+  if (!Array.isArray(c.items) || c.items.length === 0) return false;
+  return c.items.every(isWebPreviewItem);
+}
+
 // ===== Content-source activation policy (distribution governance) =====
 //
 // Mirror of `src-tauri/src/ipc/dto/import_export.rs` (policy side). Rust
@@ -554,7 +628,7 @@ export function isRssPreview(value: unknown): value is RssPreview {
 // the creation dialog never renders against an arbitrary object.
 
 /** Closed set of content-source kinds this product speaks about. */
-export type ContentSourceKind = "rss" | "atom" | "jsonFeed";
+export type ContentSourceKind = "rss" | "atom" | "jsonFeed" | "web";
 
 /** Closed set of activation states a distribution can assign to a kind. */
 export type ContentSourceActivation =
@@ -591,6 +665,7 @@ const CONTENT_SOURCE_LABELS: Readonly<Record<ContentSourceKind, string>> = {
   rss: "Flux RSS",
   atom: "Flux Atom",
   jsonFeed: "Flux JSON Feed",
+  web: "Page web",
 };
 
 /** The frozen activation → reason couples for the non-enabled lines
@@ -624,12 +699,12 @@ export function isContentSourceEntry(
   // drift, never a copy to render as authoritative.
   if (c.label !== CONTENT_SOURCE_LABELS[c.kind]) return false;
   if (c.activation === "enabled") {
-    // Only `rss` has an ingestion flow in THIS build: a policy enabling
-    // any other kind is ahead of the frontend and MUST fail closed (the
-    // dialog would otherwise render a disabled entry "justified" by the
-    // activation marker). Activating another kind is an explicit
-    // re-scope of this guard, alongside its ingestion flow.
-    if (c.kind !== "rss") return false;
+    // Only `rss` and `web` have an ingestion flow in THIS build: a
+    // policy enabling any other kind is ahead of the frontend and MUST
+    // fail closed (the dialog would otherwise render a disabled entry
+    // "justified" by the activation marker). Activating another kind is
+    // an explicit re-scope of this guard, alongside its ingestion flow.
+    if (c.kind !== "rss" && c.kind !== "web") return false;
     // An enabled line carries NO reason and EXACTLY its frozen
     // Rust-owned entry-level marker — the mirror of the Rust `Option`
     // + `skip_serializing_if` pair.
@@ -650,7 +725,7 @@ export function isContentSourceEntry(
 
 /**
  * Runtime guard for a [`ContentSourcePolicy`] payload: EXACTLY one line
- * per known kind (`rss` / `atom` / `jsonFeed`), each carrying its frozen
+ * per known kind (`rss` / `atom` / `jsonFeed` / `web`), each carrying its frozen
  * label and — when not enabled — its frozen reason. A partial policy
  * (a known kind missing) is a drift too: the contract promises that the
  * non-activated kinds stay VISIBLE with their reason, so their silent

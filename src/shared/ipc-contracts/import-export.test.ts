@@ -1000,6 +1000,12 @@ const OFFICIAL_POLICY: ContentSourcePolicy = {
       reason:
         "Source indisponible: non activée dans la distribution officielle",
     },
+    {
+      kind: "web",
+      label: "Page web",
+      activation: "enabled",
+      activationMarker: "Activée par la distribution officielle",
+    },
   ],
 };
 
@@ -1181,6 +1187,61 @@ describe("isContentSourcePolicy", () => {
           { kind: "atom", label: "Flux Atom", activation: "enabled" },
           OFFICIAL_POLICY.sources[2],
         ],
+      }),
+    ).toBe(false);
+  });
+
+  it("accepts the enabled web line and the full 4-line official policy (TDD-7)", () => {
+    // The web ingestion flow ships in this build: the official matrix
+    // activates it, and the guard must accept the Rust-carried line.
+    expect(
+      isContentSourceEntry({
+        kind: "web",
+        label: "Page web",
+        activation: "enabled",
+        activationMarker: "Activée par la distribution officielle",
+      }),
+    ).toBe(true);
+    expect(
+      isContentSourcePolicy({
+        sources: [
+          OFFICIAL_POLICY.sources[0],
+          OFFICIAL_POLICY.sources[1],
+          OFFICIAL_POLICY.sources[2],
+          {
+            kind: "web",
+            label: "Page web",
+            activation: "enabled",
+            activationMarker: "Activée par la distribution officielle",
+          },
+        ],
+      }),
+    ).toBe(true);
+    // A drifted web label is a drift (the frozen couple is refused), and
+    // an enabled line without its marker stays refused.
+    expect(
+      isContentSourceEntry({
+        kind: "web",
+        label: "Web",
+        activation: "enabled",
+        activationMarker: "Activée par la distribution officielle",
+      }),
+    ).toBe(false);
+    expect(
+      isContentSourceEntry({
+        kind: "web",
+        label: "Page web",
+        activation: "enabled",
+      }),
+    ).toBe(false);
+    // atom / jsonFeed keep failing closed on an enabled line: only rss
+    // and web have an ingestion flow in this build.
+    expect(
+      isContentSourceEntry({
+        kind: "atom",
+        label: "Flux Atom",
+        activation: "enabled",
+        activationMarker: "Activée par la distribution officielle",
       }),
     ).toBe(false);
   });

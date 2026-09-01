@@ -44,6 +44,8 @@ const mockCreateStory = vi.fn();
 const mockDeleteStories = vi.fn();
 const mockFetchRssPreview = vi.fn();
 const mockAcceptRssCreation = vi.fn();
+const mockFetchWebPreview = vi.fn();
+const mockAcceptWebCreation = vi.fn();
 const mockReadContentSourcePolicy = vi.fn();
 
 /** The current official content-source policy, exactly as
@@ -72,6 +74,63 @@ const OFFICIAL_CONTENT_SOURCE_POLICY = {
     },
   ],
 };
+
+/** The official policy as of the web import (TDD-7): `web` is enabled
+ *  alongside `rss`, exactly as `read_content_source_policy` serializes it. */
+const WEB_ENABLED_CONTENT_SOURCE_POLICY = {
+  sources: [
+    {
+      kind: "rss",
+      label: "Flux RSS",
+      activation: "enabled",
+      activationMarker: "Activée par la distribution officielle",
+    },
+    {
+      kind: "atom",
+      label: "Flux Atom",
+      activation: "notActivated",
+      reason:
+        "Source indisponible: non activée dans la distribution officielle",
+    },
+    {
+      kind: "jsonFeed",
+      label: "Flux JSON Feed",
+      activation: "notActivated",
+      reason:
+        "Source indisponible: non activée dans la distribution officielle",
+    },
+    {
+      kind: "web",
+      label: "Page web",
+      activation: "enabled",
+      activationMarker: "Activée par la distribution officielle",
+    },
+  ],
+};
+
+/** A web preview that satisfies the shared contract guard: one host, a
+ *  64-hex checksum and at least one honest episode (title + audio). */
+const WEB_PREVIEW_FIXTURE = {
+  sourceHost: "www.radiofrance.fr",
+  pageChecksum: "c".repeat(64),
+  items: [
+    {
+      title: "Épisode 1",
+      summary: "",
+      audioUrl: "https://media.exemple.fr/e1.mp3",
+      imageUrl: null,
+    },
+    {
+      title: "Épisode 2",
+      summary: "",
+      audioUrl: "https://media.exemple.fr/e2.mp3",
+      imageUrl: null,
+    },
+  ],
+};
+
+const WEB_PAGE_URL =
+  "https://www.radiofrance.fr/radiofrance/podcasts/selection-pour-partir-a-l-aventure";
 
 vi.mock("../../ipc/commands/library", () => ({
   getLibraryOverview: () => ({
@@ -221,6 +280,9 @@ vi.mock("../../ipc/commands/import-export", async () => {
     fetchRssSourcePreview: (url: string) => mockFetchRssPreview(url),
     acceptRssStoryCreation: (url: string, ref: unknown) =>
       mockAcceptRssCreation(url, ref),
+    fetchWebPodcastPreview: (url: string) => mockFetchWebPreview(url),
+    acceptWebPodcastCreation: (url: string, checksum: string) =>
+      mockAcceptWebCreation(url, checksum),
     readContentSourcePolicy: () => mockReadContentSourcePolicy(),
   };
 });
@@ -368,6 +430,12 @@ describe("<LibraryRoute />", () => {
     mockFetchRssPreview.mockImplementation(() => new Promise(() => {}));
     mockAcceptRssCreation.mockReset();
     mockAcceptRssCreation.mockImplementation(() => new Promise(() => {}));
+    // Default: the web preview is user-triggered — same never-settling
+    // default as the RSS fetch.
+    mockFetchWebPreview.mockReset();
+    mockFetchWebPreview.mockImplementation(() => new Promise(() => {}));
+    mockAcceptWebCreation.mockReset();
+    mockAcceptWebCreation.mockImplementation(() => new Promise(() => {}));
     // Default: the policy read resolves with the official distribution
     // (rss enabled) so the dialog's RSS entry is actionable. Tests that
     // exercise the fail-closed path override with a rejection.
@@ -1193,6 +1261,46 @@ describe("<LibraryRoute />", () => {
     expect(mockAnalyzeArtifact).not.toHaveBeenCalled();
   });
 
+  it("keeps the collection's import CTA inert while a web fetch is in flight (cross-flow exclusivity)", async () => {
+    const user = userEvent.setup();
+    mockGet.mockResolvedValueOnce({
+      stories: [{ id: "s1", title: "Le soleil" }],
+    });
+    mockReadContentSourcePolicy.mockResolvedValue(
+      WEB_ENABLED_CONTENT_SOURCE_POLICY,
+    );
+    // A web fetch that never settles: the flow stays busy.
+    mockFetchWebPreview.mockImplementation(() => new Promise(() => {}));
+    renderLibrary();
+
+    await screen.findByRole("button", { name: /le soleil/i });
+    // Open the creation dialog and hand over to the web flow.
+    await user.click(
+      screen.getByRole("button", { name: /créer une histoire/i }),
+    );
+    await user.click(
+      await screen.findByRole("button", {
+        name: "Démarrer depuis une page web",
+      }),
+    );
+    // Type an address and fetch — the flow is now busy.
+    await user.type(
+      screen.getByLabelText("Adresse de la page web"),
+      WEB_PAGE_URL,
+    );
+    await user.click(
+      screen.getByRole("button", { name: "Récupérer la page" }),
+    );
+    expect(mockFetchWebPreview).toHaveBeenCalledTimes(1);
+
+    const importButton = screen.getByRole("button", {
+      name: /importer une histoire/i,
+    });
+    expect(importButton).toBeDisabled();
+    await user.click(importButton);
+    expect(mockAnalyzeArtifact).not.toHaveBeenCalled();
+  });
+
   it("keeps the folder entry inert while an RSS review surface is open (cross-flow exclusivity)", async () => {
     const user = userEvent.setup();
     mockGet.mockResolvedValueOnce({
@@ -1231,6 +1339,101 @@ describe("<LibraryRoute />", () => {
       name: "Démarrer depuis une source externe (RSS)",
     });
     expect(rssButton).toHaveAttribute("aria-disabled", "true");
+  });
+
+  it("opens the web surface from the dialog, fetches on the CTA and commits the FULL page", async () => {
+    const user = userEvent.setup();
+    mockGet.mockResolvedValueOnce({
+      stories: [{ id: "s1", title: "Le soleil" }],
+    });
+    mockReadContentSourcePolicy.mockResolvedValueOnce(
+      WEB_ENABLED_CONTENT_SOURCE_POLICY,
+    );
+    mockFetchWebPreview.mockResolvedValueOnce(WEB_PREVIEW_FIXTURE);
+    renderLibrary();
+
+    await screen.findByRole("button", { name: /le soleil/i });
+    // Open the creation dialog and hand over to the web flow.
+    await user.click(
+      screen.getByRole("button", { name: /créer une histoire/i }),
+    );
+    await user.click(
+      await screen.findByRole("button", {
+        name: "Démarrer depuis une page web",
+      }),
+    );
+    expect(
+      screen.getByLabelText("Adresse de la page web"),
+    ).toBeInTheDocument();
+    await user.type(
+      screen.getByLabelText("Adresse de la page web"),
+      WEB_PAGE_URL,
+    );
+    await user.click(
+      screen.getByRole("button", { name: "Récupérer la page" }),
+    );
+    expect(mockFetchWebPreview).toHaveBeenCalledWith(WEB_PAGE_URL);
+    // The review lists every previewed episode, in page order.
+    expect(await screen.findByText("Épisode 1")).toBeInTheDocument();
+    expect(screen.getByText("Épisode 2")).toBeInTheDocument();
+    // The single CTA commits the FULL page at its reviewed checksum —
+    // never a single-episode selection.
+    await user.click(
+      screen.getByRole("button", { name: "Créer l'histoire" }),
+    );
+    expect(mockAcceptWebCreation).toHaveBeenCalledWith(
+      WEB_PAGE_URL,
+      WEB_PREVIEW_FIXTURE.pageChecksum,
+    );
+  });
+
+  it("keeps the folder, RSS and web entries inert while the web surface is open (cross-flow exclusivity)", async () => {
+    const user = userEvent.setup();
+    mockGet.mockResolvedValueOnce({
+      stories: [{ id: "s1", title: "Le soleil" }],
+    });
+    // The dialog re-reads the policy on EVERY opening — the sticky mock
+    // keeps the 4-line policy across both opens.
+    mockReadContentSourcePolicy.mockResolvedValue(
+      WEB_ENABLED_CONTENT_SOURCE_POLICY,
+    );
+    renderLibrary();
+
+    await screen.findByRole("button", { name: /le soleil/i });
+    // Open the web surface: the flow is ACTIVE (surface open) even though
+    // nothing is in flight yet.
+    await user.click(
+      screen.getByRole("button", { name: /créer une histoire/i }),
+    );
+    await user.click(
+      await screen.findByRole("button", {
+        name: "Démarrer depuis une page web",
+      }),
+    );
+    expect(
+      screen.getByLabelText("Adresse de la page web"),
+    ).toBeInTheDocument();
+
+    // Re-open the creation dialog: every secondary entry is inert while
+    // the web surface is open — two review surfaces must never stack.
+    await user.click(
+      screen.getByRole("button", { name: /créer une histoire/i }),
+    );
+    const dialog = await screen.findByRole("dialog", {
+      name: /créer une histoire/i,
+    });
+    const folderButton = within(dialog).getByRole("button", {
+      name: "Choisir un dossier…",
+    });
+    expect(folderButton).toHaveAttribute("aria-disabled", "true");
+    const rssButton = within(dialog).getByRole("button", {
+      name: "Démarrer depuis une source externe (RSS)",
+    });
+    expect(rssButton).toHaveAttribute("aria-disabled", "true");
+    const webButton = within(dialog).getByRole("button", {
+      name: "Démarrer depuis une page web",
+    });
+    expect(webButton).toHaveAttribute("aria-disabled", "true");
   });
 
   it("a completed RSS creation surfaces the à revoir chip on the created library card (review steps visible)", async () => {
@@ -4817,6 +5020,54 @@ describe("<LibraryRoute />", () => {
     expect(screen.getByText("Analyse de l'artefact…")).toBeInTheDocument();
   });
 
+  it("declines a drop while the web surface is open (cross-channel gate, drop side)", async () => {
+    const user = userEvent.setup();
+    mockGet.mockResolvedValueOnce({
+      stories: [{ id: "s1", title: "Le soleil" }],
+    });
+    mockReadContentSourcePolicy.mockResolvedValue(
+      WEB_ENABLED_CONTENT_SOURCE_POLICY,
+    );
+    renderLibrary();
+    await screen.findByRole("button", { name: /le soleil/i });
+    await waitFor(() => {
+      expect(mockAnalyzeDrop).toHaveBeenCalledTimes(1);
+    });
+
+    // Open the web surface: the flow is ACTIVE (surface open).
+    await user.click(
+      screen.getByRole("button", { name: /créer une histoire/i }),
+    );
+    await user.click(
+      await screen.findByRole("button", {
+        name: "Démarrer depuis une page web",
+      }),
+    );
+    expect(
+      screen.getByLabelText("Adresse de la page web"),
+    ).toBeInTheDocument();
+
+    act(() => {
+      useDropShell.getState().raiseSignal();
+    });
+
+    // Twice by design: the persistent status region + the visual block.
+    const occurrences = await screen.findAllByText(DROP_BUSY_COPY);
+    expect(occurrences).toHaveLength(2);
+    expect(
+      occurrences.some((el) => el.getAttribute("role") === "status"),
+    ).toBe(true);
+    await waitFor(() => {
+      expect(mockDiscardDrop).toHaveBeenCalledTimes(1);
+    });
+    // The intent was NOT analyzed (the busy gate consumed it calmly)…
+    expect(mockAnalyzeDrop).toHaveBeenCalledTimes(1);
+    // …and the web surface was never interrupted.
+    expect(
+      screen.getByLabelText("Adresse de la page web"),
+    ).toBeInTheDocument();
+  });
+
   it("declines a drop while an OS-open read settles (cross-channel gate, drop side)", async () => {
     mockGet.mockResolvedValueOnce({ stories: [] });
     // The OS-open mount pull hangs: a live OS read is in flight. The drop
@@ -4878,6 +5129,51 @@ describe("<LibraryRoute />", () => {
     });
     expect(mockAnalyzeOsOpen).toHaveBeenCalledTimes(pullsSoFar);
     expect(screen.getByText("Partiellement exploitable")).toBeInTheDocument();
+  });
+
+  it("declines an OS-open intent while the web surface is open (cross-channel gate, os-open side)", async () => {
+    const user = userEvent.setup();
+    mockGet.mockResolvedValueOnce({
+      stories: [{ id: "s1", title: "Le soleil" }],
+    });
+    mockReadContentSourcePolicy.mockResolvedValue(
+      WEB_ENABLED_CONTENT_SOURCE_POLICY,
+    );
+    renderLibrary();
+    await screen.findByRole("button", { name: /le soleil/i });
+    await waitFor(() => {
+      expect(mockAnalyzeOsOpen).toHaveBeenCalledTimes(1);
+    });
+
+    // Open the web surface: the flow is ACTIVE (surface open).
+    await user.click(
+      screen.getByRole("button", { name: /créer une histoire/i }),
+    );
+    await user.click(
+      await screen.findByRole("button", {
+        name: "Démarrer depuis une page web",
+      }),
+    );
+    expect(
+      screen.getByLabelText("Adresse de la page web"),
+    ).toBeInTheDocument();
+
+    const pullsSoFar = mockAnalyzeOsOpen.mock.calls.length;
+    act(() => {
+      useOsOpenShell.getState().raise();
+    });
+
+    // The OS-open intent is declined calmly (its OWN busy copy) and the
+    // web surface stays INTACT — never silently replaced.
+    const occurrences = await screen.findAllByText(OS_OPEN_BUSY_COPY);
+    expect(occurrences).toHaveLength(2);
+    await waitFor(() => {
+      expect(mockDiscardOsOpen).toHaveBeenCalledTimes(1);
+    });
+    expect(mockAnalyzeOsOpen).toHaveBeenCalledTimes(pullsSoFar);
+    expect(
+      screen.getByLabelText("Adresse de la page web"),
+    ).toBeInTheDocument();
   });
 
   it("surfaces an unreadable dropped element as the failed state; Réessayer replays the SAME intent", async () => {

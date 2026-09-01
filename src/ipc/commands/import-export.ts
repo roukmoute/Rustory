@@ -15,6 +15,8 @@ import type {
   RssCreationOutcome,
   RssItemRef,
   RssPreview,
+  WebCreationOutcome,
+  WebPreview,
   StructuredCreationAnalysis,
 } from "../../shared/ipc-contracts/import-export";
 import {
@@ -26,6 +28,7 @@ import {
   isImportFinding,
   isOsOpenAnalysis,
   isRssPreview,
+  isWebPreview,
   isStructuredCreationAnalysis,
 } from "../../shared/ipc-contracts/import-export";
 import type { StoryCardDto } from "../../shared/ipc-contracts/library";
@@ -492,6 +495,98 @@ export async function acceptRssStoryCreation(
   }
   if (!isRssStoryCreationOutcome(raw)) {
     throw new RssCreationContractDriftError("accept_rss_story_creation", raw);
+  }
+  return raw;
+}
+
+/**
+ * Error thrown when a web external-source command returns a payload that
+ * does not match the wire contract. A payload outside the contract NEVER
+ * renders a screen — the raw response is attached for debugging.
+ */
+export class WebCreationContractDriftError extends Error {
+  readonly raw: unknown;
+  constructor(command: string, raw: unknown) {
+    super(`${command} returned a payload that does not match the contract`);
+    this.name = "WebCreationContractDriftError";
+    this.raw = raw;
+  }
+}
+
+/**
+ * Fetch + analyze a user-provided web podcast page (phase 1, NO
+ * mutation, NO DB — the preview is pure). The ONLY networked action of
+ * the flow, on the explicit `Récupérer la page` click. Rust owns the
+ * address validation (strict http(s) guard, no network dispatch before),
+ * the bounded fetch and the bounded parse.
+ *
+ * A page PROBLEM (unreachable page, HTTP error, zero exploitable episode)
+ * is NEVER a resolved verdict — it rejects with the motivated
+ * `AppError` (`RSS_SOURCE_UNREACHABLE` for the transport, `IMPORT_FAILED`
+ * for the no-audio-media page). A drifted payload rejects with
+ * [`WebCreationContractDriftError`].
+ *
+ * Components MUST NOT call `invoke` directly — go through this facade so
+ * the wire contract stays owned by `src/ipc/`.
+ */
+export async function fetchWebPodcastPreview(
+  webUrl: string,
+): Promise<WebPreview> {
+  let raw: unknown;
+  try {
+    raw = await invoke<unknown>("fetch_web_podcast_preview", { webUrl });
+  } catch (err) {
+    throw toAppError(err);
+  }
+  if (!isWebPreview(raw)) {
+    throw new WebCreationContractDriftError("fetch_web_podcast_preview", raw);
+  }
+  return raw;
+}
+
+/** The validated accept outcome: the created card, or the honest
+ *  `sourceChanged` refusal (nothing was created). */
+export type WebStoryCreationOutcome = WebCreationOutcome<StoryCardDto>;
+
+function isWebStoryCreationOutcome(
+  value: unknown,
+): value is WebStoryCreationOutcome {
+  if (typeof value !== "object" || value === null) return false;
+  const c = value as Record<string, unknown>;
+  if (c.kind === "sourceChanged") {
+    return Object.keys(c).length === 1;
+  }
+  if (c.kind !== "created") return false;
+  if (!isStoryCardDto(c.story)) return false;
+  return Array.isArray(c.report) && c.report.every(isImportFinding);
+}
+
+/**
+ * Commit the FULL previewed page into a canonical local story (phase 2):
+ * every extracted episode, in page order — no single-episode selection.
+ * Sends the page address + the page checksum back; Rust RE-FETCHES and
+ * re-parses the page from zero (the source is the authority — the wire
+ * carries a pointer, never content), DOWNLOADS each episode's audio and
+ * commits the story + its assets in one transaction. A diverged page
+ * resolves with the typed `{ kind: "sourceChanged" }` refusal (nothing
+ * created); only transport rejects with a normalized `AppError`. A
+ * drifted payload rejects with [`WebCreationContractDriftError`].
+ */
+export async function acceptWebPodcastCreation(
+  webUrl: string,
+  pageChecksum: string,
+): Promise<WebStoryCreationOutcome> {
+  let raw: unknown;
+  try {
+    raw = await invoke<unknown>("accept_web_podcast_creation", {
+      webUrl,
+      pageChecksum,
+    });
+  } catch (err) {
+    throw toAppError(err);
+  }
+  if (!isWebStoryCreationOutcome(raw)) {
+    throw new WebCreationContractDriftError("accept_web_podcast_creation", raw);
   }
   return raw;
 }

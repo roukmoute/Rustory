@@ -19,6 +19,39 @@ import { createStory } from "../../../ipc/commands/story";
 import { CreateStoryDialog } from "./CreateStoryDialog";
 import type { ContentSourcePolicy } from "../../../shared/ipc-contracts/import-export";
 
+/** The official policy as of the web import (TDD-7): `web` is enabled
+ *  alongside `rss`, exactly as `read_content_source_policy` serializes it. */
+const WEB_ENABLED_POLICY: ContentSourcePolicy = {
+  sources: [
+    {
+      kind: "rss",
+      label: "Flux RSS",
+      activation: "enabled",
+      activationMarker: "Activée par la distribution officielle",
+    },
+    {
+      kind: "atom",
+      label: "Flux Atom",
+      activation: "notActivated",
+      reason:
+        "Source indisponible: non activée dans la distribution officielle",
+    },
+    {
+      kind: "jsonFeed",
+      label: "Flux JSON Feed",
+      activation: "notActivated",
+      reason:
+        "Source indisponible: non activée dans la distribution officielle",
+    },
+    {
+      kind: "web",
+      label: "Page web",
+      activation: "enabled",
+      activationMarker: "Activée par la distribution officielle",
+    },
+  ],
+};
+
 /** The current official policy, exactly as `read_content_source_policy`
  *  serializes it (rss enabled; atom / jsonFeed known but not activated). */
 const RSS_ENABLED_POLICY: ContentSourcePolicy = {
@@ -630,6 +663,132 @@ describe("<CreateStoryDialog />", () => {
         ],
       },
     });
+    const rssButton = screen.getByRole("button", {
+      name: "Démarrer depuis une source externe (RSS)",
+    });
+    expect(rssButton).toHaveAttribute("aria-disabled", "true");
+    expect(
+      screen.getByText("Sources externes indisponibles pour l'instant."),
+    ).toBeInTheDocument();
+  });
+
+  // ===== Web-page entry (TDD-7) =====
+
+  it("renders the web entry fail-closed when the web handler is not wired", () => {
+    renderDialog({
+      onCreateFromRssRequest: vi.fn(),
+      contentSourcePolicy: WEB_ENABLED_POLICY,
+    });
+    const webButton = screen.getByRole("button", {
+      name: "Démarrer depuis une page web",
+    });
+    expect(webButton).toHaveAttribute("aria-disabled", "true");
+    const describedBy = webButton.getAttribute("aria-describedby");
+    expect(describedBy).toBeTruthy();
+    const reason = document.getElementById(describedBy as string);
+    expect(reason).toHaveTextContent(
+      "Sources externes indisponibles pour l'instant.",
+    );
+  });
+
+  it("renders the enabled web entry with its label and the frozen activation marker", () => {
+    renderDialog({
+      onCreateFromRssRequest: vi.fn(),
+      onCreateFromWebRequest: vi.fn(),
+      contentSourcePolicy: WEB_ENABLED_POLICY,
+    });
+    const webButton = screen.getByRole("button", {
+      name: "Démarrer depuis une page web",
+    });
+    expect(webButton).not.toHaveAttribute("aria-disabled");
+    expect(screen.getByText("Page web")).toBeInTheDocument();
+    // Both enabled entries carry the frozen marker, VERBATIM.
+    expect(
+      screen.getAllByText("Activée par la distribution officielle"),
+    ).toHaveLength(2);
+  });
+
+  it("Démarrer depuis une page web closes the dialog THEN hands over, without any interactive IPC", async () => {
+    const user = userEvent.setup();
+    const onCreateFromWebRequest = vi.fn();
+    const { onClose } = renderDialog({
+      onCreateFromRssRequest: vi.fn(),
+      onCreateFromWebRequest,
+      contentSourcePolicy: WEB_ENABLED_POLICY,
+    });
+    await user.click(
+      screen.getByRole("button", { name: "Démarrer depuis une page web" }),
+    );
+    expect(onClose).toHaveBeenCalledTimes(1);
+    expect(onCreateFromWebRequest).toHaveBeenCalledTimes(1);
+    // The dialog closes BEFORE the handover (the in-context surface must
+    // never sit under a modal).
+    expect(onClose.mock.invocationCallOrder[0]).toBeLessThan(
+      onCreateFromWebRequest.mock.invocationCallOrder[0],
+    );
+    expect(createStory).not.toHaveBeenCalled();
+  });
+
+  it("disables the web entry while a sibling import/creation flow is busy (cross-flow exclusivity)", async () => {
+    const user = userEvent.setup();
+    const onCreateFromWebRequest = vi.fn();
+    const { onClose } = renderDialog({
+      onCreateFromRssRequest: vi.fn(),
+      onCreateFromWebRequest,
+      isCreateFromWebUnavailable: true,
+      contentSourcePolicy: WEB_ENABLED_POLICY,
+    });
+    const webButton = screen.getByRole("button", {
+      name: "Démarrer depuis une page web",
+    });
+    expect(webButton).toHaveAttribute("aria-disabled", "true");
+    await user.click(webButton);
+    expect(onCreateFromWebRequest).not.toHaveBeenCalled();
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it("renders the web entry disabled with the Rust reason when the policy does not enable it", () => {
+    renderDialog({
+      onCreateFromRssRequest: vi.fn(),
+      onCreateFromWebRequest: vi.fn(),
+      contentSourcePolicy: {
+        sources: [
+          {
+            kind: "rss",
+            label: "Flux RSS",
+            activation: "enabled",
+            activationMarker: "Activée par la distribution officielle",
+          },
+          {
+            kind: "web",
+            label: "Page web",
+            activation: "notActivated",
+            reason:
+              "Source indisponible: non activée dans la distribution officielle",
+          },
+        ],
+      },
+    });
+    const webButton = screen.getByRole("button", {
+      name: "Démarrer depuis une page web",
+    });
+    expect(webButton).toHaveAttribute("aria-disabled", "true");
+    const describedBy = webButton.getAttribute("aria-describedby");
+    expect(describedBy).toBeTruthy();
+    const reason = document.getElementById(describedBy as string);
+    expect(reason).toHaveTextContent(
+      "Source indisponible: non activée dans la distribution officielle",
+    );
+  });
+
+  it("renders the sources section from the web handler alone, with the RSS entry fail-closed", () => {
+    renderDialog({
+      onCreateFromWebRequest: vi.fn(),
+      contentSourcePolicy: WEB_ENABLED_POLICY,
+    });
+    expect(
+      screen.getByRole("button", { name: "Démarrer depuis une page web" }),
+    ).not.toHaveAttribute("aria-disabled");
     const rssButton = screen.getByRole("button", {
       name: "Démarrer depuis une source externe (RSS)",
     });

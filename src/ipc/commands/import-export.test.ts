@@ -31,7 +31,10 @@ import {
   discardOsOpenRequest,
   exportStoryWithSaveDialog,
   fetchRssSourcePreview,
+  fetchWebPodcastPreview,
   readContentSourcePolicy,
+  acceptWebPodcastCreation,
+  WebCreationContractDriftError,
 } from "./import-export";
 
 const STORY_ID = "0197a5d0-0000-7000-8000-000000000000";
@@ -740,6 +743,12 @@ describe("readContentSourcePolicy", () => {
         reason:
           "Source indisponible: non activée dans la distribution officielle",
       },
+      {
+        kind: "web",
+        label: "Page web",
+        activation: "enabled",
+        activationMarker: "Activée par la distribution officielle",
+      },
     ],
   };
 
@@ -747,7 +756,13 @@ describe("readContentSourcePolicy", () => {
     vi.mocked(invoke).mockResolvedValueOnce(OFFICIAL_POLICY);
     const policy = await readContentSourcePolicy();
     expect(invoke).toHaveBeenCalledWith("read_content_source_policy");
-    expect(policy.sources).toHaveLength(3);
+    expect(policy.sources).toHaveLength(4);
+    expect(policy.sources[3]).toEqual({
+      kind: "web",
+      label: "Page web",
+      activation: "enabled",
+      activationMarker: "Activée par la distribution officielle",
+    });
     expect(policy.sources[0]).toEqual({
       kind: "rss",
       label: "Flux RSS",
@@ -781,5 +796,182 @@ describe("readContentSourcePolicy", () => {
       (e: unknown) => e,
     )) as { code: string };
     expect(err.code).toBe("UNKNOWN");
+  });
+});
+
+// ===== Web external-source facades =====
+
+const WEB_PAGE_URL =
+  "https://www.radiofrance.fr/franceinter/podcasts/serie-tina-et-le-serpent-a-plumes";
+
+const WEB_PAGE_CHECKSUM = "c".repeat(64);
+
+const WEB_PREVIEW_WIRE = {
+  sourceHost: "www.radiofrance.fr",
+  pageChecksum: WEB_PAGE_CHECKSUM,
+  items: [
+    {
+      title: "Tina et le Serpent à plumes — Épisode 1",
+      summary: "Premier texte.",
+      audioUrl: "https://media.radiofrance.fr/e1.mp3",
+      imageUrl: null,
+    },
+    {
+      title: "Tina et le Serpent à plumes — Épisode 2",
+      summary: "Deuxième texte.",
+      audioUrl: "https://media.radiofrance.fr/e2.mp3",
+      imageUrl: "https://media.radiofrance.fr/e2.jpg",
+    },
+  ],
+};
+
+describe("fetchWebPodcastPreview", () => {
+  beforeEach(() => {
+    vi.mocked(invoke).mockReset();
+  });
+
+  it("calls fetch_web_podcast_preview with the page address and returns the validated preview", async () => {
+    vi.mocked(invoke).mockResolvedValueOnce(WEB_PREVIEW_WIRE);
+    const preview = await fetchWebPodcastPreview(WEB_PAGE_URL);
+    expect(invoke).toHaveBeenCalledWith("fetch_web_podcast_preview", {
+      webUrl: WEB_PAGE_URL,
+    });
+    expect(preview.sourceHost).toBe("www.radiofrance.fr");
+    expect(preview.pageChecksum).toBe(WEB_PAGE_CHECKSUM);
+    expect(preview.items).toHaveLength(2);
+  });
+
+  it("normalizes a transport rejection into an AppError shape", async () => {
+    vi.mocked(invoke).mockRejectedValueOnce({
+      code: "RSS_SOURCE_UNREACHABLE",
+      message: "Récupération de la page impossible: l'adresse n'est pas valide.",
+      userAction: "Saisis une adresse http(s) complète puis réessaie.",
+      details: { source: "network", stage: "url_invalid" },
+    });
+    const err = (await fetchWebPodcastPreview(WEB_PAGE_URL).then(
+      () => {
+        throw new Error("expected rejection");
+      },
+      (e: unknown) => e,
+    )) as { code: string };
+    expect(err.code).toBe("RSS_SOURCE_UNREACHABLE");
+  });
+
+  it("rejects with WebCreationContractDriftError on a missing page checksum", async () => {
+    const raw = { ...WEB_PREVIEW_WIRE, pageChecksum: "pas-un-sha256" };
+    vi.mocked(invoke).mockResolvedValueOnce(raw);
+    const err = (await fetchWebPodcastPreview(WEB_PAGE_URL).then(
+      () => {
+        throw new Error("expected rejection");
+      },
+      (e: unknown) => e,
+    )) as WebCreationContractDriftError;
+    expect(err).toBeInstanceOf(WebCreationContractDriftError);
+    expect(err.raw).toBe(raw);
+  });
+
+  it("rejects with WebCreationContractDriftError on an empty episode list", async () => {
+    const raw = { ...WEB_PREVIEW_WIRE, items: [] };
+    vi.mocked(invoke).mockResolvedValueOnce(raw);
+    const err = (await fetchWebPodcastPreview(WEB_PAGE_URL).then(
+      () => {
+        throw new Error("expected rejection");
+      },
+      (e: unknown) => e,
+    )) as WebCreationContractDriftError;
+    expect(err).toBeInstanceOf(WebCreationContractDriftError);
+  });
+
+  it("rejects with WebCreationContractDriftError on an episode without audio", async () => {
+    const raw = {
+      ...WEB_PREVIEW_WIRE,
+      items: [
+        {
+          title: "Épisode 1",
+          summary: "",
+          audioUrl: null,
+          imageUrl: null,
+        },
+      ],
+    };
+    vi.mocked(invoke).mockResolvedValueOnce(raw);
+    const err = (await fetchWebPodcastPreview(WEB_PAGE_URL).then(
+      () => {
+        throw new Error("expected rejection");
+      },
+      (e: unknown) => e,
+    )) as WebCreationContractDriftError;
+    expect(err).toBeInstanceOf(WebCreationContractDriftError);
+  });
+});
+
+describe("acceptWebPodcastCreation", () => {
+  beforeEach(() => {
+    vi.mocked(invoke).mockReset();
+  });
+
+  it("calls accept_web_podcast_creation with the address + page checksum and returns the created card", async () => {
+    vi.mocked(invoke).mockResolvedValueOnce({
+      kind: "created",
+      story: {
+        id: "0197a5d0-0000-7000-8000-000000000000",
+        title: "Tina et le Serpent à plumes",
+        importState: "needsReview",
+        importReport: [
+          {
+            aspect: "source",
+            category: "ambiguous",
+            message:
+              "Contenu ingéré depuis une page web. Relis le texte et complète l'histoire avant de l'utiliser.",
+          },
+        ],
+      },
+      report: [
+        {
+          aspect: "source",
+          category: "ambiguous",
+          message:
+            "Contenu ingéré depuis une page web. Relis le texte et complète l'histoire avant de l'utiliser.",
+        },
+      ],
+    });
+    const outcome = await acceptWebPodcastCreation(
+      WEB_PAGE_URL,
+      WEB_PAGE_CHECKSUM,
+    );
+    expect(invoke).toHaveBeenCalledWith("accept_web_podcast_creation", {
+      webUrl: WEB_PAGE_URL,
+      pageChecksum: WEB_PAGE_CHECKSUM,
+    });
+    expect(outcome.kind).toBe("created");
+    if (outcome.kind === "created") {
+      expect(outcome.story.title).toBe("Tina et le Serpent à plumes");
+      expect(outcome.story.importState).toBe("needsReview");
+    }
+  });
+
+  it("resolves the honest sourceChanged refusal (typed, never a rejection)", async () => {
+    vi.mocked(invoke).mockResolvedValueOnce({ kind: "sourceChanged" });
+    const outcome = await acceptWebPodcastCreation(
+      WEB_PAGE_URL,
+      WEB_PAGE_CHECKSUM,
+    );
+    expect(outcome).toEqual({ kind: "sourceChanged" });
+  });
+
+  it("rejects with WebCreationContractDriftError on a drifted story payload", async () => {
+    const raw = { kind: "created", story: { id: "x" }, report: [] };
+    vi.mocked(invoke).mockResolvedValueOnce(raw);
+    const err = (await acceptWebPodcastCreation(
+      WEB_PAGE_URL,
+      WEB_PAGE_CHECKSUM,
+    ).then(
+      () => {
+        throw new Error("expected rejection");
+      },
+      (e: unknown) => e,
+    )) as WebCreationContractDriftError;
+    expect(err).toBeInstanceOf(WebCreationContractDriftError);
+    expect(err.raw).toBe(raw);
   });
 });

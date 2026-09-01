@@ -36,6 +36,7 @@ import { CreateFromArchiveSurface } from "../../features/import-export/component
 import { DropAnalyzingOverlay } from "../../features/import-export/components/DropAnalyzingOverlay";
 import { CreateFromFolderSurface } from "../../features/import-export/components/CreateFromFolderSurface";
 import { CreateFromRssSurface } from "../../features/import-export/components/CreateFromRssSurface";
+import { CreateFromWebSurface } from "../../features/import-export/components/CreateFromWebSurface";
 import { ImportArtifactSurface } from "../../features/import-export/components/ImportArtifactSurface";
 import {
   discardDropRequest,
@@ -44,6 +45,7 @@ import {
 } from "../../ipc/commands/import-export";
 import { useArchiveCreation } from "../../features/import-export/hooks/use-archive-creation";
 import { useRssCreation } from "../../features/import-export/hooks/use-rss-creation";
+import { useWebCreation } from "../../features/import-export/hooks/use-web-creation";
 import { useStoryImport } from "../../features/import-export/hooks/use-story-import";
 import { useStructuredCreation } from "../../features/import-export/hooks/use-structured-creation";
 import type { StoryPreparationBadge } from "../../features/library/components/StoryCard";
@@ -376,6 +378,30 @@ export function LibraryRoute(): React.JSX.Element {
     setIsRssCreationOpen(false);
   };
 
+  const webCreation = useWebCreation();
+  const [isWebCreationOpen, setIsWebCreationOpen] = useState(false);
+  // ACTIVE covers the whole lifetime of the flow (surface open, or any
+  // non-idle machine state) — same cross-flow exclusivity as the RSS
+  // flow, never a stacked second creation surface.
+  const isWebCreationActive =
+    isWebCreationOpen || webCreation.status.kind !== "idle";
+  const webCreationStatusKind = webCreation.status.kind;
+  useEffect(() => {
+    if (webCreationStatusKind === "created") {
+      invalidate();
+    }
+  }, [webCreationStatusKind, invalidate]);
+
+  const handleWebAbandon = (): void => {
+    webCreation.abandon();
+    setIsWebCreationOpen(false);
+  };
+
+  const handleWebDismiss = (): void => {
+    webCreation.dismiss();
+    setIsWebCreationOpen(false);
+  };
+
   const handleCreated = (story: StoryCardDto): void => {
     // Drop the module-local SWR snapshot so the next useLibraryOverview
     // consumer (this component after rerender, and StoryEditRoute when
@@ -672,6 +698,7 @@ export function LibraryRoute(): React.JSX.Element {
     isCreateFromFolderBusy ||
     isCreateFromArchiveBusy ||
     isRssCreationActive ||
+    isWebCreationActive ||
     isCreateSubmitting ||
     storyTransfer.state.kind === "transferring" ||
     isDropChannelActive;
@@ -793,6 +820,7 @@ export function LibraryRoute(): React.JSX.Element {
     isCreateFromFolderBusy ||
     isCreateFromArchiveBusy ||
     isRssCreationActive ||
+    isWebCreationActive ||
     isCreateSubmitting ||
     storyTransfer.state.kind === "transferring";
 
@@ -1235,6 +1263,18 @@ export function LibraryRoute(): React.JSX.Element {
         onAbandon={handleRssAbandon}
         onDismiss={handleRssDismiss}
       />
+      <CreateFromWebSurface
+        open={isWebCreationOpen}
+        status={webCreation.status}
+        onFetch={(url) => {
+          void webCreation.fetchPreview(url);
+        }}
+        onAccept={() => {
+          void webCreation.acceptCreation();
+        }}
+        onAbandon={handleWebAbandon}
+        onDismiss={handleWebDismiss}
+      />
       {renderCenter(
         state,
         retry,
@@ -1249,7 +1289,10 @@ export function LibraryRoute(): React.JSX.Element {
         handleCreateStoryRequest,
         preparationBadges,
         storyImport.pickAndAnalyze,
-        isImportBusy || isCreateFromFolderBusy || isRssCreationActive,
+        isImportBusy ||
+          isCreateFromFolderBusy ||
+          isRssCreationActive ||
+          isWebCreationActive,
         handleStoryContextMenu,
       )}
       <DeviceStoryCollection
@@ -1365,7 +1408,8 @@ export function LibraryRoute(): React.JSX.Element {
           isImportBusy ||
           isCreateFromFolderBusy ||
           isCreateFromArchiveBusy ||
-          isRssCreationActive
+          isRssCreationActive ||
+          isWebCreationActive
         }
         onCreateFromArchiveRequest={() => {
           void archiveCreation.pickAndAnalyze();
@@ -1374,7 +1418,8 @@ export function LibraryRoute(): React.JSX.Element {
           isImportBusy ||
           isCreateFromFolderBusy ||
           isCreateFromArchiveBusy ||
-          isRssCreationActive
+          isRssCreationActive ||
+          isWebCreationActive
         }
         onCreateFromRssRequest={() => {
           setIsRssCreationOpen(true);
@@ -1383,7 +1428,18 @@ export function LibraryRoute(): React.JSX.Element {
           isImportBusy ||
           isCreateFromFolderBusy ||
           isCreateFromArchiveBusy ||
-          isRssCreationActive
+          isRssCreationActive ||
+          isWebCreationActive
+        }
+        onCreateFromWebRequest={() => {
+          setIsWebCreationOpen(true);
+        }}
+        isCreateFromWebUnavailable={
+          isImportBusy ||
+          isCreateFromFolderBusy ||
+          isCreateFromArchiveBusy ||
+          isRssCreationActive ||
+          isWebCreationActive
         }
         isSubmitUnavailable={
           storyImport.isOsOpenSettling || storyImport.isDropSettling

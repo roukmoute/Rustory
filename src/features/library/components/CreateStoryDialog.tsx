@@ -43,6 +43,12 @@ export interface CreateStoryDialogProps {
   onCreateFromRssRequest?: () => void;
   /** Same cross-flow exclusivity for the RSS entry. */
   isCreateFromRssUnavailable?: boolean;
+  /** Start the web-page creation path (`Démarrer depuis une page web`):
+   *  closes this dialog and hands over to the web flow. Optional — when
+   *  absent, the web entry is not rendered. */
+  onCreateFromWebRequest?: () => void;
+  /** Same cross-flow exclusivity for the web entry. */
+  isCreateFromWebUnavailable?: boolean;
   /** Cross-flow exclusivity for the PRIMARY title path: while a sibling
    *  operation that must not overlap a creation is in flight (an OS-open
    *  analysis settling), the `Créer` submission is refused — mirrors the
@@ -89,6 +95,8 @@ export function CreateStoryDialog({
   isCreateFromArchiveUnavailable = false,
   onCreateFromRssRequest,
   isCreateFromRssUnavailable = false,
+  onCreateFromWebRequest,
+  isCreateFromWebUnavailable = false,
   isSubmitUnavailable = false,
   onSubmittingChange,
   contentSourcePolicy = null,
@@ -226,6 +234,15 @@ export function CreateStoryDialog({
     onCreateFromRssRequest?.();
   };
 
+  const handleCreateFromWeb = (): void => {
+    // Same cross-flow exclusivity as the folder entry.
+    if (isSubmitting || isCreateFromWebUnavailable) return;
+    // Hand over to the web-page flow: close this dialog first so
+    // the in-context surface never sits under a modal.
+    onClose();
+    onCreateFromWebRequest?.();
+  };
+
   return (
     <Dialog
       open={open}
@@ -338,17 +355,23 @@ export function CreateStoryDialog({
           </Button>
         </div>
       ) : null}
-      {onCreateFromRssRequest ? (
+      {onCreateFromRssRequest || onCreateFromWebRequest ? (
         <div
           className="create-story-dialog__sources"
           role="group"
           aria-label="Sources de contenu"
         >
           {contentSourcePolicy !== null &&
-          contentSourcePolicy.sources.some((s) => s.kind === "rss") ? (
+          contentSourcePolicy.sources.some(
+            (s) => s.kind === "rss" || s.kind === "web",
+          ) ? (
             contentSourcePolicy.sources.map((entry) => {
               const isRssEntry = entry.kind === "rss";
-              const isActionable = isRssEntry && entry.activation === "enabled";
+              const isWebEntry = entry.kind === "web";
+              const isActionable =
+                entry.activation === "enabled" &&
+                ((isRssEntry && onCreateFromRssRequest) ||
+                  (isWebEntry && onCreateFromWebRequest));
               const subTextId = `${sourcesId}-${entry.kind}`;
               return (
                 <div key={entry.kind} className="create-story-dialog__source">
@@ -356,15 +379,23 @@ export function CreateStoryDialog({
                     <>
                       <Button
                         variant="quiet"
-                        onClick={handleCreateFromRss}
+                        onClick={
+                          isWebEntry
+                            ? handleCreateFromWeb
+                            : handleCreateFromRss
+                        }
                         aria-disabled={
                           isSubmitting ||
-                          isCreateFromRssUnavailable ||
+                          (isWebEntry
+                            ? isCreateFromWebUnavailable
+                            : isCreateFromRssUnavailable) ||
                           undefined
                         }
                         aria-describedby={subTextId}
                       >
-                        Démarrer depuis une source externe (RSS)
+                        {isWebEntry
+                          ? "Démarrer depuis une page web"
+                          : "Démarrer depuis une source externe (RSS)"}
                       </Button>
                       <p
                         id={subTextId}
@@ -395,7 +426,9 @@ export function CreateStoryDialog({
                       >
                         {isRssEntry
                           ? "Démarrer depuis une source externe (RSS)"
-                          : entry.label}
+                          : isWebEntry
+                            ? "Démarrer depuis une page web"
+                            : entry.label}
                       </Button>
                       <p
                         id={subTextId}
