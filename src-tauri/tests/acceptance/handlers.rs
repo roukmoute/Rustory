@@ -28,6 +28,15 @@ pub struct SharedState {
     s1_url: Option<String>,
     /// S1: the web preview outcome, kept verbatim (Ok: items; Err: refusal).
     s1_preview: Option<Result<web_episode_extraction::WebPreviewOutcome, AppError>>,
+    /// S2: the local fixture server carrying the three-episode page,
+    /// kept alive until the scenario ends.
+    s2_server: Option<FixtureHttpServer>,
+    /// S2: the fixture page url.
+    s2_page_url: Option<String>,
+    /// S2: the number of documented valid episodes on the fixture page.
+    s2_episode_count: usize,
+    /// S2: the committed import proof read back from the DB rows.
+    s2_proof: Option<S2ImportProof>,
     /// S3: the local fixture server carrying the documented episode page
     /// (title + audio media, no image), kept alive until the scenario ends.
     s3_server: Option<FixtureHttpServer>,
@@ -35,6 +44,8 @@ pub struct SharedState {
     s3_page_url: Option<String>,
     /// S3: the web preview outcome of the fixture page.
     s3_preview: Option<Result<web_episode_extraction::WebPreviewOutcome, AppError>>,
+    /// S3: the committed import proof read back from the DB rows.
+    s3_proof: Option<S3ImportProof>,
     /// S4: the invalid addresses documented by the Given step.
     s4_invalid_urls: Vec<String>,
     /// S4: the (address, motivated refusal) pairs collected by the When step.
@@ -79,6 +90,27 @@ impl SharedState {
     ) -> &mut Option<Result<web_episode_extraction::WebPreviewOutcome, AppError>> {
         &mut self.s1_preview
     }
+    fn s2_server_mut(&mut self) -> &mut Option<FixtureHttpServer> {
+        &mut self.s2_server
+    }
+    fn s2_page_url(&self) -> &Option<String> {
+        &self.s2_page_url
+    }
+    fn s2_page_url_mut(&mut self) -> &mut Option<String> {
+        &mut self.s2_page_url
+    }
+    fn s2_episode_count(&self) -> &usize {
+        &self.s2_episode_count
+    }
+    fn s2_episode_count_mut(&mut self) -> &mut usize {
+        &mut self.s2_episode_count
+    }
+    fn s2_proof(&self) -> &Option<S2ImportProof> {
+        &self.s2_proof
+    }
+    fn s2_proof_mut(&mut self) -> &mut Option<S2ImportProof> {
+        &mut self.s2_proof
+    }
     fn s3_server_mut(&mut self) -> &mut Option<FixtureHttpServer> {
         &mut self.s3_server
     }
@@ -95,6 +127,12 @@ impl SharedState {
         &mut self,
     ) -> &mut Option<Result<web_episode_extraction::WebPreviewOutcome, AppError>> {
         &mut self.s3_preview
+    }
+    fn s3_proof(&self) -> &Option<S3ImportProof> {
+        &self.s3_proof
+    }
+    fn s3_proof_mut(&mut self) -> &mut Option<S3ImportProof> {
+        &mut self.s3_proof
     }
     fn s4_invalid_urls(&self) -> &[String] {
         &self.s4_invalid_urls
@@ -269,6 +307,30 @@ pub fn handle(world: &mut World, scenario: &str, step: &str) {
         }
         ("Importer une page web publique non-RSS", "l'absence d'image n'empêche pas l'import") => {
             s1_assert_image_optional(world)
+        }
+        ("Créer une histoire complète avec tous les épisodes de la page", "la page contient N épisodes valides (titre et média audio)") => {
+            s2_document_page(world)
+        }
+        ("Créer une histoire complète avec tous les épisodes de la page", "je lance l'import de la page") => {
+            s2_run_import(world)
+        }
+        ("Créer une histoire complète avec tous les épisodes de la page", "une histoire complète est créée, prête à l'emploi") => {
+            s2_assert_story_created(world)
+        }
+        ("Créer une histoire complète avec tous les épisodes de la page", "l'histoire contient exactement N épisodes") => {
+            s2_assert_exact_episode_count(world)
+        }
+        ("Créer une histoire complète avec tous les épisodes de la page", "les épisodes suivent l'ordre d'apparition sur la page") => {
+            s2_assert_page_order(world)
+        }
+        ("Créer une histoire complète avec tous les épisodes de la page", "chaque épisode porte son propre titre, sans que le titre de la collection ne le remplace") => {
+            s2_assert_own_titles(world)
+        }
+        ("Créer une histoire complète avec tous les épisodes de la page", "le média audio de chaque épisode est téléchargé et associé à son épisode") => {
+            s2_assert_audio_downloaded_and_linked(world)
+        }
+        ("Créer une histoire complète avec tous les épisodes de la page", "l'image d'un épisode est associée à cet épisode lorsque la page la fournit") => {
+            s2_assert_image_linked_when_provided(world)
         }
         ("Importer un épisode sans image", "un épisode possède un titre et un média audio valides, sans image") => {
             s3_document_episode(world)
@@ -630,6 +692,358 @@ fn s1_assert_image_optional(world: &mut World) {
     }
 }
 
+// ===== S2 histoire complète multi-épisodes (TDD-6) =====
+//
+// S2: a page carrying N valid episodes (title + audio, image optional)
+// must yield, on accept, ONE complete story with exactly N nodes in
+// page order — each node carrying its own title, its downloaded audio
+// and (only when the page provides one) its image. The fixture is the
+// documented three-episode DOM of the unit tests, served locally with
+// every media and image it links.
+
+/// The committed import proof of S2: what the DB rows prove after the
+/// multi-episode accept ran.
+#[derive(Debug)]
+struct S2ImportProof {
+    stories_count: i64,
+    story_title: String,
+    source_format: String,
+    source_name: String,
+    node_ids: Vec<String>,
+    node_labels: Vec<String>,
+    node_audio_asset_ids: Vec<Option<String>>,
+    node_image_asset_ids: Vec<Option<String>>,
+    /// The media_format of each node's linked audio asset (None when the
+    /// node carries no audio asset).
+    node_audio_formats: Vec<Option<String>>,
+    /// Whether each node's linked image asset exists as an `image` row.
+    node_image_asset_rows: Vec<bool>,
+    /// Whether each node's linked audio file exists on disk under the
+    /// media store.
+    media_files_on_disk: Vec<bool>,
+}
+
+/// The three-episode fixture DOM (identical to the unit fixture): the
+/// collection title must never pollute the node labels; episodes 1 and 3
+/// carry an image, episode 2 does not.
+fn s2_fixture_page(base: &str) -> String {
+    format!(
+        "<html><head><title>Sélection S2</title></head><body>\
+         <h1>Sélection S2</h1>\
+         <section><img src=\"{base}/images/ep1.png\">\
+         <a href=\"{base}/media/ep1.wav\">Épisode un</a>\
+         <p>Résumé un.</p></section>\
+         <section><a href=\"{base}/media/ep2.m4a\">Épisode deux</a>\
+         <p>Résumé deux.</p></section>\
+         <section><img src=\"{base}/images/ep3.jpg\">\
+         <a href=\"{base}/media/ep3.wav\">Épisode trois</a>\
+         <p>Résumé trois.</p></section>\
+         </body></html>"
+    )
+}
+
+fn s2_media_routes() -> Vec<(String, u16, Vec<u8>)> {
+    vec![
+        ("/media/ep1.wav".to_owned(), 200, s2_wav_bytes(1)),
+        ("/media/ep2.m4a".to_owned(), 200, s2_m4a_bytes()),
+        ("/media/ep3.wav".to_owned(), 200, s2_wav_bytes(2)),
+        ("/images/ep1.png".to_owned(), 200, s2_png_fixture()),
+        ("/images/ep3.jpg".to_owned(), 200, s2_jpeg_fixture()),
+    ]
+}
+
+/// Magic-bytes WAV fixture (the marker byte distinguishes episodes 1 and 3).
+fn s2_wav_bytes(marker: u8) -> Vec<u8> {
+    let mut bytes = b"RIFF".to_vec();
+    bytes.extend_from_slice(&[0u8; 4]);
+    bytes.extend_from_slice(b"WAVE");
+    bytes.extend_from_slice(&[0u8; 4]);
+    bytes.push(marker);
+    bytes
+}
+
+/// Fake but correctly-shaped M4A box: 4-byte size + `ftyp` + `M4A ` brand.
+fn s2_m4a_bytes() -> Vec<u8> {
+    let mut bytes = vec![0u8; 4];
+    bytes.extend_from_slice(b"ftyp");
+    bytes.extend_from_slice(b"M4A ");
+    bytes.extend_from_slice(&[0u8; 8]);
+    bytes
+}
+
+fn s2_png_fixture() -> Vec<u8> {
+    let img = image::RgbaImage::from_pixel(8, 8, image::Rgba([200, 10, 10, 255]));
+    let mut out = Vec::new();
+    image::DynamicImage::ImageRgba8(img)
+        .write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png)
+        .expect("encode png");
+    out
+}
+
+fn s2_jpeg_fixture() -> Vec<u8> {
+    let img = image::RgbaImage::from_pixel(8, 8, image::Rgba([10, 200, 10, 255]));
+    let mut out = Vec::new();
+    image::DynamicImage::ImageRgba8(img)
+        .write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Jpeg)
+        .expect("encode jpeg");
+    out
+}
+
+/// S2 — Given: the local fixture page serves the three documented
+/// episodes (episodes 1 and 3 with an image, episode 2 without) plus
+/// every media and image the page links.
+fn s2_document_page(world: &mut World) {
+    let server = start_fixture_http_server(|base| {
+        let mut routes = vec![("/page".to_owned(), 200, s2_fixture_page(base).into_bytes())];
+        routes.extend(s2_media_routes());
+        routes
+    });
+    let page_url = format!("{}/page", server.base);
+    *world.state.s2_page_url_mut() = Some(page_url);
+    *world.state.s2_server_mut() = Some(server);
+    *world.state.s2_episode_count_mut() = 3;
+}
+
+/// S2 — When: preview then ACCEPT the fixture page through the
+/// production entry point; the committed import proof is read back from
+/// the DB rows (story, provenance, assets, canonical structure, media
+/// files on disk).
+fn s2_run_import(world: &mut World) {
+    let url = world
+        .state
+        .s2_page_url()
+        .clone()
+        .expect("the S2 Given step must document the page url");
+    let preview = web_episode_extraction::preview_web_podcast(
+        official_content_sources(),
+        &url,
+        IMPORT_BUDGET,
+    )
+    .expect("the fixture page must preview");
+    assert_eq!(
+        preview.items.len(),
+        3,
+        "the fixture page documents exactly three valid episodes"
+    );
+    let page_checksum = preview.page_checksum;
+
+    let mut library = db::open_in_memory().expect("fresh in-memory library");
+    db::run_migrations(&mut library).expect("migrations must apply");
+    let store_root = std::env::temp_dir().join(format!("rustory-accept-s2-{}", std::process::id()));
+    std::fs::create_dir_all(&store_root).expect("the media store root must be creatable");
+    let outcome = web_episode_extraction::accept_web_podcast_creation(
+        &mut library,
+        official_content_sources(),
+        &url,
+        &page_checksum,
+        IMPORT_BUDGET,
+        Some(&store_root),
+    )
+    .expect("the fixture import must not fail");
+    let web_episode_extraction::WebCreationOutcome::Created { story } = outcome else {
+        panic!("the fixture page is local and stable: the accept must never see a source change")
+    };
+    let story_id = story.id;
+    let stories_count: i64 = library
+        .conn()
+        .query_row("SELECT count(*) FROM stories", [], |row| row.get(0))
+        .expect("the stories table must exist");
+    let story_title: String = library
+        .conn()
+        .query_row(
+            "SELECT title FROM stories WHERE id = ?1",
+            [&story_id],
+            |row| row.get(0),
+        )
+        .expect("the created story row must exist");
+    let (source_format, source_name): (String, String) = library
+        .conn()
+        .query_row(
+            "SELECT source_format, source_name FROM story_local_imports WHERE story_id = ?1",
+            [&story_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("the provenance row must exist");
+    let asset_rows: Vec<(String, String, String, String)> = library
+        .conn()
+        .prepare("SELECT id, media_type, media_format, file_name FROM assets WHERE story_id = ?1")
+        .expect("the assets table must exist")
+        .query_map([&story_id], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+        })
+        .expect("the asset rows must read")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("the asset rows must be valid");
+    let asset_by_id: std::collections::HashMap<String, (String, String, String)> =
+        asset_rows
+            .iter()
+            .map(|(id, media_type, media_format, file_name)| {
+                (
+                    id.clone(),
+                    (media_type.clone(), media_format.clone(), file_name.clone()),
+                )
+            })
+            .collect();
+    let structure_json: String = library
+        .conn()
+        .query_row(
+            "SELECT structure_json FROM stories WHERE id = ?1",
+            [&story_id],
+            |row| row.get(0),
+        )
+        .expect("the story structure must exist");
+    let structure: CanonicalStructure =
+        serde_json::from_str(&structure_json).expect("the story structure must be canonical JSON");
+    let media_dir = store_root.join("node-media");
+    let mut node_ids = Vec::new();
+    let mut node_labels = Vec::new();
+    let mut node_audio_asset_ids = Vec::new();
+    let mut node_image_asset_ids = Vec::new();
+    let mut node_audio_formats = Vec::new();
+    let mut node_image_asset_rows = Vec::new();
+    let mut media_files_on_disk = Vec::new();
+    for node in &structure.nodes {
+        node_ids.push(node.id.clone());
+        node_labels.push(node.label.clone());
+        node_audio_asset_ids.push(node.audio_asset_id.clone());
+        node_image_asset_ids.push(node.image_asset_id.clone());
+        node_audio_formats.push(node.audio_asset_id.as_ref().and_then(|asset_id| {
+            asset_by_id
+                .get(asset_id)
+                .map(|(_, media_format, _)| media_format.clone())
+        }));
+        node_image_asset_rows.push(node.image_asset_id.as_ref().map_or(false, |asset_id| {
+            asset_by_id
+                .get(asset_id)
+                .is_some_and(|(media_type, _, _)| media_type == "image")
+        }));
+        media_files_on_disk.push(node.audio_asset_id.as_ref().map_or(false, |asset_id| {
+            asset_by_id
+                .get(asset_id)
+                .is_some_and(|(_, _, file_name)| media_dir.join(file_name).is_file())
+        }));
+    }
+    *world.state.s2_proof_mut() = Some(S2ImportProof {
+        stories_count,
+        story_title,
+        source_format,
+        source_name,
+        node_ids,
+        node_labels,
+        node_audio_asset_ids,
+        node_image_asset_ids,
+        node_audio_formats,
+        node_image_asset_rows,
+        media_files_on_disk,
+    });
+}
+
+fn s2_proof(world: &World) -> &S2ImportProof {
+    world
+        .state
+        .s2_proof()
+        .as_ref()
+        .expect("the S2 When step must have committed the import")
+}
+
+/// S2 — Then: one complete story exists, proven as a `web` source, and
+/// every episode's audio media is downloaded to the media store.
+fn s2_assert_story_created(world: &mut World) {
+    let proof = s2_proof(world);
+    assert_eq!(proof.stories_count, 1, "the import must create exactly one story");
+    assert_eq!(
+        proof.source_format, "web",
+        "the provenance must name the web source format"
+    );
+    assert_eq!(
+        proof.source_name, "127.0.0.1",
+        "the provenance must name the page host"
+    );
+    assert!(
+        !proof.story_title.trim().is_empty(),
+        "the complete story must carry a title"
+    );
+    assert!(
+        proof.media_files_on_disk.iter().all(|on_disk| *on_disk),
+        "every episode's audio media must be downloaded to the media store"
+    );
+}
+
+fn s2_assert_exact_episode_count(world: &mut World) {
+    let proof = s2_proof(world);
+    assert_eq!(
+        proof.node_ids.len(),
+        *world.state.s2_episode_count(),
+        "the story must contain exactly as many episodes as the page documented"
+    );
+}
+
+/// S2 — Then: the node ids follow the page appearance order AND the
+/// per-node media formats follow the page's own media links (wav, m4a,
+/// wav).
+fn s2_assert_page_order(world: &mut World) {
+    let proof = s2_proof(world);
+    assert_eq!(
+        proof.node_ids,
+        vec!["n1".to_owned(), "n2".to_owned(), "n3".to_owned()],
+        "the nodes must follow the page appearance order"
+    );
+    assert_eq!(
+        proof.node_audio_formats,
+        vec![Some("wav".to_owned()), Some("m4a".to_owned()), Some("wav".to_owned())],
+        "each node must keep the format of the media its page section links"
+    );
+}
+
+/// S2 — Then: every node carries its OWN episode title — the collection
+/// title (« Sélection S2 ») must not replace any of them.
+fn s2_assert_own_titles(world: &mut World) {
+    let proof = s2_proof(world);
+    assert_eq!(
+        proof.node_labels,
+        vec![
+            "Épisode un".to_owned(),
+            "Épisode deux".to_owned(),
+            "Épisode trois".to_owned(),
+        ],
+        "each node must carry its own episode title"
+    );
+    assert!(
+        !proof.node_labels.iter().any(|label| label == "Sélection S2"),
+        "the collection title must never replace an episode title"
+    );
+}
+
+/// S2 — Then: every node is linked to a stored audio asset whose file
+/// is on disk (downloaded, not just referenced).
+fn s2_assert_audio_downloaded_and_linked(world: &mut World) {
+    let proof = s2_proof(world);
+    assert!(
+        proof.node_audio_asset_ids.iter().all(|asset_id| asset_id.is_some()),
+        "every node must reference its stored audio asset"
+    );
+    assert!(
+        proof.media_files_on_disk.iter().all(|on_disk| *on_disk),
+        "every referenced audio asset must exist on disk"
+    );
+}
+
+/// S2 — Then: the image is linked PER episode — episodes 1 and 3 carry
+/// their image asset row, episode 2 (no image on the page) stays empty.
+fn s2_assert_image_linked_when_provided(world: &mut World) {
+    let proof = s2_proof(world);
+    assert_eq!(
+        proof.node_image_asset_ids.iter().map(Option::is_some).collect::<Vec<_>>(),
+        vec![true, false, true],
+        "only the episodes whose page section carries an image get one"
+    );
+    assert_eq!(
+        proof.node_image_asset_rows,
+        vec![true, false, true],
+        "a linked image must be a real image asset row"
+    );
+}
+
 // ===== S3 image optionnelle (TDD-4) =====
 //
 // S3 : un épisode documenté avec un titre et un média audio valides et
@@ -638,17 +1052,30 @@ fn s1_assert_image_optional(world: &mut World) {
 // titré et aucun élément image (pas de table Examples : le vocabulaire
 // appartient au handler).
 
+/// The committed import proof of S3: what the DB rows prove after the
+/// image-less episode was imported error-free.
+#[derive(Debug)]
+struct S3ImportProof {
+    stories_count: i64,
+    assets_count: i64,
+    node_audio_asset_id: Option<String>,
+    node_image_asset_id: Option<String>,
+}
+
 fn s3_document_episode(world: &mut World) {
     let server = start_fixture_http_server(|base| {
         let page = format!(
             "<html><body>\
              <h1>Sélection sans image</h1>\
              <section>\
-             <a href=\"{base}/media/episode-sans-image.m4a\">Episode sans image</a>\
+             <a href=\"{base}/media/episode-sans-image.wav\">Episode sans image</a>\
              </section>\
              </body></html>"
         );
-        vec![("/page".to_owned(), 200, page.into_bytes())]
+        vec![
+            ("/page".to_owned(), 200, page.into_bytes()),
+            ("/media/episode-sans-image.wav".to_owned(), 200, s7_fixture_wav()),
+        ]
     });
     let page_url = format!("{}/page", server.base);
     *world.state.s3_page_url_mut() = Some(page_url);
@@ -666,39 +1093,103 @@ fn s3_run_import(world: &mut World) {
         &url,
         IMPORT_BUDGET,
     ));
-}
-
-fn s3_preview(world: &World) -> &web_episode_extraction::WebPreviewOutcome {
-    world
+    let preview = world
         .state
         .s3_preview()
         .as_ref()
-        .expect("the S3 When step must have run the import")
-        .as_ref()
-        .expect("the fixture page must preview without error — S3 tests the error-free import")
+        .expect("the preview must have been stored")
+        .clone()
+        .expect("the fixture page must preview without error — S3 tests the error-free import");
+
+    let mut library = db::open_in_memory().expect("fresh in-memory library");
+    db::run_migrations(&mut library).expect("migrations must apply");
+    let store_root = std::env::temp_dir().join(format!("rustory-accept-s3-{}", std::process::id()));
+    std::fs::create_dir_all(&store_root).expect("the media store root must be creatable");
+    let outcome = web_episode_extraction::accept_web_podcast_creation(
+        &mut library,
+        official_content_sources(),
+        &url,
+        &preview.page_checksum,
+        IMPORT_BUDGET,
+        Some(&store_root),
+    )
+    .expect("the image-less episode must import without error");
+    let web_episode_extraction::WebCreationOutcome::Created { story } = outcome else {
+        panic!("the fixture page is local and stable: the accept must never see a source change")
+    };
+    let story_id = story.id;
+    let stories_count: i64 = library
+        .conn()
+        .query_row("SELECT count(*) FROM stories", [], |row| row.get(0))
+        .expect("the stories table must exist");
+    let assets_count: i64 = library
+        .conn()
+        .query_row(
+            "SELECT count(*) FROM assets WHERE story_id = ?1",
+            [&story_id],
+            |row| row.get(0),
+        )
+        .expect("the assets table must exist");
+    let structure_json: String = library
+        .conn()
+        .query_row(
+            "SELECT structure_json FROM stories WHERE id = ?1",
+            [&story_id],
+            |row| row.get(0),
+        )
+        .expect("the created story row must exist");
+    let structure: CanonicalStructure =
+        serde_json::from_str(&structure_json).expect("the story structure must be canonical JSON");
+    let node = structure
+        .nodes
+        .iter()
+        .find(|node| node.id == structure.start_node_id)
+        .expect("the structure must carry its start node");
+    *world.state.s3_proof_mut() = Some(S3ImportProof {
+        stories_count,
+        assets_count,
+        node_audio_asset_id: node.audio_asset_id.clone(),
+        node_image_asset_id: node.image_asset_id.clone(),
+    });
 }
 
 fn s3_assert_imported_without_error(world: &mut World) {
     match world.state.s3_preview().as_ref() {
-        Some(Ok(outcome)) => assert!(
-            !outcome.items.is_empty(),
-            "the documented episode must be imported"
-        ),
         Some(Err(error)) => panic!(
             "the image-less episode must import without error: {error:?}"
         ),
+        Some(Ok(_)) => {}
         None => panic!("the S3 When step must have run the import"),
     }
+    let proof = world
+        .state
+        .s3_proof()
+        .as_ref()
+        .expect("the S3 When step must have committed the import");
+    assert_eq!(proof.stories_count, 1, "the import must create exactly one story");
+    assert_eq!(
+        proof.assets_count, 1,
+        "the image-less episode stores exactly its audio asset"
+    );
+    assert!(
+        proof.node_audio_asset_id.is_some(),
+        "the documented episode's audio media must be linked to its node"
+    );
 }
 
 fn s3_assert_image_field_empty(world: &mut World) {
-    for item in &s3_preview(world).items {
-        assert!(
-            item.image_url.is_none(),
-            "the documented episode carries no image: its image field must stay empty, got: {item:?}"
-        );
-    }
+    let proof = world
+        .state
+        .s3_proof()
+        .as_ref()
+        .expect("the S3 When step must have committed the import");
+    assert!(
+        proof.node_image_asset_id.is_none(),
+        "the documented episode carries no image: its image field must stay empty, got: {:?}",
+        proof.node_image_asset_id
+    );
 }
+
 // ===== S7 regression (TDD-3) =====
 //
 // S7: the RSS path must stay unchanged END-TO-END. A valid LOCAL fixture

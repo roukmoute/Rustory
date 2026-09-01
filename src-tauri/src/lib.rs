@@ -528,6 +528,7 @@ pub fn run() {
             commands::import_export::accept_rss_story_creation,
             commands::import_export::accept_structured_archive_creation,
             commands::import_export::accept_structured_creation,
+            commands::import_export::accept_web_podcast_creation,
             commands::story::add_node_option,
             commands::story::add_story_node,
             commands::import_export::analyze_artifact_for_import,

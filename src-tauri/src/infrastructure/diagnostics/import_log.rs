@@ -98,6 +98,30 @@ pub enum Event {
     /// FAILED to emit. The intent stays pending (the next library-mount
     /// pull serves it) — this line makes the lost wake-up diagnosable.
     DropSignalEmitFailed,
+    /// An accepted web ingestion was committed. `import_state` is the
+    /// durable tag actually persisted on the provenance row.
+    WebCreationSettled {
+        host: String,
+        import_state: &'static str,
+    },
+    /// The accept re-fetch refused honestly: the page diverged from the
+    /// previewed state (content or episode set changed since) — nothing
+    /// was mutated.
+    WebSourceChanged { host: String },
+    /// The page fetch transport failed (preview or accept). `stage`
+    /// mirrors the upstream `AppError` `details.stage` closed set.
+    /// STRICTLY the `RSS_SOURCE_UNREACHABLE` code — a local failure of
+    /// the accept (SQLite commit, clock, worker join) is
+    /// [`Event::WebCreationFailed`], never counted as a network problem.
+    WebSourceUnreachable { host: String, stage: String },
+    /// An accepted web ingestion failed LOCALLY (DB commit, clock, worker
+    /// join…): `code` is the wire error code (`IMPORT_FAILED`…), `source`
+    /// mirrors the upstream `details.source` when present.
+    WebCreationFailed {
+        host: String,
+        code: String,
+        source: String,
+    },
 }
 
 /// Append a single event to the import log. Production entry point —

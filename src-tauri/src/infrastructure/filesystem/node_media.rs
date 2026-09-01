@@ -37,6 +37,13 @@ pub const NODE_MEDIA_STAGING_DIR_NAME: &str = ".staging";
 /// file from filling the disk. Applies to both images and audio.
 pub const MAX_MEDIA_BYTES: usize = 32 * 1024 * 1024;
 
+/// Hard ceiling for MEDIA DOWNLOADED BY A WEB IMPORT. Web podcast pages can
+/// link episodes much longer than a local node narration, so the web
+/// acquisition path uses this wider ceiling while the local-attach flow keeps
+/// [`MAX_MEDIA_BYTES`]. The read-back path admits it too (a stored 100 MB m4a
+/// must stay previewable).
+pub const WEB_MAX_MEDIA_BYTES: usize = 128 * 1024 * 1024;
+
 /// The two media kinds a node can carry. Stable wire strings (`image`/`audio`)
 /// matching the `assets.media_type` CHECK.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -84,7 +91,8 @@ pub struct StoredMedia {
 pub enum NodeMediaError {
     /// The bytes are not a recognized supported media format.
     UnsupportedFormat,
-    /// The bytes exceed [`MAX_MEDIA_BYTES`].
+    /// The bytes exceed the ceiling in force for the flow that stored them
+    /// ([`MAX_MEDIA_BYTES`] local-attach / [`WEB_MAX_MEDIA_BYTES`] web import).
     Oversize,
     /// A transport stage failed (`staging` / `promote` / `read` / `invalid_name`).
     Transport(&'static str),
@@ -180,6 +188,17 @@ pub fn sniff_media(bytes: &[u8]) -> Option<SniffedMedia> {
             mime: "audio/wav",
         });
     }
+    // M4A (MP4 audio) is an ISOBMFF container: first box `ftyp` with an
+    // `M4A ` brand. Radio France podcast pages link their episodes as m4a, so
+    // the web import path must recognize the format the pages actually serve.
+    if bytes.len() >= 12 && &bytes[4..8] == b"ftyp" && &bytes[8..12] == b"M4A " {
+        return Some(SniffedMedia {
+            kind: MediaKind::Audio,
+            format: "m4a",
+            ext: "m4a",
+            mime: "audio/mp4",
+        });
+    }
     if bytes.starts_with(b"OggS") {
         return Some(SniffedMedia {
             kind: MediaKind::Audio,
@@ -228,21 +247,24 @@ fn mime_for_ext(ext: &str) -> Option<&'static str> {
         "wav" => Some("audio/wav"),
         "ogg" => Some("audio/ogg"),
         "mp3" => Some("audio/mpeg"),
+        "m4a" => Some("audio/mp4"),
         _ => None,
     }
 }
 
-/// Validate, content-address and PROMOTE `bytes` into the store. Returns the
-/// promoted [`StoredMedia`]. The bytes are written to a staging temp file first,
-/// then atomically `rename`d to `<hash>.<ext>` so a crash mid-write never leaves
-/// a half-written promoted file. Re-storing identical bytes is idempotent (the
-/// content hash names the same file).
-pub fn store_media(
+/// Validate, content-address and PROMOTE `bytes` into the store, refusing any
+/// payload strictly above `cap`. Returns the promoted [`StoredMedia`]. The
+/// bytes are written to a staging temp file first, then atomically `rename`d
+/// to `<hash>.<ext>` so a crash mid-write never leaves a half-written promoted
+/// file. Re-storing identical bytes is idempotent (the content hash names the
+/// same file).
+pub fn store_media_capped(
     media_dir: &Path,
     staging_dir: &Path,
     bytes: &[u8],
+    cap: usize,
 ) -> Result<StoredMedia, NodeMediaError> {
-    if bytes.len() > MAX_MEDIA_BYTES {
+    if bytes.len() > cap {
         return Err(NodeMediaError::Oversize);
     }
     let sniffed = sniff_media(bytes).ok_or(NodeMediaError::UnsupportedFormat)?;
@@ -290,6 +312,16 @@ pub fn store_media(
         byte_size: stored_bytes.len() as u64,
         file_name,
     })
+}
+
+/// [`store_media_capped`] with the local-attach ceiling [`MAX_MEDIA_BYTES`]:
+/// the classic attach/replace flow never moves to the wider web ceiling.
+pub fn store_media(
+    media_dir: &Path,
+    staging_dir: &Path,
+    bytes: &[u8],
+) -> Result<StoredMedia, NodeMediaError> {
+    store_media_capped(media_dir, staging_dir, bytes, MAX_MEDIA_BYTES)
 }
 
 /// Target of the image transcode: the Lunii display is 320×240. Images are
@@ -346,10 +378,12 @@ fn read_file_bounded(path: &Path) -> Result<Vec<u8>, NodeMediaError> {
     use std::io::Read;
     let file = std::fs::File::open(path).map_err(|_| NodeMediaError::Transport("read"))?;
     let mut buf = Vec::new();
-    file.take(MAX_MEDIA_BYTES as u64 + 1)
+    // The store admits the WIDER web ceiling (a 128 MB episode is legal to
+    // store), so the read-back bound must not reject what the store accepted.
+    file.take(WEB_MAX_MEDIA_BYTES as u64 + 1)
         .read_to_end(&mut buf)
         .map_err(|_| NodeMediaError::Transport("read"))?;
-    if buf.len() > MAX_MEDIA_BYTES {
+    if buf.len() > WEB_MAX_MEDIA_BYTES {
         return Err(NodeMediaError::Oversize);
     }
     Ok(buf)
@@ -588,5 +622,101 @@ mod tests {
         assert!(NodeMediaError::UnsupportedFormat.is_validation());
         assert!(NodeMediaError::Oversize.is_validation());
         assert!(!NodeMediaError::Transport("read").is_validation());
+    }
+
+    /// A fake but correctly-shaped M4A box: 4-byte size + `ftyp` + `M4A `
+    /// brand. Audio is stored verbatim, so a decodable payload is NOT required.
+    fn m4a() -> Vec<u8> {
+        let mut v = vec![0u8, 0, 0, 0];
+        v.extend_from_slice(b"ftyp");
+        v.extend_from_slice(b"M4A ");
+        v.extend_from_slice(&[0; 8]);
+        v
+    }
+
+    #[test]
+    fn sniffs_m4a_audio() {
+        assert_eq!(
+            sniff_media(&m4a()),
+            Some(SniffedMedia {
+                kind: MediaKind::Audio,
+                format: "m4a",
+                ext: "m4a",
+                mime: "audio/mp4",
+            })
+        );
+    }
+
+    #[test]
+    fn stores_and_reads_back_m4a_round_trip() {
+        let tmp = TempDir::new().unwrap();
+        let (media, staging) = store(&tmp);
+        let source = m4a();
+        let stored = store_media(&media, &staging, &source).expect("store m4a");
+        assert_eq!(stored.kind, MediaKind::Audio);
+        assert_eq!(stored.format, "m4a");
+        assert_eq!(stored.file_name, format!("{}.m4a", stored.content_hash));
+        let (bytes, mime) = read_media(&media, &stored.file_name).expect("read m4a");
+        assert_eq!(mime, "audio/mp4");
+        assert_eq!(bytes, source);
+    }
+
+    #[test]
+    fn store_media_capped_refuses_bytes_above_the_cap() {
+        let tmp = TempDir::new().unwrap();
+        let (media, staging) = store(&tmp);
+        let source = m4a(); // 20 bytes
+        assert_eq!(
+            store_media_capped(&media, &staging, &source, 16),
+            Err(NodeMediaError::Oversize),
+            "strictly above the cap must be refused"
+        );
+        let stored =
+            store_media_capped(&media, &staging, &source, source.len()).expect("at cap is ok");
+        assert_eq!(stored.format, "m4a");
+    }
+
+    #[test]
+    fn store_media_capped_is_idempotent_for_identical_bytes() {
+        let tmp = TempDir::new().unwrap();
+        let (media, staging) = store(&tmp);
+        let source = m4a();
+        let a = store_media_capped(&media, &staging, &source, 1024).expect("a");
+        let b = store_media_capped(&media, &staging, &source, 1024).expect("b");
+        assert_eq!(a.content_hash, b.content_hash);
+        assert_eq!(a.file_name, b.file_name);
+    }
+
+    #[test]
+    fn web_media_cap_is_wider_than_the_classic_cap() {
+        assert!(
+            WEB_MAX_MEDIA_BYTES > MAX_MEDIA_BYTES,
+            "web acquisition must admit files the local-attach cap refuses"
+        );
+    }
+
+    /// Cap boundary: a stored file of EXACTLY the web ceiling is read back
+    /// in full — the read-back bound must not reject what the (wider) web
+    /// store admitted.
+    #[test]
+    fn read_file_bounded_accepts_a_file_of_exactly_the_web_cap() {
+        let tmp = TempDir::new().unwrap();
+        let (media, _staging) = store(&tmp);
+        let path = media.join("cap-boundary.wav");
+        std::fs::write(&path, vec![b'x'; WEB_MAX_MEDIA_BYTES]).expect("write boundary file");
+        let bytes = read_file_bounded(&path).expect("a file of exactly the web cap must be accepted");
+        assert_eq!(bytes.len(), WEB_MAX_MEDIA_BYTES);
+    }
+
+    /// Cap boundary: a stored file ONE byte above the web ceiling is refused
+    /// (Oversize) — the bounded read is the ground truth for the read-back.
+    #[test]
+    fn read_file_bounded_refuses_a_file_one_byte_above_the_web_cap() {
+        let tmp = TempDir::new().unwrap();
+        let (media, _staging) = store(&tmp);
+        let path = media.join("cap-oversize.wav");
+        std::fs::write(&path, vec![b'x'; WEB_MAX_MEDIA_BYTES + 1]).expect("write oversize file");
+        let err = read_file_bounded(&path).expect_err("one byte above the web cap must be refused");
+        assert!(matches!(err, NodeMediaError::Oversize));
     }
 }

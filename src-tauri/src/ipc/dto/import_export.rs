@@ -780,6 +780,21 @@ pub enum RssCreationOutcomeDto {
     SourceChanged,
 }
 
+/// Tagged outcome of `accept_web_podcast_creation`: the created card + its
+/// report, or the honest recoverable refusal (`sourceChanged` — the page
+/// diverged since the preview; NOTHING was created). The refusal is a
+/// typed verdict, never an `AppError` (only transport rejects).
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum WebCreationOutcomeDto {
+    #[serde(rename_all = "camelCase")]
+    Created {
+        story: crate::ipc::dto::StoryCardDto,
+        report: Vec<ImportFindingDto>,
+    },
+    SourceChanged,
+}
+
 /// The frozen user-facing label of a content-source kind
 /// (`product-language.md`). Exhaustive match — adding a kind without
 /// deciding its label is a compile error (the DTO tripwire pattern).
@@ -1933,19 +1948,26 @@ pub struct WebPreviewItemDto {
 }
 
 /// The typed outcome of `fetch_web_podcast_preview`: the source HOST (the
-/// only address fragment that ever crosses), the selectable items.
+/// only address fragment that ever crosses), the page checksum the accept
+/// phase re-proves against, and the selectable items.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct WebPreviewDto {
     pub source_host: String,
+    pub page_checksum: String,
     pub items: Vec<WebPreviewItemDto>,
 }
 
 impl WebPreviewDto {
     /// Map the domain outcome to the wire preview.
-    pub fn from_outcome(source_host: String, items: Vec<WebEpisode>) -> Self {
+    pub fn from_outcome(
+        source_host: String,
+        page_checksum: String,
+        items: Vec<WebEpisode>,
+    ) -> Self {
         Self {
             source_host,
+            page_checksum,
             items: items
                 .iter()
                 .map(|item| WebPreviewItemDto {

@@ -30,7 +30,8 @@ pub use import_export::{
     ExportStoryDialogOutcomeDto, ImportArtifactAnalysisDto, ImportAspectDto, ImportCategoryDto,
     ImportFindingDto, ImportQualityDto, ImportStateDto, ImportableContentDto, OsOpenAnalysisDto,
     RssCreationOutcomeDto, RssItemRefDto, RssPreviewDto, RssPreviewItemDto,
-    StructuredCreationAnalysisDto, WebPreviewDto, WebPreviewItemDto, DROP_MULTIPLE_ITEMS_MESSAGE,
+    StructuredCreationAnalysisDto, WebCreationOutcomeDto, WebPreviewDto, WebPreviewItemDto,
+    DROP_MULTIPLE_ITEMS_MESSAGE,
     OS_OPEN_MULTIPLE_FILES_MESSAGE,
 };
 pub use library::{LibraryOverviewDto, StoryCardDto};

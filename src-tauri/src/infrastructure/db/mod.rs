@@ -109,6 +109,16 @@ pub const MIGRATIONS: &[(u32, &str, Option<MigrationHook>)] = &[
         include_str!("../../../migrations/0015_source_archive_retained.sql"),
         None,
     ),
+    (
+        16,
+        include_str!("../../../migrations/0016_web_provenance.sql"),
+        None,
+    ),
+    (
+        17,
+        include_str!("../../../migrations/0017_media_m4a.sql"),
+        None,
+    ),
 ];
 
 /// Migration 0009 hook: re-stamp every v2 story to the v3 graph shape.
@@ -913,6 +923,128 @@ mod tests {
         assert!(
             message.contains("foreign key") || message.contains("foreignkey"),
             "expected FK constraint failure, got: {message}"
+        );
+    }
+
+    #[test]
+    fn migration_0016_allows_web_provenance_and_refuses_unknown_formats() {
+        let mut db = open_in_memory().expect("open");
+        run_migrations(&mut db).expect("migrate");
+
+        let conn = db.conn();
+        conn.execute(
+            "INSERT INTO stories (id, title, schema_version, structure_json, content_checksum, created_at, updated_at) \
+             VALUES ('story-web-prov', 'Web prov', 3, '{\"schemaVersion\":3,\"nodes\":[]}', \
+             '0000000000000000000000000000000000000000000000000000000000000000', \
+             '2026-04-22T00:00:00.000Z', '2026-04-22T00:00:00.000Z')",
+            [],
+        )
+        .expect("insert parent story");
+
+        // 'web' with a `needs_review` import must carry a findings summary
+        // (marker invariant: recognized <=> findings_summary IS NULL).
+        conn.execute(
+            "INSERT INTO story_local_imports \
+             (story_id, source_format, source_format_version, source_name, artifact_checksum, import_state, findings_summary, imported_at) \
+             VALUES ('story-web-prov', 'web', 1, '127.0.0.1', \
+             '0000000000000000000000000000000000000000000000000000000000000000', \
+             'needs_review', '[\"Structure:recognized\"]', '2026-04-22T00:00:00.000Z')",
+            [],
+        )
+        .expect("'web' provenance must be accepted");
+
+        conn.execute(
+            "INSERT INTO stories (id, title, schema_version, structure_json, content_checksum, created_at, updated_at) \
+             VALUES ('story-web-unknown', 'Web unknown', 3, '{\"schemaVersion\":3,\"nodes\":[]}', \
+             '0000000000000000000000000000000000000000000000000000000000000000', \
+             '2026-04-22T00:00:00.000Z', '2026-04-22T00:00:00.000Z')",
+            [],
+        )
+        .expect("insert second parent story");
+
+        let err = conn
+            .execute(
+                "INSERT INTO story_local_imports \
+                 (story_id, source_format, source_format_version, source_name, artifact_checksum, import_state, imported_at) \
+                 VALUES ('story-web-unknown', 'web-unknown', 1, '127.0.0.1', \
+                 '0000000000000000000000000000000000000000000000000000000000000000', \
+                 'recognized', '2026-04-22T00:00:00.000Z')",
+                [],
+            )
+            .expect_err("unknown source_format must trip CHECK");
+        let message = err.to_string().to_lowercase();
+        assert!(
+            message.contains("check"),
+            "expected CHECK constraint failure, got: {message}"
+        );
+    }
+
+    #[test]
+    fn migration_0017_allows_m4a_assets_and_refuses_unknown_formats() {
+        let mut db = open_in_memory().expect("open");
+        run_migrations(&mut db).expect("migrate");
+
+        let conn = db.conn();
+        conn.execute(
+            "INSERT INTO stories (id, title, schema_version, structure_json, content_checksum, created_at, updated_at) \
+             VALUES ('story-m4a', 'M4A', 3, '{\"schemaVersion\":3,\"nodes\":[]}', \
+             '0000000000000000000000000000000000000000000000000000000000000000', \
+             '2026-04-22T00:00:00.000Z', '2026-04-22T00:00:00.000Z')",
+            [],
+        )
+        .expect("insert parent story");
+
+        conn.execute(
+            "INSERT INTO assets (id, story_id, content_hash, media_type, media_format, byte_size, file_name, created_at) \
+             VALUES ('asset-m4a-1', 'story-m4a', \
+             'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', \
+             'audio', 'm4a', 12, \
+             'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.m4a', \
+             '2026-04-22T00:00:00.000Z')",
+            [],
+        )
+        .expect("'m4a' asset must be accepted");
+
+        let err = conn
+            .execute(
+                "INSERT INTO assets (id, story_id, content_hash, media_type, media_format, byte_size, file_name, created_at) \
+                 VALUES ('asset-m4a-2', 'story-m4a', \
+                 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', \
+                 'audio', 'm4a2', 12, \
+                 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.m4a2', \
+                 '2026-04-22T00:00:00.000Z')",
+                [],
+            )
+            .expect_err("unknown media_format must trip CHECK");
+        let message = err.to_string().to_lowercase();
+        assert!(
+            message.contains("check"),
+            "expected CHECK constraint failure, got: {message}"
+        );
+    }
+
+    #[test]
+    fn migration_0017_keeps_asset_indexes() {
+        let mut db = open_in_memory().expect("open");
+        run_migrations(&mut db).expect("migrate");
+
+        let mut names: Vec<String> = db
+            .conn()
+            .prepare(
+                "SELECT name FROM sqlite_master \
+                 WHERE type = 'index' AND name IN ('idx_assets__story_id', 'idx_assets__content_hash') \
+                 ORDER BY name",
+            )
+            .expect("prepare")
+            .query_map([], |row| row.get::<_, String>(0))
+            .expect("query")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("collect");
+        names.sort();
+        assert_eq!(
+            names,
+            vec!["idx_assets__content_hash", "idx_assets__story_id"],
+            "both pre-existing asset indexes must survive the 0017 rebuild"
         );
     }
 }

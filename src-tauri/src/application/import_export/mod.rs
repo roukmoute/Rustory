@@ -29,6 +29,6 @@ pub use structured_creation::{
     StructuredCreationOutcome, MAX_MANIFEST_BYTES,
 };
 pub use web_episode_extraction::{
-    commit_web_story_creation, prepare_web_story_creation, preview_web_podcast, WebAcceptPhase,
-    WebEpisode, WebPreviewOutcome,
+    accept_web_podcast_creation, commit_web_story_creation, prepare_web_story_creation,
+    preview_web_podcast, WebAcceptPhase, WebCreationOutcome, WebEpisode, WebPreviewOutcome,
 };

@@ -31,6 +31,34 @@
       "url" : "https://www.radiofrance.fr/franceinter/podcasts/serie-tina-et-le-serpent-a-plumes"
     } ]
   }, {
+    "name" : "Créer une histoire complète avec tous les épisodes de la page",
+    "steps" : [ {
+      "keyword" : "Given",
+      "text" : "la page contient N épisodes valides (titre et média audio)"
+    }, {
+      "keyword" : "When",
+      "text" : "je lance l'import de la page"
+    }, {
+      "keyword" : "Then",
+      "text" : "une histoire complète est créée, prête à l'emploi"
+    }, {
+      "keyword" : "And",
+      "text" : "l'histoire contient exactement N épisodes"
+    }, {
+      "keyword" : "And",
+      "text" : "les épisodes suivent l'ordre d'apparition sur la page"
+    }, {
+      "keyword" : "And",
+      "text" : "chaque épisode porte son propre titre, sans que le titre de la collection ne le remplace"
+    }, {
+      "keyword" : "And",
+      "text" : "le média audio de chaque épisode est téléchargé et associé à son épisode"
+    }, {
+      "keyword" : "And",
+      "text" : "l'image d'un épisode est associée à cet épisode lorsque la page la fournit"
+    } ],
+    "examples" : [ ]
+  }, {
     "name" : "Importer un épisode sans image",
     "steps" : [ {
       "keyword" : "Given",

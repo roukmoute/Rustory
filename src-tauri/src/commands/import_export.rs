@@ -8,7 +8,7 @@ use tauri_plugin_dialog::{DialogExt, FilePath};
 use crate::application::import_export::import::read_artifact_bounded;
 use crate::application::import_export::{
     self, import, rss_creation, structured_creation, web_episode_extraction, ExportStoryInput,
-    ImportAnalysis, RssAcceptPhase, RssCreationOutcome,
+    ImportAnalysis, RssAcceptPhase, RssCreationOutcome, WebCreationOutcome,
 };
 use crate::application::story::get_story_detail;
 use crate::commands::shared::validate_story_id;
@@ -23,7 +23,7 @@ use crate::ipc::dto::{
     ArchiveCreationAnalysisDto, DropAnalysisDto, ExportStoryDialogInputDto,
     ExportStoryDialogOutcomeDto, ImportArtifactAnalysisDto, OsOpenAnalysisDto,
     RssCreationOutcomeDto, RssItemRefDto, RssPreviewDto, StoryCardDto,
-    StructuredCreationAnalysisDto, WebPreviewDto,
+    StructuredCreationAnalysisDto, WebCreationOutcomeDto, WebPreviewDto,
 };
 use crate::AppState;
 
@@ -996,6 +996,62 @@ mod tests {
     }
 
     #[test]
+    fn web_failure_event_dispatches_on_the_error_code() {
+        // A REAL transport failure (preview or accept) lands under
+        // `web_source_unreachable`…
+        let transport = crate::infrastructure::device::rss_source::fetch_error("request");
+        let event = web_failure_event("exemple.fr".into(), &transport);
+        let v = serde_json::to_value(&event).expect("ser");
+        assert_eq!(v["category"], "web_source_unreachable");
+        assert_eq!(v["host"], "exemple.fr");
+        assert_eq!(v["stage"], "request");
+
+        // …while a LOCAL accept failure (DB commit, clock, join —
+        // IMPORT_FAILED) is a `web_creation_failed` line: the closed
+        // diagnostic categories never count a SQLite/clock failure as a
+        // network problem.
+        let local = AppError::import_failed("Création impossible.", "Réessaie.")
+            .with_details(serde_json::json!({ "source": "db_commit", "stage": "commit" }));
+        let event = web_failure_event("exemple.fr".into(), &local);
+        let v = serde_json::to_value(&event).expect("ser");
+        assert_eq!(v["category"], "web_creation_failed");
+        assert_eq!(v["code"], "IMPORT_FAILED");
+        assert_eq!(v["source"], "db_commit");
+
+        // …and a POLICY refusal is `content_source_blocked` — kind only,
+        // the host is dropped (the refusal precedes any dispatch): never
+        // a network line, never a local-failure line.
+        let policy =
+            AppError::content_source_unavailable(crate::domain::import::ContentSourceKind::Web);
+        let event = web_failure_event("exemple.fr".into(), &policy);
+        let v = serde_json::to_value(&event).expect("ser");
+        assert_eq!(v["category"], "content_source_blocked");
+        assert_eq!(v["kind"], "web");
+        assert!(v.get("host").is_none(), "no host on a policy refusal");
+    }
+
+    #[test]
+    fn web_failure_log_host_never_reads_the_address_on_a_policy_refusal() {
+        // A perfectly parseable address + a policy refusal → the host is
+        // EMPTY: the address was not consulted (the boundary mirror of
+        // "the gate runs before the address validation").
+        let policy =
+            AppError::content_source_unavailable(crate::domain::import::ContentSourceKind::Web);
+        assert_eq!(
+            web_failure_log_host("https://exemple.fr/podcasts/serie", &policy),
+            ""
+        );
+
+        // Every other failure derives the host best-effort.
+        let transport = crate::infrastructure::device::rss_source::fetch_error("request");
+        assert_eq!(
+            web_failure_log_host("https://exemple.fr/podcasts/serie", &transport),
+            "exemple.fr"
+        );
+        assert_eq!(web_failure_log_host("pas une adresse", &transport), "");
+    }
+
+    #[test]
     fn os_open_read_failure_maps_to_its_diagnostic_stage_tokens() {
         // The trace line carries exactly the closed tokens of the upstream
         // transport error — never a path, never a basename.
@@ -1286,7 +1342,8 @@ mod tests {
 
 // ===== Web podcast preview =====
 
-/// Wall-clock budget for one web page fetch (preview).
+/// Wall-clock budget for one web page fetch (preview OR the accept's
+/// re-fetch), connection to last body byte.
 const WEB_FETCH_BUDGET: Duration = Duration::from_secs(30);
 
 /// Fetch the preview of a web podcast page.
@@ -1342,6 +1399,135 @@ pub async fn fetch_web_podcast_preview(
     let preview = outcome?;
     Ok(WebPreviewDto::from_outcome(
         preview.source_host,
+        preview.page_checksum,
         preview.items,
     ))
+}
+
+/// RE-fetches and re-parses the page from zero on a blocking worker (the
+/// page is the authority; the wire checksum is a pointer, never content),
+/// WITHOUT the DB lock — the lock is taken only for the single atomic
+/// transaction, INSIDE the worker so no `MutexGuard` ever lives across an
+/// `await`. A diverged page resolves with the typed `sourceChanged`
+/// refusal (nothing created); only transport rejects.
+#[tauri::command]
+pub async fn accept_web_podcast_creation(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    web_url: String,
+    page_checksum: String,
+) -> Result<WebCreationOutcomeDto, AppError> {
+    let db = state.db.clone();
+    let app_data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|_| structured_creation::app_data_unavailable_error())?;
+    // Cloned raw, parsed only AFTER the outcome (see the preview command):
+    // a policy refusal must reject before ANY address analysis, boundary
+    // included.
+    let web_url_for_log = web_url.clone();
+    let outcome =
+        async_runtime::spawn_blocking(move || -> Result<WebCreationOutcome, AppError> {
+            match web_episode_extraction::prepare_web_story_creation(
+                official_content_sources(),
+                &web_url,
+                &page_checksum,
+                WEB_FETCH_BUDGET,
+                Some(app_data_dir.as_ref()),
+            )? {
+                web_episode_extraction::WebAcceptPhase::SourceChanged => {
+                    Ok(WebCreationOutcome::SourceChanged)
+                }
+                web_episode_extraction::WebAcceptPhase::Prepared(prepared) => {
+                    let mut guard = db.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                    web_episode_extraction::commit_web_story_creation(&mut guard, *prepared)
+                        .map(|story| WebCreationOutcome::Created { story })
+                }
+            }
+        })
+        .await
+        .map_err(|_| web_episode_extraction::spawn_blocking_join_error())?;
+
+    match &outcome {
+        Ok(WebCreationOutcome::Created { story }) => {
+            // A settled creation already passed the policy + address
+            // gates; deriving the host here cannot precede them.
+            let _ = import_log::record_event(
+                &app,
+                import_log::Event::WebCreationSettled {
+                    host: feed_url_host(&web_url_for_log).unwrap_or_default(),
+                    import_state: story
+                        .import_state
+                        .map(|state| state.wire_tag())
+                        .unwrap_or("unknown"),
+                },
+            );
+        }
+        Ok(WebCreationOutcome::SourceChanged) => {
+            let _ = import_log::record_event(
+                &app,
+                import_log::Event::WebSourceChanged {
+                    host: feed_url_host(&web_url_for_log).unwrap_or_default(),
+                },
+            );
+        }
+        Err(err) => record_web_failure(&app, &web_url_for_log, err),
+    }
+
+    Ok(match outcome? {
+        WebCreationOutcome::Created { story } => WebCreationOutcomeDto::Created {
+            report: story.import_report.clone().unwrap_or_default(),
+            story,
+        },
+        WebCreationOutcome::SourceChanged => WebCreationOutcomeDto::SourceChanged,
+    })
+}
+
+/// Best-effort failure trace (host at most). The event category follows
+/// the ERROR CODE so the closed diagnostic categories stay honest: only a
+/// real transport failure (`RSS_SOURCE_UNREACHABLE`) lands under
+/// `web_source_unreachable`; a local failure (DB commit, clock, worker
+/// join — `IMPORT_FAILED`…) is a `web_creation_failed` line.
+fn record_web_failure(app: &AppHandle, web_url: &str, err: &AppError) {
+    let _ = import_log::record_event(
+        app,
+        web_failure_event(web_failure_log_host(web_url, err), err),
+    );
+}
+
+/// The (pure, unit-tested) host derivation of a web failure trace: a
+/// POLICY refusal never reads the address — its event carries the KIND
+/// alone, so the URL is not even parsed. Every other failure derives the
+/// host best-effort.
+fn web_failure_log_host(web_url: &str, err: &AppError) -> String {
+    if err.code == crate::domain::shared::AppErrorCode::ContentSourceUnavailable {
+        return String::new();
+    }
+    feed_url_host(web_url).unwrap_or_default()
+}
+
+/// The (pure, unit-tested) category dispatch of a web failure trace.
+fn web_failure_event(host: String, err: &AppError) -> import_log::Event {
+    if err.code == crate::domain::shared::AppErrorCode::RssSourceUnreachable {
+        import_log::Event::WebSourceUnreachable {
+            host,
+            stage: error_detail(err, "stage"),
+        }
+    } else if err.code == crate::domain::shared::AppErrorCode::ContentSourceUnavailable {
+        // A POLICY refusal: kind only, and the host is deliberately
+        // dropped — the refusal precedes any network dispatch, and a
+        // distribution decision is neither a network nor a local failure.
+        import_log::Event::ContentSourceBlocked {
+            kind: error_detail(err, "kind"),
+        }
+    } else {
+        import_log::Event::WebCreationFailed {
+            host,
+            code: serde_json::to_value(&err.code)
+                .ok()
+                .and_then(|value| value.as_str().map(str::to_string))
+                .unwrap_or_else(|| "UNKNOWN".to_string()),
+            source: error_detail(err, "source"),
+        }
+    }
 }

@@ -7,17 +7,27 @@
 //! - preview_web_podcast: fetch + parse with ZERO mutation
 //! - accept_web_podcast_creation: RE-fetch, re-parse, commit
 
+use std::path::Path;
 use std::time::Duration;
 
 use crate::application::story::now_iso_ms;
 use crate::domain::import::{
-    content_source_activation, feed_url_host, ContentSourceActivation, ContentSourceKind,
-    ContentSourceLine, ImportState, RecognitionAspect, RecognitionFinding,
+    content_source_activation, feed_url_host, rss_import_state, ContentSourceActivation,
+    ContentSourceKind, ContentSourceLine, ImportState, RecognitionAspect, RecognitionCategory,
+    RecognitionFinding, RSS_FALLBACK_TITLE_PREFIX,
 };
 use crate::domain::shared::AppError;
-use crate::domain::story::{canonical_structure_json, CanonicalStructure};
+use crate::domain::story::{
+    canonical_structure_json, content_checksum, content_checksum_bytes, CanonicalNode,
+    CanonicalStructure, CANONICAL_STORY_SCHEMA_VERSION, START_NODE_ID,
+};
 use crate::infrastructure::db::DbHandle;
-use crate::ipc::dto::import_export::{state_db_tag, ImportFindingDto};
+use crate::infrastructure::filesystem::{
+    ensure_node_media_store, store_media_capped, StoredMedia, WEB_MAX_MEDIA_BYTES,
+};
+use crate::ipc::dto::import_export::{
+    import_report_dto, serialize_findings_summary, state_db_tag, state_dto,
+};
 use crate::ipc::dto::StoryCardDto;
 use scraper::{Element, ElementRef, Html, Selector};
 use sha2::{Digest, Sha256};
@@ -38,13 +48,6 @@ pub struct WebEpisode {
     pub summary: String,
     pub audio_url: Option<String>,
     pub image_url: Option<String>,
-}
-
-/// One reference to an episode, used to select which one to create.
-#[derive(Debug, Clone)]
-pub struct WebEpisodeRef {
-    pub title: String,
-    pub audio_url: Option<String>,
 }
 
 /// The content-source policy gate, consulted by BOTH facades (preview AND
@@ -71,11 +74,15 @@ fn validate_web_entry_url(web_url: &str) -> Result<String, AppError> {
 /// so each failure keeps a DISTINCT user-facing reason (S5: the system
 /// states the reason and stops). The diagnostic stage is carried in the
 /// error details.
+#[derive(Debug)]
 enum WebFetchFailure {
     ClientBuild,
     Request(String),
     StatusCheck(u16),
     ReadText(String),
+    /// A downloaded media exceeded the web ceiling (content problem: the
+    /// acquisition degrades to a verdict, it never blocks the creation).
+    Oversize,
 }
 
 impl WebFetchFailure {
@@ -116,6 +123,14 @@ impl WebFetchFailure {
                 "stage": "read_text",
                 "error": error,
             })),
+            WebFetchFailure::Oversize => AppError::import_failed(
+                "Le média est trop volumineux.",
+                "Réessaie avec une page allégée.",
+            )
+            .with_details(serde_json::json!({
+                "source": "network",
+                "stage": "oversize",
+            })),
         }
     }
 }
@@ -139,6 +154,42 @@ fn fetch_html(url: &str, budget: Duration) -> Result<String, AppError> {
     response
         .text()
         .map_err(|error| WebFetchFailure::ReadText(error.to_string()).into_app_error())
+}
+
+/// Download ONE episode media (audio or image) as raw bytes, bounded by the
+/// web ceiling. The typed [`WebFetchFailure`] (never an `AppError`) lets the
+/// accept phase degrade a failed acquisition to a CONTENT verdict — the RSS
+/// precedent: a failed download is « média non récupéré », not a refusal.
+fn fetch_media_bytes(url: &str, budget: Duration) -> Result<Vec<u8>, WebFetchFailure> {
+    use std::io::Read;
+
+    let client = reqwest::blocking::Client::builder()
+        .timeout(budget)
+        .build()
+        .map_err(|_| WebFetchFailure::ClientBuild)?;
+    let response = client
+        .get(url)
+        .send()
+        .map_err(|error| WebFetchFailure::Request(error.to_string()))?;
+    if !response.status().is_success() {
+        return Err(WebFetchFailure::StatusCheck(response.status().as_u16()));
+    }
+    if response
+        .content_length()
+        .is_some_and(|declared| (declared as usize) > WEB_MAX_MEDIA_BYTES)
+    {
+        return Err(WebFetchFailure::Oversize);
+    }
+    // Bounded read: one overflow byte past the ceiling is enough to refuse.
+    let mut bytes: Vec<u8> = Vec::new();
+    response
+        .take(WEB_MAX_MEDIA_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| WebFetchFailure::Request(error.to_string()))?;
+    if bytes.len() > WEB_MAX_MEDIA_BYTES {
+        return Err(WebFetchFailure::Oversize);
+    }
+    Ok(bytes)
 }
 
 /// The `@type` values recognized as a podcast episode on an episode page
@@ -550,6 +601,37 @@ fn no_audio_media_error() -> AppError {
     }))
 }
 
+/// The stable fingerprint of a previewed episode SET: the ordered SHA-256
+/// of every episode's `title`, RESOLVED audio url and RESOLVED image url
+/// (document order, `\0` separated). Preview and accept compute it on the
+/// SAME extraction, so a diverged page (an added, removed or re-pointed
+/// episode) is the honest `SourceChanged` refusal — the preview is a
+/// pointer to this exact state, never content.
+fn page_checksum_of(episodes: &[WebEpisode], base_url: &str) -> String {
+    let mut hasher = Sha256::new();
+    for episode in episodes {
+        hasher.update(episode.title.as_bytes());
+        hasher.update([0u8]);
+        hasher.update(resolved_media_field(episode.audio_url.as_deref(), base_url).as_bytes());
+        hasher.update([0u8]);
+        hasher.update(resolved_media_field(episode.image_url.as_deref(), base_url).as_bytes());
+        hasher.update([0u8]);
+    }
+    format!("{:x}", hasher.finalize())
+}
+
+/// One episode media reference, absolute: `resolve_url` is idempotent on
+/// absolute urls, so a JSON-LD episode already absolute and a DOM episode
+/// carried relative both fingerprint the same value. An unresolvable
+/// reference keeps its raw value (it is still an honest content difference);
+/// an absent reference contributes the empty string.
+fn resolved_media_field(raw: Option<&str>, base_url: &str) -> String {
+    match raw.map(str::trim).filter(|raw| !raw.is_empty()) {
+        Some(raw) => resolve_url(base_url, raw).unwrap_or_else(|| raw.to_owned()),
+        None => String::new(),
+    }
+}
+
 /// Phase 1 — preview a web podcast page and extract episode references.
 pub fn preview_web_podcast(
     sources: &[ContentSourceLine],
@@ -570,10 +652,9 @@ pub fn preview_web_podcast(
         return Err(no_audio_media_error());
     }
 
-    // Compute checksum of the page content (not the full URL, only host + path for PII)
-    let mut hasher = Sha256::new();
-    hasher.update(web_url);
-    let page_checksum = format!("{:x}", hasher.finalize());
+    // The fingerprint of the PREVIEWED episode set (title + resolved audio +
+    // resolved image, in page order) — the accept re-proves exactly this.
+    let page_checksum = page_checksum_of(&episodes, web_url);
 
     Ok(WebPreviewOutcome {
         source_host,
@@ -582,12 +663,31 @@ pub fn preview_web_podcast(
     })
 }
 
-/// Phase 2a — prepare the story creation from a selected episode.
+/// The `story_local_imports.source_format_version` written for a `web`
+/// provenance row (revision 1 = the first frozen-contract extraction;
+/// mirrors `RSS_SOURCE_FORMAT_VERSION` — a revision of OUR reader support,
+/// not a value declared inside the foreign page).
+pub const WEB_SOURCE_FORMAT_VERSION: u64 = 1;
+
+/// Phase 2a — RE-fetch, re-extract and re-prove the PREVIEWED episode set,
+/// with NO DB access at all: the command runs this BEFORE taking the DB
+/// lock, so the network fetch never holds it. The page is re-proven by
+/// [`page_checksum_of`] against `expected_page_checksum` — a diverged page
+/// is the honest [`WebAcceptPhase::SourceChanged`] refusal with ZERO
+/// mutation (nothing is downloaded, promoted or written). Otherwise every
+/// episode's audio (and image, when the page provides one) is DOWNLOADED
+/// and PROMOTED into the node-media store during this DB-free phase, the
+/// canonical ordered N-node structure is composed (page order, each node
+/// with its own title), and the findings derive the durable state: a
+/// failed AUDIO download is a CONTENT verdict (`(Media, Missing)`, état
+/// `partial` — the RSS precedent, the story is still created), a failed
+/// IMAGE download degrades silently (the image stays optional, S3).
 pub fn prepare_web_story_creation(
     sources: &[ContentSourceLine],
     web_url: &str,
-    selected_episode_title: &str,
+    expected_page_checksum: &str,
     budget: Duration,
+    app_data_dir: Option<&Path>,
 ) -> Result<WebAcceptPhase, AppError> {
     ensure_web_source_enabled(sources)?;
 
@@ -595,45 +695,123 @@ pub fn prepare_web_story_creation(
     let source_host = validate_web_entry_url(web_url)?;
 
     let html_content = fetch_html(web_url, budget)?;
-    let episodes = parse_web_episodes(&html_content, web_url);
-
-    let episode = episodes
-        .iter()
-        .find(|e| e.title == selected_episode_title)
-        .ok_or_else(|| {
-            AppError::import_failed(
-                "Épisode introuvable.",
-                "L'épisode sélectionné n'existe plus dans la page.",
-            )
-            .with_details(serde_json::json!({
-                "source": "parsing",
-                "stage": "episode_not_found",
-            }))
-        })?;
-
-    // Compute episode checksum (title + audio_url)
-    let mut hasher = Sha256::new();
-    hasher.update(&episode.title);
-    if let Some(audio) = &episode.audio_url {
-        hasher.update(audio);
+    let document = Html::parse_document(&html_content);
+    let episodes = extract_web_episodes(&document, web_url, &html_content, budget);
+    let episodes = keep_valid_episodes(episodes);
+    if episodes.is_empty() {
+        return Err(no_audio_media_error());
     }
-    let episode_checksum = format!("{:x}", hasher.finalize());
+    if page_checksum_of(&episodes, web_url) != expected_page_checksum {
+        // The page diverged since the preview — refuse honestly, promote
+        // NOTHING (the store is not even touched on this path).
+        return Ok(WebAcceptPhase::SourceChanged);
+    }
 
-    // Compute page checksum (for the prepared creation)
-    let mut hasher2 = Sha256::new();
-    hasher2.update(web_url);
-    let page_checksum = format!("{:x}", hasher2.finalize());
+    // The store root is consulted ONLY after the checksum re-proof, so a
+    // refusal never creates a directory or a file.
+    let store: Option<(std::path::PathBuf, std::path::PathBuf)> = match app_data_dir {
+        Some(dir) => ensure_node_media_store(dir).ok(),
+        None => None,
+    };
 
+    // One node per episode, in page order (n1..nN — the flat ordered graph
+    // the v3 canonical model carries). Every audio is downloaded and
+    // promoted NOW (the network phase); a failed download leaves its node
+    // audio-less and flips the Media finding (the RSS partial precedent).
+    let mut structure = CanonicalStructure {
+        schema_version: CANONICAL_STORY_SCHEMA_VERSION,
+        start_node_id: START_NODE_ID.to_owned(),
+        nodes: Vec::with_capacity(episodes.len()),
+    };
+    let mut assets: Vec<PreparedWebAsset> = Vec::new();
+    let mut audio_missing = false;
+    for (index, episode) in episodes.iter().enumerate() {
+        let mut audio_asset_id: Option<String> = None;
+        let mut image_asset_id: Option<String> = None;
+        if let Some((media_dir, staging_dir)) = &store {
+            if let Some(raw_audio) = &episode.audio_url {
+                let resolved = resolve_url(web_url, raw_audio)
+                    .unwrap_or_else(|| raw_audio.clone());
+                match fetch_and_promote(&resolved, budget, media_dir, staging_dir) {
+                    Some(stored) => {
+                        let asset = prepare_asset(stored, media_dir);
+                        audio_asset_id = Some(asset.asset_id.clone());
+                        assets.push(asset);
+                    }
+                    None => audio_missing = true,
+                }
+            } else {
+                audio_missing = true;
+            }
+            // The image is OPTIONAL: a failed download (or unsupported
+            // bytes) simply leaves the node image-less — no finding, no
+            // state change (S3).
+            if let Some(raw_image) = &episode.image_url {
+                let resolved = resolve_url(web_url, raw_image)
+                    .unwrap_or_else(|| raw_image.clone());
+                if let Some(stored) = fetch_and_promote(&resolved, budget, media_dir, staging_dir)
+                {
+                    let asset = prepare_asset(stored, media_dir);
+                    image_asset_id = Some(asset.asset_id.clone());
+                    assets.push(asset);
+                }
+            }
+        } else if episode.audio_url.is_some() {
+            audio_missing = true;
+        }
+        structure.nodes.push(CanonicalNode {
+            id: format!("n{}", index + 1),
+            text: episode.summary.clone(),
+            label: episode.title.trim().to_owned(),
+            image_asset_id,
+            audio_asset_id,
+            options: Vec::new(),
+        });
+    }
+
+    // The ingestion's findings and durable state: source and title carry
+    // the NOMINAL provenance ambiguity every ingestion keeps, the structure
+    // is recognized, and the Media aspect is recognized only when every
+    // audio was actually downloaded and promoted.
+    let findings = vec![
+        RecognitionFinding::ambiguous(RecognitionAspect::Source),
+        RecognitionFinding::ambiguous(RecognitionAspect::Title),
+        RecognitionFinding::recognized(RecognitionAspect::Structure),
+        if audio_missing {
+            RecognitionFinding {
+                aspect: RecognitionAspect::Media,
+                category: RecognitionCategory::Missing,
+                message: None,
+            }
+        } else {
+            RecognitionFinding::recognized(RecognitionAspect::Media)
+        },
+    ];
+    let state = rss_import_state(&findings);
+
+    // Title: the `Histoire de {hôte}` fallback, ALWAYS (a web page's
+    // collection title is not a story title; the EPISODE titles are the
+    // node labels, never replaced by it).
+    let title = format!("{RSS_FALLBACK_TITLE_PREFIX}{source_host}");
+
+    // Provenance: the checksum fingerprints the RE-FETCHED page bytes —
+    // the bytes actually ingested (the RSS `feed_checksum` precedent).
+    let artifact_checksum = content_checksum_bytes(html_content.as_bytes());
+
+    let structure_json = canonical_structure_json(&structure);
+    let checksum = content_checksum(&structure_json);
     let now_iso = now_iso_ms()?;
+
     Ok(WebAcceptPhase::Prepared(Box::new(PreparedWebCreation {
-        title: episode.title.clone(),
-        structure_json: canonical_structure_json(&CanonicalStructure::minimal()),
-        checksum: episode_checksum,
+        title,
+        structure_json,
+        checksum,
         now_iso,
-        source_host: source_host.clone(),
-        page_checksum,
-        state: ImportState::NeedsReview,
-        findings: vec![RecognitionFinding::ambiguous(RecognitionAspect::Source)],
+        source_host,
+        artifact_checksum,
+        state,
+        findings,
+        assets,
     })))
 }
 
@@ -642,6 +820,35 @@ pub fn prepare_web_story_creation(
 pub enum WebAcceptPhase {
     SourceChanged,
     Prepared(Box<PreparedWebCreation>),
+}
+
+/// Download ONE episode media and PROMOTE it into the node-media store,
+/// or `None` on ANY failure (transport, over-cap, unsupported bytes, store
+/// I/O) — the media stays honestly « non récupéré ». A content problem
+/// never becomes an `AppError` here (the module's contract, the RSS
+/// `promote_enclosure` precedent).
+fn fetch_and_promote(
+    url: &str,
+    budget: Duration,
+    media_dir: &Path,
+    staging_dir: &Path,
+) -> Option<StoredMedia> {
+    let bytes = fetch_media_bytes(url, budget).ok()?;
+    store_media_capped(media_dir, staging_dir, &bytes, WEB_MAX_MEDIA_BYTES).ok()
+}
+
+/// Everything ONE promoted episode media needs for its `assets` row, plus
+/// the promoted file path so a failed commit can compensate the store.
+fn prepare_asset(stored: StoredMedia, media_dir: &Path) -> PreparedWebAsset {
+    PreparedWebAsset {
+        asset_id: uuid::Uuid::now_v7().to_string(),
+        content_hash: stored.content_hash,
+        media_type: stored.kind.as_str(),
+        media_format: stored.format,
+        byte_size: stored.byte_size,
+        file_name: stored.file_name.clone(),
+        promoted_path: media_dir.join(stored.file_name),
+    }
 }
 
 /// The error when a db commit fails.
@@ -666,7 +873,12 @@ fn db_commit_error(err: &rusqlite::Error, stage: &'static str) -> AppError {
     }))
 }
 
-/// Phase 2b — commit the prepared creation into the database.
+/// Phase 2b — the single atomic transaction (`stories` + the provenance
+/// row + every promoted media's `assets` row). This is the ONLY part of
+/// the accept that needs the DB lock. A failed transaction rolls back
+/// fully; the promoted media files — the only pre-transaction mutation —
+/// are then compensated best-effort, exactly like the RSS flow compensates
+/// its promoted enclosure.
 pub fn commit_web_story_creation(
     db: &mut DbHandle,
     prepared: PreparedWebCreation,
@@ -677,54 +889,166 @@ pub fn commit_web_story_creation(
         checksum,
         now_iso,
         source_host,
-        page_checksum,
+        artifact_checksum,
         state,
         findings,
+        assets,
     } = prepared;
-
-    let story_id = uuid::Uuid::now_v7().to_string();
-    let import_report = Some(
-        findings
-            .iter()
-            .map(ImportFindingDto::from_domain)
-            .collect::<Vec<_>>(),
+    let result = commit_web_story_creation_tx(
+        db,
+        &title,
+        &structure_json,
+        &checksum,
+        &now_iso,
+        &source_host,
+        &artifact_checksum,
+        state,
+        &findings,
+        &assets,
     );
-    let import_state_tag = state_db_tag(state);
-    let import_report_json = serde_json::to_string(&import_report).map_err(|_e| {
-        AppError::import_failed(
-            "Création impossible: serialization échouée.",
-            "Réessaie ; si le problème persiste, consulte les traces locales.",
-        )
-    })?;
+    if result.is_err() {
+        // The transaction left nothing in the DB; the promoted files are
+        // the only remnants. Best-effort removal — a leftover is only a
+        // content-addressed orphan, never a corruption.
+        for asset in &assets {
+            let _ = std::fs::remove_file(&asset.promoted_path);
+        }
+    }
+    result
+}
 
-    db.conn()
-        .execute(
-            "INSERT INTO stories (id, title, structure_json, content_checksum, created_at, updated_at, import_state, import_report, source_format, source_name, source_checksum) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+#[allow(clippy::too_many_arguments)]
+fn commit_web_story_creation_tx(
+    db: &mut DbHandle,
+    title: &str,
+    structure_json: &str,
+    checksum: &str,
+    now_iso: &str,
+    source_host: &str,
+    artifact_checksum: &str,
+    state: crate::domain::import::ImportState,
+    findings: &[crate::domain::import::RecognitionFinding],
+    assets: &[PreparedWebAsset],
+) -> Result<StoryCardDto, AppError> {
+    let findings_summary = serialize_findings_summary(findings);
+    let story_id = uuid::Uuid::now_v7().to_string();
+
+    let tx = db
+        .conn_mut()
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(|err| db_commit_error(&err, "begin_transaction"))?;
+    tx.execute(
+        "INSERT INTO stories (id, title, schema_version, structure_json, content_checksum, created_at, updated_at) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)",
+        rusqlite::params![
+            &story_id,
+            &title,
+            CANONICAL_STORY_SCHEMA_VERSION,
+            &structure_json,
+            &checksum,
+            &now_iso,
+        ],
+    )
+    .map_err(|err| db_commit_error(&err, "insert_story"))?;
+    for asset in assets {
+        tx.execute(
+            "INSERT INTO assets (id, story_id, content_hash, media_type, media_format, byte_size, file_name, created_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             rusqlite::params![
+                &asset.asset_id,
                 &story_id,
-                &title,
-                &structure_json,
-                &checksum,
+                &asset.content_hash,
+                asset.media_type,
+                asset.media_format,
+                asset.byte_size,
+                &asset.file_name,
                 &now_iso,
-                &now_iso,
-                import_state_tag,
-                &import_report_json,
-                "web",
-                &format!("Histoire de {}", source_host),
-                &page_checksum,
             ],
         )
-        .map_err(|err| db_commit_error(&err, "insert_story"))?;
+        .map_err(|err| db_commit_error(&err, "insert_asset"))?;
+    }
+    tx.execute(
+        "INSERT INTO story_local_imports (story_id, source_format, source_format_version, source_name, artifact_checksum, import_state, findings_summary, imported_at) \
+         VALUES (?1, 'web', ?2, ?3, ?4, ?5, ?6, ?7)",
+        rusqlite::params![
+            &story_id,
+            WEB_SOURCE_FORMAT_VERSION,
+            &source_host,
+            &artifact_checksum,
+            state_db_tag(state),
+            &findings_summary,
+            &now_iso,
+        ],
+    )
+    .map_err(|err| db_commit_error(&err, "insert_provenance"))?;
+    // Persist → VERIFY → report (the P1 guardrail): re-read both rows
+    // INSIDE the transaction before composing the success DTO — a success
+    // is never composed from data that was not proven committed-to-be.
+    let verified: (String, String) = tx
+        .query_row(
+            "SELECT s.title, li.import_state FROM stories s \
+             JOIN story_local_imports li ON li.story_id = s.id \
+             WHERE s.id = ?1 AND li.source_format = 'web'",
+            rusqlite::params![&story_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(|err| db_commit_error(&err, "verify_rows"))?;
+    if verified.0 != title || verified.1 != state_db_tag(state) {
+        return Err(db_commit_error(
+            &rusqlite::Error::QueryReturnedNoRows,
+            "verify_rows",
+        ));
+    }
+    tx.commit().map_err(|err| db_commit_error(&err, "commit"))?;
 
+    let import_report = import_report_dto(findings);
     Ok(StoryCardDto {
         id: story_id,
-        title,
-        import_state: None,
-        import_report,
+        title: title.to_string(),
+        import_state: Some(state_dto(state)),
+        import_report: if import_report.is_empty() {
+            None
+        } else {
+            Some(import_report)
+        },
         transferable: false,
         sendable_archive: false,
         cover_asset_id: None,
     })
+}
+
+/// Convenience: prepare + commit under the SAME borrowed handle (tests and
+/// single-threaded callers). The IPC command does NOT use this — it runs
+/// [`prepare_web_story_creation`] before taking the DB lock and only locks
+/// for [`commit_web_story_creation`].
+pub fn accept_web_podcast_creation(
+    db: &mut DbHandle,
+    sources: &[ContentSourceLine],
+    web_url: &str,
+    expected_page_checksum: &str,
+    budget: Duration,
+    app_data_dir: Option<&Path>,
+) -> Result<WebCreationOutcome, AppError> {
+    match prepare_web_story_creation(
+        sources,
+        web_url,
+        expected_page_checksum,
+        budget,
+        app_data_dir,
+    )? {
+        WebAcceptPhase::SourceChanged => Ok(WebCreationOutcome::SourceChanged),
+        WebAcceptPhase::Prepared(prepared) => commit_web_story_creation(db, *prepared)
+            .map(|story| WebCreationOutcome::Created { story }),
+    }
+}
+
+/// The typed outcome of an accept: the created card + its report, or the
+/// honest recoverable refusal (the source diverged since the preview —
+/// nothing was mutated). The refusal is a VERDICT, never an `AppError`.
+#[derive(Debug, Clone)]
+pub enum WebCreationOutcome {
+    Created { story: StoryCardDto },
+    SourceChanged,
 }
 
 /// The error for an invalid web URL.
@@ -748,17 +1072,37 @@ pub fn spawn_blocking_join_error() -> AppError {
     .with_details(serde_json::json!({ "source": "spawn_blocking_join" }))
 }
 
-/// The data passed from the prepare phase to the commit phase.
+/// The fully re-proven, ready-to-commit ingestion — everything the atomic
+/// DB transaction needs, produced WITHOUT any DB access
+/// ([`prepare_web_story_creation`]) so the network fetch never serializes
+/// other commands behind the DB lock.
 #[derive(Debug)]
 pub struct PreparedWebCreation {
-    pub title: String,
-    pub structure_json: String,
-    pub checksum: String,
-    pub now_iso: String,
-    pub source_host: String,
-    pub page_checksum: String,
-    pub state: ImportState,
-    pub findings: Vec<RecognitionFinding>,
+    title: String,
+    structure_json: String,
+    checksum: String,
+    now_iso: String,
+    source_host: String,
+    artifact_checksum: String,
+    state: ImportState,
+    findings: Vec<RecognitionFinding>,
+    /// The downloaded-and-promoted episode media (audios, then the images
+    /// the page provides), ready for their `assets` rows — empty when no
+    /// store root was given or every download degraded.
+    assets: Vec<PreparedWebAsset>,
+}
+
+/// One promoted episode media: everything its `assets` row needs, plus the
+/// promoted file path so a failed commit can compensate the store.
+#[derive(Debug)]
+struct PreparedWebAsset {
+    asset_id: String,
+    content_hash: String,
+    media_type: &'static str,
+    media_format: &'static str,
+    byte_size: u64,
+    file_name: String,
+    promoted_path: std::path::PathBuf,
 }
 
 #[cfg(test)]
@@ -830,7 +1174,7 @@ mod tests {
 
     fn start_fixture_http_server<F>(make_routes: F) -> FixtureHttpServer
     where
-        F: FnOnce(&str) -> Vec<(String, u16, String)> + Send + 'static,
+        F: FnOnce(&str) -> Vec<(String, u16, Vec<u8>)> + Send + 'static,
     {
         use std::io::{Read, Write};
         use std::sync::atomic::{AtomicBool, Ordering};
@@ -862,7 +1206,7 @@ mod tests {
                     .iter()
                     .find(|(route, _, _)| *route == path)
                     .map(|(_, status, body)| (*status, body.clone()))
-                    .unwrap_or((404, String::from("not found")));
+                    .unwrap_or((404, b"not found".to_vec()));
                 let reason = match status {
                     200 => "OK",
                     404 => "Not Found",
@@ -870,10 +1214,11 @@ mod tests {
                     _ => "Error",
                 };
                 let response = format!(
-                    "HTTP/1.1 {status} {reason}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    "HTTP/1.1 {status} {reason}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                     body.len()
                 );
                 let _ = stream.write_all(response.as_bytes());
+                let _ = stream.write_all(&body);
                 let _ = stream.flush();
             }
         });
@@ -908,7 +1253,7 @@ mod tests {
     #[test]
     fn test_fetch_html_rejects_http_error_status_with_distinct_reason() {
         let server = start_fixture_http_server(|_| {
-            vec![("/page".to_owned(), 500, "<html><body>boom</body></html>".to_owned())]
+            vec![("/page".to_owned(), 500, "<html><body>boom</body></html>".to_owned().into_bytes())]
         });
         let url = format!("{}/page", server.base);
         let err = fetch_html(&url, Duration::from_secs(10))
@@ -932,7 +1277,7 @@ mod tests {
         )
         .expect_err("unreachable host");
         let server = start_fixture_http_server(|_| {
-            vec![("/page".to_owned(), 500, "boom".to_owned())]
+            vec![("/page".to_owned(), 500, "boom".to_owned().into_bytes())]
         });
         let http_error = fetch_html(&format!("{}/page", server.base), Duration::from_secs(10)).expect_err("http error");
         drop(server);
@@ -942,8 +1287,94 @@ mod tests {
         );
     }
 
+    /// Cap boundary: a media of EXACTLY WEB_MAX_MEDIA_BYTES is below the
+    /// ceiling ("strictly greater" is the refusal) — it must be accepted,
+    /// whatever the declared Content-Length repeats.
+    #[test]
+    fn test_fetch_media_bytes_accepts_a_media_of_exactly_the_web_cap() {
+        let server = start_fixture_http_server(|_| {
+            vec![("/media/exact".to_owned(), 200, vec![b'x'; WEB_MAX_MEDIA_BYTES])]
+        });
+        let url = format!("{}/media/exact", server.base);
+        let bytes = fetch_media_bytes(&url, Duration::from_secs(30))
+            .expect("a media of exactly the web cap must be accepted");
+        assert_eq!(bytes.len(), WEB_MAX_MEDIA_BYTES);
+        drop(server);
+    }
+
+    /// Cap boundary: ONE byte above the ceiling is refused (Oversize),
+    /// whatever the declared Content-Length says — the bounded read is the
+    /// ground truth.
+    #[test]
+    fn test_fetch_media_bytes_refuses_a_media_one_byte_above_the_web_cap() {
+        let server = start_fixture_http_server(|_| {
+            vec![("/media/over".to_owned(), 200, vec![b'x'; WEB_MAX_MEDIA_BYTES + 1])]
+        });
+        let url = format!("{}/media/over", server.base);
+        let err = fetch_media_bytes(&url, Duration::from_secs(30))
+            .expect_err("one byte above the web cap must be refused");
+        assert!(matches!(err, WebFetchFailure::Oversize));
+        drop(server);
+    }
+
+    /// A one-shot `Transfer-Encoding: chunked` response: no Content-Length
+    /// header, so the client cannot know the size upfront — the bounded
+    /// read, not a declared length, is the ground truth.
+    fn start_chunked_media_server(body: Vec<u8>) -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind 127.0.0.1:0");
+        let addr = listener.local_addr().expect("local address");
+        std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            let Ok((mut stream, _)) = listener.accept() else {
+                return
+            };
+            let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+            let mut request = [0u8; 4096];
+            let _ = stream.read(&mut request);
+            let _ = stream
+                .write_all(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n");
+            let mut offset = 0usize;
+            while offset < body.len() {
+                let chunk_len = (1024 * 1024).min(body.len() - offset);
+                let chunk = &body[offset..offset + chunk_len];
+                let _ = stream.write_all(format!("{:x}\r\n", chunk.len()).as_bytes());
+                if stream.write_all(chunk).is_err() {
+                    return
+                }
+                let _ = stream.write_all(b"\r\n");
+                offset += chunk.len();
+            }
+            let _ = stream.write_all(b"0\r\n\r\n");
+            let _ = stream.flush();
+        });
+        format!("http://{addr}/media")
+    }
+
+    /// A chunked body of exactly 1000 bytes (no Content-Length) is read in
+    /// full: proves the bounded read decodes chunked framing end to end.
+    #[test]
+    fn test_fetch_media_bytes_reads_chunked_body_without_declared_length() {
+        let url = start_chunked_media_server(vec![b'x'; 1000]);
+        let bytes = fetch_media_bytes(&url, Duration::from_secs(30))
+            .expect("a chunked body below the cap must be read in full");
+        assert_eq!(bytes.len(), 1000);
+    }
+
+    /// Cap boundary: a chunked body one byte above the ceiling (no
+    /// Content-Length) is refused by the BOUNDED READ — with no declared
+    /// length, shrinking the take() ceiling would silently truncate
+    /// instead of refusing.
+    #[test]
+    fn test_fetch_media_bytes_refuses_chunked_body_above_the_web_cap() {
+        let url = start_chunked_media_server(vec![b'x'; WEB_MAX_MEDIA_BYTES + 1]);
+        let err = fetch_media_bytes(&url, Duration::from_secs(30))
+            .expect_err("one byte above the cap must be refused without any declared length");
+        assert!(matches!(err, WebFetchFailure::Oversize));
+    }
+
     #[test]
     fn test_parse_web_episodes_returns_empty_on_no_episode() {
+
         let html = "<html><body><p>No episodes here</p></body></html>";
         let episodes = parse_web_episodes(html, "https://fixture.example.org/page");
         assert!(episodes.is_empty());
@@ -991,7 +1422,7 @@ mod tests {
     fn test_preview_web_podcast_extracts_item_list_episodes_in_position_order() {
         let server = start_fixture_http_server(|base| {
             vec![
-                ("/liste".to_owned(), 200, list_page_html(base)),
+                ("/liste".to_owned(), 200, list_page_html(base).into_bytes()),
                 (
                     "/episodes/episode-un".to_owned(),
                     200,
@@ -1000,7 +1431,8 @@ mod tests {
                         "Episode un",
                         "/media/episode-un.m4a",
                         "Resume de l'episode un.",
-                    ),
+                    )
+                    .into_bytes(),
                 ),
                 (
                     "/episodes/episode-deux".to_owned(),
@@ -1010,7 +1442,8 @@ mod tests {
                         "Episode deux",
                         "/media/episode-deux.m4a",
                         "Resume de l'episode deux.",
-                    ),
+                    )
+                    .into_bytes(),
                 ),
             ]
         });
@@ -1048,7 +1481,8 @@ mod tests {
         // page WITHOUT any audio media is a S6 refusal, not a preview.
         let server = start_fixture_http_server(|_| {
             let page = "<html><body><section><a href=\"https://fixture.example.org/media/episode.wav\">Episode</a></section></body></html>"
-                .to_owned();
+                .to_owned()
+                .into_bytes();
             vec![("/page".to_owned(), 200, page)]
         });
         let url = format!("{}/page", server.base);
@@ -1124,8 +1558,8 @@ mod tests {
                  </script></head><body><h1>Episode en type tableau</h1></body></html>"
             );
             vec![
-                ("/liste-array".to_owned(), 200, list),
-                ("/episodes/array-type".to_owned(), 200, episode),
+                ("/liste-array".to_owned(), 200, list.into_bytes()),
+                ("/episodes/array-type".to_owned(), 200, episode.into_bytes()),
             ]
         });
         let url = format!("{}/liste-array", server.base);
@@ -1164,7 +1598,7 @@ mod tests {
                  </script></head><body></body></html>"
             );
             vec![
-                ("/liste-mixte".to_owned(), 200, list),
+                ("/liste-mixte".to_owned(), 200, list.into_bytes()),
                 (
                     "/episodes/explicite".to_owned(),
                     200,
@@ -1173,7 +1607,8 @@ mod tests {
                         "Episode explicite",
                         "/media/explicite.m4a",
                         "Resume explicite.",
-                    ),
+                    )
+                    .into_bytes(),
                 ),
                 (
                     "/episodes/sans-position".to_owned(),
@@ -1183,7 +1618,8 @@ mod tests {
                         "Episode sans position",
                         "/media/sans-position.m4a",
                         "Resume sans position.",
-                    ),
+                    )
+                    .into_bytes(),
                 ),
             ]
         });
@@ -1223,7 +1659,7 @@ mod tests {
                  </script></head><body></body></html>"
             );
             vec![
-                ("/liste-doublons".to_owned(), 200, list),
+                ("/liste-doublons".to_owned(), 200, list.into_bytes()),
                 (
                     "/episodes/duplique".to_owned(),
                     200,
@@ -1232,7 +1668,8 @@ mod tests {
                         "Episode dupliqué",
                         "/media/duplique.m4a",
                         "Resume dupliqué.",
-                    ),
+                    )
+                    .into_bytes(),
                 ),
                 (
                     "/episodes/unique".to_owned(),
@@ -1242,7 +1679,8 @@ mod tests {
                         "Episode unique",
                         "/media/unique.m4a",
                         "Resume unique.",
-                    ),
+                    )
+                    .into_bytes(),
                 ),
             ]
         });
@@ -1406,11 +1844,11 @@ mod tests {
             let without_image =
                 episode_page_html(base, "Episode sans image", "/media/sans-image.m4a", "Resume sans image.");
             vec![
-                ("/liste-image".to_owned(), 200, list),
-                ("/episodes/avec-image".to_owned(), 200, with_image),
-                ("/episodes/image-string".to_owned(), 200, image_string),
-                ("/episodes/image-array".to_owned(), 200, image_array),
-                ("/episodes/sans-image".to_owned(), 200, without_image),
+                ("/liste-image".to_owned(), 200, list.into_bytes()),
+                ("/episodes/avec-image".to_owned(), 200, with_image.into_bytes()),
+                ("/episodes/image-string".to_owned(), 200, image_string.into_bytes()),
+                ("/episodes/image-array".to_owned(), 200, image_array.into_bytes()),
+                ("/episodes/sans-image".to_owned(), 200, without_image.into_bytes()),
             ]
         });
         let url = format!("{}/liste-image", server.base);
@@ -1458,7 +1896,8 @@ mod tests {
         let server = start_fixture_http_server(|_base| {
             let page = "<html><head><title>Page sans média</title></head>\
                         <body><h1>Page sans média</h1><p>Aucun épisode ici.</p></body></html>"
-                .to_owned();
+                .to_owned()
+                .into_bytes();
             vec![("/page".to_owned(), 200, page)]
         });
         let url = format!("{}/page", server.base);
@@ -1516,5 +1955,542 @@ mod tests {
             "only the honest episode survives, got: {kept:?}"
         );
         assert_eq!(kept[0].title, "Valide");
+    }
+
+    // ===== Accept/commit multi-épisodes (TDD-6) =====
+    //
+    // S2 (+ observables S1/S3) : l'accept re-télécharge la page, re-prouve
+    // l'état préviewé par checksum, télécharge et promeut les médias,
+    // compose la structure canonique ordonnée (N nœuds, ordre de la page)
+    // et commite l'histoire + assets + provenance `web` dans une
+    // transaction atomique. Les fixtures servent de vrais octets
+    // (wav / m4a / png / jpeg) : le store sniffe par magic bytes.
+
+    /// WAV factice mais bien formé (RIFF/WAVE) : l'audio est stocké tel
+    /// quel, un payload décodable n'est PAS requis. `marker` distingue les
+    /// contenus (hashes distincts).
+    fn wav_bytes(marker: u8) -> Vec<u8> {
+        let mut v = b"RIFF".to_vec();
+        v.extend_from_slice(&[0u8, 0, 0, 0]);
+        v.extend_from_slice(b"WAVE");
+        v.extend_from_slice(&[0u8; 4]);
+        v.push(marker);
+        v
+    }
+
+    /// Boîte M4A factice : taille 4 octets + `ftyp` + marque `M4A `.
+    fn m4a_bytes() -> Vec<u8> {
+        let mut v = vec![0u8, 0, 0, 0];
+        v.extend_from_slice(b"ftyp");
+        v.extend_from_slice(b"M4A ");
+        v.extend_from_slice(&[0u8; 8]);
+        v
+    }
+
+    fn png_fixture() -> Vec<u8> {
+        let img = image::RgbaImage::from_pixel(8, 8, image::Rgba([200, 10, 10, 255]));
+        let mut out = Vec::new();
+        image::DynamicImage::ImageRgba8(img)
+            .write_to(
+                &mut std::io::Cursor::new(&mut out),
+                image::ImageFormat::Png,
+            )
+            .expect("encode png");
+        out
+    }
+
+    fn jpeg_fixture() -> Vec<u8> {
+        let img = image::RgbaImage::from_pixel(8, 8, image::Rgba([10, 200, 10, 255]));
+        let mut out = Vec::new();
+        image::DynamicImage::ImageRgba8(img)
+            .write_to(
+                &mut std::io::Cursor::new(&mut out),
+                image::ImageFormat::Jpeg,
+            )
+            .expect("encode jpeg");
+        out
+    }
+
+    /// La page DOM d'exemple : un titre de collection (`<title>`/`<h1>`)
+    /// qui ne doit JAMAIS polluer les labels, puis trois sections ordonnées
+    /// — chacune porte son média audio titré, son résumé `<p>` et (épisodes
+    /// 1 et 3) son image. L'épisode 2 est SANS image (S3).
+    fn multi_episode_page_html(base: &str) -> String {
+        format!(
+            "<html><head><title>Sélection S2</title></head><body>\
+             <h1>Sélection S2</h1>\
+             <section><img src=\"{base}/images/ep1.png\">\
+             <a href=\"{base}/media/ep1.wav\">Épisode un</a>\
+             <p>Résumé un.</p></section>\
+             <section><a href=\"{base}/media/ep2.m4a\">Épisode deux</a>\
+             <p>Résumé deux.</p></section>\
+             <section><img src=\"{base}/images/ep3.jpg\">\
+             <a href=\"{base}/media/ep3.wav\">Épisode trois</a>\
+             <p>Résumé trois.</p></section>\
+             </body></html>"
+        )
+    }
+
+    /// La même page amputée de son troisième épisode : le contenu a divergé
+    /// depuis le preview (checksum de page différent).
+    fn multi_episode_page_html_shortened(base: &str) -> String {
+        format!(
+            "<html><head><title>Sélection S2</title></head><body>\
+             <h1>Sélection S2</h1>\
+             <section><img src=\"{base}/images/ep1.png\">\
+             <a href=\"{base}/media/ep1.wav\">Épisode un</a>\
+             <p>Résumé un.</p></section>\
+             <section><a href=\"{base}/media/ep2.m4a\">Épisode deux</a>\
+             <p>Résumé deux.</p></section>\
+             </body></html>"
+        )
+    }
+
+    fn s2_media_routes() -> Vec<(String, u16, Vec<u8>)> {
+        vec![
+            ("/media/ep1.wav".to_owned(), 200, wav_bytes(1)),
+            ("/media/ep2.m4a".to_owned(), 200, m4a_bytes()),
+            ("/media/ep3.wav".to_owned(), 200, wav_bytes(2)),
+            ("/images/ep1.png".to_owned(), 200, png_fixture()),
+            ("/images/ep3.jpg".to_owned(), 200, jpeg_fixture()),
+        ]
+    }
+
+    /// Comme [`start_fixture_http_server`] mais avec DEUX tables de routes :
+    /// le corps A répond avant `switch()`, le corps B après — l'accept
+    /// re-télécharge une page divergée du preview.
+    struct SwitchingFixtureServer {
+        base: String,
+        stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        switched: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl SwitchingFixtureServer {
+        fn start(
+            make_routes: impl FnOnce(
+                &str,
+            ) -> (Vec<(String, u16, Vec<u8>)>, Vec<(String, u16, Vec<u8>)>)
+                + Send
+                + 'static,
+        ) -> Self {
+            use std::io::{Read, Write};
+            use std::sync::atomic::{AtomicBool, Ordering};
+            use std::sync::Arc;
+
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+            let addr = listener.local_addr().expect("local address");
+            let base = format!("http://{addr}");
+            let (routes_a, routes_b) = make_routes(&base);
+            let stop = Arc::new(AtomicBool::new(false));
+            let switched = Arc::new(AtomicBool::new(false));
+            let worker_stop = stop.clone();
+            let worker_switched = switched.clone();
+            std::thread::spawn(move || {
+                for stream in listener.incoming() {
+                    if worker_stop.load(Ordering::SeqCst) {
+                        break;
+                    }
+                    let Ok(mut stream) = stream else {
+                        continue
+                    };
+                    let _ = stream.set_read_timeout(Some(Duration::from_secs(1)));
+                    let mut request = [0u8; 4096];
+                    let read = stream.read(&mut request).unwrap_or(0);
+                    let path = String::from_utf8_lossy(&request[..read])
+                        .split_whitespace()
+                        .nth(1)
+                        .unwrap_or("/")
+                        .to_owned();
+                    let routes = if worker_switched.load(Ordering::SeqCst) {
+                        &routes_b
+                    } else {
+                        &routes_a
+                    };
+                    let (status, body) = routes
+                        .iter()
+                        .find(|(route, _, _)| *route == path)
+                        .map(|(_, status, body)| (*status, body.clone()))
+                        .unwrap_or((404, b"not found".to_vec()));
+                    let reason = match status {
+                        200 => "OK",
+                        404 => "Not Found",
+                        500 => "Internal Server Error",
+                        _ => "Error",
+                    };
+                    let headers = format!(
+                        "HTTP/1.1 {status} {reason}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    );
+                    let _ = stream.write_all(headers.as_bytes());
+                    let _ = stream.write_all(&body);
+                    let _ = stream.flush();
+                }
+            });
+            Self { base, stop, switched }
+        }
+
+        fn switch(&self) {
+            self.switched.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    impl Drop for SwitchingFixtureServer {
+        fn drop(&mut self) {
+            self.stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    /// S2 : la page complète prépare une histoire à N nœuds ordonnés, tous
+    /// médias téléchargés et promus, et le commit persiste l'histoire +
+    /// assets + provenance `web` avec les fichiers présents sur disque.
+    #[test]
+    fn test_prepare_web_story_creation_builds_an_ordered_multi_episode_story() {
+        let server = start_fixture_http_server(|base| {
+            let mut routes =
+                vec![("/page".to_owned(), 200, multi_episode_page_html(base).into_bytes())];
+            routes.extend(s2_media_routes());
+            routes
+        });
+        let url = format!("{}/page", server.base);
+        let preview = preview_web_podcast(
+            official_content_sources(),
+            &url,
+            Duration::from_secs(30),
+        )
+        .expect("the fixture page must preview");
+        assert_eq!(preview.items.len(), 3);
+
+        let store = tempfile::TempDir::new().expect("store root");
+        let phase = prepare_web_story_creation(
+            official_content_sources(),
+            &url,
+            &preview.page_checksum,
+            Duration::from_secs(30),
+            Some(store.path()),
+        )
+        .expect("an unchanged page must prepare, never fail");
+        let WebAcceptPhase::Prepared(prepared) = phase else {
+            panic!("an unchanged page must be Prepared, not SourceChanged");
+        };
+
+        assert_eq!(prepared.source_host, "127.0.0.1");
+        assert_eq!(prepared.title, "Histoire de 127.0.0.1");
+        assert_eq!(prepared.state, ImportState::NeedsReview);
+        let expected_artifact = crate::domain::story::content_checksum_bytes(
+            multi_episode_page_html(&server.base).as_bytes(),
+        );
+        assert_eq!(
+            prepared.artifact_checksum, expected_artifact,
+            "the provenance must fingerprint the re-fetched page bytes"
+        );
+
+        let structure: CanonicalStructure =
+            serde_json::from_str(&prepared.structure_json).expect("canonical structure");
+        assert_eq!(structure.start_node_id, "n1");
+        assert_eq!(
+            structure.nodes.iter().map(|n| n.id.as_str()).collect::<Vec<_>>(),
+            vec!["n1", "n2", "n3"],
+            "the nodes must be numbered in page order"
+        );
+        assert_eq!(
+            structure.nodes.iter().map(|n| n.label.as_str()).collect::<Vec<_>>(),
+            vec!["Épisode un", "Épisode deux", "Épisode trois"],
+            "each node carries ITS OWN title — the collection title never replaces it"
+        );
+        assert_eq!(structure.nodes[0].text, "Résumé un.");
+        assert!(
+            structure.nodes[0].image_asset_id.is_some(),
+            "ep1 image is provided by the page"
+        );
+        assert!(
+            structure.nodes[1].image_asset_id.is_none(),
+            "the image-less episode must stay image-less (S3)"
+        );
+        assert!(structure.nodes[2].image_asset_id.is_some());
+        assert!(
+            structure.nodes.iter().all(|n| n.audio_asset_id.is_some()),
+            "every audio must be downloaded and linked"
+        );
+
+        assert_eq!(prepared.assets.len(), 5, "3 audio + 2 images");
+        // Captures BEFORE the commit consumes the prepared creation.
+        let structure_json = prepared.structure_json.clone();
+        let promoted_paths: Vec<std::path::PathBuf> =
+            prepared.assets.iter().map(|a| a.promoted_path.clone()).collect();
+        let audio_ids: Vec<String> =
+            serde_json::from_str::<CanonicalStructure>(&structure_json)
+                .expect("parse again")
+                .nodes
+                .iter()
+                .map(|n| n.audio_asset_id.clone().expect("audio linked"))
+                .collect();
+
+        let mut db = crate::infrastructure::db::open_in_memory().expect("in-memory db");
+        crate::infrastructure::db::run_migrations(&mut db).expect("migrate");
+        let card = commit_web_story_creation(&mut db, *prepared).expect("commit");
+        assert_eq!(card.title, "Histoire de 127.0.0.1");
+
+        let conn = db.conn();
+        let story_count: u32 = conn
+            .query_row("SELECT COUNT(*) FROM stories", [], |row| row.get(0))
+            .expect("count stories");
+        assert_eq!(story_count, 1);
+        let (source_format, source_name, import_state): (String, String, String) = conn
+            .query_row(
+                "SELECT source_format, source_name, import_state \
+                 FROM story_local_imports WHERE story_id = ?1",
+                rusqlite::params![card.id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("provenance row");
+        assert_eq!((source_format.as_str(), source_name.as_str()), ("web", "127.0.0.1"));
+        assert_eq!(import_state, "needs_review");
+        let asset_count: u32 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM assets WHERE story_id = ?1",
+                rusqlite::params![card.id],
+                |row| row.get(0),
+            )
+            .expect("count assets");
+        assert_eq!(asset_count, 5);
+        for audio_id in &audio_ids {
+            let linked: bool = conn
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM assets WHERE story_id = ?1 AND id = ?2)",
+                    rusqlite::params![card.id, audio_id],
+                    |row| row.get(0),
+                )
+                .expect("audio asset row");
+            assert!(linked, "node audio {audio_id} must have its assets row");
+        }
+        for path in &promoted_paths {
+            assert!(path.exists(), "promoted file missing on disk: {path:?}");
+        }
+        drop(server);
+    }
+
+    /// Une page divergée entre le preview et l'accept doit être refusée
+    /// honnêtement (`SourceChanged`) avec ZÉRO mutation : rien n'est
+    /// téléchargé, rien n'est promu, rien n'est écrit.
+    #[test]
+    fn test_prepare_web_story_creation_refuses_source_changed_with_zero_mutation() {
+        let store = tempfile::TempDir::new().expect("store root");
+        let switching = SwitchingFixtureServer::start(|base| {
+            let full = vec![("/page".to_owned(), 200, multi_episode_page_html(base).into_bytes())];
+            let shortened = vec![(
+                "/page".to_owned(),
+                200,
+                multi_episode_page_html_shortened(base).into_bytes(),
+            )];
+            let mut routes_a = full;
+            routes_a.extend(s2_media_routes());
+            let mut routes_b = shortened;
+            routes_b.extend(s2_media_routes());
+            (routes_a, routes_b)
+        });
+        let url = format!("{}/page", switching.base);
+        let preview = preview_web_podcast(
+            official_content_sources(),
+            &url,
+            Duration::from_secs(30),
+        )
+        .expect("preview body A");
+        assert_eq!(preview.items.len(), 3);
+
+        switching.switch();
+        let phase = prepare_web_story_creation(
+            official_content_sources(),
+            &url,
+            &preview.page_checksum,
+            Duration::from_secs(30),
+            Some(store.path()),
+        )
+        .expect("a diverged page is an honest refusal, never an error");
+        assert!(
+            matches!(phase, WebAcceptPhase::SourceChanged),
+            "the diverged page must refuse as SourceChanged"
+        );
+
+        // Zero mutation: no promoted file may exist.
+        let media_dir = store.path().join("node-media");
+        let promoted: Vec<String> = std::fs::read_dir(&media_dir)
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                    .collect()
+            })
+            .unwrap_or_default();
+        assert!(
+            promoted.is_empty(),
+            "a SourceChanged refusal must promote nothing, got: {promoted:?}"
+        );
+        drop(switching);
+    }
+
+    /// S6 côté accept : une page accessible SANS aucun média audio refuse
+    /// avec le signalement dédié, avant tout téléchargement ou checksum.
+    #[test]
+    fn test_prepare_web_story_creation_reports_no_audio_media() {
+        let server = start_fixture_http_server(|_| {
+            let page = "<html><head><title>Page sans média</title></head>\
+                        <body><h1>Page sans média</h1></body></html>"
+                .to_owned()
+                .into_bytes();
+            vec![("/page".to_owned(), 200, page)]
+        });
+        let url = format!("{}/page", server.base);
+        let err = prepare_web_story_creation(
+            official_content_sources(),
+            &url,
+            "checksum-inutile",
+            Duration::from_secs(30),
+            None,
+        )
+        .expect_err("a page without any audio must refuse with the S6 report");
+        assert_eq!(
+            err.code,
+            crate::domain::shared::AppErrorCode::ImportFailed
+        );
+        assert_eq!(err.message, "Aucun média audio n'a été trouvé.");
+        let value = serde_json::to_value(&err).expect("ser");
+        assert_eq!(value["details"]["stage"], "no_audio_media");
+    }
+
+    /// Un téléchargement audio ÉCHOUÉ (404) laisse son nœud sans audio,
+    /// porte le finding honnête `(Media, Missing)`, dérive l'état `partial`
+    /// et l'histoire reste créée — le précédent RSS d'échec partiel.
+    #[test]
+    fn test_prepare_web_story_creation_reports_a_missing_media_honestly() {
+        let server = start_fixture_http_server(|base| {
+            let mut routes =
+                vec![("/page".to_owned(), 200, multi_episode_page_html(base).into_bytes())];
+            // /media/ep2.m4a n'est PAS servi → 404.
+            routes.extend(
+                s2_media_routes()
+                    .into_iter()
+                    .filter(|(route, _, _)| route != "/media/ep2.m4a"),
+            );
+            routes
+        });
+        let url = format!("{}/page", server.base);
+        let preview = preview_web_podcast(
+            official_content_sources(),
+            &url,
+            Duration::from_secs(30),
+        )
+        .expect("the preview never fetches media");
+
+        let store = tempfile::TempDir::new().expect("store root");
+        let phase = prepare_web_story_creation(
+            official_content_sources(),
+            &url,
+            &preview.page_checksum,
+            Duration::from_secs(30),
+            Some(store.path()),
+        )
+        .expect("a failed media download degrades to a verdict, never an error");
+        let WebAcceptPhase::Prepared(prepared) = phase else {
+            panic!("a partial media set must still be Prepared");
+        };
+
+        assert_eq!(
+            prepared.state,
+            ImportState::Partial,
+            "the honest (Media, Missing) finding must derive partial"
+        );
+        assert!(
+            prepared
+                .findings
+                .iter()
+                .any(|f| {
+                    f.aspect == RecognitionAspect::Media
+                        && f.category
+                            == crate::domain::import::RecognitionCategory::Missing
+                }),
+            "the missing media must carry its (Media, Missing) finding"
+        );
+
+        let structure: CanonicalStructure =
+            serde_json::from_str(&prepared.structure_json).expect("canonical structure");
+        assert!(structure.nodes[0].audio_asset_id.is_some());
+        assert!(
+            structure.nodes[1].audio_asset_id.is_none(),
+            "the failed download must leave its node audio-less"
+        );
+        assert!(structure.nodes[2].audio_asset_id.is_some());
+        assert_eq!(prepared.assets.len(), 4, "2 audio + 2 images");
+
+        let mut db = crate::infrastructure::db::open_in_memory().expect("in-memory db");
+        crate::infrastructure::db::run_migrations(&mut db).expect("migrate");
+        let card = commit_web_story_creation(&mut db, *prepared).expect("commit");
+        let import_state: String = db
+            .conn()
+            .query_row(
+                "SELECT import_state FROM story_local_imports WHERE story_id = ?1",
+                rusqlite::params![card.id],
+                |row| row.get(0),
+            )
+            .expect("provenance row");
+        assert_eq!(import_state, "partial");
+        drop(server);
+    }
+
+    /// L'échec d'une image ne compte dans AUCUN verdict (S3) : l'état reste
+    /// `needs_review`, aucun finding `Missing` n'apparaît, le nœud perd son
+    /// image et tout le reste est importé.
+    #[test]
+    fn test_prepare_web_story_creation_counts_no_image_failure_in_no_verdict() {
+        let server = start_fixture_http_server(|base| {
+            let mut routes =
+                vec![("/page".to_owned(), 200, multi_episode_page_html(base).into_bytes())];
+            // /images/ep1.png n'est PAS servi → 404.
+            routes.extend(
+                s2_media_routes()
+                    .into_iter()
+                    .filter(|(route, _, _)| route != "/images/ep1.png"),
+            );
+            routes
+        });
+        let url = format!("{}/page", server.base);
+        let preview = preview_web_podcast(
+            official_content_sources(),
+            &url,
+            Duration::from_secs(30),
+        )
+        .expect("the preview never fetches media");
+
+        let store = tempfile::TempDir::new().expect("store root");
+        let phase = prepare_web_story_creation(
+            official_content_sources(),
+            &url,
+            &preview.page_checksum,
+            Duration::from_secs(30),
+            Some(store.path()),
+        )
+        .expect("a failed image download degrades silently, never an error");
+        let WebAcceptPhase::Prepared(prepared) = phase else {
+            panic!("an image failure must still be Prepared");
+        };
+
+        assert_eq!(
+            prepared.state,
+            ImportState::NeedsReview,
+            "an image failure must not degrade the state"
+        );
+        assert!(
+            prepared.findings.iter().all(|f| {
+                f.category != crate::domain::import::RecognitionCategory::Missing
+            }),
+            "no finding may report a missing image"
+        );
+
+        let structure: CanonicalStructure =
+            serde_json::from_str(&prepared.structure_json).expect("canonical structure");
+        assert!(structure.nodes[0].image_asset_id.is_none());
+        assert!(structure.nodes[2].image_asset_id.is_some());
+        assert!(structure.nodes.iter().all(|n| n.audio_asset_id.is_some()));
+        assert_eq!(prepared.assets.len(), 4, "3 audio + 1 image");
+        drop(server);
     }
 }

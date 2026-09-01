@@ -104,3 +104,11 @@ image = { version = "=0.25.10", default-features = false, features = ["png", "jp
 # tauri-plugin-opener's transitive zbus — the opener removal makes the
 # activation explicit, adding no crate that was not already in the tree.
 zbus = { version = "=5.16", default-features = false, features = ["async-io", "blocking-api"] }
+
+[dev-dependencies]
+# Acceptance fixtures (S2/S3): the local fixture pages must serve REAL
+# png/jpeg bytes — the node-media store decodes and re-encodes every
+# image before storing it, so magic-only fakes would be refused. Same
+# pinned pure-Rust crate as the production dependency: test-only, zero
+# production code change.
+image = { version = "=0.25.10", default-features = false, features = ["png", "jpeg"] }
