@@ -40,7 +40,7 @@ use crate::domain::import::{
 use crate::domain::shared::AppError;
 use crate::domain::story::{
     canonical_structure_json, content_checksum, content_checksum_bytes, normalize_title,
-    validate_title, CanonicalStructure, CANONICAL_STORY_SCHEMA_VERSION,
+    validate_title, CanonicalStructure,
 };
 use crate::infrastructure::db::DbHandle;
 use crate::infrastructure::device::RssFeedSource;
@@ -48,11 +48,14 @@ use crate::infrastructure::filesystem::{
     ensure_node_media_store, store_media, MediaKind, StoredMedia,
 };
 use crate::ipc::dto::import_export::{
-    rss_import_report_dto, serialize_findings_summary, state_db_tag, state_dto,
+    rss_import_report_dto,
 };
 use crate::ipc::dto::StoryCardDto;
 
-use super::creation_common::{db_commit_error, ensure_source_enabled};
+use super::creation_common::{
+    commit_story_creation, compensate_promoted_assets, ensure_source_enabled, PromotedAsset,
+    StoryCreationCommit,
+};
 
 /// The application-level outcome of previewing a feed: the HOST (the only
 /// address fragment that ever crosses further), the SHA-256 fingerprint of
@@ -102,31 +105,11 @@ pub enum RssCreationOutcome {
 /// other commands behind the DB lock.
 #[derive(Debug)]
 pub struct PreparedRssCreation {
-    title: String,
-    structure_json: String,
-    checksum: String,
-    now_iso: String,
-    source_host: String,
-    feed_checksum: String,
-    state: crate::domain::import::ImportState,
-    findings: Vec<crate::domain::import::RecognitionFinding>,
+    commit: StoryCreationCommit,
     /// The downloaded-and-promoted enclosure, ready for its `assets` row —
     /// `None` when the item has none, the caller gave no store root, or the
     /// download degraded to the `(Media, Missing)` verdict.
-    asset: Option<PreparedRssAsset>,
-}
-
-/// One promoted enclosure: everything its `assets` row needs, plus the
-/// promoted file path so a failed commit can compensate the store.
-#[derive(Debug)]
-struct PreparedRssAsset {
-    asset_id: String,
-    content_hash: String,
-    media_type: &'static str,
-    media_format: &'static str,
-    byte_size: u64,
-    file_name: String,
-    promoted_path: std::path::PathBuf,
+    assets: Vec<PromotedAsset>,
 }
 
 /// Download ONE enclosure through the injected source and PROMOTE it into
@@ -210,38 +193,38 @@ pub fn prepare_rss_story_creation(
     // unsupported bytes is a CONTENT verdict, never an `AppError`: the
     // item keeps its honest `(Media, Missing)` finding (state `partial`,
     // « média distant non récupéré ») and the story is still created.
-    let asset = match (item.has_enclosure, &item.enclosure_url, app_data_dir) {
-        (true, Some(enclosure_url), Some(app_dir)) => {
-            promote_enclosure(source, enclosure_url, budget, app_dir).map(
-                |(stored, promoted_path)| {
-                    let asset_id = uuid::Uuid::now_v7().to_string();
-                    match stored.kind {
-                        MediaKind::Image => {
-                            structure.nodes[0].image_asset_id = Some(asset_id.clone());
-                        }
-                        MediaKind::Audio => {
-                            structure.nodes[0].audio_asset_id = Some(asset_id.clone());
-                        }
-                    }
-                    PreparedRssAsset {
-                        asset_id,
-                        content_hash: stored.content_hash,
-                        media_type: stored.kind.as_str(),
-                        media_format: stored.format,
-                        byte_size: stored.byte_size,
-                        file_name: stored.file_name,
-                        promoted_path,
-                    }
-                },
-            )
+    let mut assets: Vec<PromotedAsset> = Vec::new();
+    if let (true, Some(enclosure_url), Some(app_dir)) =
+        (item.has_enclosure, &item.enclosure_url, app_data_dir)
+    {
+        if let Some((stored, promoted_path)) =
+            promote_enclosure(source, enclosure_url, budget, app_dir)
+        {
+            let asset_id = uuid::Uuid::now_v7().to_string();
+            match stored.kind {
+                MediaKind::Image => {
+                    structure.nodes[0].image_asset_id = Some(asset_id.clone());
+                }
+                MediaKind::Audio => {
+                    structure.nodes[0].audio_asset_id = Some(asset_id.clone());
+                }
+            }
+            assets.push(PromotedAsset {
+                asset_id,
+                content_hash: stored.content_hash,
+                media_type: stored.kind.as_str(),
+                media_format: stored.format,
+                byte_size: stored.byte_size,
+                file_name: stored.file_name,
+                promoted_path,
+            });
         }
-        _ => None,
-    };
+    }
 
     // The ingested item's findings and durable state: a downloaded
     // enclosure is `(Media, Recognized)`, a missing/failed one keeps the
     // `(Media, Missing)` finding that derives `partial`.
-    let findings = rss_item_findings(item, asset.is_some());
+    let findings = rss_item_findings(item, !assets.is_empty());
     let state = rss_import_state(&findings);
 
     // Title: the cleaned candidate when it survives the canonical
@@ -259,15 +242,17 @@ pub fn prepare_rss_story_creation(
     let now_iso = now_iso_ms().map_err(|_| clock_unavailable_error())?;
 
     Ok(RssAcceptPhase::Prepared(Box::new(PreparedRssCreation {
-        title,
-        structure_json,
-        checksum,
-        now_iso,
-        source_host,
-        feed_checksum,
-        state,
-        findings,
-        asset,
+        commit: StoryCreationCommit {
+            title,
+            structure_json,
+            checksum,
+            now_iso,
+            source_name: source_host,
+            artifact_checksum: feed_checksum,
+            state,
+            findings,
+        },
+        assets,
     })))
 }
 
@@ -281,138 +266,19 @@ pub fn commit_rss_story_creation(
     db: &mut DbHandle,
     prepared: PreparedRssCreation,
 ) -> Result<StoryCardDto, AppError> {
-    let PreparedRssCreation {
-        title,
-        structure_json,
-        checksum,
-        now_iso,
-        source_host,
-        feed_checksum,
-        state,
-        findings,
-        asset,
-    } = prepared;
-    let result = commit_rss_story_creation_tx(
+    let PreparedRssCreation { commit, assets } = prepared;
+    let result = commit_story_creation(
         db,
-        &title,
-        &structure_json,
-        &checksum,
-        &now_iso,
-        &source_host,
-        &feed_checksum,
-        state,
-        &findings,
-        asset.as_ref(),
+        &commit,
+        "rss",
+        RSS_SOURCE_FORMAT_VERSION,
+        &assets,
+        rss_import_report_dto,
     );
     if result.is_err() {
-        if let Some(asset) = &asset {
-            // The transaction left nothing in the DB; the promoted file is
-            // the only remnant. Best-effort removal — a leftover is only a
-            // content-addressed orphan, never a corruption.
-            let _ = std::fs::remove_file(&asset.promoted_path);
-        }
+        compensate_promoted_assets(&assets);
     }
     result
-}
-
-#[allow(clippy::too_many_arguments)]
-fn commit_rss_story_creation_tx(
-    db: &mut DbHandle,
-    title: &str,
-    structure_json: &str,
-    checksum: &str,
-    now_iso: &str,
-    source_host: &str,
-    feed_checksum: &str,
-    state: crate::domain::import::ImportState,
-    findings: &[crate::domain::import::RecognitionFinding],
-    asset: Option<&PreparedRssAsset>,
-) -> Result<StoryCardDto, AppError> {
-    let findings_summary = serialize_findings_summary(findings);
-    let story_id = uuid::Uuid::now_v7().to_string();
-
-    let tx = db
-        .conn_mut()
-        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-        .map_err(|err| db_commit_error(&err, "begin_transaction"))?;
-    tx.execute(
-        "INSERT INTO stories (id, title, schema_version, structure_json, content_checksum, created_at, updated_at) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)",
-        rusqlite::params![
-            &story_id,
-            &title,
-            CANONICAL_STORY_SCHEMA_VERSION,
-            &structure_json,
-            &checksum,
-            &now_iso,
-        ],
-    )
-    .map_err(|err| db_commit_error(&err, "insert_story"))?;
-    if let Some(asset) = asset {
-        tx.execute(
-            "INSERT INTO assets (id, story_id, content_hash, media_type, media_format, byte_size, file_name, created_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            rusqlite::params![
-                &asset.asset_id,
-                &story_id,
-                &asset.content_hash,
-                asset.media_type,
-                asset.media_format,
-                asset.byte_size,
-                &asset.file_name,
-                &now_iso,
-            ],
-        )
-        .map_err(|err| db_commit_error(&err, "insert_asset"))?;
-    }
-    tx.execute(
-        "INSERT INTO story_local_imports (story_id, source_format, source_format_version, source_name, artifact_checksum, import_state, findings_summary, imported_at) \
-         VALUES (?1, 'rss', ?2, ?3, ?4, ?5, ?6, ?7)",
-        rusqlite::params![
-            &story_id,
-            RSS_SOURCE_FORMAT_VERSION,
-            &source_host,
-            &feed_checksum,
-            state_db_tag(state),
-            &findings_summary,
-            &now_iso,
-        ],
-    )
-    .map_err(|err| db_commit_error(&err, "insert_provenance"))?;
-    // Persist → VERIFY → report (the P1 guardrail): re-read both rows
-    // INSIDE the transaction before composing the success DTO — a success
-    // is never composed from data that was not proven committed-to-be.
-    let verified: (String, String) = tx
-        .query_row(
-            "SELECT s.title, li.import_state FROM stories s \
-             JOIN story_local_imports li ON li.story_id = s.id \
-             WHERE s.id = ?1 AND li.source_format = 'rss'",
-            rusqlite::params![&story_id],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .map_err(|err| db_commit_error(&err, "verify_rows"))?;
-    if verified.0 != title || verified.1 != state_db_tag(state) {
-        return Err(db_commit_error(
-            &rusqlite::Error::QueryReturnedNoRows,
-            "verify_rows",
-        ));
-    }
-    tx.commit().map_err(|err| db_commit_error(&err, "commit"))?;
-
-    let import_report = rss_import_report_dto(findings);
-    Ok(StoryCardDto {
-        id: story_id,
-        title: title.to_string(),
-        import_state: Some(state_dto(state)),
-        import_report: if import_report.is_empty() {
-            None
-        } else {
-            Some(import_report)
-        },
-        transferable: false,
-        sendable_archive: false,
-        cover_asset_id: None,
-    })
 }
 
 /// Convenience: prepare + commit under the SAME borrowed handle (tests and
@@ -481,6 +347,7 @@ mod tests {
         official_content_sources, rss_item_ref, ContentSourceActivation, ImportState,
     };
     use crate::domain::shared::AppErrorCode;
+    use crate::domain::story::CANONICAL_STORY_SCHEMA_VERSION;
     use crate::infrastructure::db;
     use crate::infrastructure::device::MockRssFeedSource;
     use crate::ipc::dto::import_export::{ImportAspectDto, ImportCategoryDto, ImportStateDto};

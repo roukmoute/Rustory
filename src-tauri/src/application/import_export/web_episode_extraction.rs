@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use crate::application::story::now_iso_ms;
 use crate::domain::import::{
-    feed_url_host, rss_import_state, ContentSourceKind, ContentSourceLine, ImportState,
+    feed_url_host, rss_import_state, ContentSourceKind, ContentSourceLine,
     RecognitionAspect, RecognitionCategory,
     RecognitionFinding, RSS_FALLBACK_TITLE_PREFIX,
 };
@@ -25,12 +25,13 @@ use crate::infrastructure::db::DbHandle;
 use crate::infrastructure::filesystem::{
     ensure_node_media_store, store_media_capped, StoredMedia, WEB_MAX_MEDIA_BYTES,
 };
-use crate::ipc::dto::import_export::{
-    import_report_dto, serialize_findings_summary, state_db_tag, state_dto,
-};
+use crate::ipc::dto::import_export::import_report_dto;
 use crate::ipc::dto::StoryCardDto;
 
-use super::creation_common::{db_commit_error, ensure_source_enabled};
+use super::creation_common::{
+    commit_story_creation, compensate_promoted_assets, ensure_source_enabled, PromotedAsset,
+    StoryCreationCommit,
+};
 use scraper::{Element, ElementRef, Html, Selector};
 use sha2::{Digest, Sha256};
 use serde_json::Value;
@@ -714,40 +715,12 @@ pub fn prepare_web_story_creation(
         start_node_id: START_NODE_ID.to_owned(),
         nodes: Vec::with_capacity(episodes.len()),
     };
-    let mut assets: Vec<PreparedWebAsset> = Vec::new();
+    let mut assets: Vec<PromotedAsset> = Vec::new();
     let mut audio_missing = false;
     for (index, episode) in episodes.iter().enumerate() {
-        let mut audio_asset_id: Option<String> = None;
-        let mut image_asset_id: Option<String> = None;
-        if let Some((media_dir, staging_dir)) = &store {
-            if let Some(raw_audio) = &episode.audio_url {
-                let resolved = resolve_url(web_url, raw_audio)
-                    .unwrap_or_else(|| raw_audio.clone());
-                match fetch_and_promote(&resolved, budget, media_dir, staging_dir) {
-                    Some(stored) => {
-                        let asset = prepare_asset(stored, media_dir);
-                        audio_asset_id = Some(asset.asset_id.clone());
-                        assets.push(asset);
-                    }
-                    None => audio_missing = true,
-                }
-            } else {
-                audio_missing = true;
-            }
-            // The image is OPTIONAL: a failed download (or unsupported
-            // bytes) simply leaves the node image-less — no finding, no
-            // state change (S3).
-            if let Some(raw_image) = &episode.image_url {
-                let resolved = resolve_url(web_url, raw_image)
-                    .unwrap_or_else(|| raw_image.clone());
-                if let Some(stored) = fetch_and_promote(&resolved, budget, media_dir, staging_dir)
-                {
-                    let asset = prepare_asset(stored, media_dir);
-                    image_asset_id = Some(asset.asset_id.clone());
-                    assets.push(asset);
-                }
-            }
-        } else if episode.audio_url.is_some() {
+        let (audio_asset_id, image_asset_id, audio_failed) =
+            promote_episode_media(episode, web_url, budget, store.as_ref(), &mut assets);
+        if audio_failed {
             audio_missing = true;
         }
         structure.nodes.push(CanonicalNode {
@@ -794,14 +767,16 @@ pub fn prepare_web_story_creation(
     let now_iso = now_iso_ms()?;
 
     Ok(WebAcceptPhase::Prepared(Box::new(PreparedWebCreation {
-        title,
-        structure_json,
-        checksum,
-        now_iso,
-        source_host,
-        artifact_checksum,
-        state,
-        findings,
+        commit: StoryCreationCommit {
+            title,
+            structure_json,
+            checksum,
+            now_iso,
+            source_name: source_host,
+            artifact_checksum,
+            state,
+            findings,
+        },
         assets,
     })))
 }
@@ -828,10 +803,60 @@ fn fetch_and_promote(
     store_media_capped(media_dir, staging_dir, &bytes, WEB_MAX_MEDIA_BYTES).ok()
 }
 
+/// Download and promote ONE episode's media — its audio, then the image
+/// when the page provides one — into the node-media store: the exact
+/// per-episode body of the prepare loop. A failed AUDIO download is
+/// reported as `audio_failed` (the caller flips the Media finding, the
+/// RSS partial precedent); a failed IMAGE download degrades silently
+/// (the image stays optional, S3).
+fn promote_episode_media(
+    episode: &WebEpisode,
+    web_url: &str,
+    budget: Duration,
+    store: Option<&(std::path::PathBuf, std::path::PathBuf)>,
+    assets: &mut Vec<PromotedAsset>,
+) -> (Option<String>, Option<String>, bool) {
+    let mut audio_asset_id: Option<String> = None;
+    let mut image_asset_id: Option<String> = None;
+    let mut audio_failed = false;
+    if let Some((media_dir, staging_dir)) = store {
+        if let Some(raw_audio) = &episode.audio_url {
+            let resolved = resolve_url(web_url, raw_audio)
+                .unwrap_or_else(|| raw_audio.clone());
+            match fetch_and_promote(&resolved, budget, media_dir, staging_dir) {
+                Some(stored) => {
+                    let asset = prepare_asset(stored, media_dir);
+                    audio_asset_id = Some(asset.asset_id.clone());
+                    assets.push(asset);
+                }
+                None => audio_failed = true,
+            }
+        } else {
+            audio_failed = true;
+        }
+        // The image is OPTIONAL: a failed download (or unsupported
+        // bytes) simply leaves the node image-less — no finding, no
+        // state change (S3).
+        if let Some(raw_image) = &episode.image_url {
+            let resolved = resolve_url(web_url, raw_image)
+                .unwrap_or_else(|| raw_image.clone());
+            if let Some(stored) = fetch_and_promote(&resolved, budget, media_dir, staging_dir)
+            {
+                let asset = prepare_asset(stored, media_dir);
+                image_asset_id = Some(asset.asset_id.clone());
+                assets.push(asset);
+            }
+        }
+    } else if episode.audio_url.is_some() {
+        audio_failed = true;
+    }
+    (audio_asset_id, image_asset_id, audio_failed)
+}
+
 /// Everything ONE promoted episode media needs for its `assets` row, plus
 /// the promoted file path so a failed commit can compensate the store.
-fn prepare_asset(stored: StoredMedia, media_dir: &Path) -> PreparedWebAsset {
-    PreparedWebAsset {
+fn prepare_asset(stored: StoredMedia, media_dir: &Path) -> PromotedAsset {
+    PromotedAsset {
         asset_id: uuid::Uuid::now_v7().to_string(),
         content_hash: stored.content_hash,
         media_type: stored.kind.as_str(),
@@ -843,147 +868,28 @@ fn prepare_asset(stored: StoredMedia, media_dir: &Path) -> PreparedWebAsset {
 }
 
 /// Phase 2b — the single atomic transaction (`stories` + the provenance
-/// row + every promoted media's `assets` row). This is the ONLY part of
-/// the accept that needs the DB lock. A failed transaction rolls back
-/// fully; the promoted media files — the only pre-transaction mutation —
-/// are then compensated best-effort, exactly like the RSS flow compensates
-/// its promoted enclosure.
+/// row + every promoted media's `assets` row), shared with the RSS flow
+/// ([`commit_story_creation`]). This is the ONLY part of the accept that
+/// needs the DB lock. A failed transaction rolls back fully; the promoted
+/// media files — the only pre-transaction mutation — are then compensated
+/// best-effort.
 pub fn commit_web_story_creation(
     db: &mut DbHandle,
     prepared: PreparedWebCreation,
 ) -> Result<StoryCardDto, AppError> {
-    let PreparedWebCreation {
-        title,
-        structure_json,
-        checksum,
-        now_iso,
-        source_host,
-        artifact_checksum,
-        state,
-        findings,
-        assets,
-    } = prepared;
-    let result = commit_web_story_creation_tx(
+    let PreparedWebCreation { commit, assets } = prepared;
+    let result = commit_story_creation(
         db,
-        &title,
-        &structure_json,
-        &checksum,
-        &now_iso,
-        &source_host,
-        &artifact_checksum,
-        state,
-        &findings,
+        &commit,
+        "web",
+        WEB_SOURCE_FORMAT_VERSION,
         &assets,
+        import_report_dto,
     );
     if result.is_err() {
-        // The transaction left nothing in the DB; the promoted files are
-        // the only remnants. Best-effort removal — a leftover is only a
-        // content-addressed orphan, never a corruption.
-        for asset in &assets {
-            let _ = std::fs::remove_file(&asset.promoted_path);
-        }
+        compensate_promoted_assets(&assets);
     }
     result
-}
-
-#[allow(clippy::too_many_arguments)]
-fn commit_web_story_creation_tx(
-    db: &mut DbHandle,
-    title: &str,
-    structure_json: &str,
-    checksum: &str,
-    now_iso: &str,
-    source_host: &str,
-    artifact_checksum: &str,
-    state: crate::domain::import::ImportState,
-    findings: &[crate::domain::import::RecognitionFinding],
-    assets: &[PreparedWebAsset],
-) -> Result<StoryCardDto, AppError> {
-    let findings_summary = serialize_findings_summary(findings);
-    let story_id = uuid::Uuid::now_v7().to_string();
-
-    let tx = db
-        .conn_mut()
-        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-        .map_err(|err| db_commit_error(&err, "begin_transaction"))?;
-    tx.execute(
-        "INSERT INTO stories (id, title, schema_version, structure_json, content_checksum, created_at, updated_at) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)",
-        rusqlite::params![
-            &story_id,
-            &title,
-            CANONICAL_STORY_SCHEMA_VERSION,
-            &structure_json,
-            &checksum,
-            &now_iso,
-        ],
-    )
-    .map_err(|err| db_commit_error(&err, "insert_story"))?;
-    for asset in assets {
-        tx.execute(
-            "INSERT INTO assets (id, story_id, content_hash, media_type, media_format, byte_size, file_name, created_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            rusqlite::params![
-                &asset.asset_id,
-                &story_id,
-                &asset.content_hash,
-                asset.media_type,
-                asset.media_format,
-                asset.byte_size,
-                &asset.file_name,
-                &now_iso,
-            ],
-        )
-        .map_err(|err| db_commit_error(&err, "insert_asset"))?;
-    }
-    tx.execute(
-        "INSERT INTO story_local_imports (story_id, source_format, source_format_version, source_name, artifact_checksum, import_state, findings_summary, imported_at) \
-         VALUES (?1, 'web', ?2, ?3, ?4, ?5, ?6, ?7)",
-        rusqlite::params![
-            &story_id,
-            WEB_SOURCE_FORMAT_VERSION,
-            &source_host,
-            &artifact_checksum,
-            state_db_tag(state),
-            &findings_summary,
-            &now_iso,
-        ],
-    )
-    .map_err(|err| db_commit_error(&err, "insert_provenance"))?;
-    // Persist → VERIFY → report (the P1 guardrail): re-read both rows
-    // INSIDE the transaction before composing the success DTO — a success
-    // is never composed from data that was not proven committed-to-be.
-    let verified: (String, String) = tx
-        .query_row(
-            "SELECT s.title, li.import_state FROM stories s \
-             JOIN story_local_imports li ON li.story_id = s.id \
-             WHERE s.id = ?1 AND li.source_format = 'web'",
-            rusqlite::params![&story_id],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .map_err(|err| db_commit_error(&err, "verify_rows"))?;
-    if verified.0 != title || verified.1 != state_db_tag(state) {
-        return Err(db_commit_error(
-            &rusqlite::Error::QueryReturnedNoRows,
-            "verify_rows",
-        ));
-    }
-    tx.commit().map_err(|err| db_commit_error(&err, "commit"))?;
-
-    let import_report = import_report_dto(findings);
-    Ok(StoryCardDto {
-        id: story_id,
-        title: title.to_string(),
-        import_state: Some(state_dto(state)),
-        import_report: if import_report.is_empty() {
-            None
-        } else {
-            Some(import_report)
-        },
-        transferable: false,
-        sendable_archive: false,
-        cover_asset_id: None,
-    })
 }
 
 /// Convenience: prepare + commit under the SAME borrowed handle (tests and
@@ -1038,37 +944,17 @@ pub fn invalid_web_url_error() -> AppError {
 /// other commands behind the DB lock.
 #[derive(Debug)]
 pub struct PreparedWebCreation {
-    title: String,
-    structure_json: String,
-    checksum: String,
-    now_iso: String,
-    source_host: String,
-    artifact_checksum: String,
-    state: ImportState,
-    findings: Vec<RecognitionFinding>,
+    commit: StoryCreationCommit,
     /// The downloaded-and-promoted episode media (audios, then the images
     /// the page provides), ready for their `assets` rows — empty when no
     /// store root was given or every download degraded.
-    assets: Vec<PreparedWebAsset>,
-}
-
-/// One promoted episode media: everything its `assets` row needs, plus the
-/// promoted file path so a failed commit can compensate the store.
-#[derive(Debug)]
-struct PreparedWebAsset {
-    asset_id: String,
-    content_hash: String,
-    media_type: &'static str,
-    media_format: &'static str,
-    byte_size: u64,
-    file_name: String,
-    promoted_path: std::path::PathBuf,
+    assets: Vec<PromotedAsset>,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::import::official_content_sources;
+    use crate::domain::import::{official_content_sources, ImportState};
 
     #[test]
     fn test_invalid_web_url_error() {
@@ -2101,19 +1987,19 @@ mod tests {
             panic!("an unchanged page must be Prepared, not SourceChanged");
         };
 
-        assert_eq!(prepared.source_host, "127.0.0.1");
-        assert_eq!(prepared.title, "Histoire de 127.0.0.1");
-        assert_eq!(prepared.state, ImportState::NeedsReview);
+        assert_eq!(prepared.commit.source_name, "127.0.0.1");
+        assert_eq!(prepared.commit.title, "Histoire de 127.0.0.1");
+        assert_eq!(prepared.commit.state, ImportState::NeedsReview);
         let expected_artifact = crate::domain::story::content_checksum_bytes(
             multi_episode_page_html(&server.base).as_bytes(),
         );
         assert_eq!(
-            prepared.artifact_checksum, expected_artifact,
+            prepared.commit.artifact_checksum, expected_artifact,
             "the provenance must fingerprint the re-fetched page bytes"
         );
 
         let structure: CanonicalStructure =
-            serde_json::from_str(&prepared.structure_json).expect("canonical structure");
+            serde_json::from_str(&prepared.commit.structure_json).expect("canonical structure");
         assert_eq!(structure.start_node_id, "n1");
         assert_eq!(
             structure.nodes.iter().map(|n| n.id.as_str()).collect::<Vec<_>>(),
@@ -2142,7 +2028,7 @@ mod tests {
 
         assert_eq!(prepared.assets.len(), 5, "3 audio + 2 images");
         // Captures BEFORE the commit consumes the prepared creation.
-        let structure_json = prepared.structure_json.clone();
+        let structure_json = prepared.commit.structure_json.clone();
         let promoted_paths: Vec<std::path::PathBuf> =
             prepared.assets.iter().map(|a| a.promoted_path.clone()).collect();
         let audio_ids: Vec<String> =
@@ -2323,12 +2209,12 @@ mod tests {
         };
 
         assert_eq!(
-            prepared.state,
+            prepared.commit.state,
             ImportState::Partial,
             "the honest (Media, Missing) finding must derive partial"
         );
         assert!(
-            prepared
+            prepared.commit
                 .findings
                 .iter()
                 .any(|f| {
@@ -2340,7 +2226,7 @@ mod tests {
         );
 
         let structure: CanonicalStructure =
-            serde_json::from_str(&prepared.structure_json).expect("canonical structure");
+            serde_json::from_str(&prepared.commit.structure_json).expect("canonical structure");
         assert!(structure.nodes[0].audio_asset_id.is_some());
         assert!(
             structure.nodes[1].audio_asset_id.is_none(),
@@ -2402,19 +2288,19 @@ mod tests {
         };
 
         assert_eq!(
-            prepared.state,
+            prepared.commit.state,
             ImportState::NeedsReview,
             "an image failure must not degrade the state"
         );
         assert!(
-            prepared.findings.iter().all(|f| {
+            prepared.commit.findings.iter().all(|f| {
                 f.category != crate::domain::import::RecognitionCategory::Missing
             }),
             "no finding may report a missing image"
         );
 
         let structure: CanonicalStructure =
-            serde_json::from_str(&prepared.structure_json).expect("canonical structure");
+            serde_json::from_str(&prepared.commit.structure_json).expect("canonical structure");
         assert!(structure.nodes[0].image_asset_id.is_none());
         assert!(structure.nodes[2].image_asset_id.is_some());
         assert!(structure.nodes.iter().all(|n| n.audio_asset_id.is_some()));
