@@ -816,6 +816,43 @@ mod tests {
         format!("http://{addr}/media")
     }
 
+    /// A server that DECLARES a Content-Length above the web cap but sends a
+    /// SMALL body: the early refusal (before any download) must still fire —
+    /// a lying declaration is refused exactly like an honest one, so no
+    /// multi-MiB transfer is ever started.
+    fn start_lying_content_length_server() -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind 127.0.0.1:0");
+        let addr = listener.local_addr().expect("local address");
+        std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            let Ok((mut stream, _)) = listener.accept() else {
+                return
+            };
+            let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+            let mut request = [0u8; 4096];
+            let _ = stream.read(&mut request);
+            let body = b"tiny body";
+            let declared = WEB_MAX_MEDIA_BYTES as u64 + 1;
+            let _ = stream.write_all(
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {declared}\r\nConnection: close\r\n\r\n"
+                )
+                .as_bytes(),
+            );
+            let _ = stream.write_all(body);
+            let _ = stream.flush();
+        });
+        format!("http://{addr}/media")
+    }
+
+    #[test]
+    fn test_fetch_media_bytes_refuses_an_overstated_content_length() {
+        let url = start_lying_content_length_server();
+        let err = fetch_media_bytes(&url, Duration::from_secs(30))
+            .expect_err("an overstated declared length must be refused before any download");
+        assert!(matches!(err, WebFetchFailure::Oversize));
+    }
+
     /// A chunked body of exactly 1000 bytes (no Content-Length) is read in
     /// full: proves the bounded read decodes chunked framing end to end.
     #[test]

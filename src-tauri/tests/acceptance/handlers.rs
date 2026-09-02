@@ -685,7 +685,7 @@ fn s1_assert_image_optional(world: &mut World) {
             item
                 .image_url
                 .as_deref()
-                .map_or(true, |image| !image.trim().is_empty()),
+                .is_none_or(|image| !image.trim().is_empty()),
             "a carried image must be a non-empty url, got: {:?}",
             item.image_url
         );
@@ -912,12 +912,12 @@ fn s2_run_import(world: &mut World) {
                 .get(asset_id)
                 .map(|(_, media_format, _)| media_format.clone())
         }));
-        node_image_asset_rows.push(node.image_asset_id.as_ref().map_or(false, |asset_id| {
+        node_image_asset_rows.push(node.image_asset_id.as_ref().is_some_and(|asset_id| {
             asset_by_id
                 .get(asset_id)
                 .is_some_and(|(media_type, _, _)| media_type == "image")
         }));
-        media_files_on_disk.push(node.audio_asset_id.as_ref().map_or(false, |asset_id| {
+        media_files_on_disk.push(node.audio_asset_id.as_ref().is_some_and(|asset_id| {
             asset_by_id
                 .get(asset_id)
                 .is_some_and(|(_, _, file_name)| media_dir.join(file_name).is_file())

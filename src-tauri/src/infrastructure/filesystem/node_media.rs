@@ -486,6 +486,48 @@ mod tests {
     }
 
     #[test]
+    fn mpeg_frame_header_reserved_fields_fire_one_by_one() {
+        // version = 01 (reserved) alone, with a valid layer / bitrate /
+        // sampling: a truncated 3-byte header is a complete frame sync.
+        assert!(sniff_media(&[0xFF, 0xEE, 0x90]).is_none());
+        // layer = 00 (reserved) alone, with a valid version / bitrate /
+        // sampling: distinct from the existing free-bitrate (0x00) case.
+        assert!(sniff_media(&[0xFF, 0xE0, 0x90]).is_none());
+        // sampling = 11 (reserved) alone, with a valid version / layer /
+        // bitrate.
+        assert!(sniff_media(&[0xFF, 0xFB, 0x9C]).is_none());
+        // A 3-byte header is already a complete frame sync: shortening the
+        // length guard to `>= 4` would drop every real 3-byte frame.
+        assert_eq!(sniff_media(&[0xFF, 0xFB, 0x90]).unwrap().format, "mp3");
+        // Clear protection bit with a valid layer (0xFA: version 3, layer 1,
+        // protection clear) — the only vector that separates the LAYER shift
+        // `(bytes[1] >> 1)` from a `<< 1` flip: with `<<` the layer reads 00
+        // (reserved) and this complete header would be rejected.
+        assert_eq!(sniff_media(&[0xFF, 0xFA, 0x90]).unwrap().format, "mp3");
+        // Short buffers: no panic, no mp3 (a relaxed length guard would
+        // index bytes[2] on a 2-byte buffer or accept one).
+        assert!(sniff_media(&[0xFF, 0xE3]).is_none());
+        assert!(sniff_media(&[0xFF]).is_none());
+        // Missing the first sync byte: not a frame at all.
+        assert!(sniff_media(&[0xFE, 0xFB, 0x90]).is_none());
+        // Incomplete sync nibble (0xC0 & 0xE0 = 0xC0): not a frame.
+        assert!(sniff_media(&[0xFF, 0xC0, 0x90]).is_none());
+    }
+
+    #[test]
+    fn mime_for_ext_maps_every_stored_extension() {
+        assert_eq!(mime_for_ext("png"), Some("image/png"));
+        assert_eq!(mime_for_ext("jpg"), Some("image/jpeg"));
+        assert_eq!(mime_for_ext("jpeg"), Some("image/jpeg"));
+        assert_eq!(mime_for_ext("wav"), Some("audio/wav"));
+        assert_eq!(mime_for_ext("ogg"), Some("audio/ogg"));
+        assert_eq!(mime_for_ext("mp3"), Some("audio/mpeg"));
+        assert_eq!(mime_for_ext("m4a"), Some("audio/mp4"));
+        assert_eq!(mime_for_ext("gif"), None, "gif is not a stored format");
+        assert_eq!(mime_for_ext(""), None);
+    }
+
+    #[test]
     fn refuses_unsupported_bytes() {
         assert!(sniff_media(b"<html>not media</html>").is_none());
         assert!(sniff_media(b"GIF89a").is_none(), "GIF is not in the set");
@@ -603,6 +645,40 @@ mod tests {
     }
 
     #[test]
+    fn read_media_refuses_bytes_whose_sniff_disagrees_with_the_extension() {
+        // Defense in depth: a name that passes `is_safe_media_name` is still
+        // re-checked against its content — the sniffed MIME must agree with
+        // the extension, otherwise a mismatched file would be served as a
+        // preview under the wrong MIME.
+        let tmp = TempDir::new().unwrap();
+        let (media, _staging) = store(&tmp);
+        let name = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef.png";
+        std::fs::write(media.join(name), JPEG)
+            .expect("store jpeg bytes under a png name");
+        assert!(
+            read_media(&media, name).is_err(),
+            "jpeg bytes under a .png name must fail the sniff-vs-extension recheck"
+        );
+    }
+
+    #[test]
+    fn is_safe_media_name_rejects_each_unsafe_shape_one_by_one() {
+        // Each guard must fire on its own: a traversal name is rejected by
+        // the NAME check, not accidentally by a missing file downstream.
+        assert!(!is_safe_media_name(""), "empty name");
+        assert!(!is_safe_media_name("a/b.png"), "slash is a path separator");
+        assert!(!is_safe_media_name("a\\b.png"), "backslash is a path separator");
+        assert!(!is_safe_media_name("a..b.png"), "dot-dot can climb out of the store");
+        // Length floor: an extension-only name (len 4) has no stem.
+        assert!(!is_safe_media_name(".png"), "extension-only name has no stem");
+        // And the shape the store actually uses stays valid.
+        assert!(
+            is_safe_media_name("deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef.png"),
+            "64-hex stem + valid ext is the stored shape"
+        );
+    }
+
+    #[test]
     fn sweep_removes_staging_temporaries() {
         let tmp = TempDir::new().unwrap();
         let (_media, staging) = store(&tmp);
@@ -689,7 +765,7 @@ mod tests {
 
     #[test]
     fn web_media_cap_is_wider_than_the_classic_cap() {
-        assert!(
+        const _: () = assert!(
             WEB_MAX_MEDIA_BYTES > MAX_MEDIA_BYTES,
             "web acquisition must admit files the local-attach cap refuses"
         );

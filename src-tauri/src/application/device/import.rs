@@ -649,6 +649,33 @@ mod tests {
             assert!(!action.is_empty(), "refusal needs a next gesture: {err:?}");
         }
     }
+    /// The shared helper's test lives in `creation_common`; this local copy
+    /// must carry the SAME mapping — pin every arm here, per file.
+    fn sqlite_failure(code: rusqlite::ErrorCode) -> rusqlite::Error {
+        rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error { code, extended_code: 0 },
+            None,
+        )
+    }
+
+    #[test]
+    fn db_commit_error_maps_each_sqlite_failure_to_its_coarse_kind() {
+        let cases = [
+            (rusqlite::ErrorCode::ConstraintViolation, "constraint_violation"),
+            (rusqlite::ErrorCode::DatabaseBusy, "busy"),
+            (rusqlite::ErrorCode::DatabaseLocked, "locked"),
+            (rusqlite::ErrorCode::DiskFull, "other"),
+        ];
+        for (code, expected) in cases {
+            let err = db_commit_error(&sqlite_failure(code), "insert_story");
+            let value = serde_json::to_value(&err).expect("serialize");
+            assert_eq!(value["details"]["kind"], expected, "{code:?}");
+        }
+        let err = db_commit_error(&rusqlite::Error::InvalidQuery, "insert_story");
+        let value = serde_json::to_value(&err).expect("serialize");
+        assert_eq!(value["details"]["kind"], "other");
+    }
+
 
     #[test]
     fn imports_a_device_story_end_to_end() {
