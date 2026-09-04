@@ -6,6 +6,7 @@
   "packageManager": "pnpm@10.28.2",
   "scripts": {
     "dev": "vite",
+    "prepare": "git config core.hooksPath .githooks || exit 0",
     "build": "tsc && vite build",
     "preview": "vite preview",
     "tauri": "tauri",

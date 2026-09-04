@@ -26,6 +26,15 @@ docker compose run --rm rust-dev cargo test --all-targets
 
 La CI est conçue pour refléter ces commandes à l'identique. Si la CI rouge et le local vert divergent, c'est un incident de reproductibilité — à investiguer, pas à contourner.
 
+### Hook pre-commit (formatage Rust)
+
+Un hook `pre-commit` versionné dans [`.githooks/`](.githooks/) refuse tout commit dont les fichiers `.rs` **indexés** ne sont pas formatés par rustfmt — le même verrou que `cargo fmt --all -- --check` en CI, mais vérifié sur le contenu qui sera réellement commité (un `git add -p` partiel est donc contrôlé tel quel, indépendamment de l'arbre de travail).
+
+- Activation : `pnpm install` la fait automatiquement (script `prepare` → `git config core.hooksPath .githooks`). À la main : `git config core.hooksPath .githooks`.
+- Prérequis : `rustfmt` sur l'hôte (`rustup component add rustfmt`). Sans lui, le hook refuse le commit (fail-closed) et indique la vérification équivalente via Docker.
+- En cas de refus : `cargo fmt --all --manifest-path src-tauri/Cargo.toml`, puis réindexer les fichiers listés.
+- Contournement délibéré et assumé : `git commit --no-verify` — la CI reste le juge final.
+
 ## Contrats IPC
 
 Toute modification d'un DTO ou d'un code d'erreur IPC passe par trois points **simultanés** :

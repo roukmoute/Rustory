@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+# Pre-commit : refuse un commit dont les fichiers Rust indexés ne sont pas
+# formatés par rustfmt. Reproduit localement le verrou CI
+# `cargo fmt --all -- --check` (verify.yml), mais sur le CONTENU INDEXÉ
+# uniquement : un `git add -p` partiel est vérifié tel qu'il sera commité,
+# pas tel qu'il est dans l'arbre de travail.
+#
+# Activation (une fois par clone, faite par `pnpm install` via `prepare`) :
+#   git config core.hooksPath .githooks
+# Contournement délibéré : git commit --no-verify
+set -euo pipefail
+
+cd "$(git rev-parse --show-toplevel)"
+
+if ! command -v rustfmt >/dev/null 2>&1; then
+  cat >&2 <<'MSG'
+pre-commit : rustfmt introuvable — commit refusé (la CI le refuserait aussi).
+  Installer : rustup component add rustfmt
+  Ou vérifier via Docker puis committer avec --no-verify :
+    docker compose run --rm rust-dev cargo fmt --all -- --check
+MSG
+  exit 1
+fi
+
+dirty=()
+while IFS= read -r -d '' file; do
+  # rustfmt lit l'index via stdin : aucune résolution des `mod` externes, et
+  # `--check` sur stdin sort toujours 0 — la détection se fait sur la sortie.
+  if out=$(git show ":$file" | rustfmt --check --config-path src-tauri/rustfmt.toml 2>&1); then
+    [ -z "$out" ] || dirty+=("$file")
+  else
+    printf 'pre-commit : rustfmt a échoué sur %s\n%s\n' "$file" "$out" >&2
+    exit 1
+  fi
+done < <(git diff --cached --name-only --diff-filter=ACMR -z -- '*.rs')
+
+[ ${#dirty[@]} -eq 0 ] && exit 0
+
+{
+  printf 'pre-commit : %d fichier(s) Rust indexé(s) non formaté(s) :\n' "${#dirty[@]}"
+  printf '  - %s\n' "${dirty[@]}"
+  printf 'Corriger puis réindexer ces fichiers :\n'
+  printf '  cargo fmt --all --manifest-path src-tauri/Cargo.toml && git add -- %s\n' "${dirty[*]}"
+  printf 'Contournement délibéré : git commit --no-verify\n'
+} >&2
+exit 1
