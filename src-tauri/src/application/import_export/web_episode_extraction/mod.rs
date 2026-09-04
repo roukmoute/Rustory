@@ -22,9 +22,8 @@ use std::time::Duration;
 
 use crate::application::story::now_iso_ms;
 use crate::domain::import::{
-    feed_url_host, rss_import_state, ContentSourceKind, ContentSourceLine,
-    RecognitionAspect, RecognitionCategory,
-    RecognitionFinding, RSS_FALLBACK_TITLE_PREFIX,
+    feed_url_host, rss_import_state, ContentSourceKind, ContentSourceLine, RecognitionAspect,
+    RecognitionCategory, RecognitionFinding, RSS_FALLBACK_TITLE_PREFIX,
 };
 use crate::domain::shared::AppError;
 use crate::domain::story::{
@@ -38,13 +37,13 @@ use crate::infrastructure::filesystem::{
 use crate::ipc::dto::import_export::import_report_dto;
 use crate::ipc::dto::StoryCardDto;
 
-use page::{
-    collect_jsonld_nodes, episode_from_episode_page, jsonld_payloads, jsonld_type,
-    keep_valid_episodes, page_checksum_of, parse_web_episodes, resolve_url,
-};
 use super::creation_common::{
     commit_story_creation, compensate_promoted_assets, ensure_source_enabled, PromotedAsset,
     StoryCreationCommit,
+};
+use page::{
+    collect_jsonld_nodes, episode_from_episode_page, jsonld_payloads, jsonld_type,
+    keep_valid_episodes, page_checksum_of, parse_web_episodes, resolve_url,
 };
 use scraper::Html;
 use serde_json::Value;
@@ -194,18 +193,17 @@ fn fetch_media_bytes(url: &str, budget: Duration) -> Result<Vec<u8>, WebFetchFai
 /// ties and when absent), exact-duplicated urls are kept once, and an
 /// entry whose page cannot be fetched or carries no recognized episode
 /// is skipped honestly.
-fn episodes_from_item_list(
-    document: &Html,
-    base_url: &str,
-    budget: Duration,
-) -> Vec<WebEpisode> {
+fn episodes_from_item_list(document: &Html, base_url: &str, budget: Duration) -> Vec<WebEpisode> {
     let payloads = jsonld_payloads(document);
     let mut nodes: Vec<&Value> = Vec::new();
     for payload in &payloads {
         collect_jsonld_nodes(payload, &mut nodes);
     }
     let mut entries: Vec<(u64, String)> = Vec::new();
-    for node in nodes.iter().filter(|node| jsonld_type(node) == Some("ItemList")) {
+    for node in nodes
+        .iter()
+        .filter(|node| jsonld_type(node) == Some("ItemList"))
+    {
         let Some(elements) = node.get("itemListElement").and_then(Value::as_array) else {
             continue;
         };
@@ -242,11 +240,7 @@ fn episodes_from_item_list(
 /// first (the shape of the sample pages), falling back to the DOM pass
 /// when the list page carries no resolvable episode — the order of the
 /// passes is the priority, the document order inside a pass is kept.
-fn extract_web_episodes(
-    document: &Html,
-    base_url: &str,
-    budget: Duration,
-) -> Vec<WebEpisode> {
+fn extract_web_episodes(document: &Html, base_url: &str, budget: Duration) -> Vec<WebEpisode> {
     let mut episodes = episodes_from_item_list(document, base_url, budget);
     if episodes.is_empty() {
         episodes = parse_web_episodes(document, base_url);
@@ -342,8 +336,7 @@ pub fn prepare_web_story_creation(
     budget: Duration,
     app_data_dir: Option<&Path>,
 ) -> Result<WebAcceptPhase, AppError> {
-    let (source_host, html_content, episodes) =
-        fetch_extracted_episodes(sources, web_url, budget)?;
+    let (source_host, html_content, episodes) = fetch_extracted_episodes(sources, web_url, budget)?;
     if page_checksum_of(&episodes, web_url) != expected_page_checksum {
         // The page diverged since the preview — refuse honestly, promote
         // NOTHING (the store is not even touched on this path).
@@ -472,8 +465,7 @@ fn promote_episode_media(
     let mut audio_failed = false;
     if let Some((media_dir, staging_dir)) = store {
         if let Some(raw_audio) = &episode.audio_url {
-            let resolved = resolve_url(web_url, raw_audio)
-                .unwrap_or_else(|| raw_audio.clone());
+            let resolved = resolve_url(web_url, raw_audio).unwrap_or_else(|| raw_audio.clone());
             match fetch_and_promote(&resolved, budget, media_dir, staging_dir) {
                 Some(stored) => {
                     let asset = prepare_asset(stored, media_dir);
@@ -489,10 +481,8 @@ fn promote_episode_media(
         // bytes) simply leaves the node image-less — no finding, no
         // state change (S3).
         if let Some(raw_image) = &episode.image_url {
-            let resolved = resolve_url(web_url, raw_image)
-                .unwrap_or_else(|| raw_image.clone());
-            if let Some(stored) = fetch_and_promote(&resolved, budget, media_dir, staging_dir)
-            {
+            let resolved = resolve_url(web_url, raw_image).unwrap_or_else(|| raw_image.clone());
+            if let Some(stored) = fetch_and_promote(&resolved, budget, media_dir, staging_dir) {
                 let asset = prepare_asset(stored, media_dir);
                 image_asset_id = Some(asset.asset_id.clone());
                 assets.push(asset);
@@ -607,7 +597,6 @@ mod tests {
     use super::*;
     use crate::domain::import::{official_content_sources, ImportState};
 
-
     #[test]
     fn test_invalid_web_url_error() {
         let err = invalid_web_url_error();
@@ -657,9 +646,7 @@ mod tests {
                 if worker_stop.load(Ordering::SeqCst) {
                     break;
                 }
-                let Ok(mut stream) = stream else {
-                    continue
-                };
+                let Ok(mut stream) = stream else { continue };
                 let _ = stream.set_read_timeout(Some(Duration::from_secs(1)));
                 let mut request = [0u8; 4096];
                 let read = stream.read(&mut request).unwrap_or(0);
@@ -719,7 +706,11 @@ mod tests {
     #[test]
     fn test_fetch_html_rejects_http_error_status_with_distinct_reason() {
         let server = start_fixture_http_server(|_| {
-            vec![("/page".to_owned(), 500, "<html><body>boom</body></html>".to_owned().into_bytes())]
+            vec![(
+                "/page".to_owned(),
+                500,
+                "<html><body>boom</body></html>".to_owned().into_bytes(),
+            )]
         });
         let url = format!("{}/page", server.base);
         let err = fetch_html(&url, Duration::from_secs(10))
@@ -745,7 +736,8 @@ mod tests {
         let server = start_fixture_http_server(|_| {
             vec![("/page".to_owned(), 500, "boom".to_owned().into_bytes())]
         });
-        let http_error = fetch_html(&format!("{}/page", server.base), Duration::from_secs(10)).expect_err("http error");
+        let http_error = fetch_html(&format!("{}/page", server.base), Duration::from_secs(10))
+            .expect_err("http error");
         drop(server);
         assert_ne!(
             unreachable.message, http_error.message,
@@ -759,7 +751,11 @@ mod tests {
     #[test]
     fn test_fetch_media_bytes_accepts_a_media_of_exactly_the_web_cap() {
         let server = start_fixture_http_server(|_| {
-            vec![("/media/exact".to_owned(), 200, vec![b'x'; WEB_MAX_MEDIA_BYTES])]
+            vec![(
+                "/media/exact".to_owned(),
+                200,
+                vec![b'x'; WEB_MAX_MEDIA_BYTES],
+            )]
         });
         let url = format!("{}/media/exact", server.base);
         let bytes = fetch_media_bytes(&url, Duration::from_secs(30))
@@ -774,7 +770,11 @@ mod tests {
     #[test]
     fn test_fetch_media_bytes_refuses_a_media_one_byte_above_the_web_cap() {
         let server = start_fixture_http_server(|_| {
-            vec![("/media/over".to_owned(), 200, vec![b'x'; WEB_MAX_MEDIA_BYTES + 1])]
+            vec![(
+                "/media/over".to_owned(),
+                200,
+                vec![b'x'; WEB_MAX_MEDIA_BYTES + 1],
+            )]
         });
         let url = format!("{}/media/over", server.base);
         let err = fetch_media_bytes(&url, Duration::from_secs(30))
@@ -792,20 +792,19 @@ mod tests {
         std::thread::spawn(move || {
             use std::io::{Read, Write};
             let Ok((mut stream, _)) = listener.accept() else {
-                return
+                return;
             };
             let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
             let mut request = [0u8; 4096];
             let _ = stream.read(&mut request);
-            let _ = stream
-                .write_all(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n");
+            let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n");
             let mut offset = 0usize;
             while offset < body.len() {
                 let chunk_len = (1024 * 1024).min(body.len() - offset);
                 let chunk = &body[offset..offset + chunk_len];
                 let _ = stream.write_all(format!("{:x}\r\n", chunk.len()).as_bytes());
                 if stream.write_all(chunk).is_err() {
-                    return
+                    return;
                 }
                 let _ = stream.write_all(b"\r\n");
                 offset += chunk.len();
@@ -826,7 +825,7 @@ mod tests {
         std::thread::spawn(move || {
             use std::io::{Read, Write};
             let Ok((mut stream, _)) = listener.accept() else {
-                return
+                return;
             };
             let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
             let mut request = [0u8; 4096];
@@ -943,12 +942,9 @@ mod tests {
             ]
         });
         let url = format!("{}/liste", server.base);
-        let outcome = preview_web_podcast(
-            official_content_sources(),
-            &url,
-            Duration::from_secs(30),
-        )
-        .expect("the fixture list page must preview");
+        let outcome =
+            preview_web_podcast(official_content_sources(), &url, Duration::from_secs(30))
+                .expect("the fixture list page must preview");
         assert_eq!(
             outcome.items.len(),
             2,
@@ -1028,12 +1024,9 @@ mod tests {
             ]
         });
         let url = format!("{}/liste-array", server.base);
-        let outcome = preview_web_podcast(
-            official_content_sources(),
-            &url,
-            Duration::from_secs(30),
-        )
-        .expect("the fixture list page must preview");
+        let outcome =
+            preview_web_podcast(official_content_sources(), &url, Duration::from_secs(30))
+                .expect("the fixture list page must preview");
         assert_eq!(
             outcome.items.len(),
             1,
@@ -1089,20 +1082,16 @@ mod tests {
             ]
         });
         let url = format!("{}/liste-mixte", server.base);
-        let outcome = preview_web_podcast(
-            official_content_sources(),
-            &url,
-            Duration::from_secs(30),
-        )
-        .expect("the fixture list page must preview");
+        let outcome =
+            preview_web_podcast(official_content_sources(), &url, Duration::from_secs(30))
+                .expect("the fixture list page must preview");
         assert_eq!(
             outcome.items.len(),
             2,
             "both fixture episodes must be extracted, got: {outcome:?}"
         );
         assert_eq!(
-            outcome.items[0].title,
-            "Episode explicite",
+            outcome.items[0].title, "Episode explicite",
             "the tie between the explicit position and the one-based default keeps document order"
         );
         assert_eq!(outcome.items[1].title, "Episode sans position");
@@ -1150,12 +1139,9 @@ mod tests {
             ]
         });
         let url = format!("{}/liste-doublons", server.base);
-        let outcome = preview_web_podcast(
-            official_content_sources(),
-            &url,
-            Duration::from_secs(30),
-        )
-        .expect("the fixture list page must preview");
+        let outcome =
+            preview_web_podcast(official_content_sources(), &url, Duration::from_secs(30))
+                .expect("the fixture list page must preview");
         assert_eq!(
             outcome.items.len(),
             2,
@@ -1214,23 +1200,40 @@ mod tests {
                  \"mainEntity\":{{\"@type\":\"AudioObject\",\"contentUrl\":\"{base}/media/image-array.m4a\"}}}}]}}\
                  </script></head><body></body></html>"
             );
-            let without_image =
-                episode_page_html(base, "Episode sans image", "/media/sans-image.m4a", "Resume sans image.");
+            let without_image = episode_page_html(
+                base,
+                "Episode sans image",
+                "/media/sans-image.m4a",
+                "Resume sans image.",
+            );
             vec![
                 ("/liste-image".to_owned(), 200, list.into_bytes()),
-                ("/episodes/avec-image".to_owned(), 200, with_image.into_bytes()),
-                ("/episodes/image-string".to_owned(), 200, image_string.into_bytes()),
-                ("/episodes/image-array".to_owned(), 200, image_array.into_bytes()),
-                ("/episodes/sans-image".to_owned(), 200, without_image.into_bytes()),
+                (
+                    "/episodes/avec-image".to_owned(),
+                    200,
+                    with_image.into_bytes(),
+                ),
+                (
+                    "/episodes/image-string".to_owned(),
+                    200,
+                    image_string.into_bytes(),
+                ),
+                (
+                    "/episodes/image-array".to_owned(),
+                    200,
+                    image_array.into_bytes(),
+                ),
+                (
+                    "/episodes/sans-image".to_owned(),
+                    200,
+                    without_image.into_bytes(),
+                ),
             ]
         });
         let url = format!("{}/liste-image", server.base);
-        let outcome = preview_web_podcast(
-            official_content_sources(),
-            &url,
-            Duration::from_secs(30),
-        )
-        .expect("the fixture list page must preview");
+        let outcome =
+            preview_web_podcast(official_content_sources(), &url, Duration::from_secs(30))
+                .expect("the fixture list page must preview");
         assert_eq!(
             outcome.items.len(),
             4,
@@ -1274,16 +1277,9 @@ mod tests {
             vec![("/page".to_owned(), 200, page)]
         });
         let url = format!("{}/page", server.base);
-        let err = preview_web_podcast(
-            official_content_sources(),
-            &url,
-            Duration::from_secs(30),
-        )
-        .expect_err("a page without any audio media must never produce an empty preview");
-        assert_eq!(
-            err.code,
-            crate::domain::shared::AppErrorCode::ImportFailed
-        );
+        let err = preview_web_podcast(official_content_sources(), &url, Duration::from_secs(30))
+            .expect_err("a page without any audio media must never produce an empty preview");
+        assert_eq!(err.code, crate::domain::shared::AppErrorCode::ImportFailed);
         assert_eq!(err.message, "Aucun média audio n'a été trouvé.");
         let value = serde_json::to_value(&err).expect("ser");
         assert_eq!(value["details"]["source"], "parsing");
@@ -1324,10 +1320,7 @@ mod tests {
         let img = image::RgbaImage::from_pixel(8, 8, image::Rgba([200, 10, 10, 255]));
         let mut out = Vec::new();
         image::DynamicImage::ImageRgba8(img)
-            .write_to(
-                &mut std::io::Cursor::new(&mut out),
-                image::ImageFormat::Png,
-            )
+            .write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png)
             .expect("encode png");
         out
     }
@@ -1400,9 +1393,7 @@ mod tests {
 
     impl SwitchingFixtureServer {
         fn start(
-            make_routes: impl FnOnce(
-                &str,
-            ) -> (Vec<(String, u16, Vec<u8>)>, Vec<(String, u16, Vec<u8>)>)
+            make_routes: impl FnOnce(&str) -> (Vec<(String, u16, Vec<u8>)>, Vec<(String, u16, Vec<u8>)>)
                 + Send
                 + 'static,
         ) -> Self {
@@ -1423,9 +1414,7 @@ mod tests {
                     if worker_stop.load(Ordering::SeqCst) {
                         break;
                     }
-                    let Ok(mut stream) = stream else {
-                        continue
-                    };
+                    let Ok(mut stream) = stream else { continue };
                     let _ = stream.set_read_timeout(Some(Duration::from_secs(1)));
                     let mut request = [0u8; 4096];
                     let read = stream.read(&mut request).unwrap_or(0);
@@ -1459,11 +1448,16 @@ mod tests {
                     let _ = stream.flush();
                 }
             });
-            Self { base, stop, switched }
+            Self {
+                base,
+                stop,
+                switched,
+            }
         }
 
         fn switch(&self) {
-            self.switched.store(true, std::sync::atomic::Ordering::SeqCst);
+            self.switched
+                .store(true, std::sync::atomic::Ordering::SeqCst);
         }
     }
 
@@ -1479,18 +1473,18 @@ mod tests {
     #[test]
     fn test_prepare_web_story_creation_builds_an_ordered_multi_episode_story() {
         let server = start_fixture_http_server(|base| {
-            let mut routes =
-                vec![("/page".to_owned(), 200, multi_episode_page_html(base).into_bytes())];
+            let mut routes = vec![(
+                "/page".to_owned(),
+                200,
+                multi_episode_page_html(base).into_bytes(),
+            )];
             routes.extend(s2_media_routes());
             routes
         });
         let url = format!("{}/page", server.base);
-        let preview = preview_web_podcast(
-            official_content_sources(),
-            &url,
-            Duration::from_secs(30),
-        )
-        .expect("the fixture page must preview");
+        let preview =
+            preview_web_podcast(official_content_sources(), &url, Duration::from_secs(30))
+                .expect("the fixture page must preview");
         assert_eq!(preview.items.len(), 3);
 
         let store = tempfile::TempDir::new().expect("store root");
@@ -1521,12 +1515,20 @@ mod tests {
             serde_json::from_str(&prepared.commit.structure_json).expect("canonical structure");
         assert_eq!(structure.start_node_id, "n1");
         assert_eq!(
-            structure.nodes.iter().map(|n| n.id.as_str()).collect::<Vec<_>>(),
+            structure
+                .nodes
+                .iter()
+                .map(|n| n.id.as_str())
+                .collect::<Vec<_>>(),
             vec!["n1", "n2", "n3"],
             "the nodes must be numbered in page order"
         );
         assert_eq!(
-            structure.nodes.iter().map(|n| n.label.as_str()).collect::<Vec<_>>(),
+            structure
+                .nodes
+                .iter()
+                .map(|n| n.label.as_str())
+                .collect::<Vec<_>>(),
             vec!["Épisode un", "Épisode deux", "Épisode trois"],
             "each node carries ITS OWN title — the collection title never replaces it"
         );
@@ -1548,15 +1550,17 @@ mod tests {
         assert_eq!(prepared.assets.len(), 5, "3 audio + 2 images");
         // Captures BEFORE the commit consumes the prepared creation.
         let structure_json = prepared.commit.structure_json.clone();
-        let promoted_paths: Vec<std::path::PathBuf> =
-            prepared.assets.iter().map(|a| a.promoted_path.clone()).collect();
-        let audio_ids: Vec<String> =
-            serde_json::from_str::<CanonicalStructure>(&structure_json)
-                .expect("parse again")
-                .nodes
-                .iter()
-                .map(|n| n.audio_asset_id.clone().expect("audio linked"))
-                .collect();
+        let promoted_paths: Vec<std::path::PathBuf> = prepared
+            .assets
+            .iter()
+            .map(|a| a.promoted_path.clone())
+            .collect();
+        let audio_ids: Vec<String> = serde_json::from_str::<CanonicalStructure>(&structure_json)
+            .expect("parse again")
+            .nodes
+            .iter()
+            .map(|n| n.audio_asset_id.clone().expect("audio linked"))
+            .collect();
 
         let mut db = crate::infrastructure::db::open_in_memory().expect("in-memory db");
         crate::infrastructure::db::run_migrations(&mut db).expect("migrate");
@@ -1576,7 +1580,10 @@ mod tests {
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .expect("provenance row");
-        assert_eq!((source_format.as_str(), source_name.as_str()), ("web", "127.0.0.1"));
+        assert_eq!(
+            (source_format.as_str(), source_name.as_str()),
+            ("web", "127.0.0.1")
+        );
         assert_eq!(import_state, "needs_review");
         let asset_count: u32 = conn
             .query_row(
@@ -1609,7 +1616,11 @@ mod tests {
     fn test_prepare_web_story_creation_refuses_source_changed_with_zero_mutation() {
         let store = tempfile::TempDir::new().expect("store root");
         let switching = SwitchingFixtureServer::start(|base| {
-            let full = vec![("/page".to_owned(), 200, multi_episode_page_html(base).into_bytes())];
+            let full = vec![(
+                "/page".to_owned(),
+                200,
+                multi_episode_page_html(base).into_bytes(),
+            )];
             let shortened = vec![(
                 "/page".to_owned(),
                 200,
@@ -1622,12 +1633,9 @@ mod tests {
             (routes_a, routes_b)
         });
         let url = format!("{}/page", switching.base);
-        let preview = preview_web_podcast(
-            official_content_sources(),
-            &url,
-            Duration::from_secs(30),
-        )
-        .expect("preview body A");
+        let preview =
+            preview_web_podcast(official_content_sources(), &url, Duration::from_secs(30))
+                .expect("preview body A");
         assert_eq!(preview.items.len(), 3);
 
         switching.switch();
@@ -1681,10 +1689,7 @@ mod tests {
             None,
         )
         .expect_err("a page without any audio must refuse with the S6 report");
-        assert_eq!(
-            err.code,
-            crate::domain::shared::AppErrorCode::ImportFailed
-        );
+        assert_eq!(err.code, crate::domain::shared::AppErrorCode::ImportFailed);
         assert_eq!(err.message, "Aucun média audio n'a été trouvé.");
         let value = serde_json::to_value(&err).expect("ser");
         assert_eq!(value["details"]["stage"], "no_audio_media");
@@ -1696,8 +1701,11 @@ mod tests {
     #[test]
     fn test_prepare_web_story_creation_reports_a_missing_media_honestly() {
         let server = start_fixture_http_server(|base| {
-            let mut routes =
-                vec![("/page".to_owned(), 200, multi_episode_page_html(base).into_bytes())];
+            let mut routes = vec![(
+                "/page".to_owned(),
+                200,
+                multi_episode_page_html(base).into_bytes(),
+            )];
             // /media/ep2.m4a n'est PAS servi → 404.
             routes.extend(
                 s2_media_routes()
@@ -1707,12 +1715,9 @@ mod tests {
             routes
         });
         let url = format!("{}/page", server.base);
-        let preview = preview_web_podcast(
-            official_content_sources(),
-            &url,
-            Duration::from_secs(30),
-        )
-        .expect("the preview never fetches media");
+        let preview =
+            preview_web_podcast(official_content_sources(), &url, Duration::from_secs(30))
+                .expect("the preview never fetches media");
 
         let store = tempfile::TempDir::new().expect("store root");
         let phase = prepare_web_story_creation(
@@ -1733,14 +1738,10 @@ mod tests {
             "the honest (Media, Missing) finding must derive partial"
         );
         assert!(
-            prepared.commit
-                .findings
-                .iter()
-                .any(|f| {
-                    f.aspect == RecognitionAspect::Media
-                        && f.category
-                            == crate::domain::import::RecognitionCategory::Missing
-                }),
+            prepared.commit.findings.iter().any(|f| {
+                f.aspect == RecognitionAspect::Media
+                    && f.category == crate::domain::import::RecognitionCategory::Missing
+            }),
             "the missing media must carry its (Media, Missing) finding"
         );
 
@@ -1775,8 +1776,11 @@ mod tests {
     #[test]
     fn test_prepare_web_story_creation_counts_no_image_failure_in_no_verdict() {
         let server = start_fixture_http_server(|base| {
-            let mut routes =
-                vec![("/page".to_owned(), 200, multi_episode_page_html(base).into_bytes())];
+            let mut routes = vec![(
+                "/page".to_owned(),
+                200,
+                multi_episode_page_html(base).into_bytes(),
+            )];
             // /images/ep1.png n'est PAS servi → 404.
             routes.extend(
                 s2_media_routes()
@@ -1786,12 +1790,9 @@ mod tests {
             routes
         });
         let url = format!("{}/page", server.base);
-        let preview = preview_web_podcast(
-            official_content_sources(),
-            &url,
-            Duration::from_secs(30),
-        )
-        .expect("the preview never fetches media");
+        let preview =
+            preview_web_podcast(official_content_sources(), &url, Duration::from_secs(30))
+                .expect("the preview never fetches media");
 
         let store = tempfile::TempDir::new().expect("store root");
         let phase = prepare_web_story_creation(
@@ -1812,9 +1813,11 @@ mod tests {
             "an image failure must not degrade the state"
         );
         assert!(
-            prepared.commit.findings.iter().all(|f| {
-                f.category != crate::domain::import::RecognitionCategory::Missing
-            }),
+            prepared
+                .commit
+                .findings
+                .iter()
+                .all(|f| { f.category != crate::domain::import::RecognitionCategory::Missing }),
             "no finding may report a missing image"
         );
 

@@ -8,8 +8,7 @@ use tauri_plugin_dialog::{DialogExt, FilePath};
 use crate::application::import_export::import::read_artifact_bounded;
 use crate::application::import_export::{
     self, creation_common, import, rss_creation, structured_creation, web_episode_extraction,
-    ExportStoryInput,
-    ImportAnalysis, RssAcceptPhase, RssCreationOutcome, WebCreationOutcome,
+    ExportStoryInput, ImportAnalysis, RssAcceptPhase, RssCreationOutcome, WebCreationOutcome,
 };
 use crate::application::story::get_story_detail;
 use crate::commands::shared::validate_story_id;
@@ -1216,7 +1215,6 @@ mod tests {
     // the proof — a refusal that escaped the guard would surface as a
     // `request` / `status_check` / `client_build` stage instead.
 
-
     #[test]
     fn test_fetch_web_podcast_preview_rejects_empty_url() {
         let err = web_episode_extraction::preview_web_podcast(
@@ -1303,9 +1301,7 @@ mod tests {
                 if worker_stop.load(Ordering::SeqCst) {
                     break;
                 }
-                let Ok(mut stream) = stream else {
-                    continue
-                };
+                let Ok(mut stream) = stream else { continue };
                 let _ = stream.set_read_timeout(Some(Duration::from_secs(1)));
                 let mut request = [0u8; 4096];
                 let _ = stream.read(&mut request).unwrap_or(0);
@@ -1427,27 +1423,26 @@ pub async fn accept_web_podcast_creation(
     // a policy refusal must reject before ANY address analysis, boundary
     // included.
     let web_url_for_log = web_url.clone();
-    let outcome =
-        async_runtime::spawn_blocking(move || -> Result<WebCreationOutcome, AppError> {
-            match web_episode_extraction::prepare_web_story_creation(
-                official_content_sources(),
-                &web_url,
-                &page_checksum,
-                WEB_FETCH_BUDGET,
-                Some(app_data_dir.as_ref()),
-            )? {
-                web_episode_extraction::WebAcceptPhase::SourceChanged => {
-                    Ok(WebCreationOutcome::SourceChanged)
-                }
-                web_episode_extraction::WebAcceptPhase::Prepared(prepared) => {
-                    let mut guard = db.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-                    web_episode_extraction::commit_web_story_creation(&mut guard, *prepared)
-                        .map(|story| WebCreationOutcome::Created { story })
-                }
+    let outcome = async_runtime::spawn_blocking(move || -> Result<WebCreationOutcome, AppError> {
+        match web_episode_extraction::prepare_web_story_creation(
+            official_content_sources(),
+            &web_url,
+            &page_checksum,
+            WEB_FETCH_BUDGET,
+            Some(app_data_dir.as_ref()),
+        )? {
+            web_episode_extraction::WebAcceptPhase::SourceChanged => {
+                Ok(WebCreationOutcome::SourceChanged)
             }
-        })
-        .await
-        .map_err(|_| creation_common::spawn_blocking_join_error())?;
+            web_episode_extraction::WebAcceptPhase::Prepared(prepared) => {
+                let mut guard = db.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                web_episode_extraction::commit_web_story_creation(&mut guard, *prepared)
+                    .map(|story| WebCreationOutcome::Created { story })
+            }
+        }
+    })
+    .await
+    .map_err(|_| creation_common::spawn_blocking_join_error())?;
 
     match &outcome {
         Ok(WebCreationOutcome::Created { story }) => {

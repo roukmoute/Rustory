@@ -653,8 +653,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let (media, _staging) = store(&tmp);
         let name = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef.png";
-        std::fs::write(media.join(name), JPEG)
-            .expect("store jpeg bytes under a png name");
+        std::fs::write(media.join(name), JPEG).expect("store jpeg bytes under a png name");
         assert!(
             read_media(&media, name).is_err(),
             "jpeg bytes under a .png name must fail the sniff-vs-extension recheck"
@@ -667,13 +666,24 @@ mod tests {
         // the NAME check, not accidentally by a missing file downstream.
         assert!(!is_safe_media_name(""), "empty name");
         assert!(!is_safe_media_name("a/b.png"), "slash is a path separator");
-        assert!(!is_safe_media_name("a\\b.png"), "backslash is a path separator");
-        assert!(!is_safe_media_name("a..b.png"), "dot-dot can climb out of the store");
+        assert!(
+            !is_safe_media_name("a\\b.png"),
+            "backslash is a path separator"
+        );
+        assert!(
+            !is_safe_media_name("a..b.png"),
+            "dot-dot can climb out of the store"
+        );
         // Length floor: an extension-only name (len 4) has no stem.
-        assert!(!is_safe_media_name(".png"), "extension-only name has no stem");
+        assert!(
+            !is_safe_media_name(".png"),
+            "extension-only name has no stem"
+        );
         // And the shape the store actually uses stays valid.
         assert!(
-            is_safe_media_name("deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef.png"),
+            is_safe_media_name(
+                "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef.png"
+            ),
             "64-hex stem + valid ext is the stored shape"
         );
     }
@@ -780,7 +790,8 @@ mod tests {
         let (media, _staging) = store(&tmp);
         let path = media.join("cap-boundary.wav");
         std::fs::write(&path, vec![b'x'; WEB_MAX_MEDIA_BYTES]).expect("write boundary file");
-        let bytes = read_file_bounded(&path).expect("a file of exactly the web cap must be accepted");
+        let bytes =
+            read_file_bounded(&path).expect("a file of exactly the web cap must be accepted");
         assert_eq!(bytes.len(), WEB_MAX_MEDIA_BYTES);
     }
 

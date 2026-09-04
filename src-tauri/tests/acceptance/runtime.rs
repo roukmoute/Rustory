@@ -87,13 +87,12 @@ fn load_scenarios() -> Vec<Scenario> {
                         .map(|example| {
                             example
                                 .as_object()
-                                .unwrap_or_else(|| panic!("example row is not an object: {example}"))
+                                .unwrap_or_else(|| {
+                                    panic!("example row is not an object: {example}")
+                                })
                                 .iter()
                                 .map(|(key, value)| {
-                                    (
-                                        key.clone(),
-                                        value.as_str().unwrap_or("").to_owned(),
-                                    )
+                                    (key.clone(), value.as_str().unwrap_or("").to_owned())
                                 })
                                 .collect()
                         })
@@ -129,7 +128,9 @@ fn declared_placeholders(text: &str) -> BTreeSet<String> {
             if end < bytes.len() {
                 let name = &text[start..end];
                 if !name.is_empty()
-                    && name.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+                    && name
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
                 {
                     found.insert(name.to_owned());
                 }
@@ -152,9 +153,16 @@ fn declared_placeholders(text: &str) -> BTreeSet<String> {
 pub fn run_execution(scenario_index: usize, example_index: usize) {
     let scenarios = load_scenarios();
     let scenario = scenarios
-        .get(scenario_index.checked_sub(1).expect("scenario index must be >= 1"))
+        .get(
+            scenario_index
+                .checked_sub(1)
+                .expect("scenario index must be >= 1"),
+        )
         .unwrap_or_else(|| {
-            panic!("scenario index {scenario_index} out of range (IR has {})", scenarios.len())
+            panic!(
+                "scenario index {scenario_index} out of range (IR has {})",
+                scenarios.len()
+            )
         });
     let example: BTreeMap<String, String> = if example_index == 0 {
         if !scenario.examples.is_empty() {
@@ -168,7 +176,11 @@ pub fn run_execution(scenario_index: usize, example_index: usize) {
     } else {
         scenario
             .examples
-            .get(example_index.checked_sub(1).expect("example index must be >= 1"))
+            .get(
+                example_index
+                    .checked_sub(1)
+                    .expect("example index must be >= 1"),
+            )
             .unwrap_or_else(|| {
                 panic!(
                     "example index {example_index} out of range (scenario `{}` has {})",

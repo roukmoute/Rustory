@@ -34,8 +34,7 @@ use crate::application::story::now_iso_ms;
 use crate::domain::import::{
     feed_url_host, parse_rss, resolve_rss_item, rss_import_state, rss_item_findings,
     rss_item_fingerprint, ContentSourceKind, ContentSourceLine, RssAnalysis, RssItemRef,
-    RSS_FALLBACK_TITLE_PREFIX,
-    RSS_SOURCE_FORMAT_VERSION,
+    RSS_FALLBACK_TITLE_PREFIX, RSS_SOURCE_FORMAT_VERSION,
 };
 use crate::domain::shared::AppError;
 use crate::domain::story::{
@@ -47,9 +46,7 @@ use crate::infrastructure::device::RssFeedSource;
 use crate::infrastructure::filesystem::{
     ensure_node_media_store, store_media, MediaKind, StoredMedia,
 };
-use crate::ipc::dto::import_export::{
-    rss_import_report_dto,
-};
+use crate::ipc::dto::import_export::rss_import_report_dto;
 use crate::ipc::dto::StoryCardDto;
 
 use super::creation_common::{
@@ -1148,9 +1145,7 @@ mod tests {
                 if worker_stop.load(Ordering::SeqCst) {
                     break;
                 }
-                let Ok(mut stream) = stream else {
-                    continue
-                };
+                let Ok(mut stream) = stream else { continue };
                 let _ = stream.set_read_timeout(Some(Duration::from_secs(1)));
                 let mut request = [0u8; 4096];
                 let read = stream.read(&mut request).unwrap_or(0);
@@ -1226,8 +1221,14 @@ mod tests {
         )
         .expect("the local fixture feed must preview");
         assert_eq!(outcome.source_host, "127.0.0.1");
-        assert!(!outcome.analysis.is_blocked(), "the fixture feed must not be blocked");
-        assert_eq!(outcome.analysis.channel_title.as_deref(), Some("Flux fixture"));
+        assert!(
+            !outcome.analysis.is_blocked(),
+            "the fixture feed must not be blocked"
+        );
+        assert_eq!(
+            outcome.analysis.channel_title.as_deref(),
+            Some("Flux fixture")
+        );
         assert_eq!(outcome.analysis.items.len(), 2);
         assert_eq!(outcome.analysis.items[0].title, "Episode un");
         assert!(

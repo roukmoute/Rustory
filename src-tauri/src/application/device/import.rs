@@ -653,7 +653,10 @@ mod tests {
     /// must carry the SAME mapping — pin every arm here, per file.
     fn sqlite_failure(code: rusqlite::ErrorCode) -> rusqlite::Error {
         rusqlite::Error::SqliteFailure(
-            rusqlite::ffi::Error { code, extended_code: 0 },
+            rusqlite::ffi::Error {
+                code,
+                extended_code: 0,
+            },
             None,
         )
     }
@@ -661,7 +664,10 @@ mod tests {
     #[test]
     fn db_commit_error_maps_each_sqlite_failure_to_its_coarse_kind() {
         let cases = [
-            (rusqlite::ErrorCode::ConstraintViolation, "constraint_violation"),
+            (
+                rusqlite::ErrorCode::ConstraintViolation,
+                "constraint_violation",
+            ),
             (rusqlite::ErrorCode::DatabaseBusy, "busy"),
             (rusqlite::ErrorCode::DatabaseLocked, "locked"),
             (rusqlite::ErrorCode::DiskFull, "other"),
@@ -675,7 +681,6 @@ mod tests {
         let value = serde_json::to_value(&err).expect("serialize");
         assert_eq!(value["details"]["kind"], "other");
     }
-
 
     #[test]
     fn imports_a_device_story_end_to_end() {

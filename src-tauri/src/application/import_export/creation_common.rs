@@ -270,7 +270,10 @@ mod tests {
     #[test]
     fn db_commit_error_maps_each_sqlite_failure_to_its_coarse_kind() {
         let cases = [
-            (rusqlite::ErrorCode::ConstraintViolation, "constraint_violation"),
+            (
+                rusqlite::ErrorCode::ConstraintViolation,
+                "constraint_violation",
+            ),
             (rusqlite::ErrorCode::DatabaseBusy, "busy"),
             (rusqlite::ErrorCode::DatabaseLocked, "locked"),
             (rusqlite::ErrorCode::DiskFull, "other"),
@@ -295,8 +298,7 @@ mod tests {
             kind: ContentSourceKind::Web,
             activation: ContentSourceActivation::NotActivated,
         }];
-        let err =
-            ensure_source_enabled(&sources, ContentSourceKind::Web).expect_err("must reject");
+        let err = ensure_source_enabled(&sources, ContentSourceKind::Web).expect_err("must reject");
         assert_eq!(err.code, AppErrorCode::ContentSourceUnavailable);
     }
 
@@ -306,8 +308,7 @@ mod tests {
             kind: ContentSourceKind::Rss,
             activation: ContentSourceActivation::BlockedByPolicy,
         }];
-        let err =
-            ensure_source_enabled(&sources, ContentSourceKind::Rss).expect_err("must reject");
+        let err = ensure_source_enabled(&sources, ContentSourceKind::Rss).expect_err("must reject");
         assert_eq!(err.code, AppErrorCode::ContentSourceUnavailable);
     }
 
@@ -326,8 +327,7 @@ mod tests {
             kind: ContentSourceKind::Rss,
             activation: ContentSourceActivation::Enabled,
         }];
-        let err =
-            ensure_source_enabled(&sources, ContentSourceKind::Web).expect_err("must reject");
+        let err = ensure_source_enabled(&sources, ContentSourceKind::Web).expect_err("must reject");
         assert_eq!(err.code, AppErrorCode::ContentSourceUnavailable);
     }
 }

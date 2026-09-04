@@ -6,9 +6,9 @@
 //! failure) instead of being silently skipped. Handlers are added slice
 //! by slice; the generated entry points only reference what exists.
 
-use std::time::Duration;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use rustory_lib::application::import_export::{rss_creation, web_episode_extraction};
 use rustory_lib::domain::import::{
@@ -392,7 +392,10 @@ pub fn handle(world: &mut World, scenario: &str, step: &str) {
 
 fn s4_run_import(world: &mut World) {
     let urls = world.state.s4_invalid_urls().to_vec();
-    assert!(!urls.is_empty(), "the S4 Given step must document the invalid addresses");
+    assert!(
+        !urls.is_empty(),
+        "the S4 Given step must document the invalid addresses"
+    );
     for url in &urls {
         let outcome = web_episode_extraction::preview_web_podcast(
             official_content_sources(),
@@ -411,7 +414,10 @@ fn s4_run_import(world: &mut World) {
 /// stage (`client_build`, `request`, `status_check`, `read_text`).
 fn s4_assert_zero_network(world: &mut World) {
     let refusals = world.state.s4_refusals().to_vec();
-    assert!(!refusals.is_empty(), "the When step must have refused every documented address");
+    assert!(
+        !refusals.is_empty(),
+        "the When step must have refused every documented address"
+    );
     for (url, err) in &refusals {
         let value = serde_json::to_value(err).expect("AppError must serialize");
         let stage = value
@@ -448,17 +454,30 @@ fn s5_document_inaccessible_pages(world: &mut World) {
     // Case 2: a local server that answers with an HTTP error status (the
     // "erreur HTTP" case), kept alive until the scenario ends.
     let server = start_fixture_http_server(|_| {
-        vec![("/page".to_owned(), 500, Vec::from("<html><body>service indisponible</body></html>"))]
+        vec![(
+            "/page".to_owned(),
+            500,
+            Vec::from("<html><body>service indisponible</body></html>"),
+        )]
     });
     let http_url = format!("{}/page", server.base);
     *world.state.s5_server_mut() = Some(server);
-    world.state.s5_cases_mut().push((unreachable, S5Case::Unreachable));
-    world.state.s5_cases_mut().push((http_url, S5Case::HttpError(500)));
+    world
+        .state
+        .s5_cases_mut()
+        .push((unreachable, S5Case::Unreachable));
+    world
+        .state
+        .s5_cases_mut()
+        .push((http_url, S5Case::HttpError(500)));
 }
 
 fn s5_run_import(world: &mut World) {
     let cases = world.state.s5_cases().to_vec();
-    assert!(!cases.is_empty(), "the S5 Given step must document the inaccessible pages");
+    assert!(
+        !cases.is_empty(),
+        "the S5 Given step must document the inaccessible pages"
+    );
     for (url, case) in &cases {
         let outcome = web_episode_extraction::preview_web_podcast(
             official_content_sources(),
@@ -518,12 +537,16 @@ fn s5_assert_reason(world: &mut World) {
                     "the HTTP error must be refused at the status-check step"
                 );
                 assert_eq!(
-                    value.get("details").and_then(|d| d.get("status")).and_then(|s| s.as_u64()),
+                    value
+                        .get("details")
+                        .and_then(|d| d.get("status"))
+                        .and_then(|s| s.as_u64()),
                     Some(u64::from(*status)),
                     "the HTTP status must be carried in the refusal details"
                 );
                 assert!(
-                    err.message.contains("erreur HTTP") && err.message.contains(&status.to_string()),
+                    err.message.contains("erreur HTTP")
+                        && err.message.contains(&status.to_string()),
                     "the HTTP error must be reported with its status, got: {}",
                     err.message
                 );
@@ -589,8 +612,7 @@ fn s6_assert_report(world: &mut World) {
         .clone()
         .expect("the S6 When step must have collected the refusal");
     assert_eq!(
-        err.message,
-        "Aucun média audio n'a été trouvé.",
+        err.message, "Aucun média audio n'a été trouvé.",
         "the report must state that no audio media was found"
     );
     let value = serde_json::to_value(&err).expect("ser");
@@ -682,8 +704,7 @@ fn s1_assert_episode_audio(world: &mut World) {
 fn s1_assert_image_optional(world: &mut World) {
     for item in &s1_preview(world).items {
         assert!(
-            item
-                .image_url
+            item.image_url
                 .as_deref()
                 .is_none_or(|image| !image.trim().is_empty()),
             "a carried image must be a non-empty url, got: {:?}",
@@ -784,7 +805,10 @@ fn s2_jpeg_fixture() -> Vec<u8> {
     let img = image::RgbaImage::from_pixel(8, 8, image::Rgba([10, 200, 10, 255]));
     let mut out = Vec::new();
     image::DynamicImage::ImageRgba8(img)
-        .write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Jpeg)
+        .write_to(
+            &mut std::io::Cursor::new(&mut out),
+            image::ImageFormat::Jpeg,
+        )
         .expect("encode jpeg");
     out
 }
@@ -874,16 +898,15 @@ fn s2_run_import(world: &mut World) {
         .expect("the asset rows must read")
         .collect::<Result<Vec<_>, _>>()
         .expect("the asset rows must be valid");
-    let asset_by_id: std::collections::HashMap<String, (String, String, String)> =
-        asset_rows
-            .iter()
-            .map(|(id, media_type, media_format, file_name)| {
-                (
-                    id.clone(),
-                    (media_type.clone(), media_format.clone(), file_name.clone()),
-                )
-            })
-            .collect();
+    let asset_by_id: std::collections::HashMap<String, (String, String, String)> = asset_rows
+        .iter()
+        .map(|(id, media_type, media_format, file_name)| {
+            (
+                id.clone(),
+                (media_type.clone(), media_format.clone(), file_name.clone()),
+            )
+        })
+        .collect();
     let structure_json: String = library
         .conn()
         .query_row(
@@ -950,7 +973,10 @@ fn s2_proof(world: &World) -> &S2ImportProof {
 /// every episode's audio media is downloaded to the media store.
 fn s2_assert_story_created(world: &mut World) {
     let proof = s2_proof(world);
-    assert_eq!(proof.stories_count, 1, "the import must create exactly one story");
+    assert_eq!(
+        proof.stories_count, 1,
+        "the import must create exactly one story"
+    );
     assert_eq!(
         proof.source_format, "web",
         "the provenance must name the web source format"
@@ -990,7 +1016,11 @@ fn s2_assert_page_order(world: &mut World) {
     );
     assert_eq!(
         proof.node_audio_formats,
-        vec![Some("wav".to_owned()), Some("m4a".to_owned()), Some("wav".to_owned())],
+        vec![
+            Some("wav".to_owned()),
+            Some("m4a".to_owned()),
+            Some("wav".to_owned())
+        ],
         "each node must keep the format of the media its page section links"
     );
 }
@@ -1009,7 +1039,10 @@ fn s2_assert_own_titles(world: &mut World) {
         "each node must carry its own episode title"
     );
     assert!(
-        !proof.node_labels.iter().any(|label| label == "Sélection S2"),
+        !proof
+            .node_labels
+            .iter()
+            .any(|label| label == "Sélection S2"),
         "the collection title must never replace an episode title"
     );
 }
@@ -1019,7 +1052,10 @@ fn s2_assert_own_titles(world: &mut World) {
 fn s2_assert_audio_downloaded_and_linked(world: &mut World) {
     let proof = s2_proof(world);
     assert!(
-        proof.node_audio_asset_ids.iter().all(|asset_id| asset_id.is_some()),
+        proof
+            .node_audio_asset_ids
+            .iter()
+            .all(|asset_id| asset_id.is_some()),
         "every node must reference its stored audio asset"
     );
     assert!(
@@ -1033,7 +1069,11 @@ fn s2_assert_audio_downloaded_and_linked(world: &mut World) {
 fn s2_assert_image_linked_when_provided(world: &mut World) {
     let proof = s2_proof(world);
     assert_eq!(
-        proof.node_image_asset_ids.iter().map(Option::is_some).collect::<Vec<_>>(),
+        proof
+            .node_image_asset_ids
+            .iter()
+            .map(Option::is_some)
+            .collect::<Vec<_>>(),
         vec![true, false, true],
         "only the episodes whose page section carries an image get one"
     );
@@ -1074,7 +1114,11 @@ fn s3_document_episode(world: &mut World) {
         );
         vec![
             ("/page".to_owned(), 200, page.into_bytes()),
-            ("/media/episode-sans-image.wav".to_owned(), 200, s7_fixture_wav()),
+            (
+                "/media/episode-sans-image.wav".to_owned(),
+                200,
+                s7_fixture_wav(),
+            ),
         ]
     });
     let page_url = format!("{}/page", server.base);
@@ -1155,9 +1199,7 @@ fn s3_run_import(world: &mut World) {
 
 fn s3_assert_imported_without_error(world: &mut World) {
     match world.state.s3_preview().as_ref() {
-        Some(Err(error)) => panic!(
-            "the image-less episode must import without error: {error:?}"
-        ),
+        Some(Err(error)) => panic!("the image-less episode must import without error: {error:?}"),
         Some(Ok(_)) => {}
         None => panic!("the S3 When step must have run the import"),
     }
@@ -1166,7 +1208,10 @@ fn s3_assert_imported_without_error(world: &mut World) {
         .s3_proof()
         .as_ref()
         .expect("the S3 When step must have committed the import");
-    assert_eq!(proof.stories_count, 1, "the import must create exactly one story");
+    assert_eq!(
+        proof.stories_count, 1,
+        "the import must create exactly one story"
+    );
     assert_eq!(
         proof.assets_count, 1,
         "the image-less episode stores exactly its audio asset"
@@ -1256,13 +1301,9 @@ fn s7_run_import(world: &mut World) {
         .clone()
         .expect("the S7 Given step must document the feed url");
     let source = HttpRssFeedSource::default();
-    let preview = rss_creation::preview_rss_source(
-        official_content_sources(),
-        &source,
-        &url,
-        IMPORT_BUDGET,
-    )
-    .expect("the local fixture feed must preview");
+    let preview =
+        rss_creation::preview_rss_source(official_content_sources(), &source, &url, IMPORT_BUDGET)
+            .expect("the local fixture feed must preview");
     let item = preview
         .analysis
         .items
@@ -1382,7 +1423,10 @@ fn s7_assert_import_proof(world: &mut World) {
         .s7_proof()
         .as_ref()
         .expect("the S7 When step must have proven the import");
-    assert_eq!(proof.stories_count, 1, "the import must create exactly one story");
+    assert_eq!(
+        proof.stories_count, 1,
+        "the import must create exactly one story"
+    );
     assert_eq!(
         proof.story_title, "Episode un",
         "the story must keep the accepted episode's own title"

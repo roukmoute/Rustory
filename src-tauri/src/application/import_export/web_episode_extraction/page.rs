@@ -8,8 +8,8 @@
 //! of the extraction.
 
 use scraper::{Element, ElementRef, Html, Selector};
-use sha2::{Digest, Sha256};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 /// One extracted episode from the web page.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -64,9 +64,7 @@ pub(super) fn jsonld_payloads(document: &Html) -> Vec<Value> {
     };
     document
         .select(&selector)
-        .filter_map(|element| {
-            serde_json::from_str(element.text().collect::<String>().trim()).ok()
-        })
+        .filter_map(|element| serde_json::from_str(element.text().collect::<String>().trim()).ok())
         .collect()
 }
 
@@ -225,7 +223,9 @@ pub(super) fn parse_web_episodes(document: &Html, base_url: &str) -> Vec<WebEpis
         let image_url = container
             .as_ref()
             .and_then(|container| container_image_url(container, base_url));
-        let summary = container.as_ref().map_or_else(String::new, container_summary);
+        let summary = container
+            .as_ref()
+            .map_or_else(String::new, container_summary);
         episodes.push(WebEpisode {
             title,
             summary,
@@ -360,11 +360,7 @@ fn framed_episode_set(episodes: &[WebEpisode], base_url: &str) -> Vec<u8> {
     for episode in episodes {
         let audio = resolved_media_field(episode.audio_url.as_deref(), base_url);
         let image = resolved_media_field(episode.image_url.as_deref(), base_url);
-        for field in [
-            episode.title.as_bytes(),
-            audio.as_bytes(),
-            image.as_bytes(),
-        ] {
+        for field in [episode.title.as_bytes(), audio.as_bytes(), image.as_bytes()] {
             frame.extend_from_slice(&(field.len() as u32).to_be_bytes());
             frame.extend_from_slice(field);
         }
@@ -380,7 +376,10 @@ fn framed_episode_set(episodes: &[WebEpisode], base_url: &str) -> Vec<u8> {
 /// honest `SourceChanged` refusal — the preview is a pointer to this
 /// exact state, never content.
 pub(super) fn page_checksum_of(episodes: &[WebEpisode], base_url: &str) -> String {
-    format!("{:x}", Sha256::digest(framed_episode_set(episodes, base_url)))
+    format!(
+        "{:x}",
+        Sha256::digest(framed_episode_set(episodes, base_url))
+    )
 }
 
 /// One episode media reference, absolute: `resolve_url` is idempotent on
@@ -401,9 +400,11 @@ mod tests {
 
     #[test]
     fn test_parse_web_episodes_returns_empty_on_no_episode() {
-
         let html = "<html><body><p>No episodes here</p></body></html>";
-        let episodes = parse_web_episodes(&Html::parse_document(html), "https://fixture.example.org/page");
+        let episodes = parse_web_episodes(
+            &Html::parse_document(html),
+            "https://fixture.example.org/page",
+        );
         assert!(episodes.is_empty());
     }
 
@@ -447,7 +448,11 @@ mod tests {
     #[test]
     fn test_resolve_url_property_absolute_idempotent_authority_stable() {
         let schemes = ["http", "https"];
-        let hosts = ["host.example", "www.example.fr:8080", "sub.domain.example:443"];
+        let hosts = [
+            "host.example",
+            "www.example.fr:8080",
+            "sub.domain.example:443",
+        ];
         let paths = ["", "/", "/shows", "/shows/selection", "/a/b/c"];
         let raws = [
             "https://other.example.org/x/y.m4a",
@@ -480,8 +485,7 @@ mod tests {
                             || raw.starts_with("https://")
                             || raw.starts_with("//")
                         {
-                            raw
-                                .trim_start_matches("https://")
+                            raw.trim_start_matches("https://")
                                 .trim_start_matches("http://")
                                 .trim_start_matches("//")
                                 .split('/')
@@ -530,7 +534,10 @@ mod tests {
             </section>\
             <a href=\"https://fixture.example.org/media/sans-titre.mp3\"></a>\
           </body></html>";
-        let episodes = parse_web_episodes(&Html::parse_document(html), "https://fixture.example.org/page");
+        let episodes = parse_web_episodes(
+            &Html::parse_document(html),
+            "https://fixture.example.org/page",
+        );
         assert_eq!(
             episodes.len(),
             4,
@@ -551,8 +558,7 @@ mod tests {
             Some("https://fixture.example.org/media/episode-deux.ogg")
         );
         assert_eq!(
-            episodes[1].summary,
-            "Résumé deux.",
+            episodes[1].summary, "Résumé deux.",
             "the first <p> of the container is the summary, never invented"
         );
         assert!(
@@ -584,7 +590,10 @@ mod tests {
               <a href=\"https://fixture.example.org/media/orphelin.mp3\"></a>\
             </article>\
           </body></html>";
-        let episodes = parse_web_episodes(&Html::parse_document(html), "https://fixture.example.org/page");
+        let episodes = parse_web_episodes(
+            &Html::parse_document(html),
+            "https://fixture.example.org/page",
+        );
         assert!(
             !episodes
                 .iter()
@@ -646,7 +655,12 @@ mod tests {
     #[test]
     fn test_keep_valid_episodes_property_order_preserving_subsequence() {
         let titles = ["", "   ", "Titre", "  Espacé  "];
-        let audios: [Option<&str>; 4] = [None, Some(""), Some("   "), Some("https://fixture.example.org/x.m4a")];
+        let audios: [Option<&str>; 4] = [
+            None,
+            Some(""),
+            Some("   "),
+            Some("https://fixture.example.org/x.m4a"),
+        ];
         for title in titles {
             for audio in audios {
                 let episode = WebEpisode {
@@ -818,13 +832,7 @@ mod tests {
     #[test]
     fn test_framed_episode_set_property_roundtrip_injective_over_generated_sets() {
         let base = "https://fixture.example.org/page";
-        let titles = [
-            "t1",
-            "Époqué",
-            "  spaces  ",
-            "nul\0inside",
-            "",
-        ];
+        let titles = ["t1", "Époqué", "  spaces  ", "nul\0inside", ""];
         let audios: [Option<&str>; 5] = [
             None,
             Some(""),
@@ -905,13 +913,13 @@ mod tests {
             0, 0, 0, 1, // count = 1
             0, 0, 0, 1, b'a', // title
             0, 0, 0, 33, // resolved audio length
-            b'h', b't', b't', b'p', b's', b':', b'/', b'/', b'f', b'i', b'x', b't',
-            b'u', b'r', b'e', b'.', b'e', b'x', b'a', b'm', b'p', b'l', b'e', b'.',
-            b'o', b'r', b'g', b'/', b'x', b'.', b'm', b'4', b'a',
-            0, 0, 0, 0, // absent image -> empty field
+            b'h', b't', b't', b'p', b's', b':', b'/', b'/', b'f', b'i', b'x', b't', b'u', b'r',
+            b'e', b'.', b'e', b'x', b'a', b'm', b'p', b'l', b'e', b'.', b'o', b'r', b'g', b'/',
+            b'x', b'.', b'm', b'4', b'a', 0, 0, 0, 0, // absent image -> empty field
         ];
         assert_eq!(
-            frame, expected.to_vec(),
+            frame,
+            expected.to_vec(),
             "the frame layout is count u32 BE + per-episode len-prefixed title/audio/image"
         );
     }
