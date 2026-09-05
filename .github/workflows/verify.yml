@@ -129,4 +129,4 @@ jobs:
       # The speech layer rides along: its Windows engine (WinRT speech
       # runtime) only compiles on Windows, so this job is where it is proven.
       - name: cargo test (device + speech layers)
-        run: cargo test --lib infrastructure::device infrastructure::speech
+        run: cargo test --lib -- infrastructure::device infrastructure::speech
