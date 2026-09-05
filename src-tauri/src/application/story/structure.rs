@@ -364,6 +364,40 @@ pub fn delete_node(
             }
         }
 
+        // The node's spoken title (menu announcement), if any: its prompt row
+        // and asset row go with the node, the file is GC'd with the others.
+        let prompt_asset: Option<String> = tx
+            .query_row(
+                "SELECT audio_asset_id FROM story_node_prompts WHERE story_id = ?1 AND node_id = ?2",
+                rusqlite::params![story, node],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(|e| transport_error(&e, "read_prompt", &story))?;
+        if let Some(asset_id) = prompt_asset {
+            let info: Option<(String, String)> = tx
+                .query_row(
+                    "SELECT content_hash, file_name FROM assets WHERE id = ?1 AND story_id = ?2",
+                    rusqlite::params![asset_id, story],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .optional()
+                .map_err(|e| transport_error(&e, "read_assets", &story))?;
+            tx.execute(
+                "DELETE FROM assets WHERE id = ?1 AND story_id = ?2",
+                rusqlite::params![asset_id, story],
+            )
+            .map_err(|e| transport_error(&e, "delete_assets", &story))?;
+            tx.execute(
+                "DELETE FROM story_node_prompts WHERE story_id = ?1 AND node_id = ?2",
+                rusqlite::params![story, node],
+            )
+            .map_err(|e| transport_error(&e, "delete_prompt", &story))?;
+            if let Some(info) = info {
+                removed_assets.push(info);
+            }
+        }
+
         // Purge the recovery buffer FOR THIS NODE ONLY. The table's PK is
         // `story_id` (one draft per story), so the row may buffer another
         // node's unsaved content — the WHERE node_id clause protects it.

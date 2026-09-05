@@ -2744,6 +2744,9 @@ describe("<LibraryRoute />", () => {
       "Envoi indisponible: histoire copiée depuis une Lunii, non convertible pour ce modèle",
     );
     expect(reason("empty")).toBe("Envoi indisponible: l'histoire n'a aucun épisode");
+    expect(reason("missingAnnouncements")).toBe(
+      "Envoi indisponible: génère d'abord les annonces du menu depuis l'histoire",
+    );
     expect(reason("malformed")).toBe(
       "Envoi indisponible: structure de l'histoire illisible",
     );

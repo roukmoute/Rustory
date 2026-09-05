@@ -24,6 +24,18 @@
 //!    device's own "back to the pack selection" (STUdio relies on exactly
 //!    that for menus entered from the cover).
 //!
+//! 3. [`synthesize_menu_pack`] — the OTHER layout ([`StoryLayout::Menu`]):
+//!    the child picks an episode on the wheel, like an official pack. Again
+//!    the STUdio "menu" conventions: the cover leads into a QUESTION stage
+//!    (autoplay only — the spoken question, e.g. « Quelle histoire veux-tu
+//!    écouter ? ») whose OK transition enters the options action node; one
+//!    OPTION stage per episode (wheel + OK + home; its image and its SPOKEN
+//!    TITLE), whose OK leads to the episode's story stage; every story stage
+//!    ends (OK) and homes back to the question, so the child chooses again.
+//!    Those spoken announcements are audio assets the application
+//!    synthesizes beforehand — [`menu_blocker`] refuses the layout while any
+//!    is missing.
+//!
 //! The pack UUID is the cover stage's uuid (see the send engine's
 //! `pack_entry_uuid`): the caller passes the STORY id, a canonical lowercase
 //! UUID, so re-sending a story REPLACES its pack on the device rather than
@@ -47,6 +59,9 @@ pub enum StoryPackBlocker {
     Branching,
     /// A node has no audio: the device has nothing to play for it.
     MissingAudio,
+    /// The menu layout lacks a spoken announcement (the question, or an
+    /// episode's spoken title) — they must be generated first.
+    MissingAnnouncements,
 }
 
 impl StoryPackBlocker {
@@ -57,6 +72,37 @@ impl StoryPackBlocker {
             Self::Malformed => "malformed",
             Self::Branching => "branching",
             Self::MissingAudio => "missing_audio",
+            Self::MissingAnnouncements => "missing_announcements",
+        }
+    }
+}
+
+/// How a story is laid out on the device. Persisted as a stable tag beside
+/// the canonical structure (`story_layouts.layout`); absent = sequential.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum StoryLayout {
+    /// Episodes chained in order — the child presses OK once.
+    #[default]
+    Sequential,
+    /// A spoken question, then the episodes on the wheel — the child picks.
+    Menu,
+}
+
+impl StoryLayout {
+    /// Stable persisted / wire tag.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Sequential => "sequential",
+            Self::Menu => "menu",
+        }
+    }
+
+    /// Parse a persisted / wire tag. `None` for anything else.
+    pub fn parse(tag: &str) -> Option<Self> {
+        match tag {
+            "sequential" => Some(Self::Sequential),
+            "menu" => Some(Self::Menu),
+            _ => None,
         }
     }
 }
@@ -181,6 +227,156 @@ pub fn synthesize_sequential_pack(pack_uuid: &str, episodes: &[EpisodeAssets]) -
             options: vec![episode_uuid(index)],
         })
         .collect();
+
+    StudioStoryPack {
+        version: 1,
+        night_mode_available: false,
+        stage_nodes,
+        action_nodes,
+    }
+}
+
+/// Why the MENU layout cannot be sent yet, given the linear episodes and
+/// which announcements exist: the spoken question and one spoken title per
+/// episode are required (the spoken series title is optional — the cover
+/// falls back to the first episode's spoken title).
+pub fn menu_blocker(
+    episodes: &[LinearEpisode<'_>],
+    has_question: bool,
+    has_prompt: impl Fn(&str) -> bool,
+) -> Option<StoryPackBlocker> {
+    if !has_question || episodes.iter().any(|e| !has_prompt(e.node_id)) {
+        return Some(StoryPackBlocker::MissingAnnouncements);
+    }
+    None
+}
+
+/// One episode of the menu layout: its media plus its SPOKEN TITLE (the
+/// wheel prompt), all as pack asset references.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MenuEpisode {
+    pub audio_ref: String,
+    pub image_ref: Option<String>,
+    pub prompt_ref: String,
+}
+
+/// Everything the menu layout carries: the optional spoken series title (the
+/// cover prompt), the spoken question, and the episodes in wheel order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MenuPackAssets {
+    pub title_ref: Option<String>,
+    pub question_ref: String,
+    pub episodes: Vec<MenuEpisode>,
+}
+
+/// Lay `assets` out as a menu STUdio pack whose entry uuid is `pack_uuid`.
+/// See the module doc for the stage/action layout.
+pub fn synthesize_menu_pack(pack_uuid: &str, assets: &MenuPackAssets) -> StudioStoryPack {
+    let cover_controls = StudioControlSettings {
+        wheel: true,
+        ok: true,
+        home: false,
+        pause: false,
+        autoplay: false,
+    };
+    let question_controls = StudioControlSettings {
+        wheel: false,
+        ok: false,
+        home: false,
+        pause: false,
+        autoplay: true,
+    };
+    let option_controls = StudioControlSettings {
+        wheel: true,
+        ok: true,
+        home: true,
+        pause: false,
+        autoplay: false,
+    };
+    let story_controls = StudioControlSettings {
+        wheel: false,
+        ok: false,
+        home: true,
+        pause: true,
+        autoplay: true,
+    };
+    let question_uuid = format!("{pack_uuid}-question");
+    let question_action = format!("{pack_uuid}-question-action");
+    let options_action = format!("{pack_uuid}-options-action");
+    let option_uuid = |index: usize| format!("{pack_uuid}-option-{}", index + 1);
+    let episode_uuid = |index: usize| format!("{pack_uuid}-episode-{}", index + 1);
+    let episode_action = |index: usize| format!("{pack_uuid}-episode-{}-action", index + 1);
+    let to = |action: &str, option_index: i32| {
+        Some(StudioTransition {
+            action_node: action.to_string(),
+            option_index,
+        })
+    };
+
+    let first = assets.episodes.first();
+    let mut stage_nodes = Vec::with_capacity(2 + 2 * assets.episodes.len());
+    stage_nodes.push(StudioStageNode {
+        uuid: pack_uuid.to_string(),
+        square_one: true,
+        image: first.and_then(|e| e.image_ref.clone()),
+        audio: assets
+            .title_ref
+            .clone()
+            .or_else(|| first.map(|e| e.prompt_ref.clone())),
+        ok_transition: to(&question_action, 0),
+        home_transition: None,
+        control_settings: cover_controls,
+    });
+    stage_nodes.push(StudioStageNode {
+        uuid: question_uuid.clone(),
+        square_one: false,
+        image: None,
+        audio: Some(assets.question_ref.clone()),
+        ok_transition: to(&options_action, 0),
+        home_transition: None,
+        control_settings: question_controls,
+    });
+    for (index, episode) in assets.episodes.iter().enumerate() {
+        stage_nodes.push(StudioStageNode {
+            uuid: option_uuid(index),
+            square_one: false,
+            image: episode.image_ref.clone(),
+            audio: Some(episode.prompt_ref.clone()),
+            ok_transition: to(&episode_action(index), 0),
+            // Home from the wheel: the device's own "back to the pack
+            // selection" (STUdio: a menu entered from the cover).
+            home_transition: None,
+            control_settings: option_controls,
+        });
+    }
+    for (index, episode) in assets.episodes.iter().enumerate() {
+        stage_nodes.push(StudioStageNode {
+            uuid: episode_uuid(index),
+            square_one: false,
+            image: episode.image_ref.clone(),
+            audio: Some(episode.audio_ref.clone()),
+            // End and home both return to the question — the child chooses
+            // again (STUdio: a story's default transitions go to the first
+            // useful node after the cover).
+            ok_transition: to(&question_action, 0),
+            home_transition: to(&question_action, 0),
+            control_settings: story_controls,
+        });
+    }
+
+    let mut action_nodes = Vec::with_capacity(2 + assets.episodes.len());
+    action_nodes.push(StudioActionNode {
+        id: question_action.clone(),
+        options: vec![question_uuid],
+    });
+    action_nodes.push(StudioActionNode {
+        id: options_action,
+        options: (0..assets.episodes.len()).map(option_uuid).collect(),
+    });
+    action_nodes.extend((0..assets.episodes.len()).map(|index| StudioActionNode {
+        id: episode_action(index),
+        options: vec![episode_uuid(index)],
+    }));
 
     StudioStoryPack {
         version: 1,
@@ -398,6 +594,176 @@ mod tests {
         assert_eq!(pack.stage_nodes.len(), 2);
         assert_eq!(pack.action_nodes.len(), 1);
         assert!(pack.stage_nodes[1].ok_transition.is_none());
+        assert!(transcode_pack(&pack).is_ok());
+    }
+
+    // ===== menu layout =====
+
+    fn menu_assets(n: usize) -> MenuPackAssets {
+        MenuPackAssets {
+            title_ref: Some(format!("{}.wav", "t".repeat(56) + "7777aaaa")),
+            question_ref: format!("{}.wav", "q".repeat(56) + "8888bbbb"),
+            episodes: (1..=n)
+                .map(|i| MenuEpisode {
+                    audio_ref: format!("{i:0>56}aaaa{i:04}.mp3"),
+                    image_ref: (i != 2).then(|| format!("{i:0>56}bbbb{i:04}.png")),
+                    prompt_ref: format!("{i:0>56}cccc{i:04}.wav"),
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn story_layout_tags_round_trip_and_default_to_sequential() {
+        assert_eq!(StoryLayout::default(), StoryLayout::Sequential);
+        for layout in [StoryLayout::Sequential, StoryLayout::Menu] {
+            assert_eq!(StoryLayout::parse(layout.as_str()), Some(layout));
+        }
+        assert_eq!(StoryLayout::parse("carousel"), None);
+    }
+
+    #[test]
+    fn the_menu_layout_is_blocked_until_every_announcement_exists() {
+        let s = structure(
+            "n1",
+            vec![node("n1", Some("a1"), None), node("n2", Some("a2"), None)],
+        );
+        let episodes = linear_episodes(&s).expect("linear");
+        assert_eq!(
+            menu_blocker(&episodes, false, |_| true),
+            Some(StoryPackBlocker::MissingAnnouncements),
+            "no spoken question"
+        );
+        assert_eq!(
+            menu_blocker(&episodes, true, |id| id == "n1"),
+            Some(StoryPackBlocker::MissingAnnouncements),
+            "an episode without its spoken title"
+        );
+        assert_eq!(menu_blocker(&episodes, true, |_| true), None);
+        assert_eq!(
+            StoryPackBlocker::MissingAnnouncements.diagnostic_tag(),
+            "missing_announcements"
+        );
+    }
+
+    #[test]
+    fn the_menu_pack_follows_the_studio_menu_conventions() {
+        let assets = menu_assets(3);
+        let pack = synthesize_menu_pack(PACK, &assets);
+        // cover + question + 3 options + 3 stories; question + options + 3 story actions.
+        assert_eq!(pack.stage_nodes.len(), 8);
+        assert_eq!(pack.action_nodes.len(), 5);
+
+        let cover = &pack.stage_nodes[0];
+        assert_eq!(cover.uuid, PACK);
+        assert!(cover.square_one);
+        assert_eq!(
+            cover.audio, assets.title_ref,
+            "spoken series title on the wheel"
+        );
+        assert_eq!(cover.image, assets.episodes[0].image_ref);
+        let cs = cover.control_settings;
+        assert!(
+            (cs.wheel, cs.ok, cs.home, cs.pause, cs.autoplay) == (true, true, false, false, false)
+        );
+        assert_eq!(
+            cover.ok_transition.as_ref().unwrap().action_node,
+            pack.action_nodes[0].id
+        );
+
+        let question = &pack.stage_nodes[1];
+        assert_eq!(
+            question.audio.as_deref(),
+            Some(assets.question_ref.as_str())
+        );
+        assert_eq!(question.image, None);
+        let cs = question.control_settings;
+        assert!(
+            (cs.wheel, cs.ok, cs.home, cs.pause, cs.autoplay) == (false, false, false, false, true)
+        );
+        assert_eq!(
+            question.ok_transition.as_ref().unwrap().action_node,
+            pack.action_nodes[1].id
+        );
+        assert_eq!(question.ok_transition.as_ref().unwrap().option_index, 0);
+        assert_eq!(pack.action_nodes[0].options, vec![question.uuid.clone()]);
+
+        // The options action lists the option stages in wheel order.
+        let option_uuids: Vec<String> = pack.stage_nodes[2..5]
+            .iter()
+            .map(|s| s.uuid.clone())
+            .collect();
+        assert_eq!(pack.action_nodes[1].options, option_uuids);
+        for (index, option) in pack.stage_nodes[2..5].iter().enumerate() {
+            assert_eq!(
+                option.audio.as_deref(),
+                Some(assets.episodes[index].prompt_ref.as_str())
+            );
+            assert_eq!(option.image, assets.episodes[index].image_ref);
+            let cs = option.control_settings;
+            assert!(
+                (cs.wheel, cs.ok, cs.home, cs.pause, cs.autoplay)
+                    == (true, true, true, false, false)
+            );
+            assert!(option.home_transition.is_none(), "home = pack selection");
+            let ok = option.ok_transition.as_ref().unwrap();
+            assert_eq!(ok.action_node, pack.action_nodes[2 + index].id);
+            assert_eq!(
+                pack.action_nodes[2 + index].options,
+                vec![pack.stage_nodes[5 + index].uuid.clone()]
+            );
+        }
+        for (index, story) in pack.stage_nodes[5..8].iter().enumerate() {
+            assert_eq!(
+                story.audio.as_deref(),
+                Some(assets.episodes[index].audio_ref.as_str())
+            );
+            let cs = story.control_settings;
+            assert!(
+                (cs.wheel, cs.ok, cs.home, cs.pause, cs.autoplay)
+                    == (false, false, true, true, true)
+            );
+            for t in [story.ok_transition.as_ref(), story.home_transition.as_ref()] {
+                let t = t.expect("back to the question");
+                assert_eq!(t.action_node, pack.action_nodes[0].id);
+                assert_eq!(t.option_index, 0);
+            }
+        }
+        // Unique ids, and the whole graph transcodes.
+        let mut ids: Vec<&str> = pack.stage_nodes.iter().map(|s| s.uuid.as_str()).collect();
+        ids.extend(pack.action_nodes.iter().map(|a| a.id.as_str()));
+        let before = ids.len();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids.len(), before);
+        let out = transcode_pack(&pack).expect("transcode");
+        let li: Vec<i32> = out
+            .li
+            .chunks_exact(4)
+            .map(|c| i32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect();
+        assert_eq!(
+            li,
+            vec![1, 2, 3, 4, 5, 6, 7],
+            "question, then options, then stories"
+        );
+        assert_eq!(
+            out.audios.len(),
+            1 + 1 + 3 + 3,
+            "title + question + prompts + episodes"
+        );
+        assert_eq!(out.images.len(), 2);
+    }
+
+    #[test]
+    fn without_a_spoken_series_title_the_cover_speaks_the_first_episode_title() {
+        let mut assets = menu_assets(2);
+        assets.title_ref = None;
+        let pack = synthesize_menu_pack(PACK, &assets);
+        assert_eq!(
+            pack.stage_nodes[0].audio.as_deref(),
+            Some(assets.episodes[0].prompt_ref.as_str())
+        );
         assert!(transcode_pack(&pack).is_ok());
     }
 }

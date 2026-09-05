@@ -167,6 +167,29 @@ pub enum Event {
         source: &'static str,
         elapsed_ms: u64,
     },
+    /// A story's spoken announcements were generated (`engine` = `system`
+    /// / `embedded`; `planned` = clips the plan wanted, `generated` = clips
+    /// done).
+    AnnouncementsGenerated {
+        generated: u32,
+        planned: u32,
+        engine: &'static str,
+        elapsed_ms: u64,
+    },
+    /// An announcement generation failed. `source` is the closed set
+    /// (`speech`, `presentation`, `settings`, `other`).
+    AnnouncementsGenerationFailed {
+        source: &'static str,
+        elapsed_ms: u64,
+    },
+    /// The embedded neural voice was downloaded, verified and installed.
+    EmbeddedVoiceInstalled { elapsed_ms: u64 },
+    /// The embedded voice install failed. `source` is the closed set
+    /// (`embedded_voice`, `settings`, `other`).
+    EmbeddedVoiceInstallFailed {
+        source: &'static str,
+        elapsed_ms: u64,
+    },
 }
 
 /// Append a single event to the device log. Production entry point —

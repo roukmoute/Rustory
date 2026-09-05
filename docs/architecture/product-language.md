@@ -200,6 +200,12 @@ It exists to keep the same product concepts named the same way across:
 | Node metadata label (field) | `Libellé du nœud` | The short human-readable name of the current node | `nom technique`, `id`, `tag` |
 | Node media — image | `Image` | The image associated with the current node | `visuel`, `asset`, `media image` |
 | Node media — audio | `Audio` | The audio associated with the current node | `son` used loosely, `track`, `media audio` |
+| Story presentation on the device (editor zone) | `Présentation sur la Lunii` | Editor zone choosing how the device plays the story — beside the structure, never part of it | `layout`, `mode de lecture`, `export` |
+| Presentation layout — sequence | `À la suite` | Episodes chained in order (the default) | `séquentiel`, `playlist`, `linéaire` |
+| Presentation layout — menu | `Au choix` | A spoken question then the episodes on the wheel, like an official pack | `menu`, `sélection`, `carousel` |
+| Spoken announcements (menu clips) | `annonces` / `Générer les annonces` | The spoken series title, question and episode titles a voice reads for the menu; generated once, stored as story audio | `TTS`, `prompts`, `synthèse` |
+| Announcement voice (setting) | `Voix des annonces` | The voice announcements are generated with: a system voice, or the embedded neural voice | `moteur`, `TTS engine` |
+| Embedded neural voice | `Voix neuronale embarquée` / `Télécharger la voix neuronale` | The downloadable French voice, identical on every computer, used offline once installed | `modèle`, `Piper`, `IA` |
 | Add a node media (action) | `Ajouter` | Associate an image or audio file with the current node | `Importer` (reserved for `.rustory`), `Charger`, `Upload` |
 | Replace a node media (action) | `Remplacer` | Swap the associated image or audio for another file | `Changer`, `Mettre à jour`, `Re-upload` |
 | Remove a node media (action) | `Retirer` | Drop the associated image or audio from the current node | `Supprimer`, `Effacer`, `Delete` |

@@ -1,0 +1,136 @@
+//! Wire contract of a story's presentation (layout + announcements) and of
+//! the announcement voices — mirrored by `src/ipc/contract-tests/presentation.test.ts`.
+
+use rustory_lib::ipc::dto::{
+    AnnouncementDto, AnnouncementStatusDto, AnnouncementVoiceDto, AnnouncementVoicesDto,
+    ChapterAnnouncementDto, EmbeddedVoiceStateDto, EmbeddedVoiceStatusDto,
+    GenerateAnnouncementsInputDto, SetAnnouncementVoiceInputDto, SetStoryLayoutInputDto,
+    StoryLayoutDto, StoryPresentationDto, VoiceEngineDto, VoicePreviewDto,
+};
+
+#[test]
+fn story_presentation_wire_shape() {
+    let dto = StoryPresentationDto {
+        layout: StoryLayoutDto::Menu,
+        voice_id: Some("system:say:Thomas".into()),
+        archive_retained: false,
+        linear: true,
+        title: AnnouncementDto {
+            spoken_text: "Tina et le serpent à plumes.".into(),
+            status: AnnouncementStatusDto::Ready,
+            asset_id: Some("a-title".into()),
+        },
+        question: AnnouncementDto {
+            spoken_text: "Quelle histoire veux-tu écouter ?".into(),
+            status: AnnouncementStatusDto::Missing,
+            asset_id: None,
+        },
+        chapters: vec![ChapterAnnouncementDto {
+            node_id: "n1".into(),
+            label: "Le trésor : épisode 1/10".into(),
+            spoken_text: "Épisode 1. Le trésor.".into(),
+            status: AnnouncementStatusDto::Stale,
+            asset_id: Some("a-1".into()),
+        }],
+    };
+    let v = serde_json::to_value(&dto).expect("serialize");
+    assert_eq!(
+        v,
+        serde_json::json!({
+            "layout": "menu",
+            "voiceId": "system:say:Thomas",
+            "archiveRetained": false,
+            "linear": true,
+            "title": { "spokenText": "Tina et le serpent à plumes.", "status": "ready", "assetId": "a-title" },
+            "question": { "spokenText": "Quelle histoire veux-tu écouter ?", "status": "missing" },
+            "chapters": [{
+                "nodeId": "n1",
+                "label": "Le trésor : épisode 1/10",
+                "spokenText": "Épisode 1. Le trésor.",
+                "status": "stale",
+                "assetId": "a-1"
+            }]
+        })
+    );
+}
+
+#[test]
+fn presentation_inputs_parse_from_camel_case_and_refuse_unknown_layouts() {
+    let input: SetStoryLayoutInputDto =
+        serde_json::from_str(r#"{"storyId":"s1","layout":"sequential"}"#).expect("parse");
+    assert_eq!(input.layout, StoryLayoutDto::Sequential);
+    assert!(
+        serde_json::from_str::<SetStoryLayoutInputDto>(r#"{"storyId":"s1","layout":"grid"}"#)
+            .is_err()
+    );
+    let gen: GenerateAnnouncementsInputDto =
+        serde_json::from_str(r#"{"storyId":"s1","force":true}"#).expect("parse");
+    assert!(gen.force);
+    let voice: SetAnnouncementVoiceInputDto =
+        serde_json::from_str(r#"{"voiceId":"embedded:fr_FR-siwis-medium"}"#).expect("parse");
+    assert_eq!(voice.voice_id, "embedded:fr_FR-siwis-medium");
+}
+
+#[test]
+fn announcement_voices_wire_shape() {
+    let dto = AnnouncementVoicesDto {
+        voices: vec![
+            AnnouncementVoiceDto {
+                id: "system:say:Thomas".into(),
+                name: "Thomas".into(),
+                language: "fr-FR".into(),
+                engine: VoiceEngineDto::System,
+            },
+            AnnouncementVoiceDto {
+                id: "embedded:fr_FR-siwis-medium".into(),
+                name: "Voix neuronale française (Siwis)".into(),
+                language: "fr-FR".into(),
+                engine: VoiceEngineDto::Embedded,
+            },
+        ],
+        selected_voice_id: Some("system:say:Thomas".into()),
+        selected_is_stored: false,
+        embedded: EmbeddedVoiceStatusDto {
+            state: EmbeddedVoiceStateDto::Installed,
+            version: Some("2023.11.14-2".into()),
+            download_bytes: 89_667_631,
+            voice_id: "embedded:fr_FR-siwis-medium".into(),
+            voice_name: "Voix neuronale française (Siwis)".into(),
+        },
+    };
+    let v = serde_json::to_value(&dto).expect("serialize");
+    assert_eq!(
+        v,
+        serde_json::json!({
+            "voices": [
+                { "id": "system:say:Thomas", "name": "Thomas", "language": "fr-FR", "engine": "system" },
+                { "id": "embedded:fr_FR-siwis-medium", "name": "Voix neuronale française (Siwis)", "language": "fr-FR", "engine": "embedded" }
+            ],
+            "selectedVoiceId": "system:say:Thomas",
+            "selectedIsStored": false,
+            "embedded": {
+                "state": "installed",
+                "version": "2023.11.14-2",
+                "downloadBytes": 89_667_631,
+                "voiceId": "embedded:fr_FR-siwis-medium",
+                "voiceName": "Voix neuronale française (Siwis)"
+            }
+        })
+    );
+    for (state, wire) in [
+        (EmbeddedVoiceStateDto::Unsupported, "unsupported"),
+        (EmbeddedVoiceStateDto::NotInstalled, "notInstalled"),
+        (EmbeddedVoiceStateDto::Installing, "installing"),
+        (EmbeddedVoiceStateDto::Installed, "installed"),
+    ] {
+        assert_eq!(serde_json::to_value(state).expect("serialize"), wire);
+    }
+    let preview = VoicePreviewDto {
+        data_url: "data:audio/wav;base64,UklGRg==".into(),
+        duration_ms: 2_954,
+        spoken_text: "Quelle histoire…".into(),
+    };
+    let v = serde_json::to_value(&preview).expect("serialize");
+    assert_eq!(v["dataUrl"], "data:audio/wav;base64,UklGRg==");
+    assert_eq!(v["durationMs"], 2_954);
+}

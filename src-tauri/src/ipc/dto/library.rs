@@ -118,6 +118,9 @@ pub enum SendBlockerDto {
     Branching,
     /// At least one episode has no audio.
     MissingAudio,
+    /// The menu layout still lacks spoken announcements (question or
+    /// episode titles) — generate them first.
+    MissingAnnouncements,
 }
 
 impl SendBlockerDto {
@@ -128,6 +131,7 @@ impl SendBlockerDto {
             StoryPackBlocker::Malformed => Self::Malformed,
             StoryPackBlocker::Branching => Self::Branching,
             StoryPackBlocker::MissingAudio => Self::MissingAudio,
+            StoryPackBlocker::MissingAnnouncements => Self::MissingAnnouncements,
         }
     }
 }
@@ -252,6 +256,10 @@ mod tests {
             (StoryPackBlocker::Malformed, "malformed"),
             (StoryPackBlocker::Branching, "branching"),
             (StoryPackBlocker::MissingAudio, "missingAudio"),
+            (
+                StoryPackBlocker::MissingAnnouncements,
+                "missingAnnouncements",
+            ),
         ] {
             let dto = SendBlockerDto::from_domain(domain);
             assert_eq!(serde_json::to_value(dto).expect("serialize"), wire);

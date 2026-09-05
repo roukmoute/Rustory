@@ -179,6 +179,7 @@ describe("isLibraryOverviewDto guard", () => {
       "malformed",
       "branching",
       "missingAudio",
+      "missingAnnouncements",
     ]) {
       expect(
         isLibraryOverviewDto({

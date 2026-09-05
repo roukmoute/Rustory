@@ -5,6 +5,7 @@ import { useNavigate } from "react-router-dom";
 import { getVersion } from "@tauri-apps/api/app";
 
 import type { SectionRead } from "../../features/settings/components/SupportProfileView";
+import { AnnouncementVoiceSettings } from "../../features/settings/components/AnnouncementVoiceSettings";
 import { SupportProfileView } from "../../features/settings/components/SupportProfileView";
 import { UpdateApplyZone } from "../../features/settings/components/UpdateApplyZone";
 import { UpdateCheckButton } from "../../features/settings/components/UpdateCheckButton";
@@ -135,6 +136,9 @@ export function SettingsRoute(): React.JSX.Element {
           Retour à la bibliothèque
         </Button>
       </header>
+      {/* The announcement voice: its own read (`read_announcement_voices`),
+          its own calm unavailable state — independent of the profile reads. */}
+      <AnnouncementVoiceSettings />
       <SupportProfileView profileRead={profileRead} policyRead={policyRead} />
     </main>
   );

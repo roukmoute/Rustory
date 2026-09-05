@@ -7,6 +7,7 @@ pub mod device_send;
 pub mod device_title;
 pub mod import_export;
 pub mod library;
+pub mod presentation;
 pub mod settings;
 pub mod story;
 pub mod story_preparation;
@@ -34,6 +35,13 @@ pub use import_export::{
     DROP_MULTIPLE_ITEMS_MESSAGE, OS_OPEN_MULTIPLE_FILES_MESSAGE,
 };
 pub use library::{LibraryOverviewDto, SendBlockerDto, StoryCardDto};
+pub use presentation::{
+    AnnouncementDto, AnnouncementStatusDto, AnnouncementVoiceDto, AnnouncementVoicesDto,
+    ChapterAnnouncementDto, EmbeddedVoiceStateDto, EmbeddedVoiceStatusDto,
+    GenerateAnnouncementsInputDto, GenerateAnnouncementsOutcomeDto,
+    PreviewAnnouncementVoiceInputDto, SetAnnouncementVoiceInputDto, SetStoryLayoutInputDto,
+    StoryLayoutDto, StoryPresentationDto, VoiceEngineDto, VoicePreviewDto,
+};
 pub use settings::{
     DeviceCapabilityDto, DeviceSupportLineDto, LocalArtifactLineDto, SupportProfileDto,
     UpdateAvailabilityDto,

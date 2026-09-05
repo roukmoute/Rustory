@@ -2,7 +2,7 @@ use std::collections::HashSet;
 
 use tauri::AppHandle;
 
-use crate::domain::device::{linear_episodes, StoryPackBlocker};
+use crate::domain::device::{linear_episodes, menu_blocker, StoryLayout, StoryPackBlocker};
 use crate::domain::shared::AppError;
 use crate::domain::story::CanonicalStructure;
 use crate::infrastructure::db::DbHandle;
@@ -55,49 +55,99 @@ fn read_stories(db: &DbHandle) -> Result<Vec<StoryCardDto>, AppError> {
         .prepare(
             "SELECT s.id, s.title, li.import_state, li.findings_summary, \
                     li.source_format, pi.story_id IS NOT NULL, \
-                    COALESCE(li.source_archive_retained, 0), s.structure_json \
+                    COALESCE(li.source_archive_retained, 0), s.structure_json, \
+                    sl.layout, sl.question_audio_asset_id IS NOT NULL \
              FROM stories s \
              LEFT JOIN story_local_imports li ON li.story_id = s.id \
              LEFT JOIN story_imports pi ON pi.story_id = s.id \
+             LEFT JOIN story_layouts sl ON sl.story_id = s.id \
              ORDER BY s.created_at ASC, s.id ASC",
         )
         .map_err(map_select_error)?;
+    // Raw columns first (the statement borrows the connection), projection
+    // after — a menu story needs one more short read for its announcements.
+    struct Row {
+        id: String,
+        title: String,
+        import_state: Option<String>,
+        findings_summary: Option<String>,
+        source_format: Option<String>,
+        device_pack: bool,
+        sendable_archive: bool,
+        structure_json: String,
+        layout: StoryLayout,
+        has_question: bool,
+    }
     let rows = stmt
         .query_map([], |row| {
-            let id: String = row.get(0)?;
-            let title: String = row.get(1)?;
-            let import_state: Option<String> = row.get(2)?;
-            let findings_summary: Option<String> = row.get(3)?;
-            let source_format: Option<String> = row.get(4)?;
-            let device_pack: bool = row.get(5)?;
-            let sendable_archive: bool = row.get(6)?;
-            let structure_json: String = row.get(7)?;
-            // Parsed ONCE for the cover and the send readiness. Defensive: a
-            // malformed structure yields no cover and a blocked send, never
-            // a failed overview.
-            let structure: Option<CanonicalStructure> = serde_json::from_str(&structure_json).ok();
-            let mut card = project_story_card(
-                id,
-                title,
-                import_state,
-                findings_summary,
-                source_format,
-                device_pack,
-                sendable_archive,
-                structure.as_ref(),
-            );
-            // Cover = the START node's image, for every card shape alike
-            // (native stories get one from the editor, imported ones from
-            // their pack).
-            card.cover_asset_id = structure.as_ref().and_then(cover_asset_id_of);
-            Ok(card)
+            let layout_tag: Option<String> = row.get(8)?;
+            Ok(Row {
+                id: row.get(0)?,
+                title: row.get(1)?,
+                import_state: row.get(2)?,
+                findings_summary: row.get(3)?,
+                source_format: row.get(4)?,
+                device_pack: row.get(5)?,
+                sendable_archive: row.get(6)?,
+                structure_json: row.get(7)?,
+                layout: layout_tag
+                    .as_deref()
+                    .and_then(StoryLayout::parse)
+                    .unwrap_or_default(),
+                has_question: row.get::<_, Option<bool>>(9)?.unwrap_or(false),
+            })
         })
+        .map_err(map_select_error)?
+        .collect::<Result<Vec<Row>, _>>()
         .map_err(map_select_error)?;
-    let mut stories = Vec::new();
-    for entry in rows {
-        stories.push(entry.map_err(map_select_error)?);
+    drop(stmt);
+
+    let mut stories = Vec::with_capacity(rows.len());
+    for row in rows {
+        // Parsed ONCE for the cover and the send readiness. Defensive: a
+        // malformed structure yields no cover and a blocked send, never a
+        // failed overview.
+        let structure: Option<CanonicalStructure> = serde_json::from_str(&row.structure_json).ok();
+        // The menu layout is judged on its spoken announcements: one more
+        // (short) read per menu story, never for the default layout.
+        let prompt_node_ids = if row.layout == StoryLayout::Menu {
+            read_prompt_node_ids(db, &row.id).map_err(map_select_error)?
+        } else {
+            Vec::new()
+        };
+        let presentation = PresentationFacts {
+            layout: row.layout,
+            has_question: row.has_question,
+            prompt_node_ids: &prompt_node_ids,
+        };
+        let mut card = project_story_card(
+            row.id,
+            row.title,
+            row.import_state,
+            row.findings_summary,
+            row.source_format,
+            row.device_pack,
+            row.sendable_archive,
+            structure.as_ref(),
+            &presentation,
+        );
+        // Cover = the START node's image, for every card shape alike (native
+        // stories get one from the editor, imported ones from their pack).
+        card.cover_asset_id = structure.as_ref().and_then(cover_asset_id_of);
+        stories.push(card);
     }
     Ok(stories)
+}
+
+/// The node ids that carry a spoken title (menu announcement).
+fn read_prompt_node_ids(db: &DbHandle, story_id: &str) -> rusqlite::Result<Vec<String>> {
+    let mut stmt = db
+        .conn()
+        .prepare("SELECT node_id FROM story_node_prompts WHERE story_id = ?1")?;
+    let ids = stmt
+        .query_map(rusqlite::params![story_id], |r| r.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(ids)
 }
 
 /// Project a `stories` row joined with its optional `story_local_imports`
@@ -120,13 +170,14 @@ fn project_story_card(
     device_pack: bool,
     sendable_archive: bool,
     structure: Option<&CanonicalStructure>,
+    presentation: &PresentationFacts<'_>,
 ) -> StoryCardDto {
     if device_pack {
         // A device-pack story owns its writeback artifacts — transferable
         // (and says so as its V3 send blocker).
         return StoryCardDto::device_pack(id, title);
     }
-    let (sendable, send_blocker) = send_readiness(structure, sendable_archive);
+    let (sendable, send_blocker) = send_readiness(structure, sendable_archive, presentation);
     let Some(state) = import_state.as_deref().and_then(import_state_dto_from_tag) else {
         let mut card = StoryCardDto::native(id, title);
         card.sendable = sendable;
@@ -173,34 +224,64 @@ fn project_story_card(
     }
 }
 
+/// How the story is presented on a device, as the send readiness needs it:
+/// its layout and, for the menu layout, which spoken announcements exist.
+/// The default is the sequential layout (nothing to announce).
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct PresentationFacts<'a> {
+    pub(crate) layout: StoryLayout,
+    pub(crate) has_question: bool,
+    pub(crate) prompt_node_ids: &'a [String],
+}
+
 /// Whether a (non device-pack) story can be sent to a Lunii V3, and why not
 /// otherwise: a retained source archive always can (the archive engine); a
-/// structure that lays out as a sequential device pack can (every episode
-/// has an audio, no choices — `domain::device::story_pack`); anything else
-/// is blocked for the domain's reason (an unparsable structure counts as
-/// malformed).
+/// structure that lays out as a device pack can — every episode has an
+/// audio, no choices (`domain::device::story_pack`) and, for the menu
+/// layout, every spoken announcement exists; anything else is blocked for
+/// the domain's reason (an unparsable structure counts as malformed).
 pub(crate) fn send_readiness(
     structure: Option<&CanonicalStructure>,
     retained_archive: bool,
+    presentation: &PresentationFacts<'_>,
 ) -> (bool, Option<SendBlockerDto>) {
+    if retained_archive {
+        return (true, None);
+    }
     let by_structure = match structure {
-        Some(structure) => linear_episodes(structure).map(|_| ()),
+        Some(structure) => {
+            linear_episodes(structure).and_then(|episodes| match presentation.layout {
+                StoryLayout::Sequential => Ok(()),
+                StoryLayout::Menu => {
+                    let has_prompt =
+                        |node_id: &str| presentation.prompt_node_ids.iter().any(|n| n == node_id);
+                    match menu_blocker(&episodes, presentation.has_question, has_prompt) {
+                        Some(blocker) => Err(blocker),
+                        None => Ok(()),
+                    }
+                }
+            })
+        }
         None => Err(StoryPackBlocker::Malformed),
     };
     match by_structure {
         Ok(()) => (true, None),
-        Err(_) if retained_archive => (true, None),
         Err(blocker) => (false, Some(SendBlockerDto::from_domain(blocker))),
     }
 }
 
-/// [`send_readiness`] from the persisted canonical JSON.
+/// [`send_readiness`] from the persisted canonical JSON, for a story in the
+/// default (sequential) presentation — a creation-flow card.
 pub(crate) fn send_readiness_of_json(
     structure_json: &str,
     retained_archive: bool,
 ) -> (bool, Option<SendBlockerDto>) {
     let structure: Option<CanonicalStructure> = serde_json::from_str(structure_json).ok();
-    send_readiness(structure.as_ref(), retained_archive)
+    send_readiness(
+        structure.as_ref(),
+        retained_archive,
+        &PresentationFacts::default(),
+    )
 }
 
 /// The story's cover = its START node's image asset id, when that node
@@ -477,6 +558,7 @@ mod tests {
             false,
             false,
             None,
+            &PresentationFacts::default(),
         );
         assert!(card.import_state.is_none());
     }
@@ -598,6 +680,7 @@ mod tests {
             true,
             false,
             None,
+            &PresentationFacts::default(),
         );
         assert!(device.transferable);
         assert!(!device.sendable);
@@ -612,6 +695,7 @@ mod tests {
             false,
             false,
             None,
+            &PresentationFacts::default(),
         );
         assert!(!native.transferable);
 
@@ -624,6 +708,7 @@ mod tests {
             false,
             false,
             None,
+            &PresentationFacts::default(),
         );
         assert!(!file_import.transferable);
         assert!(!file_import.sendable);
@@ -640,6 +725,7 @@ mod tests {
             false,
             true,
             None,
+            &PresentationFacts::default(),
         );
         assert!(!archive_sendable.transferable);
         assert!(archive_sendable.sendable);
@@ -694,6 +780,108 @@ mod tests {
             super::send_readiness_of_json("not json", true),
             (true, None)
         );
+    }
+
+    #[test]
+    fn the_menu_layout_is_sendable_only_with_its_announcements() {
+        let structure: CanonicalStructure = serde_json::from_str(&structure_json(&[
+            ("n1", Some("a1"), false),
+            ("n2", Some("a2"), false),
+        ]))
+        .unwrap();
+        let prompts = vec!["n1".to_string(), "n2".to_string()];
+        let complete = PresentationFacts {
+            layout: StoryLayout::Menu,
+            has_question: true,
+            prompt_node_ids: &prompts,
+        };
+        assert_eq!(
+            super::send_readiness(Some(&structure), false, &complete),
+            (true, None)
+        );
+        let one_short = vec!["n1".to_string()];
+        let partial = PresentationFacts {
+            layout: StoryLayout::Menu,
+            has_question: true,
+            prompt_node_ids: &one_short,
+        };
+        assert_eq!(
+            super::send_readiness(Some(&structure), false, &partial),
+            (false, Some(SendBlockerDto::MissingAnnouncements))
+        );
+        let no_question = PresentationFacts {
+            layout: StoryLayout::Menu,
+            has_question: false,
+            prompt_node_ids: &prompts,
+        };
+        assert_eq!(
+            super::send_readiness(Some(&structure), false, &no_question),
+            (false, Some(SendBlockerDto::MissingAnnouncements))
+        );
+        // A retained archive is sent as such, whatever the layout says.
+        assert_eq!(
+            super::send_readiness(Some(&structure), true, &no_question),
+            (true, None)
+        );
+        // The structure's own blockers come first.
+        let mute: CanonicalStructure =
+            serde_json::from_str(&structure_json(&[("n1", None, false)])).unwrap();
+        assert_eq!(
+            super::send_readiness(Some(&mute), false, &complete),
+            (false, Some(SendBlockerDto::MissingAudio))
+        );
+    }
+
+    #[test]
+    fn read_stories_projects_a_menu_story_from_its_announcement_rows() {
+        let mut db = fresh_db();
+        let story = create_story(
+            &mut db,
+            CreateStoryInput {
+                title: "Menu".into(),
+            },
+        )
+        .expect("create");
+        db.conn()
+            .execute(
+                "UPDATE stories SET structure_json = ?1 WHERE id = ?2",
+                rusqlite::params![
+                    structure_json(&[("n1", Some("a1"), false), ("n2", Some("a2"), false)]),
+                    &story.id
+                ],
+            )
+            .expect("update");
+        db.conn()
+            .execute(
+                "INSERT INTO story_layouts (story_id, layout, question_audio_asset_id, question_spoken_text, voice_id, updated_at) \
+                 VALUES (?1, 'menu', 'q', 'Question ?', 'v', '2026-01-01T00:00:00Z')",
+                rusqlite::params![&story.id],
+            )
+            .expect("layout");
+        db.conn()
+            .execute(
+                "INSERT INTO story_node_prompts (story_id, node_id, audio_asset_id, spoken_text, voice_id, updated_at) \
+                 VALUES (?1, 'n1', 'p1', 'Un.', 'v', '2026-01-01T00:00:00Z')",
+                rusqlite::params![&story.id],
+            )
+            .expect("prompt");
+        let cards = super::read_stories(&db).expect("read");
+        let card = cards.iter().find(|c| c.id == story.id).expect("card");
+        assert!(!card.sendable);
+        assert_eq!(
+            card.send_blocker,
+            Some(SendBlockerDto::MissingAnnouncements)
+        );
+        db.conn()
+            .execute(
+                "INSERT INTO story_node_prompts (story_id, node_id, audio_asset_id, spoken_text, voice_id, updated_at) \
+                 VALUES (?1, 'n2', 'p2', 'Deux.', 'v', '2026-01-01T00:00:00Z')",
+                rusqlite::params![&story.id],
+            )
+            .expect("prompt");
+        let cards = super::read_stories(&db).expect("read");
+        let card = cards.iter().find(|c| c.id == story.id).expect("card");
+        assert!(card.sendable);
     }
 
     #[test]

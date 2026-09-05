@@ -86,6 +86,14 @@ pub struct AppState {
     /// `Arc` so the `spawn_blocking` worker can own a handle. No
     /// persistence by contract.
     pub update_apply_session: std::sync::Arc<application::update::UpdateApplySession>,
+    /// The voices that read a story's announcements: the system voices of
+    /// this OS plus the embedded neural voice once installed. Behind an
+    /// `Arc` + `spawn_blocking` like the device I/O (an engine is a
+    /// process or a runtime call, never on the UI thread).
+    pub speech: std::sync::Arc<infrastructure::speech::CompositeSpeech>,
+    /// Single-flight guard of the embedded-voice download: a second
+    /// install request while one runs is refused, never queued.
+    pub embedded_voice_installing: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// Read every story id that still has a pending draft row. Ordered by
@@ -514,6 +522,12 @@ pub fn run() {
                 update_apply_session: std::sync::Arc::new(
                     application::update::UpdateApplySession::new(),
                 ),
+                speech: std::sync::Arc::new(infrastructure::speech::CompositeSpeech::new(
+                    &app_data_dir,
+                )),
+                embedded_voice_installing: std::sync::Arc::new(
+                    std::sync::atomic::AtomicBool::new(false),
+                ),
             });
             Ok(())
         })
@@ -549,21 +563,26 @@ pub fn run() {
             commands::import_export::export_story_with_save_dialog,
             commands::import_export::fetch_rss_source_preview,
             commands::import_export::fetch_web_podcast_preview,
+            commands::presentation::generate_story_announcements,
             commands::library::get_library_overview,
             commands::catalog::get_official_catalog_status,
             commands::story::get_story_detail,
             commands::catalog::import_official_catalog,
             commands::device::import_device_story,
+            commands::presentation::install_embedded_voice,
             commands::device::delete_device_story,
             commands::story::move_story_node,
             commands::device::read_connected_lunii,
             commands::import_export::read_content_source_policy,
             commands::device::read_device_library,
+            commands::presentation::preview_announcement_voice,
+            commands::presentation::read_announcement_voices,
             commands::story::read_node_media,
             commands::catalog::read_pack_cover,
             commands::transfer::read_preparation_state,
             commands::story::read_recoverable_draft,
             commands::story::read_recoverable_node_draft,
+            commands::presentation::read_story_presentation,
             commands::device::read_story_validation,
             commands::settings::read_support_profile,
             commands::transfer::read_transfer_outcome,
@@ -580,8 +599,10 @@ pub fn run() {
             commands::story::remove_node_option,
             commands::settings::restart_for_update,
             commands::device::send_pack_to_device,
+            commands::presentation::set_announcement_voice,
             commands::device::set_device_story_title,
             commands::story::set_node_option_link,
+            commands::presentation::set_story_layout,
             commands::transfer::start_prepare_story,
             commands::transfer::start_transfer_story,
             commands::settings::start_update_apply,

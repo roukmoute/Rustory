@@ -54,7 +54,8 @@ export type SendBlocker =
   | "empty"
   | "malformed"
   | "branching"
-  | "missingAudio";
+  | "missingAudio"
+  | "missingAnnouncements";
 
 const SEND_BLOCKERS: ReadonlySet<string> = new Set([
   "devicePack",
@@ -62,6 +63,7 @@ const SEND_BLOCKERS: ReadonlySet<string> = new Set([
   "malformed",
   "branching",
   "missingAudio",
+  "missingAnnouncements",
 ]);
 
 const CARD_IMPORT_STATES: ReadonlySet<string> = new Set([

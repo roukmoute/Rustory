@@ -109,6 +109,23 @@ image = { version = "=0.25.10", default-features = false, features = ["png", "jp
 # the defaults apply). Both pinned strict.
 symphonia = { version = "=0.6.1", default-features = false, features = ["aac", "isomp4", "mp3", "id3v2", "pcm", "wav", "ogg", "vorbis"] }
 rusty_mp3 = "=0.7.0"
+# Added 2026-09-05 to INSTALL the downloadable embedded voice (the Piper
+# text-to-speech runtime ships as a tar.gz on Linux/macOS and a zip on
+# Windows; the zip crate above already covers the latter). Both crates are
+# ALREADY COMPILED in this workspace (the updater plugin pulls them):
+# no new download, no new toolchain constraint, pure Rust (`flate2`
+# defaults to the miniz_oxide backend). Pinned strict.
+flate2 = "=1.1.9"
+tar = "=0.4.46"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+# Windows speech runtime (WinRT `Windows.Media.SpeechSynthesis`) for the
+# SYSTEM voices — the voices already installed on the machine, listed and
+# used to speak the story announcements. The `windows` crate is already
+# in the tree at this exact version (Tauri's Windows stack); only the
+# speech + streams + WinRT-init features are added. Pure Rust bindings, no
+# C toolchain. Pinned strict.
+windows = { version = "=0.61.3", features = ["Foundation", "Foundation_Collections", "Media_SpeechSynthesis", "Storage_Streams", "Win32_System_WinRT"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # Linux-only D-Bus binding used to talk to udisks2 and auto-mount a

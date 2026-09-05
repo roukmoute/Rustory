@@ -16,6 +16,7 @@ import { OptionLinkEditor } from "./OptionLinkEditor";
 import { RecoveryBanner } from "./RecoveryBanner";
 import { RecoveryReadErrorBanner } from "./RecoveryReadErrorBanner";
 import { StoryNodeEditorHost } from "./StoryNodeEditorHost";
+import { StoryPresentationPanel } from "./StoryPresentationPanel";
 import { StoryStructureNavigator } from "./StoryStructureNavigator";
 import type { SaveStatus } from "../hooks/use-story-editor";
 import type { UseNodeEditor } from "../hooks/use-node-editor";
@@ -402,6 +403,19 @@ export function StoryEditorShell({
           />
         </StoryNodeEditorHost>
       </div>
+
+      {/* How the Lunii plays this story (sequence or spoken menu) and the
+          menu's announcements. A device-pack story carries its own pack:
+          nothing to present here. */}
+      {!packScoped && (
+        <StoryPresentationPanel
+          storyId={detail.id}
+          editable={detail.editable && !recoveryActive}
+          structureKey={JSON.stringify(
+            detail.structure?.nodes.map((node) => [node.id, node.label]) ?? [],
+          )}
+        />
+      )}
 
       <section className="story-editor-shell__actions-region">
         <ExportStatusSurface

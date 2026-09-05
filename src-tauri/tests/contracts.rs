@@ -52,3 +52,6 @@ mod story_preparation;
 
 #[path = "contracts/story_transfer.rs"]
 mod story_transfer;
+
+#[path = "contracts/presentation.rs"]
+mod presentation;

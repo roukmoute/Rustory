@@ -40,6 +40,30 @@ vi.mock("@tauri-apps/api/app", () => ({
   getVersion: () => mockGetVersion(),
 }));
 
+// The announcement-voice section has its own read and its own tests
+// (`AnnouncementVoiceSettings.test.tsx`); here it settles on one voice so
+// it never adds a `status` line to the profile sections under test.
+vi.mock("../../ipc/commands/presentation", () => ({
+  readAnnouncementVoices: () =>
+    Promise.resolve({
+      voices: [
+        { id: "system:say:Thomas", name: "Thomas", language: "fr-FR", engine: "system" },
+      ],
+      selectedVoiceId: "system:say:Thomas",
+      selectedIsStored: false,
+      embedded: {
+        state: "installed",
+        version: "2023.11.14-2",
+        downloadBytes: 89667631,
+        voiceId: "embedded:fr_FR-siwis-medium",
+        voiceName: "Voix neuronale française (Siwis)",
+      },
+    }),
+  setAnnouncementVoice: vi.fn(),
+  previewAnnouncementVoice: vi.fn(),
+  installEmbeddedVoice: vi.fn(),
+}));
+
 import { SettingsRoute } from "./SettingsRoute";
 import { useUpdateApplyShell } from "../../shell/state/update-apply-shell-store";
 import { useUpdateShell } from "../../shell/state/update-shell-store";
@@ -398,6 +422,7 @@ describe("<SettingsRoute />", () => {
     expect(
       screen.getAllByRole("heading", { level: 2 }).map((h) => h.textContent),
     ).toEqual([
+      "Voix des annonces",
       "Appareils",
       "Artefacts locaux",
       "Association de fichiers",

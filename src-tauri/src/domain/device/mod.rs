@@ -41,7 +41,8 @@ pub use profile::{
     classify_flam, classify_lunii, DeviceProfile, DeviceProfileClassification, UnsupportedReason,
 };
 pub use story_pack::{
-    linear_episodes, synthesize_sequential_pack, EpisodeAssets, LinearEpisode, StoryPackBlocker,
+    linear_episodes, menu_blocker, synthesize_menu_pack, synthesize_sequential_pack, EpisodeAssets,
+    LinearEpisode, MenuEpisode, MenuPackAssets, StoryLayout, StoryPackBlocker,
 };
 pub use support_matrix::{
     official_device_support_matrix, supported_operations_for, supported_operations_in,

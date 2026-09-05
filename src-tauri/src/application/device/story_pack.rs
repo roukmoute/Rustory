@@ -3,20 +3,22 @@
 //! [`send_story_pack_to_device`](super::send::send_story_pack_to_device).
 //!
 //! Runs UNDER the SQLite lock and does no other I/O: it reads the story's
-//! canonical structure and the stored file names of the media it
-//! references, then hands the pure synthesis
-//! (`domain::device::story_pack`) the ordered episodes. Every refusal is
-//! decided here, BEFORE any device is touched, with the same actionable
-//! copy the library card announces pre-click.
+//! canonical structure, its presentation (layout + spoken announcements)
+//! and the stored file names of the media they reference, then hands the
+//! pure synthesis (`domain::device::story_pack`) the ordered episodes —
+//! chained in sequence, or behind a spoken menu. Every refusal is decided
+//! here, BEFORE any device is touched, with the same actionable copy the
+//! library card announces pre-click.
 
 use crate::domain::device::{
-    linear_episodes, synthesize_sequential_pack, EpisodeAssets, StoryPackBlocker, StudioStoryPack,
+    linear_episodes, menu_blocker, synthesize_menu_pack, synthesize_sequential_pack, EpisodeAssets,
+    MenuEpisode, MenuPackAssets, StoryLayout, StoryPackBlocker, StudioStoryPack,
 };
 use crate::domain::shared::AppError;
 use crate::domain::story::CanonicalStructure;
 use crate::infrastructure::db::DbHandle;
 
-/// Build the sequential device pack of `story_id`, or refuse with the reason.
+/// Build the device pack of `story_id` (per its layout), or refuse with the reason.
 pub fn plan_story_pack(db: &DbHandle, story_id: &str) -> Result<StudioStoryPack, AppError> {
     let structure_json: String = db
         .conn()
@@ -61,7 +63,102 @@ pub fn plan_story_pack(db: &DbHandle, story_id: &str) -> Result<StudioStoryPack,
             image_ref,
         });
     }
-    Ok(synthesize_sequential_pack(story_id, &assets))
+
+    let presentation = read_presentation_rows(db, story_id)?;
+    match presentation.layout {
+        StoryLayout::Sequential => Ok(synthesize_sequential_pack(story_id, &assets)),
+        StoryLayout::Menu => {
+            // The spoken announcements: refused as a whole while any is
+            // missing (the same rule the card projects).
+            let has_prompt = |node_id: &str| presentation.prompts.iter().any(|(n, _)| n == node_id);
+            if let Some(blocker) = menu_blocker(
+                &episodes,
+                presentation.question_asset_id.is_some(),
+                has_prompt,
+            ) {
+                return Err(blocker_error(blocker));
+            }
+            let question_asset = presentation
+                .question_asset_id
+                .as_deref()
+                .ok_or_else(|| blocker_error(StoryPackBlocker::MissingAnnouncements))?;
+            let question_ref = stored_file_name(db, story_id, question_asset, "audio")?
+                .ok_or_else(|| announcement_missing_error("question"))?;
+            let title_ref = match presentation.title_asset_id.as_deref() {
+                Some(id) => stored_file_name(db, story_id, id, "audio")?,
+                None => None,
+            };
+            let mut menu_episodes = Vec::with_capacity(episodes.len());
+            for (episode, media) in episodes.iter().zip(assets) {
+                let prompt_asset = presentation
+                    .prompts
+                    .iter()
+                    .find(|(n, _)| n == episode.node_id)
+                    .map(|(_, asset)| asset.as_str())
+                    .ok_or_else(|| blocker_error(StoryPackBlocker::MissingAnnouncements))?;
+                let prompt_ref = stored_file_name(db, story_id, prompt_asset, "audio")?
+                    .ok_or_else(|| announcement_missing_error(episode.node_id))?;
+                menu_episodes.push(MenuEpisode {
+                    audio_ref: media.audio_ref,
+                    image_ref: media.image_ref,
+                    prompt_ref,
+                });
+            }
+            Ok(synthesize_menu_pack(
+                story_id,
+                &MenuPackAssets {
+                    title_ref,
+                    question_ref,
+                    episodes: menu_episodes,
+                },
+            ))
+        }
+    }
+}
+
+/// The presentation rows a plan needs: the layout, the spoken title and
+/// question asset ids, and the (node id → asset id) spoken titles.
+struct PresentationRows {
+    layout: StoryLayout,
+    title_asset_id: Option<String>,
+    question_asset_id: Option<String>,
+    prompts: Vec<(String, String)>,
+}
+
+fn read_presentation_rows(db: &DbHandle, story_id: &str) -> Result<PresentationRows, AppError> {
+    use rusqlite::OptionalExtension;
+    let layout_row: Option<(String, Option<String>, Option<String>)> = db
+        .conn()
+        .query_row(
+            "SELECT layout, title_audio_asset_id, question_audio_asset_id FROM story_layouts WHERE story_id = ?1",
+            rusqlite::params![story_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()
+        .map_err(|_| storage_error("read_layout"))?;
+    let (layout, title_asset_id, question_asset_id) = match layout_row {
+        Some((tag, title, question)) => (
+            StoryLayout::parse(&tag).unwrap_or_default(),
+            title,
+            question,
+        ),
+        None => (StoryLayout::Sequential, None, None),
+    };
+    let mut stmt = db
+        .conn()
+        .prepare("SELECT node_id, audio_asset_id FROM story_node_prompts WHERE story_id = ?1")
+        .map_err(|_| storage_error("read_prompts"))?;
+    let prompts = stmt
+        .query_map(rusqlite::params![story_id], |r| Ok((r.get(0)?, r.get(1)?)))
+        .map_err(|_| storage_error("read_prompts"))?
+        .collect::<Result<Vec<(String, String)>, _>>()
+        .map_err(|_| storage_error("read_prompts"))?;
+    Ok(PresentationRows {
+        layout,
+        title_asset_id,
+        question_asset_id,
+        prompts,
+    })
 }
 
 /// The node-media store file name (`<hash>.<ext>`) of one of the story's
@@ -106,10 +203,27 @@ fn blocker_error(blocker: StoryPackBlocker) -> AppError {
             "Envoi impossible: un ou plusieurs épisodes de cette histoire n'ont pas d'audio.",
             "Ajoute un audio à chaque épisode, puis réessaie l'envoi.",
         ),
+        StoryPackBlocker::MissingAnnouncements => (
+            "Envoi impossible: les annonces du menu (question et titres des épisodes) ne sont pas encore générées.",
+            "Génère les annonces depuis l'histoire, puis réessaie l'envoi.",
+        ),
     };
     AppError::device_write_failed(message, action).with_details(serde_json::json!({
         "source": "story_pack",
         "cause": blocker.diagnostic_tag(),
+    }))
+}
+
+/// A spoken announcement is referenced but its asset row is gone.
+fn announcement_missing_error(which: &str) -> AppError {
+    AppError::device_write_failed(
+        "Envoi impossible: une annonce du menu est introuvable dans la bibliothèque.",
+        "Régénère les annonces depuis l'histoire, puis réessaie l'envoi.",
+    )
+    .with_details(serde_json::json!({
+        "source": "story_pack",
+        "cause": "announcement_missing",
+        "announcement": which,
     }))
 }
 
@@ -291,5 +405,81 @@ mod tests {
         let v = serde_json::to_value(&err).unwrap();
         assert_eq!(v["code"], "LIBRARY_INCONSISTENT");
         assert_eq!(v["details"]["cause"], "not_found");
+    }
+
+    fn set_menu(db: &DbHandle, story_id: &str, question: Option<&str>, prompts: &[(&str, &str)]) {
+        db.conn()
+            .execute(
+                "INSERT INTO story_layouts (story_id, layout, question_audio_asset_id, question_spoken_text, voice_id, updated_at) \
+                 VALUES (?1, 'menu', ?2, 'q', 'v', '2026-01-01T00:00:00Z')",
+                rusqlite::params![story_id, question],
+            )
+            .expect("layout");
+        for (node_id, asset) in prompts {
+            db.conn()
+                .execute(
+                    "INSERT INTO story_node_prompts (story_id, node_id, audio_asset_id, spoken_text, voice_id, updated_at) \
+                     VALUES (?1, ?2, ?3, 't', 'v', '2026-01-01T00:00:00Z')",
+                    rusqlite::params![story_id, node_id, asset],
+                )
+                .expect("prompt");
+        }
+    }
+
+    #[test]
+    fn a_menu_layout_plans_a_menu_pack_from_the_announcements() {
+        let mut db = fresh_db();
+        let id = story(&mut db);
+        set_structure(
+            &db,
+            &id,
+            &[
+                ("n1", Some("aud-1"), Some("img-1")),
+                ("n2", Some("aud-2"), None),
+            ],
+        );
+        insert_asset(&db, &id, "aud-1", "audio", "aaaa1111.mp3");
+        insert_asset(&db, &id, "aud-2", "audio", "aaaa2222.mp3");
+        insert_asset(&db, &id, "img-1", "image", "bbbb1111.png");
+        insert_asset(&db, &id, "q-1", "audio", "cccc0001.wav");
+        insert_asset(&db, &id, "p-1", "audio", "cccc1111.wav");
+        insert_asset(&db, &id, "p-2", "audio", "cccc2222.wav");
+        set_menu(&db, &id, Some("q-1"), &[("n1", "p-1"), ("n2", "p-2")]);
+
+        let pack = plan_story_pack(&db, &id).expect("plan");
+        // cover + question + 2 options + 2 stories.
+        assert_eq!(pack.stage_nodes.len(), 6);
+        assert_eq!(
+            pack.stage_nodes[0].audio.as_deref(),
+            Some("cccc1111.wav"),
+            "no spoken title: the first prompt"
+        );
+        assert_eq!(pack.stage_nodes[1].audio.as_deref(), Some("cccc0001.wav"));
+        assert_eq!(pack.stage_nodes[2].audio.as_deref(), Some("cccc1111.wav"));
+        assert_eq!(pack.stage_nodes[2].image.as_deref(), Some("bbbb1111.png"));
+        assert_eq!(pack.stage_nodes[3].audio.as_deref(), Some("cccc2222.wav"));
+        assert_eq!(pack.stage_nodes[4].audio.as_deref(), Some("aaaa1111.mp3"));
+        assert_eq!(pack.stage_nodes[5].audio.as_deref(), Some("aaaa2222.mp3"));
+    }
+
+    #[test]
+    fn a_menu_layout_without_its_announcements_is_refused_before_any_device_touch() {
+        let mut db = fresh_db();
+        let id = story(&mut db);
+        set_structure(
+            &db,
+            &id,
+            &[("n1", Some("aud-1"), None), ("n2", Some("aud-2"), None)],
+        );
+        insert_asset(&db, &id, "aud-1", "audio", "aaaa1111.mp3");
+        insert_asset(&db, &id, "aud-2", "audio", "aaaa2222.mp3");
+        insert_asset(&db, &id, "q-1", "audio", "cccc0001.wav");
+        insert_asset(&db, &id, "p-1", "audio", "cccc1111.wav");
+        // One prompt short.
+        set_menu(&db, &id, Some("q-1"), &[("n1", "p-1")]);
+        let err = plan_story_pack(&db, &id).expect_err("refused");
+        let v = serde_json::to_value(&err).unwrap();
+        assert_eq!(v["details"]["cause"], "missing_announcements");
+        assert!(!err.user_action.as_deref().unwrap_or("").is_empty());
     }
 }

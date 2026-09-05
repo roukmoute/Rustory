@@ -127,6 +127,7 @@ Preferred patterns:
   - `Envoi indisponible: histoire copiée depuis une Lunii, non convertible pour ce modèle` (`devicePack`)
   - `Envoi indisponible: l'histoire n'a aucun épisode` (`empty`)
   - `Envoi indisponible: structure de l'histoire illisible` (`malformed`)
+  - `Envoi indisponible: génère d'abord les annonces du menu depuis l'histoire` (`missingAnnouncements` — the story is presented `Au choix` but its spoken announcements are not all generated)
   - `Envoi indisponible: cette histoire ne peut pas être préparée pour l'appareil` — no blocker on the card (a creation-flow card before the overview re-read)
 - `Envoi indisponible: transfert pas encore activé (MVP Phase 1)` — **legacy fallback only**: it no longer applies to the write-authorized cohorts (V1/V2), where the `Envoyer vers la Lunii` CTA is now activable; it subsists solely where the panel is given no write target at all (tests/storybook)
 - `Détection indisponible: vérifie que la Lunii est branchée et réessaie.`
@@ -2375,3 +2376,12 @@ four frontend-frozen button literals is Rust-carried and renders VERBATIM.
 | Accessibility | Shared `Button` (visible focus), keyboard-sufficient on start/restart/retry, a text label on every state (color alone never carries it), progress carries a textual label consistent with the product's indicators. |
 | Forbidden | `role="alert"`, toast, modal, chip tone `error`/`warning`, color alone, auto-start of any kind, a clickable external link (the releases-page address travels as plain text), any ambiguity about the installed version (the `Version {version}` line ALWAYS names the version that runs). |
 | Offline | The gesture is an optional capability of the zone: a network failure is a calm `failed` state of the zone, never an alarm; the core flow never depends on it. |
+
+## Story Presentation on the Device (editor zone + settings)
+
+The editor's `Présentation sur la Lunii` zone says how the device plays a story, beside the structure (the canonical structure is untouched by it):
+
+- Layout, one radio choice: `À la suite` (episodes chained in order — the default every story starts with) / `Au choix` (a spoken question, then the episodes on the wheel; the child returns to the menu after each episode). `Au choix` is disabled — with the calm line `La présentation au choix demande un audio sur chaque épisode et aucun choix dans l'histoire.` — while the structure does not lay out as episodes. A story sent from its retained archive shows only `Cette histoire est envoyée telle quelle depuis son archive d'origine : la présentation ci-dessous ne s'applique pas à l'envoi.`
+- Announcements (menu only): one row per spoken clip — `Titre de la série`, `Question`, `Épisode N` — with the exact spoken text (« … ») and a state chip: `prête` (success), `à régénérer` (warning: the label or the voice changed since), `manquante` (neutral). `Écouter` per generated clip. One gesture `Générer les annonces` (missing + stale only) and `Régénérer toutes les annonces`; while it runs, a determinate `Génération des annonces…` bar. A failure renders the Rust message plus its next gesture (`role="alert"`).
+- Settings section `Voix des annonces`: the French voices available on this computer (system voices first, `· système`), the selection (a radio; stored through Rust), `Écouter` per voice, and the `Voix neuronale embarquée` block — `Télécharger la voix neuronale (N Mo)` with a determinate `Téléchargement de la voix neuronale…` bar, then the `Voix neuronale installée.` chip (and the voice is selected); `La voix neuronale n'est pas disponible pour cet ordinateur.` on an unsupported platform. No French voice at all: `Aucune voix française n'est disponible sur cet ordinateur. Installe une voix française dans les réglages du système, ou télécharge la voix neuronale ci-dessous.`
+

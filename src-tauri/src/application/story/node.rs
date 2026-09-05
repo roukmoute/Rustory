@@ -360,8 +360,8 @@ pub fn save_node_content(
 /// commit. Produced by [`store_node_media`] WITHOUT the DB lock so the (up to
 /// 32 MiB) write never serialises other IPC commands (NFR5).
 pub struct PreparedMedia {
-    stored: StoredMedia,
-    media_dir: PathBuf,
+    pub(crate) stored: StoredMedia,
+    pub(crate) media_dir: PathBuf,
 }
 
 /// Validate (magic bytes + slot match) and PROMOTE the bytes into the store.

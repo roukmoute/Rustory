@@ -126,5 +126,7 @@ jobs:
       # Run the device unit tests (writer, v3_pack_writer, deleter, …) ON
       # Windows: they stage + promote + fsync + rewrite `.pi` on a real temp
       # directory, so a Windows-only regression in the write path fails here.
-      - name: cargo test (device layer)
-        run: cargo test --lib infrastructure::device
+      # The speech layer rides along: its Windows engine (WinRT speech
+      # runtime) only compiles on Windows, so this job is where it is proven.
+      - name: cargo test (device + speech layers)
+        run: cargo test --lib infrastructure::device infrastructure::speech
