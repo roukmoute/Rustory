@@ -33,7 +33,7 @@ pub use import_export::{
     StructuredCreationAnalysisDto, WebCreationOutcomeDto, WebPreviewDto, WebPreviewItemDto,
     DROP_MULTIPLE_ITEMS_MESSAGE, OS_OPEN_MULTIPLE_FILES_MESSAGE,
 };
-pub use library::{LibraryOverviewDto, StoryCardDto};
+pub use library::{LibraryOverviewDto, SendBlockerDto, StoryCardDto};
 pub use settings::{
     DeviceCapabilityDto, DeviceSupportLineDto, LocalArtifactLineDto, SupportProfileDto,
     UpdateAvailabilityDto,

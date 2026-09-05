@@ -286,7 +286,10 @@ fn commit_local_artifact_import(
             Some(import_report)
         },
         transferable: false,
-        sendable_archive: false,
+        // The overview re-read derives sendability (the structure lays out as
+        // a device pack, or not) — a fresh card stays conservative.
+        sendable: false,
+        send_blocker: None,
         cover_asset_id: None,
     })
 }

@@ -200,6 +200,8 @@ pub(crate) fn commit_story_creation(
     tx.commit().map_err(|err| db_commit_error(&err, "commit"))?;
 
     let report = import_report(findings);
+    let (sendable, send_blocker) =
+        crate::application::library::send_readiness_of_json(structure_json, false);
     Ok(StoryCardDto {
         id: story_id,
         title: title.clone(),
@@ -210,7 +212,11 @@ pub(crate) fn commit_story_creation(
             Some(report)
         },
         transferable: false,
-        sendable_archive: false,
+        // The card returned right after creation already says whether the
+        // story can be sent to a Lunii V3 — the same structure-based rule the
+        // overview projects (every episode has an audio, no choices).
+        sendable,
+        send_blocker,
         cover_asset_id: None,
     })
 }

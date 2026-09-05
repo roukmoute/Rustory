@@ -165,6 +165,39 @@ describe("isLibraryOverviewDto guard", () => {
     ).toBe(false);
   });
 
+  it("accepts the send readiness fields and refuses a blocker outside the closed set", () => {
+    // Symmetric twin of the Rust `library_overview_send_readiness_wire_shape`
+    // contract: `sendable` alone, or one closed camelCase `sendBlocker`.
+    expect(
+      isLibraryOverviewDto({
+        stories: [{ id: "a", title: "Web", sendable: true }],
+      }),
+    ).toBe(true);
+    for (const blocker of [
+      "devicePack",
+      "empty",
+      "malformed",
+      "branching",
+      "missingAudio",
+    ]) {
+      expect(
+        isLibraryOverviewDto({
+          stories: [{ id: "a", title: "A", sendBlocker: blocker }],
+        }),
+      ).toBe(true);
+    }
+    expect(
+      isLibraryOverviewDto({
+        stories: [{ id: "a", title: "A", sendBlocker: "noSourceArchive" }],
+      }),
+    ).toBe(false);
+    expect(
+      isLibraryOverviewDto({
+        stories: [{ id: "a", title: "A", sendable: "yes" }],
+      }),
+    ).toBe(false);
+  });
+
   it("accepts a structured-folder card: partial state + a media/missing report finding", () => {
     // Symmetric twin of the Rust producer test
     // (`read_stories_projects_a_structured_folder_creation_with_the_folder_copy`):

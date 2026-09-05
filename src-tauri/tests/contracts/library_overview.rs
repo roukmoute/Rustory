@@ -1,5 +1,5 @@
 use rustory_lib::domain::shared::AppError;
-use rustory_lib::ipc::dto::{LibraryOverviewDto, StoryCardDto};
+use rustory_lib::ipc::dto::{LibraryOverviewDto, SendBlockerDto, StoryCardDto};
 
 #[test]
 fn library_overview_empty_wire_shape() {
@@ -40,7 +40,8 @@ fn library_overview_with_an_imported_story_carries_import_state() {
                     .into(),
             }]),
             transferable: false,
-            sendable_archive: false,
+            sendable: false,
+            send_blocker: None,
             cover_asset_id: None,
         }],
     };
@@ -54,6 +55,52 @@ fn library_overview_with_an_imported_story_carries_import_state() {
     let native = serde_json::to_value(StoryCardDto::native("n".into(), "Native".into()))
         .expect("serialize native");
     assert!(native.get("importState").is_none());
+}
+
+#[test]
+fn library_overview_send_readiness_wire_shape() {
+    // Sendable: the flag alone. Blocked: the reason alone, in camelCase —
+    // the closed set the frontend mirrors for its "Envoi indisponible" copy.
+    let mut sendable = StoryCardDto::native("web".into(), "Web".into());
+    sendable.sendable = true;
+    let mut blocked = StoryCardDto::native("mute".into(), "Muette".into());
+    blocked.send_blocker = Some(SendBlockerDto::MissingAudio);
+    let dto = LibraryOverviewDto {
+        stories: vec![
+            sendable,
+            blocked,
+            StoryCardDto::device_pack("pack".into(), "Copiée".into()),
+        ],
+    };
+    let v = serde_json::to_value(&dto).expect("serialize overview");
+    assert_eq!(
+        v["stories"][0],
+        serde_json::json!({ "id": "web", "title": "Web", "sendable": true })
+    );
+    assert_eq!(
+        v["stories"][1],
+        serde_json::json!({ "id": "mute", "title": "Muette", "sendBlocker": "missingAudio" })
+    );
+    assert_eq!(
+        v["stories"][2],
+        serde_json::json!({
+            "id": "pack", "title": "Copiée", "transferable": true, "sendBlocker": "devicePack"
+        })
+    );
+    for (blocker, wire) in [
+        (SendBlockerDto::DevicePack, "devicePack"),
+        (SendBlockerDto::Empty, "empty"),
+        (SendBlockerDto::Malformed, "malformed"),
+        (SendBlockerDto::Branching, "branching"),
+        (SendBlockerDto::MissingAudio, "missingAudio"),
+    ] {
+        assert_eq!(serde_json::to_value(blocker).expect("serialize"), wire);
+    }
+    assert!(
+        v.to_string().find("sendable_archive").is_none()
+            && v.to_string().find("send_blocker").is_none(),
+        "snake_case must never leak across IPC"
+    );
 }
 
 #[test]

@@ -13,6 +13,7 @@ pub mod operations;
 pub mod pack;
 pub mod pack_transcode;
 pub mod profile;
+pub mod story_pack;
 pub mod support_matrix;
 pub mod title;
 
@@ -38,6 +39,9 @@ pub use pack::{
 pub use pack_transcode::{transcode_pack, StudioStoryPack, TranscodeError, TranscodedPack};
 pub use profile::{
     classify_flam, classify_lunii, DeviceProfile, DeviceProfileClassification, UnsupportedReason,
+};
+pub use story_pack::{
+    linear_episodes, synthesize_sequential_pack, EpisodeAssets, LinearEpisode, StoryPackBlocker,
 };
 pub use support_matrix::{
     official_device_support_matrix, supported_operations_for, supported_operations_in,

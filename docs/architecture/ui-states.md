@@ -121,6 +121,13 @@ Preferred patterns:
 - `Envoi indisponible: détection en échec`
 - `Envoi indisponible: prépare l'histoire d'abord` — no fresh transfer-artifact descriptor yet; run `Préparer` first
 - `Envoi indisponible: histoire native non transférable (pas de pack appareil)` — a native story has no device-format pack; enforced by the backend transfer outcome (`notTransferable`) and surfaced in context
+- On a Lunii V3 (the pack engine), the pre-click reason follows the card's `sendBlocker`, decided by Rust from the story itself — a story is V3-sendable when it retained its source `.zip` OR when its structure lays out as a sequential device pack (every episode has an audio, no choices; a web / RSS / editor story). One reason per closed cause:
+  - `Envoi indisponible: un ou plusieurs épisodes n'ont pas d'audio` (`missingAudio`)
+  - `Envoi indisponible: les histoires à choix ne sont pas encore prises en charge` (`branching`)
+  - `Envoi indisponible: histoire copiée depuis une Lunii, non convertible pour ce modèle` (`devicePack`)
+  - `Envoi indisponible: l'histoire n'a aucun épisode` (`empty`)
+  - `Envoi indisponible: structure de l'histoire illisible` (`malformed`)
+  - `Envoi indisponible: cette histoire ne peut pas être préparée pour l'appareil` — no blocker on the card (a creation-flow card before the overview re-read)
 - `Envoi indisponible: transfert pas encore activé (MVP Phase 1)` — **legacy fallback only**: it no longer applies to the write-authorized cohorts (V1/V2), where the `Envoyer vers la Lunii` CTA is now activable; it subsists solely where the panel is given no write target at all (tests/storybook)
 - `Détection indisponible: vérifie que la Lunii est branchée et réessaie.`
 - `Profil non supporté: format métadonnées v{n} non géré`

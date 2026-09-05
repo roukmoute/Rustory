@@ -291,12 +291,14 @@ import { invalidateConnectedLuniiCache } from "../../features/device/hooks/use-c
 import { invalidateDeviceLibraryCache } from "../../features/device/hooks/use-device-library";
 import { invalidateLibraryOverviewCache } from "../../features/library/hooks/use-library-overview";
 import type { ConnectedDeviceDto } from "../../shared/ipc-contracts/device";
+import type { SendBlocker } from "../../shared/ipc-contracts/library";
 import { useDropShell } from "../../shell/state/drop-shell-store";
 import { useLibraryShell } from "../../shell/state/library-shell-store";
 import { useOsOpenShell } from "../../shell/state/os-open-shell-store";
 import { useUpdateShell } from "../../shell/state/update-shell-store";
 import {
   LibraryRoute,
+  mapArchiveSendToTransferView,
   mapDeviceForPanel,
   mapStoryValidationToView,
   mapTransferPreviewToComparison,
@@ -2637,7 +2639,7 @@ describe("<LibraryRoute />", () => {
     const user = userEvent.setup();
     // A local story that RETAINED its source `.zip` at import → V3-sendable.
     mockGet.mockResolvedValueOnce({
-      stories: [{ id: "s1", title: "Le soleil", sendableArchive: true }],
+      stories: [{ id: "s1", title: "Le soleil", sendable: true }],
     });
     // A V3 whose matrix line OPENS the dedicated archive-send while the
     // round-trip write stays closed — the exact V3 wire Rust now emits.
@@ -2691,11 +2693,12 @@ describe("<LibraryRoute />", () => {
     );
   });
 
-  it("disables the Envoyer CTA for a non-retained story on a V3 with the re-import reason", async () => {
+  it("disables the Envoyer CTA for a story a V3 cannot receive, with the card's reason", async () => {
     const user = userEvent.setup();
-    // A local story WITHOUT a retained archive (imported before the feature).
+    // A local story the overview marked non-sendable: an episode without
+    // audio (the blocker Rust decided pre-click).
     mockGet.mockResolvedValueOnce({
-      stories: [{ id: "s1", title: "Le soleil" }],
+      stories: [{ id: "s1", title: "Le soleil", sendBlocker: "missingAudio" }],
     });
     const sendableV3 = {
       ...supportedV3,
@@ -2712,16 +2715,45 @@ describe("<LibraryRoute />", () => {
     const panel = screen.getByRole("complementary", {
       name: /panneau de décision/i,
     });
-    // ONE CTA, disabled with the actionable re-import reason — never a second
-    // entry point.
+    // ONE CTA, disabled with the card's own reason — never a second entry
+    // point.
     const send = within(panel).getByRole("button", {
       name: /envoyer vers la lunii/i,
     });
     expect(send).toHaveAttribute("aria-disabled", "true");
     expect(
-      within(panel).getByText(/pas de pack d'origine conservé/i),
+      within(panel).getByText(/un ou plusieurs épisodes n'ont pas d'audio/i),
     ).toBeInTheDocument();
     expect(mockSendPack).not.toHaveBeenCalled();
+  });
+
+  it("words every send blocker of the card, and a bare non-sendable card, as an actionable reason", () => {
+    const idle = { kind: "idle" } as const;
+    const reason = (blocker?: SendBlocker): string => {
+      const view = mapArchiveSendToTransferView(idle, "s1", 1, false, blocker);
+      expect(view.kind).toBe("unavailable");
+      return view.kind === "unavailable" ? view.reason : "";
+    };
+    expect(reason("missingAudio")).toBe(
+      "Envoi indisponible: un ou plusieurs épisodes n'ont pas d'audio",
+    );
+    expect(reason("branching")).toBe(
+      "Envoi indisponible: les histoires à choix ne sont pas encore prises en charge",
+    );
+    expect(reason("devicePack")).toBe(
+      "Envoi indisponible: histoire copiée depuis une Lunii, non convertible pour ce modèle",
+    );
+    expect(reason("empty")).toBe("Envoi indisponible: l'histoire n'a aucun épisode");
+    expect(reason("malformed")).toBe(
+      "Envoi indisponible: structure de l'histoire illisible",
+    );
+    expect(reason(undefined)).toBe(
+      "Envoi indisponible: cette histoire ne peut pas être préparée pour l'appareil",
+    );
+    // A sendable card is ready — whatever stale blocker the caller passes.
+    expect(mapArchiveSendToTransferView(idle, "s1", 1, true, undefined)).toEqual({
+      kind: "ready",
+    });
   });
 
   it("copies a device story: authoritative re-reads on both sides, preserved selection, flipped CTA (AC1+AC2)", async () => {

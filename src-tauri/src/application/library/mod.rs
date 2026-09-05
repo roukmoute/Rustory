@@ -2,14 +2,16 @@ use std::collections::HashSet;
 
 use tauri::AppHandle;
 
+use crate::domain::device::{linear_episodes, StoryPackBlocker};
 use crate::domain::shared::AppError;
+use crate::domain::story::CanonicalStructure;
 use crate::infrastructure::db::DbHandle;
 use crate::infrastructure::filesystem::ensure_app_data_dir;
 use crate::ipc::dto::import_export::{
     folder_import_findings_from_summary, import_findings_from_summary, import_state_dto_from_tag,
     rss_import_findings_from_summary, ImportStateDto,
 };
-use crate::ipc::dto::{LibraryOverviewDto, StoryCardDto};
+use crate::ipc::dto::{LibraryOverviewDto, SendBlockerDto, StoryCardDto};
 
 /// The `story_local_imports.source_format` tag of a structured-folder
 /// creation — selects the FOLDER per-pair copy for the durable card report.
@@ -70,6 +72,10 @@ fn read_stories(db: &DbHandle) -> Result<Vec<StoryCardDto>, AppError> {
             let device_pack: bool = row.get(5)?;
             let sendable_archive: bool = row.get(6)?;
             let structure_json: String = row.get(7)?;
+            // Parsed ONCE for the cover and the send readiness. Defensive: a
+            // malformed structure yields no cover and a blocked send, never
+            // a failed overview.
+            let structure: Option<CanonicalStructure> = serde_json::from_str(&structure_json).ok();
             let mut card = project_story_card(
                 id,
                 title,
@@ -78,12 +84,12 @@ fn read_stories(db: &DbHandle) -> Result<Vec<StoryCardDto>, AppError> {
                 source_format,
                 device_pack,
                 sendable_archive,
+                structure.as_ref(),
             );
             // Cover = the START node's image, for every card shape alike
             // (native stories get one from the editor, imported ones from
-            // their pack). Defensive: a malformed structure yields no cover,
-            // never a failed overview.
-            card.cover_asset_id = cover_asset_id_from_structure(&structure_json);
+            // their pack).
+            card.cover_asset_id = structure.as_ref().and_then(cover_asset_id_of);
             Ok(card)
         })
         .map_err(map_select_error)?;
@@ -104,6 +110,7 @@ fn read_stories(db: &DbHandle) -> Result<Vec<StoryCardDto>, AppError> {
 /// A device-pack row (`story_imports`) PRIMES over any forged local-import
 /// provenance: its content is carried by the copied pack, so the card never
 /// surfaces a local import state or report the rest of the app neutralizes.
+#[allow(clippy::too_many_arguments)]
 fn project_story_card(
     id: String,
     title: String,
@@ -112,13 +119,19 @@ fn project_story_card(
     source_format: Option<String>,
     device_pack: bool,
     sendable_archive: bool,
+    structure: Option<&CanonicalStructure>,
 ) -> StoryCardDto {
     if device_pack {
-        // A device-pack story owns its writeback artifacts — transferable.
+        // A device-pack story owns its writeback artifacts — transferable
+        // (and says so as its V3 send blocker).
         return StoryCardDto::device_pack(id, title);
     }
+    let (sendable, send_blocker) = send_readiness(structure, sendable_archive);
     let Some(state) = import_state.as_deref().and_then(import_state_dto_from_tag) else {
-        return StoryCardDto::native(id, title);
+        let mut card = StoryCardDto::native(id, title);
+        card.sendable = sendable;
+        card.send_blocker = send_blocker;
+        return card;
     };
     // The FULL per-aspect report (recognized + attention) reconstructed from
     // the durable summary, so the on-demand report survives a restart with
@@ -147,26 +160,54 @@ fn project_story_card(
         title,
         import_state: Some(state),
         import_report,
-        // A file import (`.rustory` / folder / archive / rss) owns no
+        // A file import (`.rustory` / folder / archive / rss / web) owns no
         // device-format pack — not transferable via the V1/V2 byte-copy
         // round-trip.
         transferable: false,
-        // …but a structured-archive import that RETAINED its source `.zip`
-        // CAN be sent to a Lunii V3 (transcode + re-cipher). The DB flag is
-        // the single truth (set only after a successful retention).
-        sendable_archive,
+        // …but it CAN be sent to a Lunii V3 when it retained its source
+        // `.zip` or when its structure lays out as a device pack.
+        sendable,
+        send_blocker,
         // Filled by the caller from the story's canonical structure.
         cover_asset_id: None,
     }
 }
 
-/// The story's cover = its START node's image asset id, when the canonical
-/// structure parses and that node carries one. PURE + DEFENSIVE: any
-/// malformed/legacy structure yields `None` — a cover is decoration, it must
-/// never fail (or slow) the overview read.
-fn cover_asset_id_from_structure(structure_json: &str) -> Option<String> {
-    let structure: crate::domain::story::CanonicalStructure =
-        serde_json::from_str(structure_json).ok()?;
+/// Whether a (non device-pack) story can be sent to a Lunii V3, and why not
+/// otherwise: a retained source archive always can (the archive engine); a
+/// structure that lays out as a sequential device pack can (every episode
+/// has an audio, no choices — `domain::device::story_pack`); anything else
+/// is blocked for the domain's reason (an unparsable structure counts as
+/// malformed).
+pub(crate) fn send_readiness(
+    structure: Option<&CanonicalStructure>,
+    retained_archive: bool,
+) -> (bool, Option<SendBlockerDto>) {
+    let by_structure = match structure {
+        Some(structure) => linear_episodes(structure).map(|_| ()),
+        None => Err(StoryPackBlocker::Malformed),
+    };
+    match by_structure {
+        Ok(()) => (true, None),
+        Err(_) if retained_archive => (true, None),
+        Err(blocker) => (false, Some(SendBlockerDto::from_domain(blocker))),
+    }
+}
+
+/// [`send_readiness`] from the persisted canonical JSON.
+pub(crate) fn send_readiness_of_json(
+    structure_json: &str,
+    retained_archive: bool,
+) -> (bool, Option<SendBlockerDto>) {
+    let structure: Option<CanonicalStructure> = serde_json::from_str(structure_json).ok();
+    send_readiness(structure.as_ref(), retained_archive)
+}
+
+/// The story's cover = its START node's image asset id, when that node
+/// carries one. PURE + DEFENSIVE: a legacy structure without one yields
+/// `None` — a cover is decoration, it must never fail (or slow) the overview
+/// read.
+fn cover_asset_id_of(structure: &CanonicalStructure) -> Option<String> {
     structure
         .nodes
         .iter()
@@ -232,6 +273,12 @@ mod tests {
             cover_asset_id_from_structure(structure).as_deref(),
             Some("asset-COVER")
         );
+        // The test keeps the JSON entry point: parse then project, exactly
+        // like `read_stories`.
+        fn cover_asset_id_from_structure(json: &str) -> Option<String> {
+            let structure: Option<CanonicalStructure> = serde_json::from_str(json).ok();
+            structure.as_ref().and_then(super::cover_asset_id_of)
+        }
         // A start node WITHOUT an image → no cover.
         let no_image = r#"{
             "schemaVersion": 3,
@@ -429,6 +476,7 @@ mod tests {
             Some("rustory".into()),
             false,
             false,
+            None,
         );
         assert!(card.import_state.is_none());
     }
@@ -541,13 +589,30 @@ mod tests {
         // A device-pack story is transferable; a native one and a
         // file-import one are not — the send gate's pre-click block reads
         // exactly this flag, no preparation probe needed.
-        let device =
-            super::project_story_card("d".into(), "Pack".into(), None, None, None, true, false);
+        let device = super::project_story_card(
+            "d".into(),
+            "Pack".into(),
+            None,
+            None,
+            None,
+            true,
+            false,
+            None,
+        );
         assert!(device.transferable);
-        assert!(!device.sendable_archive);
+        assert!(!device.sendable);
+        assert_eq!(device.send_blocker, Some(SendBlockerDto::DevicePack));
 
-        let native =
-            super::project_story_card("n".into(), "Native".into(), None, None, None, false, false);
+        let native = super::project_story_card(
+            "n".into(),
+            "Native".into(),
+            None,
+            None,
+            None,
+            false,
+            false,
+            None,
+        );
         assert!(!native.transferable);
 
         let file_import = super::project_story_card(
@@ -558,12 +623,14 @@ mod tests {
             Some("rustory".into()),
             false,
             false,
+            None,
         );
         assert!(!file_import.transferable);
-        assert!(!file_import.sendable_archive);
+        assert!(!file_import.sendable);
 
         // A structured-archive import that retained its source `.zip` is
-        // V3-sendable (but still not `transferable` via the byte-copy path).
+        // V3-sendable (but still not `transferable` via the byte-copy path),
+        // whatever its structure says.
         let archive_sendable = super::project_story_card(
             "a".into(),
             "Archive".into(),
@@ -572,8 +639,92 @@ mod tests {
             Some("structured-archive".into()),
             false,
             true,
+            None,
         );
         assert!(!archive_sendable.transferable);
-        assert!(archive_sendable.sendable_archive);
+        assert!(archive_sendable.sendable);
+        assert_eq!(archive_sendable.send_blocker, None);
+    }
+
+    fn structure_json(nodes: &[(&str, Option<&str>, bool)]) -> String {
+        let nodes: Vec<serde_json::Value> = nodes
+            .iter()
+            .map(|(id, audio, branching)| {
+                serde_json::json!({
+                    "id": id, "text": "", "label": id,
+                    "imageAssetId": null, "audioAssetId": audio,
+                    "options": if *branching { serde_json::json!([{"label": "suite", "target": null}]) } else { serde_json::json!([]) },
+                })
+            })
+            .collect();
+        serde_json::json!({ "schemaVersion": 3, "startNodeId": "n1", "nodes": nodes }).to_string()
+    }
+
+    #[test]
+    fn send_readiness_follows_the_structure_for_stories_without_an_archive() {
+        // Every episode with an audio, no choices → sendable (a web / RSS
+        // creation, or an editor story with narration).
+        let linear = structure_json(&[("n1", Some("a1"), false), ("n2", Some("a2"), false)]);
+        assert_eq!(super::send_readiness_of_json(&linear, false), (true, None));
+
+        // An episode without audio → blocked, and the card says so.
+        let mute = structure_json(&[("n1", Some("a1"), false), ("n2", None, false)]);
+        assert_eq!(
+            super::send_readiness_of_json(&mute, false),
+            (false, Some(SendBlockerDto::MissingAudio))
+        );
+        // Choices → blocked as branching.
+        let branching = structure_json(&[("n1", Some("a1"), true)]);
+        assert_eq!(
+            super::send_readiness_of_json(&branching, false),
+            (false, Some(SendBlockerDto::Branching))
+        );
+        // The freshly created empty start node (no audio) → missing audio.
+        let fresh = structure_json(&[("n1", None, false)]);
+        assert_eq!(
+            super::send_readiness_of_json(&fresh, false),
+            (false, Some(SendBlockerDto::MissingAudio))
+        );
+        // Unparsable JSON → malformed; a retained archive still sends.
+        assert_eq!(
+            super::send_readiness_of_json("not json", false),
+            (false, Some(SendBlockerDto::Malformed))
+        );
+        assert_eq!(
+            super::send_readiness_of_json("not json", true),
+            (true, None)
+        );
+    }
+
+    #[test]
+    fn read_stories_projects_send_readiness_from_the_persisted_structure() {
+        let mut db = fresh_db();
+        let story = create_story(
+            &mut db,
+            CreateStoryInput {
+                title: "Narrée".into(),
+            },
+        )
+        .expect("create");
+        // A fresh story: its single start node has no audio → blocked.
+        let cards = super::read_stories(&db).expect("read");
+        let card = cards.iter().find(|c| c.id == story.id).expect("card");
+        assert!(!card.sendable);
+        assert_eq!(card.send_blocker, Some(SendBlockerDto::MissingAudio));
+
+        // Give every node an audio: the overview now reports it sendable.
+        db.conn()
+            .execute(
+                "UPDATE stories SET structure_json = ?1 WHERE id = ?2",
+                rusqlite::params![
+                    structure_json(&[("n1", Some("a1"), false), ("n2", Some("a2"), false)]),
+                    &story.id
+                ],
+            )
+            .expect("update");
+        let cards = super::read_stories(&db).expect("read");
+        let card = cards.iter().find(|c| c.id == story.id).expect("card");
+        assert!(card.sendable);
+        assert_eq!(card.send_blocker, None);
     }
 }

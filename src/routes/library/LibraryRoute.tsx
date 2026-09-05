@@ -65,7 +65,10 @@ import { deleteStories } from "../../ipc/commands/story";
 import { toAppError } from "../../shared/errors/app-error";
 import type { DeviceStoryDto } from "../../shared/ipc-contracts/device-library";
 import type { ContentSourcePolicy } from "../../shared/ipc-contracts/import-export";
-import type { StoryCardDto } from "../../shared/ipc-contracts/library";
+import type {
+  SendBlocker,
+  StoryCardDto,
+} from "../../shared/ipc-contracts/library";
 import { Button, ContextMenu, Dialog, SurfacePanel } from "../../shared/ui";
 import { LibraryLayout } from "../../shell/layout/LibraryLayout";
 import { useDropShell } from "../../shell/state/drop-shell-store";
@@ -523,14 +526,16 @@ export function LibraryRoute(): React.JSX.Element {
   });
   // Two durable facts of the selected card, read straight from the overview (no
   // preparation probe): `transferable` = owns a device-format pack (the V1/V2
-  // byte-copy round-trip); `sendableArchive` = retained its source `.zip` (the
-  // V3 transcode + re-cipher send). A native / file-imported story is neither.
+  // byte-copy round-trip); `sendable` = can become a V3 pack (a retained source
+  // `.zip`, or a structure whose episodes all carry an audio — the transcode +
+  // re-cipher send), with `sendBlocker` saying why not otherwise.
   const selectedCard =
     singleSelectedStoryId !== null
       ? overview?.stories.find((s) => s.id === singleSelectedStoryId)
       : undefined;
   const selectedStoryTransferable = selectedCard?.transferable ?? false;
-  const selectedStorySendable = selectedCard?.sendableArchive ?? false;
+  const selectedStorySendable = selectedCard?.sendable ?? false;
+  const selectedStorySendBlocker = selectedCard?.sendBlocker;
   // ONE gesture, TWO backends chosen by the connected device's capability: a
   // writable V1/V2 uses the round-trip (`storyTransfer`); a send-capable V3 uses
   // the archive engine (`devicePackSend`). A device has at most one of the two.
@@ -548,6 +553,7 @@ export function LibraryRoute(): React.JSX.Element {
           singleSelectedStoryId,
           presentSelectedIds.size,
           selectedStorySendable,
+          selectedStorySendBlocker,
         )
       : mapTransferView(
           storyTransfer.state,
@@ -1669,6 +1675,7 @@ export function mapArchiveSendToTransferView(
   selectedStoryId: string | null,
   selectionCount: number,
   sendable: boolean,
+  sendBlocker?: SendBlocker,
 ): TransferView {
   switch (status.kind) {
     case "sending":
@@ -1701,13 +1708,28 @@ export function mapArchiveSendToTransferView(
     return { kind: "unavailable", reason: "Envoi indisponible: sélection multiple" };
   }
   if (selectedStoryId === null || !sendable) {
-    return {
-      kind: "unavailable",
-      reason:
-        "Envoi indisponible: pas de pack d'origine conservé (ré-importe l'histoire depuis son archive .zip)",
-    };
+    return { kind: "unavailable", reason: sendBlockerReason(sendBlocker) };
   }
   return { kind: "ready" };
+}
+
+/** The pre-click reason for a story a V3 cannot receive, per the card's
+ *  closed blocker set (Rust decides; this only words it). */
+export function sendBlockerReason(blocker: SendBlocker | undefined): string {
+  switch (blocker) {
+    case "devicePack":
+      return "Envoi indisponible: histoire copiée depuis une Lunii, non convertible pour ce modèle";
+    case "missingAudio":
+      return "Envoi indisponible: un ou plusieurs épisodes n'ont pas d'audio";
+    case "branching":
+      return "Envoi indisponible: les histoires à choix ne sont pas encore prises en charge";
+    case "empty":
+      return "Envoi indisponible: l'histoire n'a aucun épisode";
+    case "malformed":
+      return "Envoi indisponible: structure de l'histoire illisible";
+    case undefined:
+      return "Envoi indisponible: cette histoire ne peut pas être préparée pour l'appareil";
+  }
 }
 
 export function mapTransferView(

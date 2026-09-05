@@ -534,8 +534,10 @@ pub fn commit_structured_creation(
         },
         transferable: false,
         // Reflects the retention that just ran: a structured-archive import
-        // whose source `.zip` was kept is immediately V3-sendable.
-        sendable_archive,
+        // whose source `.zip` was kept is immediately V3-sendable (the
+        // overview re-read also weighs the structure itself).
+        sendable: sendable_archive,
+        send_blocker: None,
         // The overview re-read derives the authoritative cover; a fresh
         // import card can go without one for the brief interval.
         cover_asset_id: None,

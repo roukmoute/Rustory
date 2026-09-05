@@ -555,7 +555,7 @@ mod tests {
 
         // The card returned right after import already reports V3-sendable.
         assert!(
-            card.sendable_archive,
+            card.sendable,
             "a structured-archive import must be V3-sendable"
         );
 

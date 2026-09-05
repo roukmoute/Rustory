@@ -92,6 +92,23 @@ quick-xml = "=0.40.1"
 # (`default-features = false` avoids native codecs; `image-webp` is pure Rust)
 # — no cmake, no system lib, honoring the CI build constraint. Pinned strict.
 image = { version = "=0.25.10", default-features = false, features = ["png", "jpeg", "bmp", "webp"] }
+# Added 2026-09-05 for the device send of LIBRARY stories (created from a
+# web page, an RSS feed or the editor — no retained `.zip`): their audio
+# (m4a/AAC, stereo or 48 kHz MP3, wav, ogg) must become the ONLY format a
+# Lunii plays — a bare MPEG-1 Layer III, 44100 Hz, MONO MP3. Symphonia
+# DECODES those inputs and `rusty_mp3` ENCODES the device MP3; the
+# 48 → 44.1 kHz resampler is ours (infrastructure/device/resample.rs).
+# PURE RUST both — no cmake, no system lib (CI build constraint) and no
+# LGPL (`shine-rs` was refused: LGPL-2.0 statically linked). Symphonia is
+# MPL-2.0 (file-level copyleft, used unmodified), `default-features =
+# false` plus EXACTLY the codec/container set the media store admits (the
+# `assets.media_format` CHECK: mp3, wav, ogg, m4a) and the ID3v2 reader
+# (tagged podcast MP3s); no SIMD feature (a 16-minute AAC episode already
+# decodes in ~1 s). `rusty_mp3` is Apache-2.0 with ZERO dependencies; it
+# reads a few `MP3_*` tuning env vars at runtime (never set by Rustory —
+# the defaults apply). Both pinned strict.
+symphonia = { version = "=0.6.1", default-features = false, features = ["aac", "isomp4", "mp3", "id3v2", "pcm", "wav", "ogg", "vorbis"] }
+rusty_mp3 = "=0.7.0"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # Linux-only D-Bus binding used to talk to udisks2 and auto-mount a
@@ -112,3 +129,18 @@ zbus = { version = "=5.16", default-features = false, features = ["async-io", "b
 # pinned pure-Rust crate as the production dependency: test-only, zero
 # production code change.
 image = { version = "=0.25.10", default-features = false, features = ["png", "jpeg"] }
+
+# Dependencies are OPTIMIZED even in the dev profile: the audio codecs the
+# device send relies on (Symphonia decode, rusty_mp3 encode) run ~20× slower
+# unoptimized — a 16-minute podcast episode took 157 s to transcode in a
+# plain dev build against 8 s in release, which made `tauri dev` unusable
+# for that flow. Only third-party crates are affected (one longer first
+# build, then cached); the crate itself keeps its fast incremental debug
+# builds. Tests and `tauri dev` inherit this; release is untouched.
+[profile.dev.package."*"]
+opt-level = 3
+# …and the crate itself gets light optimization: its own resampler
+# (2.8 G multiply-adds per episode) took 45 s unoptimized against ~1 s at
+# `opt-level = 1`, which keeps debug info and near-debug compile times.
+[profile.dev]
+opt-level = 1

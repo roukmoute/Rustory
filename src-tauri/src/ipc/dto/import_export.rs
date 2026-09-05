@@ -1830,7 +1830,8 @@ mod tests {
                 import_state: Some(ImportStateDto::NeedsReview),
                 import_report: None,
                 transferable: false,
-                sendable_archive: false,
+                sendable: false,
+                send_blocker: None,
                 cover_asset_id: None,
             },
             report: vec![ImportFindingDto {

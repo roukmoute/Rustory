@@ -10,6 +10,7 @@
 //! reports.
 
 pub mod asset_convert;
+pub mod audio_transcode;
 pub mod automount;
 pub mod catalog_source;
 pub mod cipher;
@@ -18,6 +19,7 @@ pub mod library_reader;
 pub mod pack_assembly;
 pub mod pack_reader;
 pub mod parser;
+pub mod resample;
 pub mod rss_source;
 pub mod scanner;
 pub mod system;
@@ -29,7 +31,9 @@ pub mod fixtures;
 #[cfg(test)]
 pub mod mock;
 
-pub use asset_convert::{to_device_audio, to_device_image, AssetConvertError};
+pub use asset_convert::{
+    audio_is_device_ready, to_device_audio, to_device_image, AssetConvertError,
+};
 pub use automount::{
     looks_like_lunii_candidate, try_automount_lunii_candidates, MountAttempt, MountOutcome,
 };

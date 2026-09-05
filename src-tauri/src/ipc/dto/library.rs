@@ -36,14 +36,23 @@ pub struct StoryCardDto {
     /// file-imported card keeps its minimal shape.
     #[serde(skip_serializing_if = "is_not_transferable")]
     pub transferable: bool,
-    /// `true` iff the story retains its ORIGINAL source `.zip` (a
-    /// structured-archive import) and can therefore be sent to a Lunii V3 via
-    /// the single "Envoyer vers la Lunii" gesture (transcode + re-cipher for
-    /// the target). Independent of `transferable` (which is the V1/V2
-    /// byte-copy round-trip). Skipped on the wire when `false` so a card
-    /// without it keeps its minimal shape.
+    /// `true` iff the story can be sent to a Lunii V3 via the single
+    /// "Envoyer vers la Lunii" gesture: it either retains its ORIGINAL source
+    /// `.zip` (a structured-archive import — transcode + re-cipher for the
+    /// target) or its structure lays out as a sequential device pack (every
+    /// episode has an audio, no choices — a web / RSS / editor story).
+    /// Independent of `transferable` (the V1/V2 byte-copy round-trip).
+    /// Skipped on the wire when `false` so a card without it keeps its
+    /// minimal shape. The library overview projection is authoritative; a
+    /// card returned by a creation flow may carry the conservative `false`
+    /// (the overview re-read settles it).
     #[serde(skip_serializing_if = "is_false")]
-    pub sendable_archive: bool,
+    pub sendable: bool,
+    /// WHY the story is not sendable, when it is not — drives the pre-click
+    /// "Envoi indisponible: …" reason. Absent when `sendable` (or when the
+    /// projection did not decide, e.g. a creation-flow card).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub send_blocker: Option<SendBlockerDto>,
     /// Asset id of the story's COVER image — the START node's image, when it
     /// has one. The frontend loads the actual pixels through the existing
     /// `read_node_media` command (a display PNG data URL); only the opaque
@@ -70,7 +79,8 @@ impl StoryCardDto {
             import_state: None,
             import_report: None,
             transferable: false,
-            sendable_archive: false,
+            sendable: false,
+            send_blocker: None,
             cover_asset_id: None,
         }
     }
@@ -85,8 +95,39 @@ impl StoryCardDto {
             import_state: None,
             import_report: None,
             transferable: true,
-            sendable_archive: false,
+            sendable: false,
+            send_blocker: Some(SendBlockerDto::DevicePack),
             cover_asset_id: None,
+        }
+    }
+}
+
+/// Why a story cannot be sent to a Lunii V3 (see [`StoryCardDto::send_blocker`]).
+/// Closed set, camelCase on the wire.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SendBlockerDto {
+    /// A device-copied (V1/V2) pack: its content is the copied pack, which
+    /// the V3 engine does not convert.
+    DevicePack,
+    /// The structure has no episode.
+    Empty,
+    /// The structure's start node is missing from its nodes.
+    Malformed,
+    /// The story offers choices — not laid out by the sequential synthesis.
+    Branching,
+    /// At least one episode has no audio.
+    MissingAudio,
+}
+
+impl SendBlockerDto {
+    pub const fn from_domain(blocker: crate::domain::device::StoryPackBlocker) -> Self {
+        use crate::domain::device::StoryPackBlocker;
+        match blocker {
+            StoryPackBlocker::Empty => Self::Empty,
+            StoryPackBlocker::Malformed => Self::Malformed,
+            StoryPackBlocker::Branching => Self::Branching,
+            StoryPackBlocker::MissingAudio => Self::MissingAudio,
         }
     }
 }
@@ -133,7 +174,8 @@ mod tests {
             import_state: Some(ImportStateDto::Recognized),
             import_report: None,
             transferable: false,
-            sendable_archive: false,
+            sendable: false,
+            send_blocker: None,
             cover_asset_id: None,
         };
         let v = serde_json::to_value(&card).expect("serialize");
@@ -162,7 +204,8 @@ mod tests {
                     .into(),
             }]),
             transferable: false,
-            sendable_archive: false,
+            sendable: false,
+            send_blocker: None,
             cover_asset_id: None,
         };
         let v = serde_json::to_value(&card).expect("serialize");
@@ -173,5 +216,49 @@ mod tests {
             .as_str()
             .expect("message")
             .is_empty());
+    }
+
+    #[test]
+    fn a_device_pack_card_says_why_it_cannot_be_sent_to_a_v3() {
+        let card = StoryCardDto::device_pack("s4".into(), "Copiée".into());
+        let v = serde_json::to_value(&card).expect("serialize");
+        assert_eq!(
+            v,
+            serde_json::json!({
+                "id": "s4",
+                "title": "Copiée",
+                "transferable": true,
+                "sendBlocker": "devicePack",
+            })
+        );
+    }
+
+    #[test]
+    fn a_sendable_card_carries_the_flag_and_no_blocker() {
+        let mut card = StoryCardDto::native("s5".into(), "Web".into());
+        card.sendable = true;
+        let v = serde_json::to_value(&card).expect("serialize");
+        assert_eq!(
+            v,
+            serde_json::json!({ "id": "s5", "title": "Web", "sendable": true })
+        );
+    }
+
+    #[test]
+    fn send_blockers_serialize_in_camel_case_from_their_domain_reasons() {
+        use crate::domain::device::StoryPackBlocker;
+        for (domain, wire) in [
+            (StoryPackBlocker::Empty, "empty"),
+            (StoryPackBlocker::Malformed, "malformed"),
+            (StoryPackBlocker::Branching, "branching"),
+            (StoryPackBlocker::MissingAudio, "missingAudio"),
+        ] {
+            let dto = SendBlockerDto::from_domain(domain);
+            assert_eq!(serde_json::to_value(dto).expect("serialize"), wire);
+        }
+        assert_eq!(
+            serde_json::to_value(SendBlockerDto::DevicePack).expect("serialize"),
+            "devicePack"
+        );
     }
 }

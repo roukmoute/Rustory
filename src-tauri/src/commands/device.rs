@@ -6,7 +6,8 @@ use tauri::{AppHandle, Manager, State};
 use crate::application::device::delete::DeleteDeviceStoryRequest;
 use crate::application::device::import::ImportDeviceStoryRequest;
 use crate::application::device::library::DeviceLibraryOutcome;
-use crate::application::device::send::SendArchiveRequest;
+use crate::application::device::send::{SendArchiveRequest, SendStoryPackRequest};
+use crate::application::device::story_pack::plan_story_pack;
 use crate::application::device::title::{resolve_local_truth, set_user_title, LocalTruth};
 use crate::application::device::{self, ConnectedLuniiOutcome};
 use crate::domain::device::is_canonical_pack_uuid;
@@ -594,20 +595,40 @@ pub async fn delete_device_story(
     outcome.map(DeleteDeviceStoryOutcomeDto::from_outcome)
 }
 
+/// Where the pack of a send comes from (resolved by Rust, never by the UI).
+enum PackSource {
+    /// The story's retained source archive.
+    Archive(std::path::PathBuf),
+    /// A pack synthesized from the story's structure, its assets in the
+    /// node-media store.
+    Story {
+        pack: crate::domain::device::StudioStoryPack,
+        media_dir: std::path::PathBuf,
+    },
+}
+
 /// Send the SELECTED local story identified by `storyId` to the connected
 /// supported device identified by `deviceIdentifier` — the V3 branch of the
 /// single "Envoyer vers la Lunii" gesture.
 ///
 /// A DEVICE MUTATION with the same discipline as the delete command: async +
 /// `spawn_blocking`, authoritative re-scan + capability gate BEFORE any byte is
-/// touched. Exactly two identifiers cross the boundary; Rust resolves the story's
-/// RETAINED source archive (`source-archives/<storyId>.zip`, kept at import)
-/// itself — no path crosses IPC, and no file picker. The gate is the DEDICATED
-/// `send_archive` capability, distinct from `write_story`: a V3 receives packs
-/// through this engine (transcode + re-cipher for the target `.md`) while the
-/// library round-trip stays closed. A story with no retained archive (imported
-/// before the feature, or a native/other-source story) is refused with an
-/// actionable "re-import" message BEFORE any device touch.
+/// touched. Exactly two identifiers cross the boundary; Rust resolves the
+/// pack's SOURCE itself — no path crosses IPC, and no file picker:
+///
+/// - a story that RETAINED its source archive (`source-archives/<storyId>.zip`,
+///   kept at import) is sent from that archive;
+/// - any other story (created from a web page, an RSS feed, a folder or the
+///   editor) has its pack SYNTHESIZED from its structure and node media
+///   (sequential playback of its episodes) — planned under the SQLite lock,
+///   which is RELEASED before any file or device I/O.
+///
+/// The gate is the DEDICATED `send_archive` capability, distinct from
+/// `write_story`: a V3 receives packs through this engine (transcode +
+/// re-cipher for the target `.md`) while the library round-trip stays closed.
+/// A story that cannot become a pack (an episode without audio, a story with
+/// choices, a device-copied pack) is refused with an actionable message BEFORE
+/// any device touch — the same reason its library card announces.
 #[tauri::command]
 pub async fn send_pack_to_device(
     app: AppHandle,
@@ -632,18 +653,28 @@ pub async fn send_pack_to_device(
         &app_data_dir,
         &input.story_id,
     );
-    // A story with no retained source archive cannot be sent to a V3 — refused
-    // here (before any device touch) with an actionable message.
-    if !archive_path.is_file() {
-        return Err(no_source_archive_error());
-    }
+    let source = if archive_path.is_file() {
+        PackSource::Archive(archive_path)
+    } else {
+        // No retained archive: plan the synthesized pack from the library,
+        // under the lock and without any other I/O; every refusal (no audio,
+        // choices, device-copied pack) lands here, before any device touch.
+        let pack = {
+            let db = state
+                .db
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            plan_story_pack(&db, &input.story_id)?
+        };
+        PackSource::Story {
+            pack,
+            media_dir: crate::infrastructure::filesystem::resolve_node_media_dir(&app_data_dir),
+        }
+    };
 
     let scanner = state.device_scanner.clone();
     let writer = state.pack_writer_v3.clone();
-    let request = SendArchiveRequest {
-        device_identifier: input.device_identifier,
-        archive_path,
-    };
+    let device_identifier = input.device_identifier;
     let started = Instant::now();
 
     let outcome = tauri::async_runtime::spawn_blocking(move || {
@@ -656,13 +687,29 @@ pub async fn send_pack_to_device(
                 let _ = on_progress.send(pct);
             }
         };
-        device::send::send_archive_to_device(
-            scanner.as_ref(),
-            writer.as_ref(),
-            &request,
-            SEND_PACK_TO_DEVICE_BUDGET,
-            &forward,
-        )
+        match source {
+            PackSource::Archive(archive_path) => device::send::send_archive_to_device(
+                scanner.as_ref(),
+                writer.as_ref(),
+                &SendArchiveRequest {
+                    device_identifier,
+                    archive_path,
+                },
+                SEND_PACK_TO_DEVICE_BUDGET,
+                &forward,
+            ),
+            PackSource::Story { pack, media_dir } => device::send::send_story_pack_to_device(
+                scanner.as_ref(),
+                writer.as_ref(),
+                &SendStoryPackRequest {
+                    device_identifier,
+                    pack,
+                    media_dir,
+                },
+                SEND_PACK_TO_DEVICE_BUDGET,
+                &forward,
+            ),
+        }
     })
     .await
     .map_err(|_| send_join_error())?;
@@ -817,16 +864,6 @@ fn send_app_data_unavailable_error() -> AppError {
     .with_details(serde_json::json!({ "source": "other", "cause": "app_data_dir" }))
 }
 
-/// The selected story has no retained source archive — it was imported before
-/// this feature, or it is a native / non-archive story. Actionable: re-import.
-fn no_source_archive_error() -> AppError {
-    AppError::device_write_failed(
-        "Envoi impossible: cette histoire n'a pas de pack d'origine conservé.",
-        "Ré-importe l'histoire depuis son archive .zip puis réessaie l'envoi.",
-    )
-    .with_details(serde_json::json!({ "source": "no_source_archive" }))
-}
-
 /// The blocking send worker could not be joined (panicked or cancelled).
 fn send_join_error() -> AppError {
     AppError::device_write_failed(
@@ -849,7 +886,8 @@ fn send_failure_source(err: &AppError) -> &'static str {
             "archive" => "archive",
             "asset_convert" => "asset_convert",
             "device_write" => "device_write",
-            "no_source_archive" => "no_source_archive",
+            "media_store" => "media_store",
+            "story_pack" => "story_pack",
             "spawn_blocking_join" => "spawn_blocking_join",
             _ => "other",
         })
@@ -985,7 +1023,6 @@ mod tests {
             invalid_send_input("invalid_device_identifier"),
             invalid_send_input("invalid_story_id"),
             send_app_data_unavailable_error(),
-            no_source_archive_error(),
             send_join_error(),
         ];
         for err in &refusals {

@@ -17,10 +17,13 @@
 //!   pack (offset 118, bottom-up, 16-entry BGRA palette with 0xFF alpha,
 //!   `colorsUsed = 0`, `colorsImportant = 16`).
 //! - [`to_device_audio`] — a bare, conformant MP3 passes VERBATIM; ID3v2
-//!   headers and ID3v1 trailers are STRIPPED (lossless); anything that is not
-//!   MPEG-1 Layer III / 44100 Hz / mono after stripping is REFUSED (fail
-//!   closed: this crate ships no audio encoder, and an unprovable file must
-//!   never reach the device to fail there as an opaque SD error).
+//!   headers and ID3v1 trailers are STRIPPED (lossless); anything else
+//!   (m4a/AAC, stereo or 48 kHz MP3, WAV, Ogg — what podcast pages and the
+//!   media store hold) is TRANSCODED to the device MP3 by
+//!   [`audio_transcode`](super::audio_transcode); what cannot be decoded is
+//!   REFUSED (fail closed: an unprovable file must never reach the device to
+//!   fail there as an opaque SD error). The produced bytes are re-checked
+//!   against the same conformance rule before they are handed out.
 
 use image::GenericImageView;
 
@@ -38,8 +41,8 @@ const BI_RLE4: u32 = 2;
 pub enum AssetConvertError {
     /// The image could not be decoded (corrupt, or an unsupported codec).
     ImageUndecodable,
-    /// The audio is not (and cannot losslessly become) a device-playable
-    /// MP3: not MPEG-1 Layer III, wrong sample rate, or not mono.
+    /// The audio is neither a device-playable MP3 nor decodable into one
+    /// (unrecognized container/codec, or a stream without audio).
     AudioUnsupported,
 }
 
@@ -278,10 +281,35 @@ fn assemble_bmp(palette: &[[u8; 3]], rle: &[u8]) -> Vec<u8> {
 
 // ===== Audio =====
 
-/// Convert arbitrary audio bytes to a device-playable bare MP3 (verbatim when
-/// already bare and conformant; ID3 wrappers stripped losslessly; anything
-/// else refused — see the module doc).
+/// True iff the bytes are ALREADY a device-playable MP3 (bare or under a
+/// losslessly strippable ID3 wrapper) — the cheap header check the send
+/// pipeline uses to plan its progress before any transcoding runs.
+pub fn audio_is_device_ready(bytes: &[u8]) -> bool {
+    conformant_mp3_body(bytes).is_some()
+}
+
+/// Convert arbitrary audio bytes to a device-playable bare MP3: verbatim when
+/// already bare and conformant, ID3 wrappers stripped losslessly, anything
+/// else transcoded (see the module doc); undecodable input is refused.
 pub fn to_device_audio(bytes: &[u8]) -> Result<Vec<u8>, AssetConvertError> {
+    if let Some(body) = conformant_mp3_body(bytes) {
+        return Ok(body.to_vec());
+    }
+    let transcoded = super::audio_transcode::transcode_to_device_mp3(bytes)
+        .map_err(|_| AssetConvertError::AudioUnsupported)?;
+    // Defense in depth: the encoder's output must satisfy the very rule the
+    // device needs, or it is not handed out.
+    match conformant_mp3_body(&transcoded) {
+        Some(body) if body.len() == transcoded.len() => Ok(transcoded),
+        _ => Err(AssetConvertError::AudioUnsupported),
+    }
+}
+
+/// The bare MP3 body of `bytes` when — after skipping an ID3v2 header and an
+/// ID3v1 trailer — its first frame header is MPEG-1 Layer III, 44100 Hz,
+/// mono (the device format observed on real packs and the format both STUdio
+/// and Lunii.QT produce). `None` otherwise.
+fn conformant_mp3_body(bytes: &[u8]) -> Option<&[u8]> {
     let mut start = 0usize;
     let mut end = bytes.len();
 
@@ -301,25 +329,18 @@ pub fn to_device_audio(bytes: &[u8]) -> Result<Vec<u8>, AssetConvertError> {
     }
     let body = &bytes[start..end];
 
-    // The first MPEG frame header decides conformance: MPEG-1 Layer III,
-    // 44100 Hz, mono — the device format observed on real packs and the
-    // format both STUdio and Lunii.QT produce.
-    let h = body.get(0..4).ok_or(AssetConvertError::AudioUnsupported)?;
+    let h = body.get(0..4)?;
     if h[0] != 0xFF || (h[1] & 0xE0) != 0xE0 {
-        return Err(AssetConvertError::AudioUnsupported);
+        return None;
     }
     let version_bits = (h[1] >> 3) & 0b11; // 3 = MPEG-1
     let layer_bits = (h[1] >> 1) & 0b11; // 1 = Layer III
     let samplerate_bits = (h[2] >> 2) & 0b11; // 0 = 44100 for MPEG-1
     let channel_bits = (h[3] >> 6) & 0b11; // 3 = mono
     if version_bits != 3 || layer_bits != 1 || samplerate_bits != 0 || channel_bits != 3 {
-        return Err(AssetConvertError::AudioUnsupported);
+        return None;
     }
-
-    if start == 0 && end == bytes.len() {
-        return Ok(bytes.to_vec()); // already bare — verbatim
-    }
-    Ok(body.to_vec())
+    Some(body)
 }
 
 #[cfg(test)]
@@ -359,26 +380,49 @@ mod tests {
     }
 
     #[test]
-    fn non_mono_or_wrong_samplerate_audio_is_refused() {
-        // Stereo (channel bits 00).
+    fn audio_that_is_neither_conformant_nor_decodable_is_refused() {
+        // A stereo / 48 kHz frame HEADER on filler bytes is not a decodable
+        // stream: no transcode can prove it, so it never reaches the device.
         let mut stereo = bare_mp3();
         stereo[3] = 0x00;
         assert_eq!(
             to_device_audio(&stereo).unwrap_err(),
             AssetConvertError::AudioUnsupported
         );
-        // 48000 Hz (samplerate bits 01 for MPEG-1).
         let mut sr48 = bare_mp3();
         sr48[2] = 0x94;
         assert_eq!(
             to_device_audio(&sr48).unwrap_err(),
             AssetConvertError::AudioUnsupported
         );
-        // Not an MPEG stream at all.
+        // Not an audio stream at all.
         assert_eq!(
             to_device_audio(b"OggS whatever").unwrap_err(),
             AssetConvertError::AudioUnsupported
         );
+        assert!(!audio_is_device_ready(&stereo));
+        assert!(!audio_is_device_ready(b"OggS whatever"));
+    }
+
+    #[test]
+    fn a_decodable_non_conformant_audio_is_transcoded_to_the_device_format() {
+        // A 48 kHz STEREO WAV — the shape of a podcast episode once decoded —
+        // must come out as a bare mono 44100 Hz MPEG-1 Layer III stream.
+        let wav = super::super::audio_transcode::test_support::wav_sine(48_000, 2, 660.0, 1.0, 0.5);
+        assert!(!audio_is_device_ready(&wav));
+        let mp3 = to_device_audio(&wav).expect("transcoded");
+        assert!(audio_is_device_ready(&mp3));
+        assert_eq!(&mp3[0..1], &[0xFF]);
+        assert_eq!((mp3[3] >> 6) & 0b11, 3, "mono");
+        assert_eq!((mp3[2] >> 2) & 0b11, 0, "44100 Hz");
+        // Roughly 128 kbps · 1 s = 16 KB (± the Info frame and padding).
+        assert!((12_000..22_000).contains(&mp3.len()), "len {}", mp3.len());
+    }
+
+    #[test]
+    fn device_ready_audio_is_reported_as_such_even_under_id3() {
+        assert!(audio_is_device_ready(&bare_mp3()));
+        assert!(audio_is_device_ready(&id3v2_wrapped(&bare_mp3())));
     }
 
     // ===== images =====

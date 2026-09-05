@@ -30,17 +30,39 @@ export interface StoryCardDto {
    *  send gate's pre-click "native non transférable" block. Absent (falsy)
    *  on native / file-imported cards, so their shape is unchanged. */
   transferable?: boolean;
-  /** `true` iff the story retained its ORIGINAL source `.zip` (a
-   *  structured-archive import) and can be sent to a Lunii V3 via the single
-   *  "Envoyer vers la Lunii" gesture. Independent of `transferable` (the
-   *  V1/V2 round-trip). Absent (falsy) otherwise, so the shape is unchanged. */
-  sendableArchive?: boolean;
+  /** `true` iff the story can be sent to a Lunii V3 via the single
+   *  "Envoyer vers la Lunii" gesture: it retained its ORIGINAL source `.zip`
+   *  (a structured-archive import) OR its structure lays out as a sequential
+   *  device pack (every episode has an audio, no choices — a web / RSS /
+   *  editor story). Independent of `transferable` (the V1/V2 round-trip).
+   *  Absent (falsy) otherwise, so the shape is unchanged. */
+  sendable?: boolean;
+  /** WHY the story is not sendable, when it is not — the closed set behind
+   *  the pre-click "Envoi indisponible: …" reason. Absent when `sendable`
+   *  (or when the projection did not decide). */
+  sendBlocker?: SendBlocker;
   /** Asset id of the story's cover image (the START node's image). The
    *  pixels are loaded through the existing `read_node_media` command; only
    *  this opaque id crosses the overview wire. Absent when the start node
    *  has no image. */
   coverAssetId?: string;
 }
+
+/** Mirror of `SendBlockerDto` (camelCase wire values). */
+export type SendBlocker =
+  | "devicePack"
+  | "empty"
+  | "malformed"
+  | "branching"
+  | "missingAudio";
+
+const SEND_BLOCKERS: ReadonlySet<string> = new Set([
+  "devicePack",
+  "empty",
+  "malformed",
+  "branching",
+  "missingAudio",
+]);
 
 const CARD_IMPORT_STATES: ReadonlySet<string> = new Set([
   "recognized",
@@ -95,8 +117,16 @@ export function isStoryCardDto(value: unknown): value is StoryCardDto {
   }
   // Optional V3-sendability flag, same discipline (emitted only when `true`).
   if (
-    candidate.sendableArchive !== undefined &&
-    typeof candidate.sendableArchive !== "boolean"
+    candidate.sendable !== undefined &&
+    typeof candidate.sendable !== "boolean"
+  ) {
+    return false;
+  }
+  // Optional send blocker: one of the closed reasons when present.
+  if (
+    candidate.sendBlocker !== undefined &&
+    (typeof candidate.sendBlocker !== "string" ||
+      !SEND_BLOCKERS.has(candidate.sendBlocker))
   ) {
     return false;
   }

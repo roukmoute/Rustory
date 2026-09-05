@@ -13,6 +13,7 @@ pub mod import;
 pub mod library;
 pub mod preflight;
 pub mod send;
+pub mod story_pack;
 pub mod title;
 pub mod transfer;
 
