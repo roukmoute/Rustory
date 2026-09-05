@@ -139,9 +139,33 @@
   align-items: start;
 }
 
+/*
+ * The current-node zone FOLLOWS the scroll (the library decision-panel
+ * pattern): selecting a node deep in a long structure list must not force a
+ * scroll back up to edit it. `align-items: start` on the grid keeps the zone
+ * at its content height so it has room to stick within its grid area; the
+ * offset matches the shell's vertical rhythm. Taller than the viewport, the
+ * zone scrolls internally (the bottom action bar is sticky too — the
+ * max-height leaves it room) rather than hiding its foot.
+ */
+.story-editor-shell__zones > .story-node-editor-host {
+  position: sticky;
+  top: var(--space-3);
+  max-height: calc(100vh - var(--space-3) - 6rem);
+  overflow-y: auto;
+  background: var(--color-surface-base);
+}
+
 @media (max-width: 720px) {
   .story-editor-shell__zones {
     grid-template-columns: 1fr;
+  }
+
+  /* Stacked zones: the node zone sits under the structure, nothing to pin. */
+  .story-editor-shell__zones > .story-node-editor-host {
+    position: static;
+    max-height: none;
+    overflow: visible;
   }
 }
 
