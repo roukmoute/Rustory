@@ -106,12 +106,12 @@ pub fn take_wav_output(path: &Path) -> Result<Vec<u8>, SpeechError> {
 
 #[cfg(test)]
 pub(crate) mod test_support {
-    use std::path::{Path, PathBuf};
+    use std::path::Path;
 
     /// Write an executable shell script named `name` into `dir` (Unix) so a
     /// test can stand in for a speech program found on the PATH.
     #[cfg(unix)]
-    pub fn fake_program(dir: &Path, name: &str, body: &str) -> PathBuf {
+    pub fn fake_program(dir: &Path, name: &str, body: &str) -> std::path::PathBuf {
         use std::os::unix::fs::PermissionsExt;
         let path = dir.join(name);
         std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).expect("write fake program");

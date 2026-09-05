@@ -123,9 +123,9 @@ tar = "=0.4.46"
 # SYSTEM voices — the voices already installed on the machine, listed and
 # used to speak the story announcements. The `windows` crate is already
 # in the tree at this exact version (Tauri's Windows stack); only the
-# speech + streams + WinRT-init features are added. Pure Rust bindings, no
-# C toolchain. Pinned strict.
-windows = { version = "=0.61.3", features = ["Foundation", "Foundation_Collections", "Media_SpeechSynthesis", "Storage_Streams", "Win32_System_WinRT"] }
+# speech + streams + WinRT-init features are added (`Media_Core` gates the
+# text-to-stream call). Pure Rust bindings, no C toolchain. Pinned strict.
+windows = { version = "=0.61.3", features = ["Foundation", "Foundation_Collections", "Media_Core", "Media_SpeechSynthesis", "Storage_Streams", "Win32_System_WinRT"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # Linux-only D-Bus binding used to talk to udisks2 and auto-mount a
