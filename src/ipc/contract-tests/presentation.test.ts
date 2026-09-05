@@ -83,6 +83,18 @@ describe("presentation guards", () => {
     expect(
       isStoryPresentationDto({ ...PRESENTATION, linearBlocker: { reason: "tooLong" } }),
     ).toBe(false);
+    expect(
+      isStoryPresentationDto({
+        ...PRESENTATION,
+        title: { ...PRESENTATION.title, source: "recorded" },
+      }),
+    ).toBe(true);
+    expect(
+      isStoryPresentationDto({
+        ...PRESENTATION,
+        title: { ...PRESENTATION.title, source: "cloud" },
+      }),
+    ).toBe(false);
 
     expect(isAnnouncementVoicesDto(VOICES)).toBe(true);
     for (const state of ["unsupported", "notInstalled", "installing", "installed"]) {
@@ -160,6 +172,29 @@ describe("presentation IPC facade", () => {
     });
     await expect(facade.previewAnnouncementVoice({ voiceId: "system:say:Thomas" })).rejects.toMatchObject({
       code: "MEDIA_PROCESSING_FAILED",
+    });
+  });
+
+  it("attaches a recording and removes an announcement through the validated commands", async () => {
+    const core = await import("@tauri-apps/api/core");
+    const facade = await import("../commands/presentation");
+    vi.mocked(core.invoke).mockResolvedValueOnce({
+      ...PRESENTATION,
+      title: { ...PRESENTATION.title, source: "recorded" },
+    });
+    const attached = await facade.attachRecordedAnnouncement({
+      storyId: "s1",
+      target: { kind: "title" },
+      audioBase64: "UklGRg==",
+    });
+    expect(attached.title.source).toBe("recorded");
+    expect(vi.mocked(core.invoke)).toHaveBeenCalledWith("attach_recorded_announcement", {
+      input: { storyId: "s1", target: { kind: "title" }, audioBase64: "UklGRg==" },
+    });
+    vi.mocked(core.invoke).mockResolvedValueOnce(PRESENTATION);
+    await facade.removeStoryAnnouncement({ storyId: "s1", target: { kind: "chapter", nodeId: "n1" } });
+    expect(vi.mocked(core.invoke)).toHaveBeenCalledWith("remove_story_announcement", {
+      input: { storyId: "s1", target: { kind: "chapter", nodeId: "n1" } },
     });
   });
 

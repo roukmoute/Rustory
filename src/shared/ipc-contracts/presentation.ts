@@ -12,10 +12,14 @@ export type StoryLayout = "sequential" | "menu";
 
 export type AnnouncementStatus = "ready" | "stale" | "missing";
 
+/** `voice` = synthesized; `recorded` = the user's microphone. */
+export type AnnouncementSource = "voice" | "recorded";
+
 export interface AnnouncementDto {
   spokenText: string;
   status: AnnouncementStatus;
   assetId?: string;
+  source?: AnnouncementSource;
 }
 
 export interface ChapterAnnouncementDto {
@@ -24,6 +28,25 @@ export interface ChapterAnnouncementDto {
   spokenText: string;
   status: AnnouncementStatus;
   assetId?: string;
+  source?: AnnouncementSource;
+}
+
+/** Which announcement an attach / remove targets (tagged on `kind`). */
+export type AnnouncementTarget =
+  | { kind: "title" }
+  | { kind: "question" }
+  | { kind: "chapter"; nodeId: string };
+
+export interface AttachRecordedAnnouncementInput {
+  storyId: string;
+  target: AnnouncementTarget;
+  /** A mono 16-bit WAV, base64. */
+  audioBase64: string;
+}
+
+export interface RemoveAnnouncementInput {
+  storyId: string;
+  target: AnnouncementTarget;
 }
 
 /** Why the structure does not lay out as episodes, naming the node to fix. */
@@ -110,6 +133,7 @@ export interface VoicePreviewDto {
 
 const LAYOUTS: ReadonlySet<string> = new Set(["sequential", "menu"]);
 const STATUSES: ReadonlySet<string> = new Set(["ready", "stale", "missing"]);
+const SOURCES: ReadonlySet<string> = new Set(["voice", "recorded"]);
 const ENGINES: ReadonlySet<string> = new Set(["system", "embedded"]);
 const LINEAR_REASONS: ReadonlySet<string> = new Set([
   "empty",
@@ -138,7 +162,9 @@ function isAnnouncement(value: unknown): value is AnnouncementDto {
     typeof value.spokenText === "string" &&
     typeof value.status === "string" &&
     STATUSES.has(value.status) &&
-    isOptionalString(value.assetId)
+    isOptionalString(value.assetId) &&
+    (value.source === undefined ||
+      (typeof value.source === "string" && SOURCES.has(value.source)))
   );
 }
 
@@ -152,6 +178,7 @@ function isChapterAnnouncement(value: unknown): value is ChapterAnnouncementDto 
       spokenText: value.spokenText,
       status: value.status,
       assetId: value.assetId,
+      source: value.source,
     })
   );
 }

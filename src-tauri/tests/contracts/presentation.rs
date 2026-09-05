@@ -2,7 +2,8 @@
 //! the announcement voices — mirrored by `src/ipc/contract-tests/presentation.test.ts`.
 
 use rustory_lib::ipc::dto::{
-    AnnouncementDto, AnnouncementStatusDto, AnnouncementVoiceDto, AnnouncementVoicesDto,
+    AnnouncementDto, AnnouncementSourceDto, AnnouncementStatusDto, AnnouncementTargetDto,
+    AnnouncementVoiceDto, AnnouncementVoicesDto, AttachRecordedAnnouncementInputDto,
     ChapterAnnouncementDto, EmbeddedVoiceStateDto, EmbeddedVoiceStatusDto,
     GenerateAnnouncementsInputDto, LinearBlockerDto, SendBlockerDto, SetAnnouncementVoiceInputDto,
     SetStoryLayoutInputDto, StoryLayoutDto, StoryPresentationDto, VoiceEngineDto, VoicePreviewDto,
@@ -20,11 +21,13 @@ fn story_presentation_wire_shape() {
             spoken_text: "Tina et le serpent à plumes.".into(),
             status: AnnouncementStatusDto::Ready,
             asset_id: Some("a-title".into()),
+            source: Some(AnnouncementSourceDto::Voice),
         },
         question: AnnouncementDto {
             spoken_text: "Quelle histoire veux-tu écouter ?".into(),
             status: AnnouncementStatusDto::Missing,
             asset_id: None,
+            source: None,
         },
         chapters: vec![ChapterAnnouncementDto {
             node_id: "n1".into(),
@@ -32,6 +35,7 @@ fn story_presentation_wire_shape() {
             spoken_text: "Épisode 1. Le trésor.".into(),
             status: AnnouncementStatusDto::Stale,
             asset_id: Some("a-1".into()),
+            source: Some(AnnouncementSourceDto::Recorded),
         }],
     };
     let v = serde_json::to_value(&dto).expect("serialize");
@@ -42,14 +46,15 @@ fn story_presentation_wire_shape() {
             "voiceId": "system:say:Thomas",
             "archiveRetained": false,
             "linear": true,
-            "title": { "spokenText": "Tina et le serpent à plumes.", "status": "ready", "assetId": "a-title" },
+            "title": { "spokenText": "Tina et le serpent à plumes.", "status": "ready", "assetId": "a-title", "source": "voice" },
             "question": { "spokenText": "Quelle histoire veux-tu écouter ?", "status": "missing" },
             "chapters": [{
                 "nodeId": "n1",
                 "label": "Le trésor : épisode 1/10",
                 "spokenText": "Épisode 1. Le trésor.",
                 "status": "stale",
-                "assetId": "a-1"
+                "assetId": "a-1",
+                "source": "recorded"
             }]
         })
     );
@@ -71,11 +76,13 @@ fn a_non_linear_presentation_names_the_node_to_fix() {
             spoken_text: "Série.".into(),
             status: AnnouncementStatusDto::Missing,
             asset_id: None,
+            source: None,
         },
         question: AnnouncementDto {
             spoken_text: "Quelle histoire veux-tu écouter ?".into(),
             status: AnnouncementStatusDto::Missing,
             asset_id: None,
+            source: None,
         },
         chapters: Vec::new(),
     };
@@ -85,6 +92,21 @@ fn a_non_linear_presentation_names_the_node_to_fix() {
         v["linearBlocker"],
         serde_json::json!({ "reason": "missingAudio", "nodeId": "n2", "label": "Deux" })
     );
+}
+
+#[test]
+fn recording_inputs_parse_their_target_kind() {
+    let input: AttachRecordedAnnouncementInputDto = serde_json::from_str(
+        r#"{"storyId":"s1","target":{"kind":"chapter","nodeId":"n2"},"audioBase64":"UklGRg=="}"#,
+    )
+    .expect("parse");
+    assert_eq!(
+        input.target,
+        AnnouncementTargetDto::Chapter {
+            node_id: "n2".into()
+        }
+    );
+    assert!(serde_json::from_str::<AnnouncementTargetDto>(r#"{"kind":"chapter"}"#).is_err());
 }
 
 #[test]

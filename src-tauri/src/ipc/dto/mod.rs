@@ -36,11 +36,12 @@ pub use import_export::{
 };
 pub use library::{LibraryOverviewDto, SendBlockerDto, StoryCardDto};
 pub use presentation::{
-    AnnouncementDto, AnnouncementStatusDto, AnnouncementVoiceDto, AnnouncementVoicesDto,
+    AnnouncementDto, AnnouncementSourceDto, AnnouncementStatusDto, AnnouncementTargetDto,
+    AnnouncementVoiceDto, AnnouncementVoicesDto, AttachRecordedAnnouncementInputDto,
     ChapterAnnouncementDto, EmbeddedVoiceStateDto, EmbeddedVoiceStatusDto,
     GenerateAnnouncementsInputDto, GenerateAnnouncementsOutcomeDto, LinearBlockerDto,
-    PreviewAnnouncementVoiceInputDto, SetAnnouncementVoiceInputDto, SetStoryLayoutInputDto,
-    StoryLayoutDto, StoryPresentationDto, VoiceEngineDto, VoicePreviewDto,
+    PreviewAnnouncementVoiceInputDto, RemoveAnnouncementInputDto, SetAnnouncementVoiceInputDto,
+    SetStoryLayoutInputDto, StoryLayoutDto, StoryPresentationDto, VoiceEngineDto, VoicePreviewDto,
 };
 pub use settings::{
     DeviceCapabilityDto, DeviceSupportLineDto, LocalArtifactLineDto, SupportProfileDto,

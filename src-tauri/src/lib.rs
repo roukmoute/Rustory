@@ -471,6 +471,30 @@ pub fn run() {
                 }
             }
 
+            // Linux (WebKitGTK): media capture is OFF by default and every
+            // user-media permission request is refused unless handled — the
+            // microphone recording of announcements needs both. Windows
+            // (WebView2) and macOS (WKWebView) prompt the user themselves.
+            #[cfg(target_os = "linux")]
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.with_webview(|webview| {
+                    use webkit2gtk::glib::ObjectExt;
+                    use webkit2gtk::{PermissionRequestExt, SettingsExt, WebViewExt};
+                    let inner = webview.inner();
+                    if let Some(settings) = inner.settings() {
+                        settings.set_enable_media_stream(true);
+                    }
+                    inner.connect_permission_request(|_, request| {
+                        if request.is::<webkit2gtk::UserMediaPermissionRequest>() {
+                            request.allow();
+                            true
+                        } else {
+                            false
+                        }
+                    });
+                });
+            }
+
             app.manage(AppState {
                 db: std::sync::Arc::new(Mutex::new(db)),
                 device_scanner: std::sync::Arc::new(
@@ -542,6 +566,7 @@ pub fn run() {
             commands::import_export::accept_rss_story_creation,
             commands::import_export::accept_structured_archive_creation,
             commands::import_export::accept_structured_creation,
+            commands::presentation::attach_recorded_announcement,
             commands::import_export::accept_web_podcast_creation,
             commands::story::add_node_option,
             commands::story::add_story_node,
@@ -597,6 +622,7 @@ pub fn run() {
             commands::story::record_node_draft,
             commands::story::remove_node_media,
             commands::story::remove_node_option,
+            commands::presentation::remove_story_announcement,
             commands::settings::restart_for_update,
             commands::device::send_pack_to_device,
             commands::presentation::set_announcement_voice,

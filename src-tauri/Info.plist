@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- Merged into the app bundle by Tauri. The microphone is used only for
+       the story announcements the user chooses to record (a spoken title
+       the Lunii plays); nothing is captured otherwise. -->
+  <key>NSMicrophoneUsageDescription</key>
+  <string>Rustory utilise le micro uniquement pour enregistrer, à ta demande, les annonces d'une histoire (les titres lus sur la Lunii).</string>
+</dict>
+</plist>

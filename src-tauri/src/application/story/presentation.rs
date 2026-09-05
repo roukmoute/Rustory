@@ -25,6 +25,20 @@ use crate::infrastructure::db::DbHandle;
 use super::node::{gc_unreferenced_media_file, PreparedMedia};
 use super::now_iso_ms;
 
+/// The "voice" id of a clip the user RECORDED with the microphone: kept
+/// apart from every synthesis voice — a generation never overwrites it,
+/// and a voice change never makes it stale (only its text can).
+pub const RECORDED_VOICE_ID: &str = "recorded";
+
+/// Where a stored clip came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AnnouncementSource {
+    /// Synthesized by a voice engine.
+    Voice,
+    /// Recorded by the user.
+    Recorded,
+}
+
 /// The state of one announcement.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AnnouncementStatus {
@@ -52,6 +66,8 @@ pub struct Announcement {
     pub spoken_text: String,
     pub status: AnnouncementStatus,
     pub asset_id: Option<String>,
+    /// Where the stored clip came from (`None` while missing).
+    pub source: Option<AnnouncementSource>,
 }
 
 /// An episode's announcement, keyed by its node.
@@ -120,9 +136,13 @@ pub fn read_presentation(
                 spoken_text: spoken_now.to_string(),
                 status: AnnouncementStatus::Missing,
                 asset_id: None,
+                source: None,
             },
             Some((asset_id, spoken_then, voice_then)) => {
-                let same_voice = selected_voice_id.is_none_or(|v| v == voice_then);
+                let recorded = voice_then == RECORDED_VOICE_ID;
+                // A recording is the user's own voice: a voice change never
+                // dates it — only its text can.
+                let same_voice = recorded || selected_voice_id.is_none_or(|v| v == voice_then);
                 Announcement {
                     spoken_text: spoken_now.to_string(),
                     status: if spoken_then == spoken_now && same_voice {
@@ -131,6 +151,11 @@ pub fn read_presentation(
                         AnnouncementStatus::Stale
                     },
                     asset_id: Some(asset_id.to_string()),
+                    source: Some(if recorded {
+                        AnnouncementSource::Recorded
+                    } else {
+                        AnnouncementSource::Voice
+                    }),
                 }
             }
         }
@@ -264,7 +289,12 @@ pub fn plan_announcements(
         return Err(not_linear_error());
     }
     let mut clips = Vec::new();
-    let wants = |a: &Announcement| force || a.status != AnnouncementStatus::Ready;
+    // A recorded clip is the user's: never re-synthesized, not even by
+    // `force` — re-record it, or remove it first.
+    let wants = |a: &Announcement| {
+        a.source != Some(AnnouncementSource::Recorded)
+            && (force || a.status != AnnouncementStatus::Ready)
+    };
     if wants(&presentation.title) && !presentation.title.spoken_text.is_empty() {
         clips.push(PlannedClip {
             target: AnnouncementTarget::Title,
@@ -464,6 +494,156 @@ pub fn sweep_orphan_prompts(db: &mut DbHandle, app_data_dir: &Path, story_id: &s
         );
         gc_unreferenced_media_file(db, &media_dir, info);
     }
+}
+
+/// The current spoken text of `target` (what a recording stands for).
+fn spoken_text_of(
+    db: &DbHandle,
+    story_id: &str,
+    target: &AnnouncementTarget,
+) -> Result<String, AppError> {
+    let presentation = read_presentation(db, story_id, None)?;
+    match target {
+        AnnouncementTarget::Title => Ok(presentation.title.spoken_text),
+        AnnouncementTarget::Question => Ok(presentation.question.spoken_text),
+        AnnouncementTarget::Chapter { node_id } => presentation
+            .chapters
+            .iter()
+            .find(|c| &c.node_id == node_id)
+            .map(|c| c.announcement.spoken_text.clone())
+            .ok_or_else(target_missing_error),
+    }
+}
+
+/// Commit a clip the user RECORDED for `target` (already promoted into the
+/// store): stored like a synthesized clip, under the [`RECORDED_VOICE_ID`]
+/// voice and the target's current spoken text (so a later text change
+/// still surfaces as stale). The target must exist.
+pub fn attach_recorded_announcement(
+    db: &mut DbHandle,
+    story_id: &str,
+    target: &AnnouncementTarget,
+    prepared: PreparedMedia,
+) -> Result<String, AppError> {
+    let spoken_text = match spoken_text_of(db, story_id, target) {
+        Ok(text) => text,
+        Err(err) => {
+            // The promoted file must not leak when the target is refused.
+            let media_dir = prepared.media_dir.clone();
+            let promoted = (
+                prepared.stored.content_hash.clone(),
+                prepared.stored.file_name.clone(),
+            );
+            gc_unreferenced_media_file(db, &media_dir, Some(promoted));
+            return Err(err);
+        }
+    };
+    commit_announcement(
+        db,
+        story_id,
+        target,
+        prepared,
+        &spoken_text,
+        RECORDED_VOICE_ID,
+    )
+}
+
+/// Remove the stored clip of `target` (its rows and, if unreferenced, its
+/// file): the announcement goes back to MISSING. A no-op when none exists.
+pub fn remove_announcement(
+    db: &mut DbHandle,
+    app_data_dir: &Path,
+    story_id: &str,
+    target: &AnnouncementTarget,
+) -> Result<(), AppError> {
+    ensure_story(db, story_id)?;
+    let media_dir = crate::infrastructure::filesystem::resolve_node_media_dir(app_data_dir);
+    let tx = db
+        .conn_mut()
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(|e| storage_error(&e, "begin"))?;
+    let asset_id: Option<String> = match target {
+        AnnouncementTarget::Title => {
+            let id = tx
+                .query_row(
+                    "SELECT title_audio_asset_id FROM story_layouts WHERE story_id = ?1",
+                    rusqlite::params![story_id],
+                    |r| r.get::<_, Option<String>>(0),
+                )
+                .optional()
+                .map_err(|e| storage_error(&e, "read_layout"))?
+                .flatten();
+            tx.execute(
+                "UPDATE story_layouts SET title_audio_asset_id = NULL, title_spoken_text = NULL WHERE story_id = ?1",
+                rusqlite::params![story_id],
+            )
+            .map_err(|e| storage_error(&e, "clear_title"))?;
+            id
+        }
+        AnnouncementTarget::Question => {
+            let id = tx
+                .query_row(
+                    "SELECT question_audio_asset_id FROM story_layouts WHERE story_id = ?1",
+                    rusqlite::params![story_id],
+                    |r| r.get::<_, Option<String>>(0),
+                )
+                .optional()
+                .map_err(|e| storage_error(&e, "read_layout"))?
+                .flatten();
+            tx.execute(
+                "UPDATE story_layouts SET question_audio_asset_id = NULL, question_spoken_text = NULL WHERE story_id = ?1",
+                rusqlite::params![story_id],
+            )
+            .map_err(|e| storage_error(&e, "clear_question"))?;
+            id
+        }
+        AnnouncementTarget::Chapter { node_id } => {
+            let id = tx
+                .query_row(
+                    "SELECT audio_asset_id FROM story_node_prompts WHERE story_id = ?1 AND node_id = ?2",
+                    rusqlite::params![story_id, node_id],
+                    |r| r.get::<_, String>(0),
+                )
+                .optional()
+                .map_err(|e| storage_error(&e, "read_prompt"))?;
+            tx.execute(
+                "DELETE FROM story_node_prompts WHERE story_id = ?1 AND node_id = ?2",
+                rusqlite::params![story_id, node_id],
+            )
+            .map_err(|e| storage_error(&e, "delete_prompt"))?;
+            id
+        }
+    };
+    let info: Option<(String, String)> = match asset_id.as_deref() {
+        Some(id) => {
+            let info = tx
+                .query_row(
+                    "SELECT content_hash, file_name FROM assets WHERE id = ?1 AND story_id = ?2",
+                    rusqlite::params![id, story_id],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .optional()
+                .map_err(|e| storage_error(&e, "read_assets"))?;
+            tx.execute(
+                "DELETE FROM assets WHERE id = ?1 AND story_id = ?2",
+                rusqlite::params![id, story_id],
+            )
+            .map_err(|e| storage_error(&e, "delete_assets"))?;
+            info
+        }
+        None => None,
+    };
+    tx.commit().map_err(|e| storage_error(&e, "commit"))?;
+    gc_unreferenced_media_file(db, &media_dir, info);
+    Ok(())
+}
+
+fn target_missing_error() -> AppError {
+    AppError::library_inconsistent(
+        "Cet épisode n'existe plus dans l'histoire.",
+        "Recharge l'histoire puis réessaie.",
+    )
+    .with_details(serde_json::json!({ "source": "presentation", "cause": "target_missing" }))
 }
 
 // ===== rows =====
@@ -901,6 +1081,92 @@ mod tests {
         assert_eq!(
             read_presentation(&db, &id, None).unwrap().linear_blocker,
             None
+        );
+    }
+
+    #[test]
+    fn a_recorded_clip_is_never_regenerated_and_only_its_text_can_date_it() {
+        let mut db = fresh_db();
+        let app_data = tempfile::tempdir().expect("app data");
+        let id = story(&mut db, "Série");
+        set_structure(&db, &id, &[("n1", "Un"), ("n2", "Deux")]);
+        let target = AnnouncementTarget::Chapter {
+            node_id: "n1".into(),
+        };
+        let prepared =
+            store_node_media(app_data.path(), MediaKind::Audio, &wav_clip(7)).expect("store");
+        attach_recorded_announcement(&mut db, &id, &target, prepared).expect("attach");
+
+        // Ready whatever the selected voice; reported as recorded.
+        let p = read_presentation(&db, &id, Some("system:any")).expect("read");
+        assert_eq!(p.chapters[0].announcement.status, AnnouncementStatus::Ready);
+        assert_eq!(
+            p.chapters[0].announcement.source,
+            Some(AnnouncementSource::Recorded)
+        );
+        assert_eq!(p.chapters[0].announcement.spoken_text, "Un.");
+        // Never in a plan, not even forced; the other clips still are.
+        let plan = plan_announcements(&db, &id, "system:any", true).expect("plan");
+        assert!(plan.iter().all(|c| c.target != target), "{plan:?}");
+        assert_eq!(plan.len(), 3, "title + question + n2");
+        // A label change dates the recording (to re-record), still recorded.
+        set_structure(&db, &id, &[("n1", "Un bis"), ("n2", "Deux")]);
+        let p = read_presentation(&db, &id, Some("system:any")).expect("read");
+        assert_eq!(p.chapters[0].announcement.status, AnnouncementStatus::Stale);
+        assert_eq!(
+            p.chapters[0].announcement.source,
+            Some(AnnouncementSource::Recorded)
+        );
+        assert!(plan_announcements(&db, &id, "system:any", true)
+            .unwrap()
+            .iter()
+            .all(|c| c.target != target));
+
+        // Removing it frees the row, the asset and the file.
+        let file: String = db
+            .conn()
+            .query_row("SELECT a.file_name FROM assets a JOIN story_node_prompts p ON p.audio_asset_id = a.id WHERE p.story_id = ?1", rusqlite::params![&id], |r| r.get(0))
+            .unwrap();
+        remove_announcement(&mut db, app_data.path(), &id, &target).expect("remove");
+        let p = read_presentation(&db, &id, None).expect("read");
+        assert_eq!(
+            p.chapters[0].announcement.status,
+            AnnouncementStatus::Missing
+        );
+        let media_dir = crate::infrastructure::filesystem::resolve_node_media_dir(app_data.path());
+        assert!(!media_dir.join(file).exists());
+        // Removing again is a no-op; removing the title / question works too.
+        remove_announcement(&mut db, app_data.path(), &id, &target).expect("no-op");
+        remove_announcement(&mut db, app_data.path(), &id, &AnnouncementTarget::Title)
+            .expect("no-op");
+    }
+
+    #[test]
+    fn a_recording_for_an_unknown_episode_is_refused_and_leaks_no_file() {
+        let mut db = fresh_db();
+        let app_data = tempfile::tempdir().expect("app data");
+        let id = story(&mut db, "Série");
+        set_structure(&db, &id, &[("n1", "Un")]);
+        let prepared =
+            store_node_media(app_data.path(), MediaKind::Audio, &wav_clip(9)).expect("store");
+        let file = prepared.stored.file_name.clone();
+        let err = attach_recorded_announcement(
+            &mut db,
+            &id,
+            &AnnouncementTarget::Chapter {
+                node_id: "nope".into(),
+            },
+            prepared,
+        )
+        .expect_err("refused");
+        assert_eq!(
+            serde_json::to_value(&err).unwrap()["details"]["cause"],
+            "target_missing"
+        );
+        let media_dir = crate::infrastructure::filesystem::resolve_node_media_dir(app_data.path());
+        assert!(
+            !media_dir.join(file).exists(),
+            "the promoted file is compensated"
         );
     }
 

@@ -2,18 +2,26 @@ import type React from "react";
 import { useEffect, useRef, useState } from "react";
 
 import {
+  attachRecordedAnnouncement,
   generateStoryAnnouncements,
   readStoryPresentation,
+  removeStoryAnnouncement,
   setStoryLayout,
 } from "../../../ipc/commands/presentation";
 import { readNodeMedia } from "../../../ipc/commands/story";
 import { toAppError } from "../../../shared/errors/app-error";
 import type {
   AnnouncementStatus,
+  AnnouncementTarget,
   LinearBlockerDto,
   StoryLayout,
   StoryPresentationDto,
 } from "../../../shared/ipc-contracts/presentation";
+import type { RecordedTake, Recorder } from "../lib/microphone-recorder";
+import { MicrophoneRecorder } from "../lib/microphone-recorder";
+import { bytesToBase64 } from "../lib/wav";
+
+import { AnnouncementRecorder } from "./AnnouncementRecorder";
 import {
   Button,
   ProgressIndicator,
@@ -48,8 +56,14 @@ const GENERATE_LABEL = "Générer les annonces";
 const REGENERATE_LABEL = "Régénérer toutes les annonces";
 const GENERATING_LABEL = "Génération des annonces…";
 const LISTEN_LABEL = "Écouter";
+const REMOVE_LABEL = "Retirer";
+const RECORDED_CHIP = "ta voix";
 const TITLE_ROW = "Titre de la série";
 const QUESTION_ROW = "Question";
+const ANNOUNCEMENTS_RECORD_LEAD =
+  "Tu peux aussi enregistrer une annonce avec ta propre voix : elle remplace la voix synthétique pour cette ligne et n'est jamais régénérée.";
+
+const DEFAULT_RECORDER: Recorder = new MicrophoneRecorder();
 
 type PresentationRead =
   | { kind: "loading" }
@@ -112,6 +126,8 @@ export interface StoryPresentationPanelProps {
   editable: boolean;
   /** Changes when the structure (labels, nodes) changes: re-reads. */
   structureKey: string;
+  /** The microphone capture; injectable (tests), the real one by default. */
+  recorder?: Recorder;
 }
 
 /**
@@ -125,6 +141,7 @@ export function StoryPresentationPanel({
   storyId,
   editable,
   structureKey,
+  recorder = DEFAULT_RECORDER,
 }: StoryPresentationPanelProps): React.JSX.Element {
   const [read, setRead] = useState<PresentationRead>({ kind: "loading" });
   const [generating, setGenerating] = useState<number | null>(null);
@@ -179,6 +196,33 @@ export function StoryPresentationPanel({
       );
     } finally {
       setGenerating(null);
+    }
+  };
+
+  const attachTake = async (target: AnnouncementTarget, take: RecordedTake): Promise<void> => {
+    setNote(null);
+    try {
+      const data = await attachRecordedAnnouncement({
+        storyId,
+        target,
+        audioBase64: bytesToBase64(take.wav),
+      });
+      setRead({ kind: "loaded", data });
+    } catch (err) {
+      const error = toAppError(err);
+      throw new Error(
+        error.userAction ? `${error.message} ${error.userAction}` : error.message,
+      );
+    }
+  };
+
+  const remove = async (target: AnnouncementTarget): Promise<void> => {
+    setNote(null);
+    try {
+      const data = await removeStoryAnnouncement({ storyId, target });
+      setRead({ kind: "loaded", data });
+    } catch (err) {
+      setNote(toAppError(err).message);
     }
   };
 
@@ -273,21 +317,34 @@ export function StoryPresentationPanel({
             <div className="story-presentation__announcements">
               <h3 className="story-presentation__subtitle">{ANNOUNCEMENTS_TITLE}</h3>
               <p className="story-presentation__lead">{ANNOUNCEMENTS_LEAD}</p>
+              <p className="story-presentation__lead">{ANNOUNCEMENTS_RECORD_LEAD}</p>
               <details className="story-presentation__details">
                 <summary className="story-presentation__summary">
                   {announcementSummary(read.data)}
                 </summary>
               <ul className="story-presentation__list" aria-label="Annonces">
                 {[
-                  { key: "title", row: TITLE_ROW, announcement: read.data.title },
-                  { key: "question", row: QUESTION_ROW, announcement: read.data.question },
+                  {
+                    key: "title",
+                    row: TITLE_ROW,
+                    target: { kind: "title" } as AnnouncementTarget,
+                    announcement: read.data.title,
+                  },
+                  {
+                    key: "question",
+                    row: QUESTION_ROW,
+                    target: { kind: "question" } as AnnouncementTarget,
+                    announcement: read.data.question,
+                  },
                   ...read.data.chapters.map((chapter, index) => ({
                     key: `chapter-${chapter.nodeId}`,
                     row: `Épisode ${index + 1}`,
+                    target: { kind: "chapter", nodeId: chapter.nodeId } as AnnouncementTarget,
                     announcement: chapter,
                   })),
-                ].map(({ key, row, announcement }) => {
+                ].map(({ key, row, target, announcement }) => {
                   const chip = statusChip(announcement.status);
+                  const recorded = announcement.source === "recorded";
                   return (
                     <li key={key} className="story-presentation__item">
                       <div className="story-presentation__item-text">
@@ -298,6 +355,7 @@ export function StoryPresentationPanel({
                       </div>
                       <div className="story-presentation__item-actions">
                         <StateChip tone={chip.tone} label={chip.label} />
+                        {recorded && <StateChip tone="info" label={RECORDED_CHIP} />}
                         {announcement.assetId !== undefined && (
                           <Button
                             variant="quiet"
@@ -305,6 +363,24 @@ export function StoryPresentationPanel({
                             aria-label={`${LISTEN_LABEL} — ${row}`}
                           >
                             {LISTEN_LABEL}
+                          </Button>
+                        )}
+                        <AnnouncementRecorder
+                          spokenText={announcement.spokenText}
+                          hasClip={announcement.assetId !== undefined}
+                          disabled={busy}
+                          recorder={recorder}
+                          rowName={row}
+                          onUse={(take) => attachTake(target, take)}
+                        />
+                        {announcement.assetId !== undefined && (
+                          <Button
+                            variant="quiet"
+                            onClick={() => void remove(target)}
+                            disabled={busy}
+                            aria-label={`${REMOVE_LABEL} — ${row}`}
+                          >
+                            {REMOVE_LABEL}
                           </Button>
                         )}
                       </div>

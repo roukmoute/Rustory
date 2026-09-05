@@ -204,6 +204,7 @@ It exists to keep the same product concepts named the same way across:
 | Presentation layout — sequence | `À la suite` | Episodes chained in order (the default) | `séquentiel`, `playlist`, `linéaire` |
 | Presentation layout — menu | `Au choix` | A spoken question then the episodes on the wheel, like an official pack | `menu`, `sélection`, `carousel` |
 | Spoken announcements (menu clips) | `annonces` / `Générer les annonces` | The spoken series title, question and episode titles a voice reads for the menu; generated once, stored as story audio | `TTS`, `prompts`, `synthèse` |
+| Record an announcement with the microphone (action) | `Enregistrer` / `Réenregistrer` → `Arrêter` → `Utiliser` / `Refaire` / `Annuler` | The user's own voice for one announcement, replacing the synthetic clip of that row; chipped `ta voix` | `micro`, `capture`, `record`, `dictée` |
 | Announcement voice (setting) | `Voix des annonces` | The voice announcements are generated with: a system voice, or the embedded neural voice | `moteur`, `TTS engine` |
 | Embedded neural voice | `Voix neuronale embarquée` / `Télécharger la voix neuronale` | The downloadable French voice, identical on every computer, used offline once installed | `modèle`, `Piper`, `IA` |
 | Add a node media (action) | `Ajouter` | Associate an image or audio file with the current node | `Importer` (reserved for `.rustory`), `Charger`, `Upload` |

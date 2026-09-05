@@ -81,10 +81,76 @@ pub fn base64_encode(data: &[u8]) -> String {
     out
 }
 
+/// Strict standard-alphabet base64 decoder (RFC 4648): the inverse of
+/// [`base64_encode`], for the few payloads the webview PRODUCES (a
+/// microphone recording). Refuses anything but the alphabet, misplaced
+/// padding or a length that is not a multiple of 4 — never guesses.
+pub fn base64_decode(text: &str) -> Option<Vec<u8>> {
+    fn value(c: u8) -> Option<u32> {
+        match c {
+            b'A'..=b'Z' => Some((c - b'A') as u32),
+            b'a'..=b'z' => Some((c - b'a') as u32 + 26),
+            b'0'..=b'9' => Some((c - b'0') as u32 + 52),
+            b'+' => Some(62),
+            b'/' => Some(63),
+            _ => None,
+        }
+    }
+    let bytes = text.as_bytes();
+    if !bytes.len().is_multiple_of(4) {
+        return None;
+    }
+    let mut out = Vec::with_capacity(bytes.len() / 4 * 3);
+    for (i, chunk) in bytes.chunks(4).enumerate() {
+        let last = i + 1 == bytes.len() / 4;
+        let pad = chunk.iter().rev().take_while(|c| **c == b'=').count();
+        if pad > 2 || (pad > 0 && !last) {
+            return None;
+        }
+        let mut n = 0u32;
+        for &c in &chunk[..4 - pad] {
+            n = (n << 6) | value(c)?;
+        }
+        n <<= 6 * pad as u32;
+        out.push((n >> 16) as u8);
+        if pad < 2 {
+            out.push((n >> 8) as u8);
+        }
+        if pad < 1 {
+            out.push(n as u8);
+        }
+    }
+    Some(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::domain::shared::AppErrorCode;
+
+    #[test]
+    fn base64_decode_inverts_encode_and_refuses_garbage() {
+        for data in [
+            b"".to_vec(),
+            b"f".to_vec(),
+            b"fo".to_vec(),
+            b"foo".to_vec(),
+            b"foob".to_vec(),
+            (0u8..=255).collect::<Vec<u8>>(),
+        ] {
+            assert_eq!(
+                base64_decode(&base64_encode(&data)).as_deref(),
+                Some(data.as_slice())
+            );
+        }
+        assert_eq!(base64_decode("Zm9v"), Some(b"foo".to_vec()));
+        assert_eq!(base64_decode("Zm8="), Some(b"fo".to_vec()));
+        assert_eq!(base64_decode("Zg=="), Some(b"f".to_vec()));
+        assert_eq!(base64_decode("Zg="), None, "length not a multiple of 4");
+        assert_eq!(base64_decode("Zg==Zm9v"), None, "padding not at the end");
+        assert_eq!(base64_decode("Zm9!"), None, "outside the alphabet");
+        assert_eq!(base64_decode("===="), None);
+    }
 
     #[test]
     fn parse_media_slot_maps_known_slots_and_rejects_others() {

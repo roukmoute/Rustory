@@ -6,18 +6,23 @@ vi.mock("../../../ipc/commands/presentation", () => ({
   readStoryPresentation: vi.fn(),
   setStoryLayout: vi.fn(),
   generateStoryAnnouncements: vi.fn(),
+  attachRecordedAnnouncement: vi.fn(),
+  removeStoryAnnouncement: vi.fn(),
 }));
 vi.mock("../../../ipc/commands/story", () => ({
   readNodeMedia: vi.fn(),
 }));
 
 import {
+  attachRecordedAnnouncement,
   generateStoryAnnouncements,
   readStoryPresentation,
+  removeStoryAnnouncement,
   setStoryLayout,
 } from "../../../ipc/commands/presentation";
 import { readNodeMedia } from "../../../ipc/commands/story";
 import type { StoryPresentationDto } from "../../../shared/ipc-contracts/presentation";
+import { bytesToBase64 } from "../lib/wav";
 
 import { StoryPresentationPanel } from "./StoryPresentationPanel";
 
@@ -44,8 +49,18 @@ const MENU_READY: StoryPresentationDto = {
   ],
 };
 
+// A take long enough not to count as empty (a real WAV is 44 bytes of
+// header plus samples).
+const FAKE_WAV = new Uint8Array(64).map((_, i) => (i < 4 ? [82, 73, 70, 70][i] : i));
+const FAKE_RECORDER = {
+  start: vi.fn(async () => ({
+    stop: vi.fn(async () => ({ wav: FAKE_WAV, durationMs: 1200, sampleRate: 22050 })),
+    cancel: vi.fn(),
+  })),
+};
+
 function renderPanel(): void {
-  render(<StoryPresentationPanel storyId="s1" editable structureKey="k" />);
+  render(<StoryPresentationPanel storyId="s1" editable structureKey="k" recorder={FAKE_RECORDER} />);
 }
 
 describe("StoryPresentationPanel", () => {
@@ -83,7 +98,45 @@ describe("StoryPresentationPanel", () => {
     expect(items[2]).toHaveTextContent("Épisode 1");
     expect(items[2]).toHaveTextContent("« Épisode 1. Un. »");
     expect(within(list).queryByRole("button", { name: /écouter/i })).not.toBeInTheDocument();
+    expect(within(list).getAllByRole("button", { name: /^enregistrer — /i })).toHaveLength(4);
     expect(screen.getByRole("button", { name: "Générer les annonces" })).toBeInTheDocument();
+  });
+
+  it("records an announcement with the microphone and attaches it through Rust", async () => {
+    const user = userEvent.setup();
+    vi.mocked(readStoryPresentation).mockResolvedValueOnce({ ...SEQUENTIAL, layout: "menu" });
+    vi.mocked(attachRecordedAnnouncement).mockResolvedValueOnce({
+      ...MENU_READY,
+      question: { ...MENU_READY.question, source: "recorded" },
+    });
+    renderPanel();
+    const list = await screen.findByRole("list", { name: /annonces/i });
+    await user.click(within(list).getByRole("button", { name: /enregistrer — question/i }));
+    await user.click(await screen.findByRole("button", { name: "Arrêter" }));
+    await user.click(await screen.findByRole("button", { name: "Utiliser" }));
+    await waitFor(() =>
+      expect(attachRecordedAnnouncement).toHaveBeenCalledWith({
+        storyId: "s1",
+        target: { kind: "question" },
+        audioBase64: bytesToBase64(FAKE_WAV),
+      }),
+    );
+    expect(await within(list).findByText("ta voix")).toBeInTheDocument();
+    expect(within(list).getByRole("button", { name: /réenregistrer — question/i })).toBeInTheDocument();
+  });
+
+  it("removes a clip through Rust", async () => {
+    const user = userEvent.setup();
+    vi.mocked(readStoryPresentation).mockResolvedValueOnce(MENU_READY);
+    vi.mocked(removeStoryAnnouncement).mockResolvedValueOnce({ ...SEQUENTIAL, layout: "menu" });
+    renderPanel();
+    const list = await screen.findByRole("list", { name: /annonces/i });
+    await user.click(within(list).getByRole("button", { name: /retirer — épisode 1/i }));
+    expect(removeStoryAnnouncement).toHaveBeenCalledWith({
+      storyId: "s1",
+      target: { kind: "chapter", nodeId: "n1" },
+    });
+    await waitFor(() => expect(within(list).getAllByText("manquante")).toHaveLength(4));
   });
 
   it("generates the announcements with progress and re-renders the outcome", async () => {

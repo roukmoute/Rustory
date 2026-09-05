@@ -128,6 +128,10 @@ tar = "=0.4.46"
 windows = { version = "=0.61.3", features = ["Foundation", "Foundation_Collections", "Media_Core", "Media_SpeechSynthesis", "Storage_Streams", "Win32_System_WinRT"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
+# WebKitGTK bindings (ALREADY in the tree through wry/tauri, same version)
+# to turn media capture on and accept the microphone permission request —
+# the announcement recording. Pinned strict.
+webkit2gtk = { version = "=2.0.2", features = ["v2_38"] }
 # Linux-only D-Bus binding used to talk to udisks2 and auto-mount a
 # plugged Lunii whose volume the desktop session did not auto-mount
 # (common with minimal DEs / lockdown polkit rules). Pinned strict.

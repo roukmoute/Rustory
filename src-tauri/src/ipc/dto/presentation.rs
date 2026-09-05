@@ -5,7 +5,8 @@
 use serde::{Deserialize, Serialize};
 
 use crate::application::story::presentation::{
-    Announcement, AnnouncementStatus, ChapterAnnouncement, LinearBlocker, StoryPresentation,
+    Announcement, AnnouncementSource, AnnouncementStatus, AnnouncementTarget, ChapterAnnouncement,
+    LinearBlocker, StoryPresentation,
 };
 use crate::domain::device::StoryLayout;
 use crate::infrastructure::speech::{EmbeddedVoiceStatus, Voice, VoiceEngine};
@@ -53,6 +54,23 @@ impl AnnouncementStatusDto {
     }
 }
 
+/// `voice` (synthesized) | `recorded` (the user's microphone).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum AnnouncementSourceDto {
+    Voice,
+    Recorded,
+}
+
+impl AnnouncementSourceDto {
+    pub const fn from_domain(source: AnnouncementSource) -> Self {
+        match source {
+            AnnouncementSource::Voice => Self::Voice,
+            AnnouncementSource::Recorded => Self::Recorded,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AnnouncementDto {
@@ -60,6 +78,9 @@ pub struct AnnouncementDto {
     pub status: AnnouncementStatusDto,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub asset_id: Option<String>,
+    /// Where the stored clip came from; absent while missing.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<AnnouncementSourceDto>,
 }
 
 impl AnnouncementDto {
@@ -68,8 +89,49 @@ impl AnnouncementDto {
             spoken_text: announcement.spoken_text.clone(),
             status: AnnouncementStatusDto::from_domain(announcement.status),
             asset_id: announcement.asset_id.clone(),
+            source: announcement.source.map(AnnouncementSourceDto::from_domain),
         }
     }
+}
+
+/// Which announcement an attach / remove targets. Tagged on `kind`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum AnnouncementTargetDto {
+    Title,
+    Question,
+    #[serde(rename_all = "camelCase")]
+    Chapter {
+        node_id: String,
+    },
+}
+
+impl AnnouncementTargetDto {
+    pub fn to_domain(&self) -> AnnouncementTarget {
+        match self {
+            Self::Title => AnnouncementTarget::Title,
+            Self::Question => AnnouncementTarget::Question,
+            Self::Chapter { node_id } => AnnouncementTarget::Chapter {
+                node_id: node_id.clone(),
+            },
+        }
+    }
+}
+
+/// A microphone recording for one announcement: WAV bytes, base64.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AttachRecordedAnnouncementInputDto {
+    pub story_id: String,
+    pub target: AnnouncementTargetDto,
+    pub audio_base64: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoveAnnouncementInputDto {
+    pub story_id: String,
+    pub target: AnnouncementTargetDto,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -81,6 +143,8 @@ pub struct ChapterAnnouncementDto {
     pub status: AnnouncementStatusDto,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub asset_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<AnnouncementSourceDto>,
 }
 
 impl ChapterAnnouncementDto {
@@ -91,6 +155,10 @@ impl ChapterAnnouncementDto {
             spoken_text: chapter.announcement.spoken_text.clone(),
             status: AnnouncementStatusDto::from_domain(chapter.announcement.status),
             asset_id: chapter.announcement.asset_id.clone(),
+            source: chapter
+                .announcement
+                .source
+                .map(AnnouncementSourceDto::from_domain),
         }
     }
 }
@@ -319,11 +387,13 @@ mod tests {
                 spoken_text: "Série.".into(),
                 status: AnnouncementStatusDto::Ready,
                 asset_id: Some("a1".into()),
+                source: Some(AnnouncementSourceDto::Voice),
             },
             question: AnnouncementDto {
                 spoken_text: "Quelle histoire veux-tu écouter ?".into(),
                 status: AnnouncementStatusDto::Missing,
                 asset_id: None,
+                source: None,
             },
             chapters: vec![ChapterAnnouncementDto {
                 node_id: "n1".into(),
@@ -331,6 +401,7 @@ mod tests {
                 spoken_text: "Un.".into(),
                 status: AnnouncementStatusDto::Stale,
                 asset_id: Some("a2".into()),
+                source: Some(AnnouncementSourceDto::Recorded),
             }],
         };
         let v = serde_json::to_value(&dto).unwrap();
@@ -338,7 +409,10 @@ mod tests {
         assert_eq!(v["voiceId"], "system:say:Thomas");
         assert_eq!(v["archiveRetained"], false);
         assert_eq!(v["title"]["status"], "ready");
+        assert_eq!(v["title"]["source"], "voice");
         assert_eq!(v["question"]["status"], "missing");
+        assert!(v["question"].get("source").is_none());
+        assert_eq!(v["chapters"][0]["source"], "recorded");
         assert!(v["question"].get("assetId").is_none());
         assert_eq!(v["chapters"][0]["nodeId"], "n1");
         assert_eq!(v["chapters"][0]["status"], "stale");
@@ -381,6 +455,26 @@ mod tests {
             r#"{"storyId":"s1","layout":"carousel"}"#
         )
         .is_err());
+    }
+
+    #[test]
+    fn announcement_targets_parse_from_their_kind_tag() {
+        let title: AnnouncementTargetDto = serde_json::from_str(r#"{"kind":"title"}"#).unwrap();
+        assert_eq!(title.to_domain(), AnnouncementTarget::Title);
+        let chapter: AnnouncementTargetDto =
+            serde_json::from_str(r#"{"kind":"chapter","nodeId":"n3"}"#).unwrap();
+        assert_eq!(
+            chapter.to_domain(),
+            AnnouncementTarget::Chapter {
+                node_id: "n3".into()
+            }
+        );
+        assert!(serde_json::from_str::<AnnouncementTargetDto>(r#"{"kind":"cover"}"#).is_err());
+        let input: AttachRecordedAnnouncementInputDto = serde_json::from_str(
+            r#"{"storyId":"s1","target":{"kind":"question"},"audioBase64":"UklGRg=="}"#,
+        )
+        .unwrap();
+        assert_eq!(input.target, AnnouncementTargetDto::Question);
     }
 
     #[test]
