@@ -38,7 +38,7 @@ pub use library::{LibraryOverviewDto, SendBlockerDto, StoryCardDto};
 pub use presentation::{
     AnnouncementDto, AnnouncementStatusDto, AnnouncementVoiceDto, AnnouncementVoicesDto,
     ChapterAnnouncementDto, EmbeddedVoiceStateDto, EmbeddedVoiceStatusDto,
-    GenerateAnnouncementsInputDto, GenerateAnnouncementsOutcomeDto,
+    GenerateAnnouncementsInputDto, GenerateAnnouncementsOutcomeDto, LinearBlockerDto,
     PreviewAnnouncementVoiceInputDto, SetAnnouncementVoiceInputDto, SetStoryLayoutInputDto,
     StoryLayoutDto, StoryPresentationDto, VoiceEngineDto, VoicePreviewDto,
 };

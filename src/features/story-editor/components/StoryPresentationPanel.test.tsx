@@ -144,10 +144,39 @@ describe("StoryPresentationPanel", () => {
     expect(screen.queryByRole("radio", { name: /au choix/i })).not.toBeInTheDocument();
   });
 
-  it("keeps the menu choice disabled for a story that does not lay out as episodes", async () => {
-    vi.mocked(readStoryPresentation).mockResolvedValueOnce({ ...SEQUENTIAL, linear: false, chapters: [] });
+  it("keeps the menu choice disabled for a story that does not lay out as episodes, naming the node to fix", async () => {
+    vi.mocked(readStoryPresentation).mockResolvedValueOnce({
+      ...SEQUENTIAL,
+      linear: false,
+      chapters: [],
+      linearBlocker: { reason: "missingAudio", nodeId: "n3", label: "L'île des femmes" },
+    });
     renderPanel();
     expect(await screen.findByRole("radio", { name: /au choix/i })).toBeDisabled();
-    expect(screen.getByText(/demande un audio sur chaque épisode/i)).toBeInTheDocument();
+    expect(
+      screen.getByText(/l'épisode « L'île des femmes » n'a pas d'audio/i),
+    ).toBeInTheDocument();
+  });
+
+  it("names a branching node and falls back to the generic note without a blocker", async () => {
+    vi.mocked(readStoryPresentation).mockResolvedValueOnce({
+      ...SEQUENTIAL,
+      linear: false,
+      chapters: [],
+      linearBlocker: { reason: "branching", nodeId: "n1", label: "Un" },
+    });
+    renderPanel();
+    expect(await screen.findByText(/l'épisode « Un » propose des choix/i)).toBeInTheDocument();
+    vi.mocked(readStoryPresentation).mockResolvedValueOnce({ ...SEQUENTIAL, linear: false, chapters: [] });
+    render(<StoryPresentationPanel storyId="s2" editable structureKey="k" />);
+    expect(await screen.findByText(/demande un audio sur chaque épisode/i)).toBeInTheDocument();
+  });
+
+  it("summarizes the announcements in one line and explains a locked editor", async () => {
+    vi.mocked(readStoryPresentation).mockResolvedValueOnce(MENU_READY);
+    render(<StoryPresentationPanel storyId="s1" editable={false} structureKey="k" />);
+    expect(await screen.findByText("4 annonces : 3 prêtes, 1 à régénérer")).toBeInTheDocument();
+    expect(screen.getByText(/présentation verrouillée/i)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Générer les annonces" })).toBeDisabled();
   });
 });

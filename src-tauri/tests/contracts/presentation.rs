@@ -4,8 +4,8 @@
 use rustory_lib::ipc::dto::{
     AnnouncementDto, AnnouncementStatusDto, AnnouncementVoiceDto, AnnouncementVoicesDto,
     ChapterAnnouncementDto, EmbeddedVoiceStateDto, EmbeddedVoiceStatusDto,
-    GenerateAnnouncementsInputDto, SetAnnouncementVoiceInputDto, SetStoryLayoutInputDto,
-    StoryLayoutDto, StoryPresentationDto, VoiceEngineDto, VoicePreviewDto,
+    GenerateAnnouncementsInputDto, LinearBlockerDto, SendBlockerDto, SetAnnouncementVoiceInputDto,
+    SetStoryLayoutInputDto, StoryLayoutDto, StoryPresentationDto, VoiceEngineDto, VoicePreviewDto,
 };
 
 #[test]
@@ -15,6 +15,7 @@ fn story_presentation_wire_shape() {
         voice_id: Some("system:say:Thomas".into()),
         archive_retained: false,
         linear: true,
+        linear_blocker: None,
         title: AnnouncementDto {
             spoken_text: "Tina et le serpent à plumes.".into(),
             status: AnnouncementStatusDto::Ready,
@@ -51,6 +52,38 @@ fn story_presentation_wire_shape() {
                 "assetId": "a-1"
             }]
         })
+    );
+}
+
+#[test]
+fn a_non_linear_presentation_names_the_node_to_fix() {
+    let dto = StoryPresentationDto {
+        layout: StoryLayoutDto::Sequential,
+        voice_id: None,
+        archive_retained: false,
+        linear: false,
+        linear_blocker: Some(LinearBlockerDto {
+            reason: SendBlockerDto::MissingAudio,
+            node_id: Some("n2".into()),
+            label: Some("Deux".into()),
+        }),
+        title: AnnouncementDto {
+            spoken_text: "Série.".into(),
+            status: AnnouncementStatusDto::Missing,
+            asset_id: None,
+        },
+        question: AnnouncementDto {
+            spoken_text: "Quelle histoire veux-tu écouter ?".into(),
+            status: AnnouncementStatusDto::Missing,
+            asset_id: None,
+        },
+        chapters: Vec::new(),
+    };
+    let v = serde_json::to_value(&dto).expect("serialize");
+    assert_eq!(v["linear"], false);
+    assert_eq!(
+        v["linearBlocker"],
+        serde_json::json!({ "reason": "missingAudio", "nodeId": "n2", "label": "Deux" })
     );
 }
 

@@ -14,6 +14,15 @@ vi.mock("../../../ipc/commands/story", () => ({
   readNodeMedia: vi.fn().mockResolvedValue({ dataUrl: "data:image/png;base64,AA" }),
 }));
 
+// The presentation zone has its own read and its own tests
+// (`StoryPresentationPanel.test.tsx`); here its read never settles, so the
+// shell's synchronous zone assertions run without a late state update.
+vi.mock("../../../ipc/commands/presentation", () => ({
+  readStoryPresentation: vi.fn(() => new Promise(() => undefined)),
+  setStoryLayout: vi.fn(),
+  generateStoryAnnouncements: vi.fn(),
+}));
+
 function buildDetail(overrides: Partial<StoryDetailDto> = {}): StoryDetailDto {
   return {
     id: "abc",

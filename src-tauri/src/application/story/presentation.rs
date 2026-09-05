@@ -16,7 +16,7 @@ use std::path::Path;
 
 use rusqlite::OptionalExtension;
 
-use crate::domain::device::{linear_episodes, StoryLayout};
+use crate::domain::device::{linear_episodes, StoryLayout, StoryPackBlocker};
 use crate::domain::shared::AppError;
 use crate::domain::speech::{spoken_episode_title, spoken_series_title, MENU_QUESTION};
 use crate::domain::story::CanonicalStructure;
@@ -62,6 +62,15 @@ pub struct ChapterAnnouncement {
     pub announcement: Announcement,
 }
 
+/// Why the structure does NOT lay out as episodes — the first offending
+/// node, named, so the user knows what to fix.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LinearBlocker {
+    pub blocker: StoryPackBlocker,
+    pub node_id: Option<String>,
+    pub label: Option<String>,
+}
+
 /// The whole presentation read-model of a story.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoryPresentation {
@@ -71,6 +80,8 @@ pub struct StoryPresentation {
     /// Whether the story's structure lays out as episodes at all (a story
     /// with choices, or without audio, has no menu to announce).
     pub linear: bool,
+    /// When `linear` is false: why, and which node.
+    pub linear_blocker: Option<LinearBlocker>,
     pub title: Announcement,
     pub question: Announcement,
     pub chapters: Vec<ChapterAnnouncement>,
@@ -148,6 +159,20 @@ pub fn read_presentation(
     );
 
     let prompts = read_prompt_rows(db, story_id)?;
+    let linear_blocker = structure
+        .as_ref()
+        .map(|s| {
+            linear_episodes(s)
+                .err()
+                .map(|blocker| name_linear_blocker(s, blocker))
+        })
+        .unwrap_or_else(|| {
+            Some(LinearBlocker {
+                blocker: StoryPackBlocker::Malformed,
+                node_id: None,
+                label: None,
+            })
+        });
     let (linear, chapters) = match structure.as_ref().and_then(|s| linear_episodes(s).ok()) {
         Some(episodes) => (
             true,
@@ -186,10 +211,29 @@ pub fn read_presentation(
         layout,
         voice_id,
         linear,
+        linear_blocker,
         title: title_ann,
         question: question_ann,
         chapters,
     })
+}
+
+/// The first node responsible for `blocker` (a choice, a missing audio),
+/// so the reason can name it; structural reasons name no node.
+fn name_linear_blocker(structure: &CanonicalStructure, blocker: StoryPackBlocker) -> LinearBlocker {
+    let offender = match blocker {
+        StoryPackBlocker::Branching => structure.nodes.iter().find(|n| !n.options.is_empty()),
+        StoryPackBlocker::MissingAudio => structure
+            .nodes
+            .iter()
+            .find(|n| n.audio_asset_id.as_deref().is_none_or(str::is_empty)),
+        _ => None,
+    };
+    LinearBlocker {
+        blocker,
+        node_id: offender.map(|n| n.id.clone()),
+        label: offender.map(|n| n.label.clone()),
+    }
 }
 
 /// Set the layout of `story_id` (creates the row on first use).
@@ -830,6 +874,37 @@ mod tests {
     }
 
     #[test]
+    fn a_non_linear_story_names_the_node_to_fix() {
+        let mut db = fresh_db();
+        let id = story(&mut db, "Série");
+        // n2 has no audio.
+        let nodes = serde_json::json!([
+            { "id": "n1", "text": "", "label": "Un", "imageAssetId": null, "audioAssetId": "a1", "options": [] },
+            { "id": "n2", "text": "", "label": "Deux (muet)", "imageAssetId": null, "audioAssetId": null, "options": [] }
+        ]);
+        let json = serde_json::json!({ "schemaVersion": 3, "startNodeId": "n1", "nodes": nodes })
+            .to_string();
+        db.conn()
+            .execute(
+                "UPDATE stories SET structure_json = ?1 WHERE id = ?2",
+                rusqlite::params![json, &id],
+            )
+            .unwrap();
+        let p = read_presentation(&db, &id, None).expect("read");
+        assert!(!p.linear);
+        let blocker = p.linear_blocker.expect("named");
+        assert_eq!(blocker.blocker, StoryPackBlocker::MissingAudio);
+        assert_eq!(blocker.node_id.as_deref(), Some("n2"));
+        assert_eq!(blocker.label.as_deref(), Some("Deux (muet)"));
+        // A linear story names nothing.
+        set_structure(&db, &id, &[("n1", "Un")]);
+        assert_eq!(
+            read_presentation(&db, &id, None).unwrap().linear_blocker,
+            None
+        );
+    }
+
+    #[test]
     fn a_story_with_choices_has_no_announcements_to_plan() {
         let mut db = fresh_db();
         let id = story(&mut db, "Aventure");
@@ -845,6 +920,9 @@ mod tests {
         let p = read_presentation(&db, &id, None).expect("read");
         assert!(!p.linear);
         assert!(p.chapters.is_empty());
+        let blocker = p.linear_blocker.expect("named");
+        assert_eq!(blocker.blocker, StoryPackBlocker::Branching);
+        assert_eq!(blocker.node_id.as_deref(), Some("n1"));
         let err = plan_announcements(&db, &id, "v", false).expect_err("not linear");
         assert_eq!(
             serde_json::to_value(&err).unwrap()["details"]["cause"],

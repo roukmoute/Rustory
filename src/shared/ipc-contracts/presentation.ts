@@ -26,6 +26,13 @@ export interface ChapterAnnouncementDto {
   assetId?: string;
 }
 
+/** Why the structure does not lay out as episodes, naming the node to fix. */
+export interface LinearBlockerDto {
+  reason: "empty" | "malformed" | "branching" | "missingAudio";
+  nodeId?: string;
+  label?: string;
+}
+
 export interface StoryPresentationDto {
   layout: StoryLayout;
   /** The voice the stored announcements were generated with. */
@@ -36,6 +43,8 @@ export interface StoryPresentationDto {
   /** `true` iff the structure lays out as episodes (announcements make
    *  sense); `false` for a story with choices or without audio. */
   linear: boolean;
+  /** When `linear` is false: the reason and the first node to fix. */
+  linearBlocker?: LinearBlockerDto;
   title: AnnouncementDto;
   question: AnnouncementDto;
   chapters: ChapterAnnouncementDto[];
@@ -102,6 +111,12 @@ export interface VoicePreviewDto {
 const LAYOUTS: ReadonlySet<string> = new Set(["sequential", "menu"]);
 const STATUSES: ReadonlySet<string> = new Set(["ready", "stale", "missing"]);
 const ENGINES: ReadonlySet<string> = new Set(["system", "embedded"]);
+const LINEAR_REASONS: ReadonlySet<string> = new Set([
+  "empty",
+  "malformed",
+  "branching",
+  "missingAudio",
+]);
 const EMBEDDED_STATES: ReadonlySet<string> = new Set([
   "unsupported",
   "notInstalled",
@@ -145,6 +160,16 @@ export function isStoryLayout(value: unknown): value is StoryLayout {
   return typeof value === "string" && LAYOUTS.has(value);
 }
 
+function isLinearBlocker(value: unknown): value is LinearBlockerDto {
+  if (!isRecord(value)) return false;
+  return (
+    typeof value.reason === "string" &&
+    LINEAR_REASONS.has(value.reason) &&
+    isOptionalString(value.nodeId) &&
+    isOptionalString(value.label)
+  );
+}
+
 export function isStoryPresentationDto(
   value: unknown,
 ): value is StoryPresentationDto {
@@ -154,6 +179,7 @@ export function isStoryPresentationDto(
     isOptionalString(value.voiceId) &&
     typeof value.archiveRetained === "boolean" &&
     typeof value.linear === "boolean" &&
+    (value.linearBlocker === undefined || isLinearBlocker(value.linearBlocker)) &&
     isAnnouncement(value.title) &&
     isAnnouncement(value.question) &&
     Array.isArray(value.chapters) &&

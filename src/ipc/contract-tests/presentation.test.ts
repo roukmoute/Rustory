@@ -73,6 +73,16 @@ describe("presentation guards", () => {
       }),
     ).toBe(false);
     expect(isStoryPresentationDto({ ...PRESENTATION, linear: "yes" })).toBe(false);
+    expect(
+      isStoryPresentationDto({
+        ...PRESENTATION,
+        linear: false,
+        linearBlocker: { reason: "missingAudio", nodeId: "n2", label: "Deux" },
+      }),
+    ).toBe(true);
+    expect(
+      isStoryPresentationDto({ ...PRESENTATION, linearBlocker: { reason: "tooLong" } }),
+    ).toBe(false);
 
     expect(isAnnouncementVoicesDto(VOICES)).toBe(true);
     for (const state of ["unsupported", "notInstalled", "installing", "installed"]) {

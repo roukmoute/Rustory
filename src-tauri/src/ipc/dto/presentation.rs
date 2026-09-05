@@ -5,10 +5,11 @@
 use serde::{Deserialize, Serialize};
 
 use crate::application::story::presentation::{
-    Announcement, AnnouncementStatus, ChapterAnnouncement, StoryPresentation,
+    Announcement, AnnouncementStatus, ChapterAnnouncement, LinearBlocker, StoryPresentation,
 };
 use crate::domain::device::StoryLayout;
 use crate::infrastructure::speech::{EmbeddedVoiceStatus, Voice, VoiceEngine};
+use crate::ipc::dto::SendBlockerDto;
 
 /// `sequential` | `menu` — see `StoryLayout`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -108,9 +109,33 @@ pub struct StoryPresentationDto {
     /// `true` iff the structure lays out as episodes (announcements make
     /// sense); `false` for a story with choices or without audio.
     pub linear: bool,
+    /// When `linear` is false: the reason, and the first node to fix.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub linear_blocker: Option<LinearBlockerDto>,
     pub title: AnnouncementDto,
     pub question: AnnouncementDto,
     pub chapters: Vec<ChapterAnnouncementDto>,
+}
+
+/// Why the structure does not lay out as episodes, naming the node to fix.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LinearBlockerDto {
+    pub reason: SendBlockerDto,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub node_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+}
+
+impl LinearBlockerDto {
+    fn from_domain(blocker: &LinearBlocker) -> Self {
+        Self {
+            reason: SendBlockerDto::from_domain(blocker.blocker),
+            node_id: blocker.node_id.clone(),
+            label: blocker.label.clone(),
+        }
+    }
 }
 
 impl StoryPresentationDto {
@@ -120,6 +145,10 @@ impl StoryPresentationDto {
             voice_id: presentation.voice_id.clone(),
             archive_retained,
             linear: presentation.linear,
+            linear_blocker: presentation
+                .linear_blocker
+                .as_ref()
+                .map(LinearBlockerDto::from_domain),
             title: AnnouncementDto::from_domain(&presentation.title),
             question: AnnouncementDto::from_domain(&presentation.question),
             chapters: presentation
@@ -285,6 +314,7 @@ mod tests {
             voice_id: Some("system:say:Thomas".into()),
             archive_retained: false,
             linear: true,
+            linear_blocker: None,
             title: AnnouncementDto {
                 spoken_text: "Série.".into(),
                 status: AnnouncementStatusDto::Ready,
@@ -315,6 +345,22 @@ mod tests {
         assert!(
             v.to_string().find("spoken_text").is_none(),
             "no snake_case on the wire"
+        );
+        assert!(v.get("linearBlocker").is_none(), "absent when linear");
+        let blocked = StoryPresentationDto {
+            linear: false,
+            linear_blocker: Some(LinearBlockerDto::from_domain(&LinearBlocker {
+                blocker: crate::domain::device::StoryPackBlocker::MissingAudio,
+                node_id: Some("n2".into()),
+                label: Some("Deux".into()),
+            })),
+            chapters: Vec::new(),
+            ..dto
+        };
+        let v = serde_json::to_value(&blocked).unwrap();
+        assert_eq!(
+            v["linearBlocker"],
+            serde_json::json!({ "reason": "missingAudio", "nodeId": "n2", "label": "Deux" })
         );
     }
 

@@ -10,6 +10,7 @@ import { readNodeMedia } from "../../../ipc/commands/story";
 import { toAppError } from "../../../shared/errors/app-error";
 import type {
   AnnouncementStatus,
+  LinearBlockerDto,
   StoryLayout,
   StoryPresentationDto,
 } from "../../../shared/ipc-contracts/presentation";
@@ -32,6 +33,8 @@ const ARCHIVE_NOTE =
   "Cette histoire est envoyée telle quelle depuis son archive d'origine : la présentation ci-dessous ne s'applique pas à l'envoi.";
 const NOT_LINEAR_NOTE =
   "La présentation au choix demande un audio sur chaque épisode et aucun choix dans l'histoire.";
+const EDIT_LOCKED_NOTE =
+  "Présentation verrouillée tant que l'histoire n'est pas modifiable (restauration en attente).";
 const LAYOUT_LEGEND = "Comment la Lunii joue cette histoire";
 const SEQUENTIAL_LABEL = "À la suite";
 const SEQUENTIAL_HINT = "Les épisodes s'enchaînent dans l'ordre.";
@@ -52,6 +55,42 @@ type PresentationRead =
   | { kind: "loading" }
   | { kind: "loaded"; data: StoryPresentationDto }
   | { kind: "unavailable" };
+
+/** The precise, actionable reason « Au choix » is unavailable. */
+function notLinearReason(blocker: LinearBlockerDto | undefined): string {
+  if (blocker === undefined) return NOT_LINEAR_NOTE;
+  const name =
+    blocker.label !== undefined && blocker.label.trim().length > 0
+      ? `« ${blocker.label} »`
+      : blocker.nodeId !== undefined
+        ? `« ${blocker.nodeId} »`
+        : "un épisode";
+  switch (blocker.reason) {
+    case "missingAudio":
+      return `« Au choix » indisponible : l'épisode ${name} n'a pas d'audio. Ajoute-lui un audio depuis « Structure de l'histoire ».`;
+    case "branching":
+      return `« Au choix » indisponible : l'épisode ${name} propose des choix. Retire ses options pour une lecture par épisodes.`;
+    case "empty":
+      return "« Au choix » indisponible : l'histoire n'a aucun épisode.";
+    case "malformed":
+      return "« Au choix » indisponible : la structure de l'histoire est illisible.";
+  }
+}
+
+/** One line: how many clips are ready / to redo / missing. */
+function announcementSummary(data: StoryPresentationDto): string {
+  const all = [data.title, data.question, ...data.chapters];
+  const count = (status: AnnouncementStatus): number =>
+    all.filter((a) => a.status === status).length;
+  const parts: string[] = [];
+  const ready = count("ready");
+  const stale = count("stale");
+  const missing = count("missing");
+  if (ready > 0) parts.push(`${ready} prête${ready > 1 ? "s" : ""}`);
+  if (stale > 0) parts.push(`${stale} à régénérer`);
+  if (missing > 0) parts.push(`${missing} manquante${missing > 1 ? "s" : ""}`);
+  return `${all.length} annonces : ${parts.join(", ")}`;
+}
 
 function statusChip(status: AnnouncementStatus): {
   tone: StateChipTone;
@@ -220,15 +259,24 @@ export function StoryPresentationPanel({
             </label>
             {!read.data.linear && (
               <p className="story-presentation__state" role="status">
-                {NOT_LINEAR_NOTE}
+                {notLinearReason(read.data.linearBlocker)}
               </p>
             )}
           </fieldset>
+          {!editable && (
+            <p className="story-presentation__state" role="status">
+              {EDIT_LOCKED_NOTE}
+            </p>
+          )}
 
           {read.data.layout === "menu" && read.data.linear && (
             <div className="story-presentation__announcements">
               <h3 className="story-presentation__subtitle">{ANNOUNCEMENTS_TITLE}</h3>
               <p className="story-presentation__lead">{ANNOUNCEMENTS_LEAD}</p>
+              <details className="story-presentation__details">
+                <summary className="story-presentation__summary">
+                  {announcementSummary(read.data)}
+                </summary>
               <ul className="story-presentation__list" aria-label="Annonces">
                 {[
                   { key: "title", row: TITLE_ROW, announcement: read.data.title },
@@ -264,6 +312,7 @@ export function StoryPresentationPanel({
                   );
                 })}
               </ul>
+              </details>
               {generating !== null ? (
                 <ProgressIndicator
                   mode="determinate"

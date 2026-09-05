@@ -301,6 +301,20 @@ export function StoryEditorShell({
           device-pack story (titleOnly scope) the navigator is NOT mounted at
           all: its placeholder graph would be a lying projection of the
           binary pack, so a short named state replaces the zone (AC2). */}
+      {/* How the Lunii plays this story (sequence or spoken menu) and the
+          menu's announcements — ABOVE the structure, where the eye lands
+          first (a long story must not hide it at the bottom). A device-pack
+          story carries its own pack: nothing to present here. */}
+      {!packScoped && (
+        <StoryPresentationPanel
+          storyId={detail.id}
+          editable={detail.editable && !recoveryActive}
+          structureKey={JSON.stringify(
+            detail.structure?.nodes.map((node) => [node.id, node.label]) ?? [],
+          )}
+        />
+      )}
+
       <div className="story-editor-shell__zones">
         {packScoped ? (
           <section
@@ -403,19 +417,6 @@ export function StoryEditorShell({
           />
         </StoryNodeEditorHost>
       </div>
-
-      {/* How the Lunii plays this story (sequence or spoken menu) and the
-          menu's announcements. A device-pack story carries its own pack:
-          nothing to present here. */}
-      {!packScoped && (
-        <StoryPresentationPanel
-          storyId={detail.id}
-          editable={detail.editable && !recoveryActive}
-          structureKey={JSON.stringify(
-            detail.structure?.nodes.map((node) => [node.id, node.label]) ?? [],
-          )}
-        />
-      )}
 
       <section className="story-editor-shell__actions-region">
         <ExportStatusSurface
