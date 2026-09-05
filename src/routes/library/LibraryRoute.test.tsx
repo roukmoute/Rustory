@@ -1,6 +1,7 @@
 import { StrictMode } from "react";
 import {
   act,
+  cleanup,
   fireEvent,
   render,
   screen,
@@ -20,6 +21,7 @@ const mockDevice = vi.fn();
 const mockDeviceLibrary = vi.fn();
 const mockImport = vi.fn();
 const mockDeleteDevice = vi.fn();
+const mockReorder = vi.fn();
 const mockSendPack = vi.fn();
 const mockTransferPreview = vi.fn();
 const mockStoryValidation = vi.fn();
@@ -185,6 +187,16 @@ vi.mock("../../ipc/commands/device-delete", async () => {
   };
 });
 
+vi.mock("../../ipc/commands/device-reorder", async () => {
+  const actual = await vi.importActual<
+    typeof import("../../ipc/commands/device-reorder")
+  >("../../ipc/commands/device-reorder");
+  return {
+    ...actual,
+    reorderDeviceStories: (input: unknown) => mockReorder(input),
+  };
+});
+
 vi.mock("../../ipc/commands/device-send", async () => {
   const actual = await vi.importActual<
     typeof import("../../ipc/commands/device-send")
@@ -343,6 +355,7 @@ describe("<LibraryRoute />", () => {
     mockDeviceLibrary.mockResolvedValue({ kind: "none" });
     mockImport.mockReset();
     mockDeleteDevice.mockReset();
+    mockReorder.mockReset();
     mockSendPack.mockReset();
     // Default: the transfer-preview read folds away (noDevice) so the
     // comparison stays sober unless a test opts into a readable comparison.
@@ -1833,6 +1846,7 @@ describe("<LibraryRoute />", () => {
         writeStory: false,
         deleteStory: false,
         sendArchive: false,
+        reorderStories: false,
       },
     });
     renderLibrary();
@@ -2065,6 +2079,7 @@ describe("<LibraryRoute />", () => {
         writeStory: false,
         deleteStory: false,
         sendArchive: false,
+        reorderStories: false,
       },
     });
     renderLibrary();
@@ -2122,6 +2137,7 @@ describe("<LibraryRoute />", () => {
       writeStory: false,
       deleteStory: false,
       sendArchive: false,
+      reorderStories: false,
     },
   };
 
@@ -2173,7 +2189,8 @@ describe("<LibraryRoute />", () => {
       '{"kind":"supported","family":"flam","firmwareCohort":"flamGen1",' +
         '"deviceIdentifier":"fedcba9876543210fedcba9876543210",' +
         '"supportedOperations":{"readLibrary":true,"inspectStory":true,' +
-        '"importStory":true,"writeStory":false}}',
+        '"importStory":true,"writeStory":false,"deleteStory":false,' +
+        '"sendArchive":false,"reorderStories":false}}',
     ) as ConnectedDeviceDto;
     mockGet.mockResolvedValueOnce({
       stories: [{ id: "s1", title: "Le soleil" }],
@@ -2405,6 +2422,7 @@ describe("<LibraryRoute />", () => {
         writeStory: false,
         deleteStory: false,
         sendArchive: false,
+        reorderStories: false,
       },
     });
     mockDeviceLibrary.mockResolvedValue(readableTwo);
@@ -2480,6 +2498,7 @@ describe("<LibraryRoute />", () => {
       writeStory: false,
       deleteStory: false,
       sendArchive: false,
+      reorderStories: false,
     },
   };
 
@@ -2585,6 +2604,7 @@ describe("<LibraryRoute />", () => {
         ...supportedV3.supportedOperations,
         deleteStory: true,
         sendArchive: false,
+        reorderStories: true,
       },
     };
     mockDevice.mockResolvedValue(deletableV3);
@@ -2598,9 +2618,11 @@ describe("<LibraryRoute />", () => {
     const main = await screen.findByRole("main", {
       name: /collection d'histoires/i,
     });
+    // The reorder arrows are also named by the identifier: pick the CARD
+    // (the pressable entry), not an arrow.
     await user.click(
       await within(main).findByRole("button", {
-        name: /identifiant 0000abcd/i,
+        name: /^histoire non reconnue, identifiant 0000abcd/i,
       }),
     );
     const inspector = screen.getByRole("region", {
@@ -2630,8 +2652,116 @@ describe("<LibraryRoute />", () => {
     );
     await waitFor(() =>
       expect(
-        within(main).queryByRole("button", { name: /identifiant 0000abcd/i }),
+        within(main).queryByRole("button", {
+          name: /^histoire non reconnue, identifiant 0000abcd/i,
+        }),
       ).not.toBeInTheDocument(),
+    );
+  });
+
+  it("moves a device story with the arrows, writes the new order and re-reads the inventory", async () => {
+    const user = userEvent.setup();
+    mockGet.mockResolvedValue({ stories: [] });
+    const reorderableV3 = {
+      ...supportedV3,
+      supportedOperations: {
+        ...supportedV3.supportedOperations,
+        reorderStories: true,
+      },
+    };
+    mockDevice.mockResolvedValue(reorderableV3);
+    const swapped = {
+      ...readableTwo,
+      stories: [readableTwo.stories[1], readableTwo.stories[0]],
+    };
+    mockDeviceLibrary
+      .mockResolvedValueOnce(readableTwo)
+      .mockResolvedValue(swapped);
+    mockReorder.mockResolvedValue({ count: 2, changed: true });
+    renderLibrary();
+
+    const main = await screen.findByRole("main", {
+      name: /collection d'histoires/i,
+    });
+    // Arrows carry the entry's name; the edges are disabled.
+    const downFirst = await within(main).findByRole("button", {
+      name: "Descendre — Histoire non reconnue, identifiant 0000ABCD",
+    });
+    expect(
+      within(main).getByRole("button", {
+        name: "Monter — Histoire non reconnue, identifiant 0000ABCD",
+      }),
+    ).toBeDisabled();
+    await user.click(downFirst);
+
+    // The COMPLETE visible order is written, then the device is re-read: the
+    // list follows the device's own order (no optimistic reordering).
+    await waitFor(() =>
+      expect(mockReorder).toHaveBeenCalledWith({
+        deviceIdentifier: reorderableV3.deviceIdentifier,
+        orderedPackUuids: ["u2", "u1"],
+      }),
+    );
+    await waitFor(() => {
+      const names = within(main)
+        .getAllByRole("button", { name: /^Monter — / })
+        .map((b) => b.getAttribute("aria-label"));
+      expect(names).toEqual([
+        "Monter — Histoire non reconnue, identifiant 0000BEEF",
+        "Monter — Histoire non reconnue, identifiant 0000ABCD",
+      ]);
+    });
+  });
+
+  it("keeps the arrows away when the device profile closes the reorder, and surfaces a refused move", async () => {
+    const user = userEvent.setup();
+    mockGet.mockResolvedValue({ stories: [] });
+    mockDevice.mockResolvedValue(supportedV3);
+    mockDeviceLibrary.mockResolvedValue(readableTwo);
+    renderLibrary();
+    const main = await screen.findByRole("main", {
+      name: /collection d'histoires/i,
+    });
+    await within(main).findByRole("button", { name: /identifiant 0000abcd/i });
+    expect(
+      within(main).queryByRole("button", { name: /^Descendre — / }),
+    ).not.toBeInTheDocument();
+    expect(mockReorder).not.toHaveBeenCalled();
+
+    // Same route, a reorderable profile whose device refuses the write
+    // (its list changed since the read): the refusal is shown in-context
+    // with the re-read hint, and the list stays as read.
+    mockDevice.mockResolvedValue({
+      ...supportedV3,
+      supportedOperations: {
+        ...supportedV3.supportedOperations,
+        reorderStories: true,
+      },
+    });
+    mockReorder.mockRejectedValue({
+      code: "DEVICE_WRITE_FAILED",
+      message:
+        "Réorganisation impossible: la liste des histoires de l'appareil a changé entre-temps.",
+      userAction:
+        "Relance la lecture de l'appareil, puis déplace à nouveau l'histoire.",
+      details: { source: "reorder_diverged", cause: "diverged" },
+    });
+    cleanup();
+    renderLibrary();
+    const main2 = await screen.findByRole("main", {
+      name: /collection d'histoires/i,
+    });
+    await user.click(
+      await within(main2).findByRole("button", {
+        name: "Descendre — Histoire non reconnue, identifiant 0000ABCD",
+      }),
+    );
+    const alert = await within(main2).findByRole("alert");
+    expect(alert).toHaveTextContent(/a changé entre-temps/);
+    expect(alert).toHaveTextContent(/relance la lecture de l'appareil/i);
+    await user.click(within(alert).getByRole("button", { name: /fermer/i }));
+    await waitFor(() =>
+      expect(within(main2).queryByRole("alert")).not.toBeInTheDocument(),
     );
   });
 
@@ -2648,6 +2778,7 @@ describe("<LibraryRoute />", () => {
       supportedOperations: {
         ...supportedV3.supportedOperations,
         sendArchive: true,
+        reorderStories: false,
       },
     };
     mockDevice.mockResolvedValue(sendableV3);
@@ -2705,6 +2836,7 @@ describe("<LibraryRoute />", () => {
       supportedOperations: {
         ...supportedV3.supportedOperations,
         sendArchive: true,
+        reorderStories: false,
       },
     };
     mockDevice.mockResolvedValue(sendableV3);
@@ -3313,6 +3445,7 @@ describe("<LibraryRoute />", () => {
         writeStory: false,
         deleteStory: false,
         sendArchive: false,
+        reorderStories: false,
       },
     });
     renderLibrary();
@@ -3516,6 +3649,7 @@ describe("<LibraryRoute />", () => {
         writeStory: false,
         deleteStory: false,
         sendArchive: false,
+        reorderStories: false,
       },
     });
     renderLibrary();
@@ -3717,7 +3851,7 @@ describe("<LibraryRoute />", () => {
         '"deviceIdentifier":"fedcba9876543210fedcba9876543210",' +
         '"supportedOperations":{"readLibrary":true,"inspectStory":true,' +
         '"importStory":true,"writeStory":false,"deleteStory":false,' +
-        '"sendArchive":false}}',
+        '"sendArchive":false,"reorderStories":false}}',
     ) as ConnectedDeviceDto;
     const mapped = mapDeviceForPanel({ kind: "ready", device: flamDto }, false);
     expect(mapped.deviceState).toBe("idle");
@@ -3730,6 +3864,7 @@ describe("<LibraryRoute />", () => {
       writeStory: false,
       deleteStory: false,
       sendArchive: false,
+      reorderStories: false,
     });
   });
 
@@ -3745,6 +3880,7 @@ describe("<LibraryRoute />", () => {
       writeStory: true,
       deleteStory: false,
       sendArchive: false,
+      reorderStories: false,
     },
   };
 

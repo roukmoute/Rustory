@@ -111,6 +111,7 @@ describe("<LuniiDecisionPanel />", () => {
       writeStory: false,
       deleteStory: false,
       sendArchive: false,
+      reorderStories: false,
     };
 
     it("renders the STATIC 'Appareil reconnu — …' chip instead of 'Appareil prêt' (recognized ≠ ready)", () => {
@@ -191,6 +192,7 @@ describe("<LuniiDecisionPanel />", () => {
             writeStory: false,
             deleteStory: false,
             sendArchive: false,
+            reorderStories: false,
           }}
           deviceFamily="flam"
           onEdit={noop}
@@ -224,6 +226,7 @@ describe("<LuniiDecisionPanel />", () => {
             writeStory: false,
             deleteStory: false,
             sendArchive: false,
+            reorderStories: false,
           }}
           deviceFamily="lunii"
           onEdit={noop}
@@ -276,6 +279,7 @@ describe("<LuniiDecisionPanel />", () => {
             writeStory: false,
             deleteStory: false,
             sendArchive: false,
+            reorderStories: false,
           }}
           deviceFamily="lunii"
           onEdit={noop}
@@ -327,6 +331,7 @@ describe("<LuniiDecisionPanel />", () => {
       writeStory: false,
       deleteStory: false,
       sendArchive: false,
+      reorderStories: false,
     };
 
     it("renders 'Appareil prêt — FLAM' through the EXISTING hasAnyCapability rule", () => {
@@ -481,6 +486,7 @@ describe("<LuniiDecisionPanel />", () => {
             writeStory: true,
             deleteStory: false,
             sendArchive: false,
+            reorderStories: false,
           }}
           deviceFamily="lunii"
           comparison={{ kind: "none", reason: "no-device" }}
@@ -522,6 +528,7 @@ describe("<LuniiDecisionPanel />", () => {
             writeStory: true,
             deleteStory: false,
             sendArchive: false,
+            reorderStories: false,
           }}
           deviceFamily="lunii"
           transfer={{
@@ -721,6 +728,7 @@ describe("<LuniiDecisionPanel />", () => {
           writeStory: false,
           deleteStory: false,
           sendArchive: false,
+          reorderStories: false,
         }}
         onEdit={noop}
       />,

@@ -26,6 +26,7 @@ const validSupported = {
     writeStory: false,
     deleteStory: false,
     sendArchive: false,
+    reorderStories: false,
   },
 };
 

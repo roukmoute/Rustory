@@ -63,6 +63,7 @@ pub struct DeviceOperationsSupport {
     pub write_story: OperationSupport,
     pub delete_story: OperationSupport,
     pub send_archive: OperationSupport,
+    pub reorder_stories: OperationSupport,
 }
 
 impl DeviceOperationsSupport {
@@ -75,6 +76,7 @@ impl DeviceOperationsSupport {
             SupportedOperation::WriteStory => self.write_story,
             SupportedOperation::DeleteStory => self.delete_story,
             SupportedOperation::SendArchive => self.send_archive,
+            SupportedOperation::ReorderStories => self.reorder_stories,
         }
     }
 
@@ -89,6 +91,7 @@ impl DeviceOperationsSupport {
             write_story: self.write_story.is_available(),
             delete_story: self.delete_story.is_available(),
             send_archive: self.send_archive.is_available(),
+            reorder_stories: self.reorder_stories.is_available(),
         }
     }
 }
@@ -142,6 +145,8 @@ const OFFICIAL_DEVICE_SUPPORT_MATRIX: &[DeviceSupportLine] = &[
             send_archive: OperationSupport::NotAvailable {
                 reason: V1_V2_ARCHIVE_CIPHER_REASON,
             },
+            // The `.pi` index is written by every transfer on these cohorts.
+            reorder_stories: OperationSupport::Available,
         },
     },
     // Lunii Mid-Gen v2 (metadata v6) ✅✅✅✅ — same round-trip write
@@ -159,6 +164,8 @@ const OFFICIAL_DEVICE_SUPPORT_MATRIX: &[DeviceSupportLine] = &[
             send_archive: OperationSupport::NotAvailable {
                 reason: V1_V2_ARCHIVE_CIPHER_REASON,
             },
+            // The `.pi` index is written by every transfer on these cohorts.
+            reorder_stories: OperationSupport::Available,
         },
     },
     // Lunii V3 (metadata v7) ✅✅❌❌ — reverse engineering is still
@@ -192,6 +199,8 @@ const OFFICIAL_DEVICE_SUPPORT_MATRIX: &[DeviceSupportLine] = &[
             // device's `.md`, transcoder, atomic on-volume writer) is
             // validated byte-for-byte against real hardware.
             send_archive: OperationSupport::Available,
+            // The `.pi` index rewrite is the delete path's proven step.
+            reorder_stories: OperationSupport::Available,
         },
     },
     // FLAM Gen1 (no documented metadata version — none is invented)
@@ -220,6 +229,9 @@ const OFFICIAL_DEVICE_SUPPORT_MATRIX: &[DeviceSupportLine] = &[
             // The archive-send pipeline is Lunii-V3-specific (AES `.md`
             // key, `.content` layout) — nothing exists for FLAM.
             send_archive: OperationSupport::NotAvailable {
+                reason: FLAM_WRITE_UNPROVEN_REASON,
+            },
+            reorder_stories: OperationSupport::NotAvailable {
                 reason: FLAM_WRITE_UNPROVEN_REASON,
             },
         },
@@ -262,13 +274,14 @@ pub fn supported_operations_for(cohort: FirmwareCohort) -> SupportedOperations {
 mod tests {
     use super::*;
 
-    const ALL_OPERATIONS: [SupportedOperation; 6] = [
+    const ALL_OPERATIONS: [SupportedOperation; 7] = [
         SupportedOperation::ReadLibrary,
         SupportedOperation::InspectStory,
         SupportedOperation::ImportStory,
         SupportedOperation::WriteStory,
         SupportedOperation::DeleteStory,
         SupportedOperation::SendArchive,
+        SupportedOperation::ReorderStories,
     ];
 
     // ===== The official matrix — one line = one test, every cell
@@ -477,6 +490,7 @@ mod tests {
             write_story: OperationSupport::NotAvailable { reason: "why" },
             delete_story: OperationSupport::Available,
             send_archive: OperationSupport::NotAvailable { reason: "why" },
+            reorder_stories: OperationSupport::NotAvailable { reason: "why" },
         };
         let ops = support.operations();
         assert!(ops.read_library);
@@ -496,6 +510,7 @@ mod tests {
             write_story: OperationSupport::Available,
             delete_story: OperationSupport::Available,
             send_archive: OperationSupport::NotAvailable { reason: "closed" },
+            reorder_stories: OperationSupport::NotAvailable { reason: "closed" },
         };
         assert!(support
             .support_for(SupportedOperation::DeleteStory)
@@ -535,6 +550,7 @@ mod tests {
                 write_story: OperationSupport::NotAvailable { reason: "custom" },
                 delete_story: OperationSupport::NotAvailable { reason: "custom" },
                 send_archive: OperationSupport::NotAvailable { reason: "custom" },
+                reorder_stories: OperationSupport::NotAvailable { reason: "custom" },
             },
         }];
         let ops = supported_operations_in(&matrix, FirmwareCohort::Lunii(LuniiFirmwareCohort::V3));
@@ -561,6 +577,7 @@ mod tests {
                 write_story: OperationSupport::NotAvailable { reason: "unproven" },
                 delete_story: OperationSupport::NotAvailable { reason: "unproven" },
                 send_archive: OperationSupport::NotAvailable { reason: "unproven" },
+                reorder_stories: OperationSupport::NotAvailable { reason: "unproven" },
             },
         }];
         assert_eq!(

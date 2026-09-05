@@ -596,3 +596,98 @@ describe("<DeviceStoryCollection />", () => {
     expect(heading).not.toHaveFocus();
   });
 });
+
+describe("<DeviceStoryCollection /> — order on the device", () => {
+  const readyThree = {
+    kind: "ready" as const,
+    deviceIdentifier: "0123456789abcdef0123456789abcdef",
+    stories: [
+      makeStory({ uuid: "u1", shortId: "0000ABCD", title: "Premier" }),
+      makeStory({ uuid: "u2", shortId: "0000BEEF", hidden: true, title: "Caché" }),
+      makeStory({ uuid: "u3", shortId: "0000F00D", title: "Dernier" }),
+    ],
+  };
+
+  it("offers no arrows at all when the device cannot be reordered", () => {
+    renderState(readyThree);
+    expect(screen.queryByRole("button", { name: /^monter/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /^descendre/i })).not.toBeInTheDocument();
+  });
+
+  it("moves visible stories one step with named arrows, never a hidden one", async () => {
+    const onMoveStory = vi.fn();
+    render(
+      <DeviceStoryCollection
+        state={readyThree}
+        isRefreshing={false}
+        onRetry={() => {}}
+        onMoveStory={onMoveStory}
+      />,
+    );
+    // The hidden entry lives in another file: no arrows for it.
+    expect(screen.queryByRole("button", { name: /caché/i })).not.toBeInTheDocument();
+    // Edges are disabled: the first cannot go up, the last cannot go down.
+    expect(screen.getByRole("button", { name: "Monter — Premier" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Descendre — Dernier" })).toBeDisabled();
+
+    await userEvent.click(screen.getByRole("button", { name: "Descendre — Premier" }));
+    await userEvent.click(screen.getByRole("button", { name: "Monter — Dernier" }));
+    expect(onMoveStory.mock.calls).toEqual([
+      ["u1", 1],
+      ["u3", -1],
+    ]);
+  });
+
+  it("freezes every arrow while a move is being written, then surfaces a refusal", async () => {
+    const onDismissMoveError = vi.fn();
+    const { rerender } = render(
+      <DeviceStoryCollection
+        state={readyThree}
+        isRefreshing={false}
+        onRetry={() => {}}
+        onMoveStory={() => {}}
+        movingUuid="u1"
+      />,
+    );
+    for (const name of ["Descendre — Premier", "Monter — Dernier"]) {
+      expect(screen.getByRole("button", { name })).toBeDisabled();
+    }
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+
+    // Still frozen while the inventory is being re-read after the write: a
+    // second move computed on the stale order would mislead.
+    rerender(
+      <DeviceStoryCollection
+        state={readyThree}
+        isRefreshing={true}
+        onRetry={() => {}}
+        onMoveStory={() => {}}
+      />,
+    );
+    for (const name of ["Descendre — Premier", "Monter — Dernier"]) {
+      expect(screen.getByRole("button", { name })).toBeDisabled();
+    }
+
+    rerender(
+      <DeviceStoryCollection
+        state={readyThree}
+        isRefreshing={false}
+        onRetry={() => {}}
+        onMoveStory={() => {}}
+        moveError={{
+          code: "DEVICE_WRITE_FAILED",
+          message: "Réorganisation impossible: la liste des histoires de l'appareil a changé entre-temps.",
+          userAction: "Relance la lecture de l'appareil, puis déplace à nouveau l'histoire.",
+          details: null,
+        }}
+        onDismissMoveError={onDismissMoveError}
+      />,
+    );
+    const alert = screen.getByRole("alert");
+    expect(alert).toHaveTextContent(/a changé entre-temps/);
+    expect(alert).toHaveTextContent(/relance la lecture de l'appareil/i);
+    expect(screen.getByRole("button", { name: "Descendre — Premier" })).toBeEnabled();
+    await userEvent.click(within(alert).getByRole("button", { name: /fermer/i }));
+    expect(onDismissMoveError).toHaveBeenCalledTimes(1);
+  });
+});

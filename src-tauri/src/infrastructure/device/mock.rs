@@ -10,6 +10,7 @@ use super::catalog_source::OfficialCatalogSource;
 use super::deleter::{DeleteFailure, DeleteOutcome, DevicePackDeleter};
 use super::library_reader::DeviceLibraryReader;
 use super::pack_reader::{AcquiredPack, DevicePackReader};
+use super::reorderer::{DevicePackReorderer, ReorderFailure, ReorderOutcome};
 use super::rss_source::RssFeedSource;
 use super::scanner::{CandidateFacts, DeviceCandidate, DeviceScanReport, DeviceScanner};
 use super::writer::{DevicePackWriter, WriteFailure, WriteProgress};
@@ -843,6 +844,62 @@ impl DevicePackDeleter for MockDevicePackDeleter {
         match script {
             DeleteScript::Success(outcome) => Ok(outcome),
             DeleteScript::Failure(failure) => Err(failure),
+        }
+    }
+}
+
+/// Programmable mock for the device reorder path. Records the call count
+/// (so a test can prove the capability gate blocked the reorder) and the
+/// order it was asked to write; returns the next scripted outcome (FIFO),
+/// an empty queue succeeding as [`ReorderOutcome::Reordered`].
+#[derive(Clone, Default)]
+pub struct MockDevicePackReorderer {
+    queue: Arc<Mutex<Vec<Result<ReorderOutcome, ReorderFailure>>>>,
+    calls: Arc<Mutex<u32>>,
+    orders: Arc<Mutex<Vec<Vec<String>>>>,
+}
+
+impl MockDevicePackReorderer {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn enqueue(&self, outcome: Result<ReorderOutcome, ReorderFailure>) {
+        self.queue
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .push(outcome);
+    }
+
+    pub fn call_count(&self) -> u32 {
+        *self.calls.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    /// The orders this mock was asked to write, in call order.
+    pub fn orders(&self) -> Vec<Vec<String>> {
+        self.orders
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
+    }
+}
+
+impl DevicePackReorderer for MockDevicePackReorderer {
+    fn reorder_packs(
+        &self,
+        _mount_path: &Path,
+        ordered_pack_uuids: &[String],
+    ) -> Result<ReorderOutcome, ReorderFailure> {
+        *self.calls.lock().unwrap_or_else(|p| p.into_inner()) += 1;
+        self.orders
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .push(ordered_pack_uuids.to_vec());
+        let mut g = self.queue.lock().unwrap_or_else(|p| p.into_inner());
+        if g.is_empty() {
+            Ok(ReorderOutcome::Reordered)
+        } else {
+            g.remove(0)
         }
     }
 }

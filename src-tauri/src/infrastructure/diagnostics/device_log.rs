@@ -149,6 +149,23 @@ pub enum Event {
         source: &'static str,
         elapsed_ms: u64,
     },
+    /// The device's stories were reordered (its `.pi` index rewritten in
+    /// the requested order). `changed` is `false` for an already-listed
+    /// order (nothing written).
+    DeviceStoriesReordered {
+        family: &'static str,
+        firmware_cohort: &'static str,
+        count: u32,
+        changed: bool,
+        elapsed_ms: u64,
+    },
+    /// A device reorder failed. `source` is the closed reorder taxonomy
+    /// (`device_changed`, `capability_gate`, `reorder_diverged`,
+    /// `reorder_rejected`, `spawn_blocking_join`, `other`).
+    DeviceStoriesReorderFailed {
+        source: &'static str,
+        elapsed_ms: u64,
+    },
     /// A pack archive (`.zip`) was sent to the device (transcoded, ciphered
     /// for its `.md` key, written atomically). Carries the family/cohort tags
     /// of the re-scanned profile and the pack's distinct asset COUNTS — never

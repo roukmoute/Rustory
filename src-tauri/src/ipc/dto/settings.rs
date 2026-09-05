@@ -109,6 +109,7 @@ pub fn operation_wire_tag(operation: SupportedOperation) -> &'static str {
         SupportedOperation::WriteStory => "writeStory",
         SupportedOperation::DeleteStory => "deleteStory",
         SupportedOperation::SendArchive => "sendArchive",
+        SupportedOperation::ReorderStories => "reorderStories",
     }
 }
 
@@ -131,6 +132,7 @@ pub fn device_capability_label(
         },
         SupportedOperation::DeleteStory => "Suppression sur l'appareil",
         SupportedOperation::SendArchive => "Envoi d'un pack (.zip)",
+        SupportedOperation::ReorderStories => "Réordonner les histoires sur l'appareil",
     }
 }
 

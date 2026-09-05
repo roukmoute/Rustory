@@ -39,6 +39,10 @@ pub struct AppState {
     /// Behind an `Arc` + `spawn_blocking` like the other device I/O; gated by
     /// the `delete_story` capability before any mutation.
     pub pack_deleter: std::sync::Arc<dyn infrastructure::device::DevicePackDeleter>,
+    /// Rewrites the device's `.pi` index in a new order (the wheel order).
+    /// Same `Arc` + `spawn_blocking` discipline; gated by the
+    /// `reorder_stories` capability before any mutation.
+    pub pack_reorderer: std::sync::Arc<dyn infrastructure::device::DevicePackReorderer>,
     /// Writes an assembled V3 pack to the device (staging on the volume →
     /// atomic promotion → fsync → `.pi`), used by the archive-send flow.
     /// Behind an `Arc` + `spawn_blocking` like the other device I/O; reached
@@ -509,6 +513,9 @@ pub fn run() {
                 pack_deleter: std::sync::Arc::new(
                     infrastructure::device::SystemDevicePackDeleter,
                 ),
+                pack_reorderer: std::sync::Arc::new(
+                    infrastructure::device::SystemDevicePackReorderer,
+                ),
                 pack_writer_v3: std::sync::Arc::new(
                     infrastructure::device::SystemDeviceV3PackWriter,
                 ),
@@ -622,6 +629,7 @@ pub fn run() {
             commands::story::record_node_draft,
             commands::story::remove_node_media,
             commands::story::remove_node_option,
+            commands::device::reorder_device_stories,
             commands::presentation::remove_story_announcement,
             commands::settings::restart_for_update,
             commands::device::send_pack_to_device,

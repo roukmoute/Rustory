@@ -387,6 +387,47 @@ incomplet` (no `.content/<shortId>` folder) chips surface structural facts —
 all non-color (ASCII-glyph chips). The recognized title and its provenance
 are also folded into each card's accessible name.
 
+### Order on the device (wheel order)
+
+The device plays its stories in the order of its visible index (the
+`.pi` order on a Lunii — the order the child scrolls through on the
+wheel). That order is **editable in place** on any supported profile whose
+`reorderStories` capability is `true` (every Lunii cohort; FLAM stays
+`false`, its index write being unproven). Each visible entry then carries
+two arrows, `Monter` (▲) and `Descendre` (▼), accessibly named after the
+entry (`Monter — <titre>`; an unrecognized pack is named `Histoire non
+reconnue, identifiant <shortId>` so every arrow name stays unique). The
+first entry's `Monter` and the last entry's `Descendre` are disabled; a
+`Masquée` entry (`.pi.hidden`) shows no arrow at all — it lives in another
+file and never takes part in the wheel order.
+
+One move = one write: the frontend hook `useDeviceStoryReorder` derives the
+COMPLETE new visible order (the moved uuid swapped with its neighbour) and
+sends it through `reorder_device_stories`. Rust re-scans the device,
+passes the `ReorderStories` gate, checks that the requested list is a strict
+permutation of the index it just read, and rewrites the index atomically
+under the mount lock (see
+[device-support-profile.md#Reordering the wheel order](./device-support-profile.md)).
+The list is **never reordered optimistically**: every arrow freezes while a
+move is in flight (`movingUuid`), a success triggers a re-read of the
+inventory so the list follows the device's own order, and a failure keeps the
+list exactly as read.
+
+| Move state | Center-column rendering | Notes |
+| --- | --- | --- |
+| moving | every arrow disabled | The list keeps its read order until the device confirms the write. |
+| reordered | list re-read | The moved entry appears at its new place only once the device says so. |
+| failed | inline `role="alert"` under the section heading: the refusal `message` + its `userAction`, with a `Fermer` gesture | Recoverable, in-context, never a toast; the list stays as read. |
+
+Refusals carry a stable `details.source`: `reorder_diverged` (the device's
+index changed between the read and the write — the message names it and the
+gesture asks to re-read the device, then move again), `reorder_rejected`
+(the index write itself was refused; `details.cause` mirrors the transfer
+write causes), `device_changed` (the re-scan no longer resolves to the
+requested device), or the `capability_gate` refusal for a profile whose
+reorder is closed. An order identical to the device's is answered
+`changed = false` and writes nothing.
+
 Error payloads under the read carry a stable `details.source`:
 
 - `fs_read` — index-file read failure. `details.kind` ∈ `permission_denied`, `not_found`, `timeout`, `interrupted`, `other` (a mid-read unplug typically surfaces as `not_found`).

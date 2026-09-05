@@ -2,7 +2,8 @@ import type React from "react";
 import { useLayoutEffect, useRef } from "react";
 
 import { LibraryErrorBanner } from "../../library/components/LibraryErrorBanner";
-import { ProgressIndicator, StateChip, SurfacePanel } from "../../../shared/ui";
+import { Button, ProgressIndicator, StateChip, SurfacePanel } from "../../../shared/ui";
+import type { AppError } from "../../../shared/errors/app-error";
 import type { DeviceStoryDto } from "../../../shared/ipc-contracts/device-library";
 import type { DeviceLibraryState } from "../hooks/use-device-library";
 import { usePackCover } from "../hooks/use-pack-cover";
@@ -37,6 +38,16 @@ export interface DeviceStoryCollectionProps {
   onSelectStory?: (uuid: string, mode: DeviceStorySelectionMode) => void;
   /** Re-run the device-library read (recovery action on the error state). */
   onRetry: () => void;
+  /** Move a VISIBLE story one step up (`-1`) or down (`+1`) on the device
+   *  wheel. Wired by the route only when the `reorderStories` capability is
+   *  open; absent → no move controls. */
+  onMoveStory?: (uuid: string, direction: -1 | 1) => void;
+  /** The uuid of the story whose move is in flight (controls disabled). */
+  movingUuid?: string | null;
+  /** A refused move (the device changed, or refused the write): worded
+   *  inline with the Rust message + next gesture, dismissable. */
+  moveError?: AppError | null;
+  onDismissMoveError?: () => void;
 }
 
 /**
@@ -66,6 +77,10 @@ export function DeviceStoryCollection({
   selectedUuids = EMPTY_UUIDS,
   onSelectStory,
   onRetry,
+  onMoveStory,
+  movingUuid = null,
+  moveError = null,
+  onDismissMoveError,
 }: DeviceStoryCollectionProps): React.JSX.Element | null {
   const headingRef = useRef<HTMLHeadingElement>(null);
   const focusedCardRef = useRef<HTMLElement | null>(null);
@@ -104,6 +119,13 @@ export function DeviceStoryCollection({
     ? `Histoires sur l'appareil — ${deviceLabel}`
     : "Histoires sur l'appareil";
 
+  // The wheel order is the order of the VISIBLE entries only: hidden entries
+  // live in another device file and never move here.
+  const visibleUuids =
+    state.kind === "ready"
+      ? state.stories.filter((s) => !s.hidden).map((s) => s.uuid)
+      : [];
+
   return (
     <section
       className="device-story-collection"
@@ -118,6 +140,19 @@ export function DeviceStoryCollection({
           {heading}
         </h2>
         <StateChip tone="info" label="Sur l'appareil" />
+        {moveError !== null && (
+          <div className="device-story-collection__move-error" role="alert">
+            <span>
+              {moveError.message}
+              {moveError.userAction ? ` ${moveError.userAction}` : ""}
+            </span>
+            {onDismissMoveError && (
+              <Button variant="quiet" onClick={onDismissMoveError}>
+                Fermer
+              </Button>
+            )}
+          </div>
+        )}
       </header>
 
       {state.kind === "loading" ? (
@@ -182,22 +217,56 @@ export function DeviceStoryCollection({
             onFocus={handleListFocus}
             onBlur={handleListBlur}
           >
-            {state.stories.map((story, index) => (
-              <li
-                key={`${story.uuid}::${index}`}
-                className="device-story-collection__item"
-              >
-                <DeviceStoryCard
-                  story={story}
-                  isSelected={
-                    onSelectStory !== undefined &&
-                    selectedUuids.has(story.uuid)
-                  }
-                  selectionSize={selectedUuids.size}
-                  onSelect={onSelectStory}
-                />
-              </li>
-            ))}
+            {state.stories.map((story, index) => {
+              const visibleIndex = visibleUuids.indexOf(story.uuid);
+              const canMove = onMoveStory !== undefined && visibleIndex !== -1;
+              // Frozen from the click until the device has been re-read: a
+              // second move computed on a stale order would be misleading.
+              const moving = movingUuid !== null || isRefreshing;
+              // Arrow names must stay unique per entry for assistive tech:
+              // an unrecognized pack is named by its short identifier.
+              const displayTitle =
+                story.title ?? `Histoire non reconnue, identifiant ${story.shortId}`;
+              return (
+                <li
+                  key={`${story.uuid}::${index}`}
+                  className="device-story-collection__item"
+                >
+                  <DeviceStoryCard
+                    story={story}
+                    isSelected={
+                      onSelectStory !== undefined &&
+                      selectedUuids.has(story.uuid)
+                    }
+                    selectionSize={selectedUuids.size}
+                    onSelect={onSelectStory}
+                  />
+                  {canMove && (
+                    <div
+                      className="device-story-collection__move"
+                      aria-label={`Ordre sur l'appareil — ${displayTitle}`}
+                    >
+                      <Button
+                        variant="quiet"
+                        onClick={() => onMoveStory(story.uuid, -1)}
+                        disabled={moving || visibleIndex === 0}
+                        aria-label={`Monter — ${displayTitle}`}
+                      >
+                        ▲
+                      </Button>
+                      <Button
+                        variant="quiet"
+                        onClick={() => onMoveStory(story.uuid, 1)}
+                        disabled={moving || visibleIndex === visibleUuids.length - 1}
+                        aria-label={`Descendre — ${displayTitle}`}
+                      >
+                        ▼
+                      </Button>
+                    </div>
+                  )}
+                </li>
+              );
+            })}
           </ul>
         </>
       ) : null}

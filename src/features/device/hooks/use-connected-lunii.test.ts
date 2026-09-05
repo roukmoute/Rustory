@@ -36,6 +36,7 @@ const supported = {
     writeStory: false,
     deleteStory: false,
     sendArchive: false,
+    reorderStories: false,
   },
 };
 

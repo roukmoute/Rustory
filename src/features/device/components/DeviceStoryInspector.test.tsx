@@ -29,6 +29,7 @@ const importableOps = {
   writeStory: false,
   deleteStory: false,
   sendArchive: false,
+  reorderStories: false,
 };
 
 const importError: AppError = {

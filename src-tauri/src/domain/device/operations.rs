@@ -31,6 +31,11 @@ pub struct SupportedOperations {
     /// pack): the archive-send owns its whole pipeline, so a cohort can be
     /// allowed to receive archives before the round-trip is (Lunii V3).
     pub send_archive: bool,
+    /// Reorder the stories already on the device (rewrite the `.pi` index
+    /// in a new order — the wheel order). A DEVICE MUTATION of the index
+    /// only, same discipline as `delete_story` (atomic rewrite under the
+    /// mount lock), open wherever the index is proven writable.
+    pub reorder_stories: bool,
 }
 
 impl SupportedOperations {
@@ -44,6 +49,7 @@ impl SupportedOperations {
         write_story: false,
         delete_story: false,
         send_archive: false,
+        reorder_stories: false,
     };
 
     /// Lookup helper used by the capability gate to ask in a typed way:
@@ -57,6 +63,7 @@ impl SupportedOperations {
             SupportedOperation::WriteStory => self.write_story,
             SupportedOperation::DeleteStory => self.delete_story,
             SupportedOperation::SendArchive => self.send_archive,
+            SupportedOperation::ReorderStories => self.reorder_stories,
         }
     }
 }
@@ -72,6 +79,7 @@ pub enum SupportedOperation {
     WriteStory,
     DeleteStory,
     SendArchive,
+    ReorderStories,
 }
 
 impl SupportedOperation {
@@ -84,6 +92,7 @@ impl SupportedOperation {
             Self::WriteStory => "write_story",
             Self::DeleteStory => "delete_story",
             Self::SendArchive => "send_archive",
+            Self::ReorderStories => "reorder_stories",
         }
     }
 }
@@ -112,6 +121,7 @@ mod tests {
             write_story: false,
             delete_story: false,
             send_archive: false,
+            reorder_stories: false,
         };
         assert!(ops.allows(SupportedOperation::ReadLibrary));
         assert!(!ops.allows(SupportedOperation::InspectStory));
@@ -119,6 +129,22 @@ mod tests {
         assert!(!ops.allows(SupportedOperation::WriteStory));
         assert!(!ops.allows(SupportedOperation::DeleteStory));
         assert!(!ops.allows(SupportedOperation::SendArchive));
+        assert!(!ops.allows(SupportedOperation::ReorderStories));
+    }
+
+    #[test]
+    fn reorder_stories_authorizes_only_the_index_rewrite() {
+        let ops = SupportedOperations {
+            reorder_stories: true,
+            ..SupportedOperations::ALL_FALSE
+        };
+        assert!(ops.allows(SupportedOperation::ReorderStories));
+        assert!(!ops.allows(SupportedOperation::DeleteStory));
+        assert!(!ops.allows(SupportedOperation::WriteStory));
+        assert_eq!(
+            SupportedOperation::ReorderStories.diagnostic_tag(),
+            "reorder_stories"
+        );
     }
 
     #[test]

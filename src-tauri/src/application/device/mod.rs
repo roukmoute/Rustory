@@ -12,6 +12,7 @@ pub mod delete;
 pub mod import;
 pub mod library;
 pub mod preflight;
+pub mod reorder;
 pub mod send;
 pub mod story_pack;
 pub mod title;

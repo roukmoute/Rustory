@@ -28,6 +28,9 @@ export interface SupportedOperationsDto {
    *  the archive-send owns its whole V3 pipeline, so Lunii V3 may
    *  receive archives while the round-trip stays closed. */
   sendArchive: boolean;
+  /** Reorder the stories on the device (rewrite its index in a new order —
+   *  the wheel order). Index only, gated like `deleteStory`. */
+  reorderStories: boolean;
 }
 
 export type UnsupportedReasonDto =
@@ -97,7 +100,8 @@ function isSupportedOperationsDto(
     typeof c.importStory === "boolean" &&
     typeof c.writeStory === "boolean" &&
     typeof c.deleteStory === "boolean" &&
-    typeof c.sendArchive === "boolean"
+    typeof c.sendArchive === "boolean" &&
+    typeof c.reorderStories === "boolean"
   );
 }
 

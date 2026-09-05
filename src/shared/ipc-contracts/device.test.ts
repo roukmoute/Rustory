@@ -15,6 +15,7 @@ const validSupported = {
     writeStory: false,
     deleteStory: true,
     sendArchive: false,
+    reorderStories: true,
   },
 };
 
@@ -29,7 +30,7 @@ const validSupportedFlam = JSON.parse(
     '"deviceIdentifier":"fedcba9876543210fedcba9876543210",' +
     '"supportedOperations":{"readLibrary":true,"inspectStory":true,' +
     '"importStory":true,"writeStory":false,"deleteStory":false,' +
-    '"sendArchive":false}}',
+    '"sendArchive":false,"reorderStories":false}}',
 ) as Record<string, unknown>;
 
 describe("isConnectedDeviceDto — valid payloads", () => {
@@ -54,6 +55,7 @@ describe("isConnectedDeviceDto — valid payloads", () => {
           writeStory: false,
           deleteStory: true,
           sendArchive: false,
+          reorderStories: true,
         },
       }),
     ).toBe(true);
@@ -105,6 +107,7 @@ describe("isConnectedDeviceDto — valid payloads", () => {
           writeStory: false,
           deleteStory: false,
           sendArchive: false,
+          reorderStories: false,
         },
       }),
     ).toBe(true);
@@ -304,6 +307,19 @@ describe("isConnectedDeviceDto — drift rejections", () => {
       isConnectedDeviceDto({
         ...validSupported,
         supportedOperations: opsWithoutSendArchive,
+      }),
+    ).toBe(false);
+  });
+
+  it("rejects supportedOperations missing the reorderStories flag", () => {
+    // Same discipline for the reorder extension: the full set, always.
+    const { reorderStories: _drop, ...opsWithoutReorder } =
+      validSupported.supportedOperations;
+    void _drop;
+    expect(
+      isConnectedDeviceDto({
+        ...validSupported,
+        supportedOperations: opsWithoutReorder,
       }),
     ).toBe(false);
   });

@@ -6,6 +6,7 @@ use tauri::{AppHandle, Manager, State};
 use crate::application::device::delete::DeleteDeviceStoryRequest;
 use crate::application::device::import::ImportDeviceStoryRequest;
 use crate::application::device::library::DeviceLibraryOutcome;
+use crate::application::device::reorder::ReorderDeviceStoriesRequest;
 use crate::application::device::send::{SendArchiveRequest, SendStoryPackRequest};
 use crate::application::device::story_pack::plan_story_pack;
 use crate::application::device::title::{resolve_local_truth, set_user_title, LocalTruth};
@@ -18,9 +19,9 @@ use crate::infrastructure::diagnostics::device_log;
 use crate::ipc::dto::{
     ConnectedDeviceDto, DeleteDeviceStoryInputDto, DeleteDeviceStoryOutcomeDto, DeviceLibraryDto,
     DeviceStoryTitleDto, ImportDeviceStoryInputDto, ImportDeviceStoryOutcomeDto,
-    ReadStoryValidationInputDto, ReadTransferPreviewInputDto, SendPackToDeviceInputDto,
-    SendPackToDeviceOutcomeDto, SetDeviceStoryTitleInputDto, StoryValidationDto,
-    TransferPreviewDto,
+    ReadStoryValidationInputDto, ReadTransferPreviewInputDto, ReorderDeviceStoriesInputDto,
+    ReorderDeviceStoriesOutcomeDto, SendPackToDeviceInputDto, SendPackToDeviceOutcomeDto,
+    SetDeviceStoryTitleInputDto, StoryValidationDto, TransferPreviewDto,
 };
 use crate::AppState;
 
@@ -48,6 +49,12 @@ pub const IMPORT_DEVICE_STORY_BUDGET: Duration = Duration::from_secs(300);
 /// than the import budget is ample; it still covers a slow USB unlink of a
 /// large pack folder.
 pub const DELETE_DEVICE_STORY_BUDGET: Duration = Duration::from_secs(60);
+
+/// Budget of a device reorder: a re-scan plus one small index rewrite.
+pub const REORDER_DEVICE_STORIES_BUDGET: Duration = Duration::from_secs(60);
+
+/// Upper bound on the packs of one reorder (a `.pi` holds a few dozen).
+const MAX_REORDER_PACKS: usize = 4096;
 
 /// Wall-clock budget for a pack-archive send. A pack can weigh hundreds of
 /// MB and the whole pipeline (archive read, transcode, cipher, staged copy
@@ -595,6 +602,61 @@ pub async fn delete_device_story(
     outcome.map(DeleteDeviceStoryOutcomeDto::from_outcome)
 }
 
+/// Reorder the stories of the connected supported device identified by
+/// `deviceIdentifier` — the wheel order — to `orderedPackUuids`, the
+/// COMPLETE list of its visible packs in the new order.
+///
+/// A DEVICE MUTATION of the index only, with the delete command's
+/// discipline: async + `spawn_blocking`, authoritative re-scan + the
+/// `reorder_stories` capability gate BEFORE any byte is touched; the order
+/// must match exactly what the device lists (a stale list is refused with a
+/// re-read hint, never guessed around).
+#[tauri::command]
+pub async fn reorder_device_stories(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    input: ReorderDeviceStoriesInputDto,
+) -> Result<ReorderDeviceStoriesOutcomeDto, AppError> {
+    validate_reorder_input(&input)?;
+
+    let scanner = state.device_scanner.clone();
+    let reorderer = state.pack_reorderer.clone();
+    let request = ReorderDeviceStoriesRequest {
+        device_identifier: input.device_identifier,
+        ordered_pack_uuids: input.ordered_pack_uuids,
+    };
+    let started = Instant::now();
+
+    let outcome = tauri::async_runtime::spawn_blocking(move || {
+        device::reorder::reorder_device_stories(
+            scanner.as_ref(),
+            reorderer.as_ref(),
+            &request,
+            REORDER_DEVICE_STORIES_BUDGET,
+        )
+    })
+    .await
+    .map_err(|_| reorder_join_error())?;
+
+    let elapsed_ms = started.elapsed().as_millis() as u64;
+    let event = match &outcome {
+        Ok(reordered) => device_log::Event::DeviceStoriesReordered {
+            family: reordered.family.diagnostic_tag(),
+            firmware_cohort: reordered.firmware_cohort.diagnostic_tag(),
+            count: reordered.count as u32,
+            changed: reordered.changed,
+            elapsed_ms,
+        },
+        Err(err) => device_log::Event::DeviceStoriesReorderFailed {
+            source: reorder_failure_source(err),
+            elapsed_ms,
+        },
+    };
+    let _ = device_log::record_event(&app, event);
+
+    outcome.map(ReorderDeviceStoriesOutcomeDto::from_outcome)
+}
+
 /// Where the pack of a send comes from (resolved by Rust, never by the UI).
 enum PackSource {
     /// The story's retained source archive.
@@ -839,6 +901,63 @@ fn delete_failure_source(err: &AppError) -> &'static str {
         .unwrap_or("other")
 }
 
+/// Strict boundary validation of the reorder input: the identifier shape,
+/// a bounded, non-empty list of canonical pack uuids with no repeat.
+fn validate_reorder_input(input: &ReorderDeviceStoriesInputDto) -> Result<(), AppError> {
+    if !is_32_lowercase_hex(&input.device_identifier) {
+        return Err(invalid_reorder_input("invalid_device_identifier"));
+    }
+    if input.ordered_pack_uuids.is_empty() || input.ordered_pack_uuids.len() > MAX_REORDER_PACKS {
+        return Err(invalid_reorder_input("invalid_count"));
+    }
+    let mut seen = std::collections::HashSet::new();
+    for uuid in &input.ordered_pack_uuids {
+        if !is_canonical_pack_uuid(uuid) {
+            return Err(invalid_reorder_input("invalid_pack_uuid"));
+        }
+        if !seen.insert(uuid.as_str()) {
+            return Err(invalid_reorder_input("repeated_pack_uuid"));
+        }
+    }
+    Ok(())
+}
+
+fn invalid_reorder_input(cause: &'static str) -> AppError {
+    AppError::device_write_failed(
+        "Réorganisation impossible: requête invalide.",
+        "Relance la lecture de l'appareil puis réessaie.",
+    )
+    .with_details(serde_json::json!({
+        "source": "other",
+        "kind": "invalid_input",
+        "cause": cause,
+    }))
+}
+
+fn reorder_join_error() -> AppError {
+    AppError::device_write_failed(
+        "Réorganisation impossible: tâche interrompue.",
+        "Réessaie ; si le problème persiste, redémarre Rustory.",
+    )
+    .with_details(serde_json::json!({ "source": "spawn_blocking_join" }))
+}
+
+/// Map a reorder AppError to the closed diagnostic `source` set.
+fn reorder_failure_source(err: &AppError) -> &'static str {
+    err.details
+        .as_ref()
+        .and_then(|d| d.get("source").and_then(|s| s.as_str()))
+        .map(|s| match s {
+            "device_changed" => "device_changed",
+            "capability_gate" => "capability_gate",
+            "reorder_diverged" => "reorder_diverged",
+            "reorder_rejected" => "reorder_rejected",
+            "spawn_blocking_join" => "spawn_blocking_join",
+            _ => "other",
+        })
+        .unwrap_or("other")
+}
+
 /// Strict boundary validation refusal of the send input — the identifier
 /// normally comes from Rust's own detection DTO, so a malformed value is a
 /// frontend bug, refused explicitly before the dialog even opens.
@@ -1024,6 +1143,8 @@ mod tests {
             invalid_send_input("invalid_story_id"),
             send_app_data_unavailable_error(),
             send_join_error(),
+            invalid_reorder_input("invalid_count"),
+            reorder_join_error(),
         ];
         for err in &refusals {
             assert_eq!(

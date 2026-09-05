@@ -66,6 +66,8 @@ pub struct SupportedOperationsDto {
     pub write_story: bool,
     pub delete_story: bool,
     pub send_archive: bool,
+    /// Reorder the stories on the device (the wheel order).
+    pub reorder_stories: bool,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -129,6 +131,7 @@ fn operations_dto(profile: &DeviceProfile) -> SupportedOperationsDto {
         write_story: ops.write_story,
         delete_story: ops.delete_story,
         send_archive: ops.send_archive,
+        reorder_stories: ops.reorder_stories,
     }
 }
 
@@ -168,6 +171,7 @@ mod tests {
                 write_story: false,
                 delete_story: true,
                 send_archive: false,
+                reorder_stories: false,
             },
         };
         let v = serde_json::to_value(&dto).expect("ser");
@@ -199,6 +203,7 @@ mod tests {
                 write_story: false,
                 delete_story: false,
                 send_archive: false,
+                reorder_stories: false,
             },
         };
         let v = serde_json::to_value(&dto).expect("ser");

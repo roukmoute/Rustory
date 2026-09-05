@@ -19,6 +19,7 @@ pub mod library_reader;
 pub mod pack_assembly;
 pub mod pack_reader;
 pub mod parser;
+pub mod reorderer;
 pub mod resample;
 pub mod rss_source;
 pub mod scanner;
@@ -47,6 +48,9 @@ pub use library_reader::{DeviceLibraryReader, SystemDeviceLibraryReader};
 pub use pack_assembly::{assemble_v3_pack, AssembleError, AssembledFile};
 pub use pack_reader::{AcquiredPack, DevicePackReader, SystemDevicePackReader};
 pub use parser::{compute_device_identifier, parse_metadata_version, MetadataParseError};
+pub use reorderer::{
+    DevicePackReorderer, ReorderFailure, ReorderOutcome, SystemDevicePackReorderer,
+};
 pub use rss_source::{HttpRssFeedSource, RssFeedSource, MAX_RSS_RESPONSE_BYTES};
 pub use scanner::{CandidateFacts, DeviceCandidate, DeviceScanReport, DeviceScanner};
 pub use system::{SystemDeviceScanner, EXTRA_MOUNT_ROOTS_ENV, SYSTEM_SCANNER_DEFAULT};
@@ -58,6 +62,6 @@ pub use writer::{
 
 #[cfg(test)]
 pub use mock::{
-    MockDeviceLibraryReader, MockDevicePackDeleter, MockDevicePackReader, MockDevicePackWriter,
-    MockDeviceScanner, MockOfficialCatalogSource, MockRssFeedSource,
+    MockDeviceLibraryReader, MockDevicePackDeleter, MockDevicePackReader, MockDevicePackReorderer,
+    MockDevicePackWriter, MockDeviceScanner, MockOfficialCatalogSource, MockRssFeedSource,
 };

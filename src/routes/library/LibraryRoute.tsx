@@ -16,6 +16,7 @@ import {
   useDevicePackSend,
   useDeviceStoryDelete,
   useDeviceStoryImport,
+  useDeviceStoryReorder,
   useDeviceStoryTitle,
   useOfficialCatalog,
   useStoryValidation,
@@ -1116,6 +1117,27 @@ export function LibraryRoute(): React.JSX.Element {
   const canDeleteDeviceStory =
     canInspect && supportedDeviceOperations?.deleteStory === true;
 
+  // The wheel order: move controls are wired only when the authoritative
+  // matrix POSITIVELY allows `reorderStories` (the `.pi` rewrite). The
+  // device stays the single truth — a settled move re-reads the inventory.
+  const reorderableDeviceId =
+    effectiveDevice &&
+    effectiveDevice.kind === "supported" &&
+    effectiveDevice.supportedOperations.reorderStories
+      ? effectiveDevice.deviceIdentifier
+      : null;
+  const deviceReorder = useDeviceStoryReorder({
+    onReordered: () => deviceLibrary.refresh(),
+  });
+  const visibleDeviceOrder: string[] =
+    deviceLibrary.state.kind === "ready"
+      ? deviceLibrary.state.stories.filter((s) => !s.hidden).map((s) => s.uuid)
+      : [];
+  const handleMoveDeviceStory = (uuid: string, direction: -1 | 1): void => {
+    if (reorderableDeviceId === null) return;
+    void deviceReorder.move(reorderableDeviceId, visibleDeviceOrder, uuid, direction);
+  };
+
   const handleRequestDeleteDeviceStory = (story: DeviceStoryDto): void => {
     // Open the confirmation; the actual delete fires on confirm.
     setConfirmDeleteDeviceStory(story);
@@ -1308,6 +1330,14 @@ export function LibraryRoute(): React.JSX.Element {
         selectedUuids={canInspect ? selectedDeviceUuids : EMPTY_DEVICE_SELECTION}
         onSelectStory={canInspect ? handleSelectDeviceStory : undefined}
         onRetry={deviceLibrary.refresh}
+        onMoveStory={reorderableDeviceId !== null ? handleMoveDeviceStory : undefined}
+        movingUuid={
+          deviceReorder.status.kind === "moving" ? deviceReorder.status.packUuid : null
+        }
+        moveError={
+          deviceReorder.status.kind === "failed" ? deviceReorder.status.error : null
+        }
+        onDismissMoveError={deviceReorder.dismissStatus}
       />
     </>
   );

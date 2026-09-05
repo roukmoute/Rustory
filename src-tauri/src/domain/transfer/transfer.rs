@@ -589,6 +589,48 @@ pub fn remove_pack_uuid(pi_bytes: &[u8], uuid_bytes: &[u8; LUNII_PACK_UUID_BYTES
     out
 }
 
+/// Why a `.pi` index cannot be reordered to a requested order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReorderIndexError {
+    /// The requested order is not a permutation of the listed packs: a pack
+    /// missing, unknown or repeated — the UI's list is stale against the
+    /// device (a pack was added/removed since), never guessed around.
+    Diverged,
+    /// The index carries a trailing partial chunk (already corrupt): a
+    /// rewrite would have to author bytes we do not understand — refused.
+    Corrupt,
+}
+
+/// Rewrite a `.pi` index payload so its packs come in `ordered` order — the
+/// device plays its packs in index order, so this IS "move a story on the
+/// wheel". PURE and strict: `ordered` must list EXACTLY the packs the index
+/// lists (same set, no repeat, same count), else [`ReorderIndexError`].
+/// Idempotent: the same order yields the same bytes.
+pub fn reorder_pack_index(
+    pi_bytes: &[u8],
+    ordered: &[[u8; LUNII_PACK_UUID_BYTES]],
+) -> Result<Vec<u8>, ReorderIndexError> {
+    let index = parse_pack_index(pi_bytes);
+    if index.had_trailing_bytes {
+        return Err(ReorderIndexError::Corrupt);
+    }
+    if ordered.len() != index.uuids.len() {
+        return Err(ReorderIndexError::Diverged);
+    }
+    let mut seen: Vec<&[u8; LUNII_PACK_UUID_BYTES]> = Vec::with_capacity(ordered.len());
+    for uuid in ordered {
+        if seen.contains(&uuid) || !index.uuids.contains(uuid) {
+            return Err(ReorderIndexError::Diverged);
+        }
+        seen.push(uuid);
+    }
+    let mut out = Vec::with_capacity(pi_bytes.len());
+    for uuid in ordered {
+        out.extend_from_slice(uuid);
+    }
+    Ok(out)
+}
+
 /// Ensure the prepared descriptor targets the cohort of the connected device.
 ///
 /// A mismatch means the artifacts were prepared for a DIFFERENT device than the
@@ -1213,5 +1255,45 @@ mod tests {
                 assert!(!action.contains(bad), "{verdict:?} jargon: {bad}");
             }
         }
+    }
+
+    #[test]
+    fn reorder_pack_index_permutes_only_a_matching_set() {
+        let a = [0xAAu8; 16];
+        let b = [0xBBu8; 16];
+        let c = [0xCCu8; 16];
+        let pi: Vec<u8> = [a, b, c].concat();
+        // A permutation rewrites in that order.
+        assert_eq!(
+            reorder_pack_index(&pi, &[c, a, b]).unwrap(),
+            [c, a, b].concat()
+        );
+        // The same order is a byte-identical no-op.
+        assert_eq!(reorder_pack_index(&pi, &[a, b, c]).unwrap(), pi);
+        // Missing / unknown / repeated / short → the UI is stale.
+        assert_eq!(
+            reorder_pack_index(&pi, &[a, b]),
+            Err(ReorderIndexError::Diverged)
+        );
+        assert_eq!(
+            reorder_pack_index(&pi, &[a, b, [0xDDu8; 16]]),
+            Err(ReorderIndexError::Diverged)
+        );
+        assert_eq!(
+            reorder_pack_index(&pi, &[a, a, b]),
+            Err(ReorderIndexError::Diverged)
+        );
+        assert_eq!(
+            reorder_pack_index(&pi, &[a, b, c, a]),
+            Err(ReorderIndexError::Diverged)
+        );
+        // An empty index reorders to empty; a corrupt tail is refused.
+        assert_eq!(reorder_pack_index(&[], &[]).unwrap(), Vec::<u8>::new());
+        let mut corrupt = pi.clone();
+        corrupt.extend_from_slice(&[1, 2, 3]);
+        assert_eq!(
+            reorder_pack_index(&corrupt, &[a, b, c]),
+            Err(ReorderIndexError::Corrupt)
+        );
     }
 }

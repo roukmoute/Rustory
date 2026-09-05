@@ -49,6 +49,12 @@ renders `Appareil reconnu — {famille}`, never a lying `Profil non
 supporté`) while every operation stays ❌ until support activates them
 line by line — recognition and capability are separate facts.
 
+Beyond the four MVP columns, three later mutations follow the same
+line-by-line discipline: `deleteStory` (delist + remove a pack), `sendArchive`
+(send a STUdio `.zip` pack) and `reorderStories` (rewrite the visible index
+order — see "Reordering the wheel order" below). All three are open on every
+Lunii cohort and closed on FLAM Gen1.
+
 The write column is wired by the transfer flow: `WriteStory` is `true` for
 **Origine v1** and **Mid-Gen v2**, and stays `false` for **V3** (device-write
 reverse-engineering is still active — same rationale as import) and **FLAM**. The
@@ -649,6 +655,34 @@ is a bug.
 
 A line in the matrix that has no test is a bug — the test enforces
 that the gate behavior matches the published policy.
+
+## Reordering the wheel order
+
+`ReorderStories` is the seventh operation of the capability matrix: it
+authorizes ONE device mutation — rewriting the visible pack index (`.pi`
+on a Lunii) in a new order, the order the device plays / the child scrolls
+through. It is `true` for every Lunii cohort (Origine v1, Mid-Gen v2, V3 —
+the index rewrite is the exact write already proven by the delete and send
+flows) and `false` for FLAM Gen1 (its text index write is unproven).
+
+Contract of `reorder_device_stories` (`application::device::reorder_device_stories`):
+
+| Step | Rule |
+| --- | --- |
+| Input | the device identifier + the COMPLETE list of the device's visible pack UUIDs in the new order (canonical lowercase hyphenated, distinct, 1 ≤ n ≤ 4096); validated client-side and again at the command boundary |
+| Authority | a live re-scan must resolve to the requested device (`device_changed` otherwise), then the `ReorderStories` gate runs BEFORE any byte is touched |
+| Permutation check | the requested list must be a STRICT permutation of the index just read under the mount write lock — same UUIDs, same count, no extra, no missing. Any drift is refused as `reorder_diverged` (`Réorganisation impossible: la liste des histoires de l'appareil a changé entre-temps.` → `Relance la lecture de l'appareil, puis déplace à nouveau l'histoire.`), ZERO byte written |
+| Identity | an order identical to the device's answers `changed = false` and writes nothing |
+| Write | the new index is produced by `domain::transfer::reorder_pack_index` (pure: bytes in, bytes out; the 16-byte entries are moved, never re-encoded) and written through the same atomic `.pi` writer as the send / delete flows (temp file → fsync → rename), under the mount write lock. Hidden entries (`.pi.hidden`) are never touched |
+| Outcome | `{ count, changed }` + a `DeviceStoriesReordered` diagnostics event (`family`, `firmware_cohort`, `count`, `changed`, `elapsed_ms`); a refusal logs `DeviceStoriesReorderFailed { source, elapsed_ms }` |
+| Budget | 60 s (`REORDER_DEVICE_STORIES_BUDGET`), same timeout discipline as the other device writes |
+
+Content folders are never moved, renamed or rewritten: the wheel order is
+the index order alone, so a reorder can never leave the device with a
+partial pack — the two honest terminals of a send (`échoué` / `incomplet`)
+do not exist here. The frontend never reorders optimistically: it re-reads
+the inventory after a successful write (see
+[ui-states.md#Order on the device (wheel order)](./ui-states.md)).
 
 ## Node Media Source Formats
 

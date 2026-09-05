@@ -16,6 +16,7 @@ fn supported_dto() -> ConnectedDeviceDto {
             write_story: false,
             delete_story: true,
             send_archive: false,
+            reorder_stories: true,
         },
     }
 }
@@ -35,6 +36,7 @@ fn supported_flam_dto() -> ConnectedDeviceDto {
             write_story: false,
             delete_story: false,
             send_archive: false,
+            reorder_stories: false,
         },
     }
 }
@@ -63,6 +65,7 @@ fn connected_device_supported_origine_v1_round_trip_wire_shape() {
                 "writeStory": false,
                 "deleteStory": true,
                 "sendArchive": false,
+                "reorderStories": true,
             },
         })
     );
@@ -82,6 +85,7 @@ fn connected_device_supported_v3_serializes_with_import_story_false() {
             write_story: false,
             delete_story: true,
             send_archive: true,
+            reorder_stories: true,
         },
     };
     let v = serde_json::to_value(&dto).expect("ser");
@@ -138,6 +142,7 @@ fn supported_operations_dto_uses_camel_case_only() {
         "writeStory",
         "deleteStory",
         "sendArchive",
+        "reorderStories",
     ] {
         assert!(ops.get(camel).is_some(), "missing camelCase field: {camel}");
     }
@@ -148,6 +153,7 @@ fn supported_operations_dto_uses_camel_case_only() {
         "write_story",
         "delete_story",
         "send_archive",
+        "reorder_stories",
     ] {
         assert!(
             ops.get(snake).is_none(),
@@ -224,10 +230,10 @@ fn connected_device_supported_does_not_emit_snake_case_aliases() {
 }
 
 /// Byte-for-byte INVARIANCE of the Lunii supported wire: the exact JSON
-/// string frozen as a literal. `deleteStory` then `sendArchive` were each
-/// appended as deliberate wire extensions (device-delete, then archive-send
-/// capability) AFTER `writeStory`, keeping every prior field's position and
-/// value; the `Option<u8>` migration of `metadataFormatVersion` still must
+/// string frozen as a literal. `deleteStory`, `sendArchive` then
+/// `reorderStories` were each appended as deliberate wire extensions
+/// (device-delete, archive-send, then device-reorder capability) AFTER
+/// `writeStory`, keeping every prior field's position and value; the `Option<u8>` migration of `metadataFormatVersion` still must
 /// not deform the wire — key present, plain integer, same order.
 #[test]
 fn connected_device_supported_lunii_wire_string_is_byte_for_byte_unchanged() {
@@ -239,7 +245,7 @@ fn connected_device_supported_lunii_wire_string_is_byte_for_byte_unchanged() {
          \"deviceIdentifier\":\"0123456789abcdef0123456789abcdef\",\
          \"supportedOperations\":{\"readLibrary\":true,\"inspectStory\":true,\
          \"importStory\":true,\"writeStory\":false,\"deleteStory\":true,\
-         \"sendArchive\":false}}"
+         \"sendArchive\":false,\"reorderStories\":true}}"
     );
 }
 
@@ -257,7 +263,7 @@ fn connected_device_supported_flam_wire_string_omits_version_key() {
          \"deviceIdentifier\":\"fedcba9876543210fedcba9876543210\",\
          \"supportedOperations\":{\"readLibrary\":true,\"inspectStory\":true,\
          \"importStory\":true,\"writeStory\":false,\"deleteStory\":false,\
-         \"sendArchive\":false}}"
+         \"sendArchive\":false,\"reorderStories\":false}}"
     );
     assert!(!s.contains("metadataFormatVersion"));
     assert!(!s.contains("null"));

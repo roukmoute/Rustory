@@ -34,6 +34,13 @@ export {
 } from "./hooks/use-device-story-delete";
 
 export {
+  useDeviceStoryReorder,
+  type DeviceStoryReorderStatus,
+  type UseDeviceStoryReorder,
+  type UseDeviceStoryReorderOptions,
+} from "./hooks/use-device-story-reorder";
+
+export {
   useDevicePackSend,
   type DevicePackSendStatus,
   type UseDevicePackSend,
