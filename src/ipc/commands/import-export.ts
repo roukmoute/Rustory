@@ -472,23 +472,36 @@ function isRssStoryCreationOutcome(
 }
 
 /**
- * Commit one previewed feed item into a canonical local draft (phase 2).
- * Sends the feed address + the item reference back; Rust RE-FETCHES and
+ * Commit the previewed feed's accepted items into ONE canonical local
+ * story (phase 2): one episode node per reference, in the given order.
+ * Sends the feed address + the item references back; Rust RE-FETCHES and
  * re-parses the feed from zero (the source is the authority — the wire
- * carries a pointer, never content). A diverged source resolves with the
- * typed `{ kind: "sourceChanged" }` refusal (nothing created); only
- * transport rejects with a normalized `AppError`. A drifted payload
- * rejects with [`RssCreationContractDriftError`].
+ * carries pointers + proofs, never content) and downloads every episode.
+ * A diverged source resolves with the typed `{ kind: "sourceChanged" }`
+ * refusal (nothing created); only transport rejects with a normalized
+ * `AppError`. A drifted payload rejects with
+ * [`RssCreationContractDriftError`]. `onProgress`, when given, receives
+ * the integer percent (0..99) of episodes settled.
  */
 export async function acceptRssStoryCreation(
   feedUrl: string,
-  itemRef: RssItemRef,
+  itemRefs: readonly RssItemRef[],
+  onProgress?: (percent: number) => void,
 ): Promise<RssStoryCreationOutcome> {
+  const channel = new Channel<number>();
+  if (onProgress) {
+    channel.onmessage = (percent) => {
+      if (typeof percent === "number" && Number.isFinite(percent)) {
+        onProgress(Math.max(0, Math.min(99, Math.round(percent))));
+      }
+    };
+  }
   let raw: unknown;
   try {
     raw = await invoke<unknown>("accept_rss_story_creation", {
       feedUrl,
-      itemRef,
+      itemRefs,
+      onProgress: channel,
     });
   } catch (err) {
     throw toAppError(err);

@@ -1845,11 +1845,15 @@ Starting a story from an **external source** (`Créer une histoire` →
 `Démarrer depuis une source externe (RSS)`) is a CREATION flow, the exact
 sibling of the structured-folder one: the user provides the address of an
 RSS feed they follow, Rustory fetches it ON EXPLICIT ACTION ONLY, and the
-accepted episode becomes an ORDINARY canonical local draft (fresh UUIDv7,
-`created_at = updated_at = now` — a birth), fully editable (`Full` scope by
-construction — the provenance lives in `story_local_imports`, which the
-edit-scope derivation never consults) and reviewable through the EXISTING
-import chip / report / resolution machinery.
+WHOLE feed (every ticked episode — all of them by default: **the podcast
+IS the story**) becomes ONE ORDINARY canonical local draft (fresh UUIDv7,
+`created_at = updated_at = now` — a birth) with one node per episode in
+listening order, fully editable (`Full` scope by construction — the
+provenance lives in `story_local_imports`, which the edit-scope derivation
+never consults) and reviewable through the EXISTING import chip / report /
+resolution machinery. The created story is then presented on the device
+like any other multi-episode story (`À la suite` or `Au choix`, see
+`Story Presentation on the Device`).
 
 Scope declaration: RSS 2.0 is a **content source kind governed by the
 `Content Source Activation Contract`** — the distribution-owned registry
@@ -1871,8 +1875,8 @@ The flow is **two-phase, with no mutation before acceptance**:
 
 | Phase | Command | Effect |
 | --- | --- | --- |
-| Preview | `fetch_rss_source_preview` | Validates the address (Rust-authoritative), fetches the feed bounded, parses it (bounded, event-driven) and returns a typed preview DTO: the source HOST, the exploitable items (bounded list), the flow-level findings and the derived state — or a BLOCKED verdict. The preview is PURE: zero byte written, zero DB row, zero store file. |
-| Accept | `accept_rss_story_creation` | On the explicit `Créer le brouillon` action: RE-FETCHES and RE-PARSES the feed from zero (**the source is the authority** — the network equivalent of "the disk is the authority"; the frontend never re-submits content). The chosen item is resolved by STRICT `guid` when present, else by exact (`title`, `link`), THEN re-proven against the previewed-content FINGERPRINT carried by the reference (a canonical hash of title/text/guid/link/enclosure — the wire is a pointer + a PROOF): a missing/ambiguous item, a feed turned blocked, or a resolvable item whose CONTENT diverged since the preview is the honest recoverable refusal `La source a changé depuis la récupération.` with ZERO mutation — a creation can never ingest content the user never reread. Otherwise ONE `BEGIN IMMEDIATE` transaction inserts `stories` (canonical v3 minimal structure whose start node carries the cleaned item text; normalized title with the `Histoire de {hôte}` fallback) + `story_local_imports` (`source_format = 'rss'`, `source_name` = host, `artifact_checksum` = SHA-256 of the SECOND fetch's bytes — the bytes actually ingested). A transaction failure rolls back fully: nothing remains. |
+| Preview | `fetch_rss_source_preview` | Validates the address (Rust-authoritative), fetches the feed bounded, parses it (bounded, event-driven) and returns a typed preview DTO: the source HOST, the channel title (`channelTitle`, the story title the accept will give when the feed names one), the exploitable items in LISTENING order (bounded list; each with its title, truncated summary, `hasEnclosure`, `hasImage` and its round-trip reference), the flow-level findings and the derived state — or a BLOCKED verdict. The preview is PURE: zero byte written, zero DB row, zero store file. |
+| Accept | `accept_rss_story_creation` | On the explicit `Créer l'histoire` action, with the TICKED references in the reviewed order (`itemRefs`, 1..500, distinct — a malformed selection is the `IMPORT_FAILED` / `details.source = "validation"` refusal before any dispatch) and a progress channel: RE-FETCHES and RE-PARSES the feed from zero (**the source is the authority** — the network equivalent of "the disk is the authority"; the frontend never re-submits content). EVERY selected item is resolved by STRICT `guid` when present, else by exact (`title`, `link`), THEN re-proven against the previewed-content FINGERPRINT carried by its reference (a canonical hash of title/text/guid/link/enclosure/artwork/date — the wire is a pointer + a PROOF): a missing/ambiguous item, a feed turned blocked, or a resolvable item whose CONTENT diverged since the preview is the honest recoverable refusal `La source a changé depuis la récupération.` for the WHOLE selection, with ZERO mutation — a creation can never ingest content the user never reread. Otherwise, DB-free, every episode is DOWNLOADED and promoted into the node-media store (its enclosure with one retry, its artwork — the item's own `itunes:image`, else the channel's — fetched ONCE per address per accept and shared by content hash), the canonical ordered N-node structure is composed (`n1..nN` in the selection order, each node labelled by its episode title and carrying its cleaned text, audio and artwork; the story titled by the channel title when it survives the canonical validation, else `Histoire de {hôte}`), and the percent of settled episodes streams on the channel. Then ONE `BEGIN IMMEDIATE` transaction inserts `stories` + `story_local_imports` (`source_format = 'rss'`, `source_name` = host, `artifact_checksum` = SHA-256 of the SECOND fetch's bytes — the bytes actually ingested) + every promoted media's `assets` row. A transaction failure rolls back fully and compensates the promoted files REFCOUNTED (a file another story already references is never removed): nothing remains. |
 | Abandon | — (pure frontend) | `Abandonner` drops the preview. Nothing was mutated, so no command is needed. |
 
 Error taxonomy (the central discipline): **transport is an `AppError`,
@@ -1898,11 +1902,23 @@ content is a typed VERDICT** — never the other way around.
   récupération du flux.`
 
 Bounds (all named, all tested): response cap 8 MiB read cap+1; parse depth
-32; at most 100 items retained (beyond: ignored, documented here); item
-text cleaned (HTML tags stripped, whitespace collapsed) and truncated at
-65 536 chars; feed address at most 2048 chars, `http`/`https` only, no
-userinfo, non-empty host; at most 5 redirects; fetch budget 30 s shared
-across the whole request. The RSS network client is DEDICATED (its own
+32; at most 500 items retained (beyond: ignored, documented here — sized
+for a whole kids' series); item text cleaned (HTML tags stripped,
+whitespace collapsed) and truncated at 65 536 chars; feed address at most
+2048 chars, `http`/`https` only, no userinfo, non-empty host; at most 5
+redirects; feed fetch budget 30 s shared across the whole request; ONE
+episode download budget 180 s with the web media ceiling (128 MiB, cap+1
+read) — a series downloads its episodes one after the other, the progress
+bar carries the wall clock.
+
+Listening order: a podcast feed lists its newest episode first, while a
+story box plays a series from its first episode. When EVERY retained item
+carries a parseable `pubDate` (RFC 822/2822: optional weekday, 2- or
+4-digit year, named or numeric zone), the preview lists the items OLDEST
+FIRST (a stable sort — same-dated items keep the feed order); when any
+date is missing or unreadable the feed order is kept unchanged —
+chronology is never guessed. The accept follows the SELECTION order (the
+reviewed order, whatever the ticking order). The RSS network client is DEDICATED (its own
 `reqwest` blocking client behind the `RssFeedSource` trait) — the
 official-catalog source is a NEIGHBOR, not a base class; the duplication
 of its disciplines (shared budget, cap+1 read, PII-free stages) is
@@ -1916,21 +1932,29 @@ is `needs_review` (the dedicated per-flow derivation: any `Blocking` →
 `blocked`, nothing created; else any `Missing` → `partial`; else →
 `needs_review`). The DB invariant (`recognized` ⟺ `findings_summary IS
 NULL`) holds by construction — an `rss` provenance row ALWAYS carries a
-summary. A referenced enclosure (podcast audio…) is NOT downloaded: it
+summary. A referenced enclosure (podcast audio…) IS downloaded at accept
+time; an enclosure that could not be fetched (after one retry), was over
+the ceiling or was not a supported media leaves its node audio-less and
 becomes the `(media, information manquante)` finding → state `partial` —
-that is the honest "qualité partielle" and a named review step. The
-existing review resolution (a sound write from the editor settles
-`needs_review` / `partial` → `resolved`) applies UNCHANGED — the
+that is the honest "qualité partielle" and a named review step (the
+story is still created; the user attaches the missing audio in the
+editor). A failed ARTWORK download degrades silently (the image stays
+optional). The existing review resolution (a sound write from the editor
+settles `needs_review` / `partial` → `resolved`) applies UNCHANGED — the
 resolution query is format-agnostic.
 
-Per-item findings vs flow findings: the PREVIEW carries the flow-level
-findings (`envelope` / `formatVersion` recognized + the nominal `source`
-ambiguity — floor state `needsReview`); the per-item facts surface in the
-item list itself (title, truncated summary, `hasEnclosure`). The findings
-PERSISTED at accept time are derived for the CHOSEN item (envelope +
-format + source + the item's title/text adjustments + its enclosure), so
-the created story's chip, report and durable state speak of what was
-actually ingested.
+Feed-level findings: the PREVIEW carries the flow-level findings
+(`envelope` / `formatVersion` recognized + the nominal `source` ambiguity
+— floor state `needsReview`); the per-item facts surface in the item list
+itself (title, truncated summary, `hasEnclosure`, `hasImage`). The
+findings PERSISTED at accept time are derived for the ACCEPTED SELECTION:
+envelope + format recognized, the `source` ambiguity, `title` recognized
+only when the channel title became the story title (else the fallback —
+an ambiguity), `structure` recognized only when no ingested episode
+needed a cleaning adjustment, and — when any ingested episode references
+an enclosure — `media` recognized iff EVERY audio was downloaded, else
+missing. So the created story's chip, report and durable state speak of
+what was actually ingested.
 
 UI state machine (owned by `use-rss-creation`, mounted in the library;
 surface `Création depuis une source externe`; seven states — `idle →
@@ -1953,10 +1977,10 @@ distribution decision):
 | closed | nothing | none |
 | `idle` (open) | the visible content-rights posture line (`Utilise uniquement des contenus dont tu as les droits : tes contenus personnels ou des contenus libres.`), the `Adresse du flux RSS` field, the `Récupérer le flux` CTA (soft-disabled while the address is empty) and `Abandonner` (closes the surface — a pure frontend reset, available in every non-terminal state) | none |
 | `fetching` | indeterminate `ProgressIndicator` labelled `Récupération du flux…` (Long Operation Rule); `Abandonner` stays reachable (the in-flight result is then ignored — the surface never resurrects) | deliberately NOT announced |
-| `review` (exploitable) | the source HOST (never the full address), the flow findings (existing category chips + messages), the BOUNDED selectable item list (title + truncated summary + the `Média distant non récupéré` note when `hasEnclosure`), then the UNIQUE CTA `Créer le brouillon` (aria-disabled until an item is selected AND while the typed address diverges from the reviewed one — the accept must never silently target the OLD source) THEN `Abandonner` in tab order. The field + `Récupérer le flux` stay available (re-fetch replaces the preview) | `aria-live="polite"` |
+| `review` (exploitable) | the source HOST (never the full address), the feed's name (`channelTitle`, when present), the flow findings (existing category chips + messages), the selection count (`N épisodes sélectionnés sur M`) with `Tout sélectionner` / `Tout désélectionner`, the BOUNDED TICK LIST of the episodes (`Épisodes du flux`: one checkbox per episode named by its title — `Épisode N` when untitled —, EVERY one ticked by default, with the truncated summary and the media markers `Média audio` / `Sans média audio` and `Image`), then the UNIQUE CTA `Créer l'histoire` (aria-disabled while nothing is ticked AND while the typed address diverges from the reviewed one — the accept must never silently target the OLD source) THEN `Abandonner` in tab order. The field + `Récupérer le flux` stay available (re-fetch replaces the preview and re-ticks everything) | `aria-live="polite"` |
 | `review` (blocked verdict) | the verdict findings in a `role="alert"` block (message + gesture — nothing will be created), only `Abandonner`; the field + `Récupérer le flux` stay available to correct and retry | `role="alert"` |
 | `review` (source changed, after a refused accept) | the frozen verdict `La source a changé depuis la récupération.` + gesture in a `role="alert"` block; the stale items are DROPPED (never re-proposed); the field + `Récupérer le flux` stay available; `Abandonner` closes | `role="alert"` |
-| `creating` | indeterminate `ProgressIndicator` labelled `Création en cours…`; `Abandonner` stays reachable (the UI stops listening; an accept that already reached Rust still settles atomically — the fresh card appears on the next authoritative overview read) | deliberately NOT announced |
+| `creating` | `ProgressIndicator` labelled `Création en cours…`, indeterminate until Rust streams the first percent, then determinate `Création en cours… N %` (the percent of episodes settled — each one a download); `Abandonner` stays reachable (the UI stops listening; an accept that already reached Rust still settles atomically — the fresh card appears on the next authoritative overview read) | deliberately NOT announced |
 | `created` | `Histoire créée dans ta bibliothèque` (success chip) + the created title + explicit `Fermer`; the library reloads (authoritative re-read); the editor is NOT auto-opened — the fresh card with its `à revoir` / `partiel` chip IS the sober success feedback. The address form is dropped (the activation mention, a surface-level line, STAYS rendered); closing forgets the typed address (a feed URL can carry a private token) | `aria-live="polite"`, mounted, `aria-atomic` |
 | `failed` (transport) | the canonical `message` + `userAction` of the `AppError` in a `role="alert"` block, buttons `Réessayer` THEN `Fermer`. The `Adresse du flux RSS` field STAYS visible and editable (the gesture is "correct the address, then retry" — in-context, never close/reopen); `Réessayer` re-runs the fetch with the CURRENT field value, and the form's own fetch CTA yields to it | `role="alert"` |
 | `unavailable` (policy refusal — defence in depth, nominally unreachable) | the frozen `message` + `userAction` of the `CONTENT_SOURCE_UNAVAILABLE` refusal (`Cette source de contenu n'est pas activée dans la distribution officielle.` + `Utilise une source activée ou consulte le profil de support de ta version.`) in a CALM `role="status"` block (never `role="alert"` — a distribution policy is not a breakage), NO `Réessayer` (a retry cannot change the policy; retry actions are no-ops in this state), only `Abandonner` (the gesture: close, then pick an enabled source); the deliberate exception to the always-visible surface elements — NO activation mention, NO posture line, NO address field, NO fetch CTA; never confused with `failed` (which keeps the field + `Réessayer`) | `aria-live="polite"` — routed through the PERSISTENT live region (mounted before the transition, like `created`; the visual `role="status"` block mounts already filled, which screen readers do not reliably vocalize) |
@@ -1974,14 +1998,19 @@ Invariants (locked by tests):
   row; a blocked verdict creates NOTHING; `Abandonner` is a pure frontend
   reset; a refused accept (`La source a changé`) mutates NOTHING.
 - **Re-proven accept**: the accept re-fetches and re-parses from zero;
-  the item is resolved by strict `guid` (else exact `title`+`link`) AND
-  its fresh content must match the previewed-content fingerprint; any
-  divergence refuses honestly — NEVER a creation from the stale preview
-  data, NEVER an approximate match, NEVER content the user did not
-  reread. The persisted checksum fingerprints the SECOND fetch's bytes.
-- **Atomicity**: ONE transaction for `stories` + provenance; a failure
-  rolls back fully (no media is ever downloaded, so there is nothing to
-  compensate).
+  EVERY selected item is resolved by strict `guid` (else exact
+  `title`+`link`) AND its fresh content must match the previewed-content
+  fingerprint; any divergence refuses the whole selection honestly —
+  NEVER a creation from the stale preview data, NEVER an approximate
+  match, NEVER content the user did not reread, NEVER a download before
+  the re-proof. The persisted checksum fingerprints the SECOND fetch's
+  bytes.
+- **One story, N episodes, selection order**: the accepted selection
+  becomes ONE story whose nodes follow the reviewed order; a stale or
+  repeated reference never yields a duplicated episode.
+- **Atomicity**: ONE transaction for `stories` + provenance + the
+  `assets` rows; a failure rolls back fully and the promoted media files
+  are compensated refcounted (a file another story references survives).
 - **Floor**: an `rss` story is never `recognized`; its summary is never
   NULL; the `(source, ambiguïté)` finding is always present.
 - **Orthogonality**: the `.rustory` import, the structured-folder creation,

@@ -538,11 +538,13 @@ const RSS_FEED_URL = "https://exemple.fr/flux.xml";
 
 const RSS_PREVIEW_WIRE = {
   sourceHost: "exemple.fr",
+  channelTitle: "Mon flux",
   items: [
     {
       title: "Episode 1",
       summary: "Premier texte.",
       hasEnclosure: false,
+      hasImage: false,
       itemRef: { kind: "guid", guid: "g-1", fingerprint: "a".repeat(64) },
     },
   ],
@@ -576,6 +578,7 @@ describe("fetchRssSourcePreview", () => {
   it("resolves a blocked verdict (typed content problem, never a rejection)", async () => {
     vi.mocked(invoke).mockResolvedValueOnce({
       sourceHost: "exemple.fr",
+      channelTitle: null,
       items: [],
       findings: [
         {
@@ -628,7 +631,7 @@ describe("acceptRssStoryCreation", () => {
     vi.mocked(invoke).mockReset();
   });
 
-  it("calls accept_rss_story_creation with the address + item reference and returns the created card", async () => {
+  it("calls accept_rss_story_creation with the address + the item references (in order) + a progress channel, and returns the created card", async () => {
     vi.mocked(invoke).mockResolvedValueOnce({
       kind: "created",
       story: {
@@ -653,14 +656,15 @@ describe("acceptRssStoryCreation", () => {
         },
       ],
     });
-    const outcome = await acceptRssStoryCreation(RSS_FEED_URL, {
-      kind: "guid",
-      guid: "g-1",
-      fingerprint: "a".repeat(64),
-    });
+    const refs = [
+      { kind: "guid" as const, guid: "g-1", fingerprint: "a".repeat(64) },
+      { kind: "guid" as const, guid: "g-2", fingerprint: "b".repeat(64) },
+    ];
+    const outcome = await acceptRssStoryCreation(RSS_FEED_URL, refs);
     expect(invoke).toHaveBeenCalledWith("accept_rss_story_creation", {
       feedUrl: RSS_FEED_URL,
-      itemRef: { kind: "guid", guid: "g-1", fingerprint: "a".repeat(64) },
+      itemRefs: refs,
+      onProgress: expect.anything(),
     });
     expect(outcome.kind).toBe("created");
     if (outcome.kind === "created") {
@@ -671,23 +675,41 @@ describe("acceptRssStoryCreation", () => {
 
   it("resolves the honest sourceChanged refusal (typed, never a rejection)", async () => {
     vi.mocked(invoke).mockResolvedValueOnce({ kind: "sourceChanged" });
-    const outcome = await acceptRssStoryCreation(RSS_FEED_URL, {
-      kind: "titleLink",
-      title: "Episode",
-      link: null,
-      fingerprint: "a".repeat(64),
-    });
+    const outcome = await acceptRssStoryCreation(RSS_FEED_URL, [
+      {
+        kind: "titleLink",
+        title: "Episode",
+        link: null,
+        fingerprint: "a".repeat(64),
+      },
+    ]);
     expect(outcome).toEqual({ kind: "sourceChanged" });
+  });
+
+  it("forwards the streamed percent, clamped to 0..99, to onProgress", async () => {
+    vi.mocked(invoke).mockImplementationOnce(async (_cmd, args) => {
+      const channel = (args as { onProgress: { onmessage: (n: number) => void } })
+        .onProgress;
+      channel.onmessage(33);
+      channel.onmessage(120);
+      channel.onmessage(Number.NaN);
+      return { kind: "sourceChanged" };
+    });
+    const ticks: number[] = [];
+    await acceptRssStoryCreation(
+      RSS_FEED_URL,
+      [{ kind: "guid", guid: "g-1", fingerprint: "a".repeat(64) }],
+      (pct) => ticks.push(pct),
+    );
+    expect(ticks).toEqual([33, 99]);
   });
 
   it("rejects with RssCreationContractDriftError on a drifted story payload", async () => {
     const raw = { kind: "created", story: { id: "x" }, report: [] };
     vi.mocked(invoke).mockResolvedValueOnce(raw);
-    const err = (await acceptRssStoryCreation(RSS_FEED_URL, {
-      kind: "guid",
-      guid: "g-1",
-      fingerprint: "a".repeat(64),
-    }).then(
+    const err = (await acceptRssStoryCreation(RSS_FEED_URL, [
+      { kind: "guid", guid: "g-1", fingerprint: "a".repeat(64) },
+    ]).then(
       () => {
         throw new Error("expected rejection");
       },
@@ -702,11 +724,9 @@ describe("acceptRssStoryCreation", () => {
       kind: "sourceChanged",
       leaked: true,
     });
-    const err = (await acceptRssStoryCreation(RSS_FEED_URL, {
-      kind: "guid",
-      guid: "g-1",
-      fingerprint: "a".repeat(64),
-    }).then(
+    const err = (await acceptRssStoryCreation(RSS_FEED_URL, [
+      { kind: "guid", guid: "g-1", fingerprint: "a".repeat(64) },
+    ]).then(
       () => {
         throw new Error("expected rejection");
       },

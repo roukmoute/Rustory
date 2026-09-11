@@ -19,6 +19,7 @@ import {
   type OsOpenAnalysis,
   type RssPreview,
   type StructuredCreationAnalysis,
+  rssItemRefKey,
 } from "./import-export";
 
 const VALID_EXPORTED: ExportStoryDialogOutcome = {
@@ -754,17 +755,20 @@ describe("isArchiveCreationAnalysis", () => {
 
 const RSS_PREVIEW_EXPLOITABLE: RssPreview = {
   sourceHost: "exemple.fr",
+  channelTitle: "Mon flux",
   items: [
     {
       title: "Episode 1",
       summary: "Premier texte.",
       hasEnclosure: false,
+      hasImage: false,
       itemRef: { kind: "guid", guid: "g-1", fingerprint: "a".repeat(64) },
     },
     {
       title: "",
       summary: "Sans titre.",
       hasEnclosure: true,
+      hasImage: true,
       itemRef: {
         kind: "titleLink",
         title: "",
@@ -797,6 +801,7 @@ const RSS_PREVIEW_EXPLOITABLE: RssPreview = {
 
 const RSS_PREVIEW_BLOCKED: RssPreview = {
   sourceHost: "exemple.fr",
+  channelTitle: null,
   items: [],
   findings: [
     {
@@ -958,11 +963,67 @@ describe("isRssPreview", () => {
             title: "",
             summary: "",
             hasEnclosure: false,
+            hasImage: false,
             itemRef: { kind: "guid", guid: "g", fingerprint: "a".repeat(64) },
           },
         ],
       }),
     ).toBe(false);
+  });
+
+  it("requires the artwork flag on every item and a null-or-string channel title", () => {
+    const [first, second] = RSS_PREVIEW_EXPLOITABLE.items;
+    const { hasImage: _dropped, ...withoutImageFlag } = first;
+    void _dropped;
+    expect(
+      isRssPreview({
+        ...RSS_PREVIEW_EXPLOITABLE,
+        items: [withoutImageFlag, second],
+      }),
+    ).toBe(false);
+    expect(
+      isRssPreview({ ...RSS_PREVIEW_EXPLOITABLE, channelTitle: null }),
+    ).toBe(true);
+    expect(
+      isRssPreview({ ...RSS_PREVIEW_EXPLOITABLE, channelTitle: 42 }),
+    ).toBe(false);
+    const { channelTitle: _title, ...withoutChannelTitle } =
+      RSS_PREVIEW_EXPLOITABLE;
+    void _title;
+    expect(isRssPreview(withoutChannelTitle)).toBe(false);
+  });
+
+  it("keys an item reference by its identity, never by its fingerprint", () => {
+    expect(
+      rssItemRefKey({ kind: "guid", guid: "g-1", fingerprint: "a".repeat(64) }),
+    ).toBe(
+      rssItemRefKey({ kind: "guid", guid: "g-1", fingerprint: "b".repeat(64) }),
+    );
+    expect(
+      rssItemRefKey({
+        kind: "titleLink",
+        title: "T",
+        link: null,
+        fingerprint: "a".repeat(64),
+      }),
+    ).not.toBe(
+      rssItemRefKey({
+        kind: "titleLink",
+        title: "T",
+        link: "https://exemple.fr/t",
+        fingerprint: "a".repeat(64),
+      }),
+    );
+    expect(
+      rssItemRefKey({ kind: "guid", guid: "T", fingerprint: "a".repeat(64) }),
+    ).not.toBe(
+      rssItemRefKey({
+        kind: "titleLink",
+        title: "T",
+        link: null,
+        fingerprint: "a".repeat(64),
+      }),
+    );
   });
 
   it("accepts the source aspect in the closed finding set", () => {

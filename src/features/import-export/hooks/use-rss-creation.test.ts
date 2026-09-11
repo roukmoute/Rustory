@@ -22,11 +22,13 @@ const FEED_URL = "https://exemple.fr/flux.xml";
 
 const RSS_PREVIEW = {
   sourceHost: "exemple.fr",
+  channelTitle: "Mon flux",
   items: [
     {
       title: "Episode 1",
       summary: "Premier texte.",
       hasEnclosure: false,
+      hasImage: false,
       itemRef: {
         kind: "guid" as const,
         guid: "g-1",
@@ -37,6 +39,7 @@ const RSS_PREVIEW = {
       title: "Episode 2",
       summary: "Deuxième texte.",
       hasEnclosure: true,
+      hasImage: true,
       itemRef: {
         kind: "guid" as const,
         guid: "g-2",
@@ -58,6 +61,7 @@ const RSS_PREVIEW = {
 
 const RSS_PREVIEW_BLOCKED = {
   sourceHost: "exemple.fr",
+  channelTitle: null,
   items: [],
   findings: [
     {
@@ -73,9 +77,16 @@ const RSS_PREVIEW_BLOCKED = {
 
 const CREATED_STORY = {
   id: "0197a5d0-0000-7000-8000-000000000000",
-  title: "Episode 1",
+  title: "Mon flux",
   importState: "needsReview" as const,
 };
+
+const G1 = { kind: "guid" as const, guid: "g-1", fingerprint: "a".repeat(64) };
+const G2 = { kind: "guid" as const, guid: "g-2", fingerprint: "b".repeat(64) };
+const ALL_KEYS = new Set([
+  JSON.stringify(["guid", "g-1"]),
+  JSON.stringify(["guid", "g-2"]),
+]);
 
 const APP_ERROR = {
   code: "RSS_SOURCE_UNREACHABLE",
@@ -96,7 +107,7 @@ describe("useRssCreation", () => {
     expect(result.current.status).toEqual({ kind: "idle" });
   });
 
-  it("fetchPreview lands on review with the preview and no selection", async () => {
+  it("fetchPreview lands on review with the preview and EVERY item ticked", async () => {
     vi.mocked(fetchRssSourcePreview).mockResolvedValueOnce(RSS_PREVIEW);
     const { result } = renderHook(() => useRssCreation());
     await act(async () => {
@@ -107,7 +118,7 @@ describe("useRssCreation", () => {
       kind: "review",
       feedUrl: FEED_URL,
       preview: RSS_PREVIEW,
-      selectedItemRef: null,
+      selectedKeys: ALL_KEYS,
       sourceChanged: false,
     });
   });
@@ -159,38 +170,57 @@ describe("useRssCreation", () => {
     }
   });
 
-  it("selectItem stores the reference on an exploitable review only", async () => {
+  it("toggleItem unticks then re-ticks one item on an exploitable review", async () => {
     vi.mocked(fetchRssSourcePreview).mockResolvedValueOnce(RSS_PREVIEW);
     const { result } = renderHook(() => useRssCreation());
     await act(async () => {
       await result.current.fetchPreview(FEED_URL);
     });
     act(() => {
-      result.current.selectItem({
-        kind: "guid",
-        guid: "g-2",
-        fingerprint: "b".repeat(64),
-      });
+      result.current.toggleItem(G2);
     });
-    const status = result.current.status;
+    let status = result.current.status;
     expect(status.kind).toBe("review");
     if (status.kind === "review") {
-      expect(status.selectedItemRef).toEqual({
-        kind: "guid",
-        guid: "g-2",
-        fingerprint: "b".repeat(64),
-      });
+      expect([...status.selectedKeys]).toEqual([JSON.stringify(["guid", "g-1"])]);
+    }
+    act(() => {
+      result.current.toggleItem(G2);
+    });
+    status = result.current.status;
+    if (status.kind === "review") {
+      expect(status.selectedKeys).toEqual(ALL_KEYS);
     }
   });
 
-  it("selectItem is a no-op on a blocked review and outside review", async () => {
+  it("selectNone empties the selection and selectAll restores every item", async () => {
+    vi.mocked(fetchRssSourcePreview).mockResolvedValueOnce(RSS_PREVIEW);
+    const { result } = renderHook(() => useRssCreation());
+    await act(async () => {
+      await result.current.fetchPreview(FEED_URL);
+    });
+    act(() => {
+      result.current.selectNone();
+    });
+    let status = result.current.status;
+    if (status.kind === "review") {
+      expect(status.selectedKeys.size).toBe(0);
+    }
+    act(() => {
+      result.current.selectAll();
+    });
+    status = result.current.status;
+    if (status.kind === "review") {
+      expect(status.selectedKeys).toEqual(ALL_KEYS);
+    }
+  });
+
+  it("selection gestures are no-ops on a blocked review and outside review", async () => {
     const { result } = renderHook(() => useRssCreation());
     act(() => {
-      result.current.selectItem({
-        kind: "guid",
-        guid: "g-1",
-        fingerprint: "a".repeat(64),
-      });
+      result.current.toggleItem(G1);
+      result.current.selectAll();
+      result.current.selectNone();
     });
     expect(result.current.status).toEqual({ kind: "idle" });
 
@@ -201,19 +231,49 @@ describe("useRssCreation", () => {
       await result.current.fetchPreview(FEED_URL);
     });
     act(() => {
-      result.current.selectItem({
-        kind: "guid",
-        guid: "g-1",
-        fingerprint: "a".repeat(64),
-      });
+      result.current.toggleItem(G1);
     });
     const status = result.current.status;
     if (status.kind === "review") {
-      expect(status.selectedItemRef).toBeNull();
+      expect(status.selectedKeys.size).toBe(0);
     }
   });
 
-  it("acceptCreation commits the selected item, invalidates the cache and lands on created", async () => {
+  it("acceptCreation commits every ticked item in the REVIEWED order, invalidates the cache and lands on created", async () => {
+    vi.mocked(fetchRssSourcePreview).mockResolvedValueOnce(RSS_PREVIEW);
+    vi.mocked(acceptRssStoryCreation).mockResolvedValueOnce({
+      kind: "created",
+      story: CREATED_STORY,
+      report: [],
+    });
+    const { result } = renderHook(() => useRssCreation());
+    await act(async () => {
+      await result.current.fetchPreview(FEED_URL);
+    });
+    // Untick then re-tick the FIRST item: the ticking order must never
+    // reorder the story — the reviewed order stands.
+    act(() => {
+      result.current.toggleItem(G1);
+    });
+    act(() => {
+      result.current.toggleItem(G1);
+    });
+    await act(async () => {
+      await result.current.acceptCreation();
+    });
+    expect(acceptRssStoryCreation).toHaveBeenCalledWith(
+      FEED_URL,
+      [G1, G2],
+      expect.any(Function),
+    );
+    expect(invalidateLibraryOverviewCache).toHaveBeenCalledTimes(1);
+    expect(result.current.status).toEqual({
+      kind: "created",
+      story: CREATED_STORY,
+    });
+  });
+
+  it("acceptCreation sends only the ticked subset", async () => {
     vi.mocked(fetchRssSourcePreview).mockResolvedValueOnce(RSS_PREVIEW);
     vi.mocked(acceptRssStoryCreation).mockResolvedValueOnce({
       kind: "created",
@@ -225,28 +285,59 @@ describe("useRssCreation", () => {
       await result.current.fetchPreview(FEED_URL);
     });
     act(() => {
-      result.current.selectItem({
-        kind: "guid",
-        guid: "g-1",
-        fingerprint: "a".repeat(64),
-      });
+      result.current.toggleItem(G1);
     });
     await act(async () => {
       await result.current.acceptCreation();
     });
-    expect(acceptRssStoryCreation).toHaveBeenCalledWith(FEED_URL, {
-      kind: "guid",
-      guid: "g-1",
-      fingerprint: "a".repeat(64),
+    expect(acceptRssStoryCreation).toHaveBeenCalledWith(
+      FEED_URL,
+      [G2],
+      expect.any(Function),
+    );
+  });
+
+  it("acceptCreation reflects the streamed percent while creating, and a late tick never resurrects the flow", async () => {
+    vi.mocked(fetchRssSourcePreview).mockResolvedValueOnce(RSS_PREVIEW);
+    let tick: ((pct: number) => void) | undefined;
+    let settle: (v: { kind: "created"; story: typeof CREATED_STORY; report: [] }) => void =
+      () => undefined;
+    vi.mocked(acceptRssStoryCreation).mockImplementationOnce(
+      (_url, _refs, onProgress) => {
+        tick = onProgress;
+        return new Promise((resolve) => {
+          settle = resolve;
+        });
+      },
+    );
+    const { result } = renderHook(() => useRssCreation());
+    await act(async () => {
+      await result.current.fetchPreview(FEED_URL);
     });
-    expect(invalidateLibraryOverviewCache).toHaveBeenCalledTimes(1);
+    let accept: Promise<void> = Promise.resolve();
+    act(() => {
+      accept = result.current.acceptCreation();
+    });
+    expect(result.current.status).toEqual({ kind: "creating", progress: null });
+    act(() => {
+      tick?.(42);
+    });
+    expect(result.current.status).toEqual({ kind: "creating", progress: 42 });
+    await act(async () => {
+      settle({ kind: "created", story: CREATED_STORY, report: [] });
+      await accept;
+    });
     expect(result.current.status).toEqual({
       kind: "created",
       story: CREATED_STORY,
     });
+    act(() => {
+      tick?.(99);
+    });
+    expect(result.current.status.kind).toBe("created");
   });
 
-  it("acceptCreation is a no-op without a selection, on a blocked review and outside review", async () => {
+  it("acceptCreation is a no-op with nothing ticked, on a blocked review and outside review", async () => {
     const { result } = renderHook(() => useRssCreation());
     await act(async () => {
       await result.current.acceptCreation();
@@ -254,6 +345,20 @@ describe("useRssCreation", () => {
     expect(acceptRssStoryCreation).not.toHaveBeenCalled();
 
     vi.mocked(fetchRssSourcePreview).mockResolvedValueOnce(RSS_PREVIEW);
+    await act(async () => {
+      await result.current.fetchPreview(FEED_URL);
+    });
+    act(() => {
+      result.current.selectNone();
+    });
+    await act(async () => {
+      await result.current.acceptCreation();
+    });
+    expect(acceptRssStoryCreation).not.toHaveBeenCalled();
+
+    vi.mocked(fetchRssSourcePreview).mockResolvedValueOnce(
+      RSS_PREVIEW_BLOCKED,
+    );
     await act(async () => {
       await result.current.fetchPreview(FEED_URL);
     });
@@ -272,13 +377,6 @@ describe("useRssCreation", () => {
     await act(async () => {
       await result.current.fetchPreview(FEED_URL);
     });
-    act(() => {
-      result.current.selectItem({
-        kind: "guid",
-        guid: "g-1",
-        fingerprint: "a".repeat(64),
-      });
-    });
     await act(async () => {
       await result.current.acceptCreation();
     });
@@ -286,7 +384,7 @@ describe("useRssCreation", () => {
       kind: "review",
       feedUrl: FEED_URL,
       preview: RSS_PREVIEW,
-      selectedItemRef: null,
+      selectedKeys: new Set(),
       sourceChanged: true,
     });
     expect(invalidateLibraryOverviewCache).not.toHaveBeenCalled();
@@ -304,13 +402,6 @@ describe("useRssCreation", () => {
     const { result } = renderHook(() => useRssCreation());
     await act(async () => {
       await result.current.fetchPreview(FEED_URL);
-    });
-    act(() => {
-      result.current.selectItem({
-        kind: "guid",
-        guid: "g-1",
-        fingerprint: "a".repeat(64),
-      });
     });
     await act(async () => {
       await result.current.acceptCreation();
@@ -391,18 +482,11 @@ describe("useRssCreation", () => {
     await act(async () => {
       await result.current.fetchPreview(FEED_URL);
     });
-    act(() => {
-      result.current.selectItem({
-        kind: "guid",
-        guid: "g-1",
-        fingerprint: "a".repeat(64),
-      });
-    });
     let pending: Promise<void> = Promise.resolve();
     act(() => {
       pending = result.current.acceptCreation();
     });
-    expect(result.current.status).toEqual({ kind: "creating" });
+    expect(result.current.status).toEqual({ kind: "creating", progress: null });
 
     act(() => {
       result.current.abandon();
@@ -456,7 +540,7 @@ describe("useRssCreation", () => {
       kind: "review",
       feedUrl: FEED_URL,
       preview: RSS_PREVIEW,
-      selectedItemRef: null,
+      selectedKeys: ALL_KEYS,
       sourceChanged: false,
     });
 
@@ -502,9 +586,6 @@ describe("useRssCreation", () => {
     const { result } = renderHook(() => useRssCreation());
     await act(async () => {
       await result.current.fetchPreview(FEED_URL);
-    });
-    act(() => {
-      result.current.selectItem(RSS_PREVIEW.items[0].itemRef);
     });
     await act(async () => {
       await result.current.acceptCreation();

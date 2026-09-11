@@ -45,8 +45,10 @@ pub const MAX_RSS_XML_DEPTH: usize = 32;
 
 /// Ceiling on the RETAINED exploitable items (anti-DoS: bounds the wire
 /// payload and the review surface). Items beyond the bound are IGNORED —
-/// the feed stays exploitable, the contract documents the cut.
-pub const MAX_RSS_ITEMS: usize = 100;
+/// the feed stays exploitable, the contract documents the cut. Sized for
+/// a WHOLE podcast becoming one story (a kids' series easily runs past
+/// a hundred episodes); the wire stays bounded by the summary excerpt.
+pub const MAX_RSS_ITEMS: usize = 500;
 
 /// Ceiling on one item's cleaned narrative text, in Unicode scalar values
 /// (aligned with the folder flow's `MAX_FOLDER_NODE_TEXT_CHARS`, itself a
@@ -104,6 +106,12 @@ pub struct RssItem {
     pub enclosure_url: Option<String>,
     /// The MIME type of the enclosure (audio/*, image/*, etc.), if present.
     pub enclosure_type: Option<String>,
+    /// The item's own artwork (`<itunes:image href>`), if any — the
+    /// channel artwork is the fallback, resolved by the creation.
+    pub image_url: Option<String>,
+    /// The item's `<pubDate>` as Unix seconds, when it parses as an
+    /// RFC 2822 date; drives the chronological ordering of the analysis.
+    pub published_at: Option<i64>,
 }
 
 /// The stable reference of one previewed item, round-tripped by the
@@ -122,6 +130,12 @@ pub enum RssItemRef {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RssAnalysis {
     pub channel_title: Option<String>,
+    /// The channel artwork (`<itunes:image href>`, else `<image><url>`),
+    /// the fallback image of every item without its own.
+    pub channel_image_url: Option<String>,
+    /// The exploitable items in LISTENING order: chronological (oldest
+    /// first) when every retained item carries a parseable `pubDate`,
+    /// else the feed's own order (see [`order_items_chronologically`]).
     pub items: Vec<RssItem>,
     pub findings: Vec<RecognitionFinding>,
     pub state: ImportState,
@@ -166,11 +180,150 @@ impl RssAnalysis {
         let state = rss_import_state(&findings);
         Self {
             channel_title: None,
+            channel_image_url: None,
             items: Vec::new(),
             findings,
             state,
         }
     }
+}
+
+/// Order the retained items for LISTENING: a podcast feed lists its
+/// newest episode first, while a story box plays a series from its first
+/// episode. When EVERY item carries a parseable `pubDate`, the items are
+/// stably sorted oldest-first (ties keep the feed order); when any date is
+/// missing or unreadable the feed order is kept unchanged — chronology is
+/// never guessed.
+pub fn order_items_chronologically(items: &mut [RssItem]) {
+    if items.iter().all(|item| item.published_at.is_some()) {
+        items.sort_by_key(|item| item.published_at);
+    }
+}
+
+/// Parse an RSS `<pubDate>` (RFC 822 / RFC 2822) into Unix seconds. Pure
+/// and tolerant of the common real-world spellings: an optional weekday,
+/// a 2-digit year, a named zone (`GMT`, `UT`, `UTC`, `Z`, the US zones)
+/// or a numeric offset. `None` for anything else — a date that cannot be
+/// proven never orders a feed.
+pub fn parse_rss_pub_date(raw: &str) -> Option<i64> {
+    let mut tokens: Vec<&str> = raw.split_whitespace().collect();
+    if tokens.is_empty() {
+        return None;
+    }
+    // The optional leading weekday (`Fri,` / `Fri`).
+    if tokens[0].trim_end_matches(',').len() == 3
+        && tokens[0]
+            .trim_end_matches(',')
+            .chars()
+            .all(|c| c.is_ascii_alphabetic())
+        && tokens.len() >= 5
+    {
+        tokens.remove(0);
+    }
+    if tokens.len() < 4 {
+        return None;
+    }
+    let day: i64 = tokens[0].parse().ok()?;
+    let month = match tokens[1].to_ascii_lowercase().as_str() {
+        "jan" => 1,
+        "feb" => 2,
+        "mar" => 3,
+        "apr" => 4,
+        "may" => 5,
+        "jun" => 6,
+        "jul" => 7,
+        "aug" => 8,
+        "sep" => 9,
+        "oct" => 10,
+        "nov" => 11,
+        "dec" => 12,
+        _ => return None,
+    };
+    let mut year: i64 = tokens[2].parse().ok()?;
+    if tokens[2].len() == 2 {
+        // RFC 822 two-digit years (RFC 2822 §4.3 interpretation).
+        year += if year < 50 { 2000 } else { 1900 };
+    }
+    let mut clock = tokens[3].split(':');
+    let hour: i64 = clock.next()?.parse().ok()?;
+    let minute: i64 = clock.next()?.parse().ok()?;
+    let second: i64 = match clock.next() {
+        Some(value) => value.parse().ok()?,
+        None => 0,
+    };
+    if clock.next().is_some() {
+        return None;
+    }
+    if !(1..=31).contains(&day)
+        || !(0..=23).contains(&hour)
+        || !(0..=59).contains(&minute)
+        || !(0..=60).contains(&second)
+        || !(1900..=9999).contains(&year)
+    {
+        return None;
+    }
+    let offset_seconds: i64 = match tokens.get(4) {
+        None => 0,
+        Some(zone) => parse_rss_zone(zone)?,
+    };
+    if tokens.len() > 5 {
+        return None;
+    }
+    let days = days_from_civil(year, month, day)?;
+    Some(days * 86_400 + hour * 3_600 + minute * 60 + second - offset_seconds)
+}
+
+/// The zone token of an RFC 2822 date, as seconds EAST of UTC.
+fn parse_rss_zone(zone: &str) -> Option<i64> {
+    match zone.to_ascii_uppercase().as_str() {
+        "GMT" | "UT" | "UTC" | "Z" => return Some(0),
+        "EST" => return Some(-5 * 3_600),
+        "EDT" => return Some(-4 * 3_600),
+        "CST" => return Some(-6 * 3_600),
+        "CDT" => return Some(-5 * 3_600),
+        "MST" => return Some(-7 * 3_600),
+        "MDT" => return Some(-6 * 3_600),
+        "PST" => return Some(-8 * 3_600),
+        "PDT" => return Some(-7 * 3_600),
+        _ => {}
+    }
+    let (sign, digits) = match zone.as_bytes().first()? {
+        b'+' => (1, &zone[1..]),
+        b'-' => (-1, &zone[1..]),
+        _ => return None,
+    };
+    if digits.len() != 4 || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let hours: i64 = digits[..2].parse().ok()?;
+    let minutes: i64 = digits[2..].parse().ok()?;
+    if hours > 23 || minutes > 59 {
+        return None;
+    }
+    Some(sign * (hours * 3_600 + minutes * 60))
+}
+
+/// Days since 1970-01-01 of a proleptic Gregorian civil date (Howard
+/// Hinnant's `days_from_civil`); `None` for a day past the month's end.
+fn days_from_civil(year: i64, month: i64, day: i64) -> Option<i64> {
+    let leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+    let month_days = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if leap => 29,
+        2 => 28,
+        _ => return None,
+    };
+    if day > month_days {
+        return None;
+    }
+    let y = if month <= 2 { year - 1 } else { year };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400;
+    let mp = (month + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    Some(era * 146_097 + doe - 719_468)
 }
 
 /// The RSS state derivation (dedicated per-flow derivation — the
@@ -205,35 +358,46 @@ fn exploitable_flow_findings() -> Vec<RecognitionFinding> {
     ]
 }
 
-/// The findings persisted for ONE ingested item — what the created
-/// story's durable state, chip and report speak of. Envelope + format are
+/// The findings persisted for ONE ingested feed — what the created story's
+/// durable state, chip and report speak of. Envelope + format are
 /// recognized by construction (a blocked feed never reaches an accept),
-/// the `(Source, Ambiguous)` floor is always present, the item's own
-/// adjustments surface as ambiguities, and a referenced enclosure is the
-/// `(Media, Missing)` finding (state `Partial`).
-pub fn rss_item_findings(item: &RssItem, media_downloaded: bool) -> Vec<RecognitionFinding> {
+/// the `(Source, Ambiguous)` floor is always present; the TITLE aspect is
+/// recognized only when the channel title survived as the story title
+/// (else the `Histoire de {hôte}` fallback applied — an ambiguity); the
+/// STRUCTURE aspect is recognized when no ingested item needed a cleaning
+/// adjustment; and when any ingested item references an enclosure the
+/// MEDIA aspect is recognized iff EVERY referenced audio was downloaded,
+/// else the `(Media, Missing)` finding derives `Partial`.
+pub fn rss_feed_findings(
+    items: &[&RssItem],
+    title_recognized: bool,
+    audio_missing: bool,
+) -> Vec<RecognitionFinding> {
     let mut findings = vec![
         RecognitionFinding::recognized(RecognitionAspect::Envelope),
         RecognitionFinding::recognized(RecognitionAspect::FormatVersion),
         RecognitionFinding::ambiguous(RecognitionAspect::Source),
     ];
-    findings.push(if item.title_adjusted {
-        RecognitionFinding::ambiguous(RecognitionAspect::Title)
-    } else {
+    findings.push(if title_recognized {
         RecognitionFinding::recognized(RecognitionAspect::Title)
+    } else {
+        RecognitionFinding::ambiguous(RecognitionAspect::Title)
     });
-    findings.push(if item.text_adjusted {
+    let any_adjusted = items
+        .iter()
+        .any(|item| item.title_adjusted || item.text_adjusted);
+    findings.push(if any_adjusted {
         RecognitionFinding::ambiguous(RecognitionAspect::Structure)
     } else {
         RecognitionFinding::recognized(RecognitionAspect::Structure)
     });
-    if item.has_enclosure {
+    if items.iter().any(|item| item.has_enclosure) {
         findings.push(RecognitionFinding {
             aspect: RecognitionAspect::Media,
-            category: if media_downloaded {
-                RecognitionCategory::Recognized
-            } else {
+            category: if audio_missing {
                 RecognitionCategory::Missing
+            } else {
+                RecognitionCategory::Recognized
             },
             message: None,
         });
@@ -267,6 +431,8 @@ pub fn rss_item_fingerprint(item: &RssItem) -> String {
         item.has_enclosure,
         item.enclosure_url,
         item.enclosure_type,
+        item.image_url,
+        item.published_at,
     ]);
     // Serializing a small array of plain scalars cannot fail in practice.
     let bytes = serde_json::to_vec(&canonical).unwrap_or_default();
@@ -308,16 +474,22 @@ pub fn parse_rss(bytes: &[u8]) -> RssAnalysis {
     enum Capture {
         None,
         ChannelTitle,
+        ChannelImageUrl,
         ItemTitle,
         ItemDescription,
         ItemGuid,
         ItemLink,
+        ItemPubDate,
     }
 
     let mut stack: Vec<Vec<u8>> = Vec::new();
     let mut root_seen = false;
     let mut root_is_rss2 = false;
     let mut channel_title: Option<String> = None;
+    // The channel artwork: `<itunes:image href>` wins over `<image><url>`
+    // (the podcast-standard, usually higher-resolution artwork).
+    let mut channel_itunes_image: Option<String> = None;
+    let mut channel_image_url: Option<String> = None;
     let mut items: Vec<RssItem> = Vec::new();
     // The references already retained — deduplication runs INLINE so the
     // item cap only ever counts NOVEL references (duplicates never squat
@@ -347,10 +519,54 @@ pub fn parse_rss(bytes: &[u8]) -> RssAnalysis {
         has_enclosure: bool,
         enclosure_url: Option<String>,
         enclosure_type: Option<String>,
+        image_url: Option<String>,
+        pub_date: Option<String>,
     }
 
     fn is_item_path(stack: &[Vec<u8>]) -> bool {
         stack.len() == 3 && stack[0] == b"rss" && stack[1] == b"channel" && stack[2] == b"item"
+    }
+
+    fn is_channel_path(stack: &[Vec<u8>]) -> bool {
+        stack.len() == 2 && stack[0] == b"rss" && stack[1] == b"channel"
+    }
+
+    /// The `href` of an `<itunes:image>` tag, trimmed; `None` when absent
+    /// or unreadable (never a verdict — artwork is optional).
+    fn itunes_image_href(start: &BytesStart<'_>) -> Option<String> {
+        if start.name().as_ref() != b"itunes:image" {
+            return None;
+        }
+        for attr in start.attributes() {
+            let Ok(attr) = attr else { continue };
+            if attr.key.as_ref() == b"href" {
+                let Ok(value) = attr.normalized_value(quick_xml::XmlVersion::Implicit1_0) else {
+                    continue;
+                };
+                let value = value.trim().to_string();
+                return (!value.is_empty()).then_some(value);
+            }
+        }
+        None
+    }
+
+    /// The `url` / `type` of an `<enclosure>` tag into the draft.
+    fn read_enclosure(start: &BytesStart<'_>, draft: &mut DraftItem) {
+        draft.has_enclosure = true;
+        for attr in start.attributes() {
+            let Ok(attr) = attr else { continue };
+            if attr.key.as_ref() == b"url" {
+                let Ok(value) = attr.normalized_value(quick_xml::XmlVersion::Implicit1_0) else {
+                    continue;
+                };
+                draft.enclosure_url = Some(value.trim().to_string());
+            } else if attr.key.as_ref() == b"type" {
+                let Ok(value) = attr.normalized_value(quick_xml::XmlVersion::Implicit1_0) else {
+                    continue;
+                };
+                draft.enclosure_type = Some(value.trim().to_string());
+            }
+        }
     }
 
     /// Clean the draft's fields and decide exploitability: an item with
@@ -393,6 +609,8 @@ pub fn parse_rss(bytes: &[u8]) -> RssAnalysis {
             has_enclosure: draft.has_enclosure,
             enclosure_url: draft.enclosure_url,
             enclosure_type: draft.enclosure_type,
+            image_url: draft.image_url,
+            published_at: draft.pub_date.as_deref().and_then(parse_rss_pub_date),
         })
     }
 
@@ -403,11 +621,20 @@ pub fn parse_rss(bytes: &[u8]) -> RssAnalysis {
                 b"description" => Capture::ItemDescription,
                 b"guid" => Capture::ItemGuid,
                 b"link" => Capture::ItemLink,
+                b"pubDate" => Capture::ItemPubDate,
                 _ => Capture::None,
             };
         }
-        if stack.len() == 2 && stack[0] == b"rss" && stack[1] == b"channel" && name == b"title" {
+        if is_channel_path(stack) && name == b"title" {
             return Capture::ChannelTitle;
+        }
+        if stack.len() == 3
+            && stack[0] == b"rss"
+            && stack[1] == b"channel"
+            && stack[2] == b"image"
+            && name == b"url"
+        {
+            return Capture::ChannelImageUrl;
         }
         Capture::None
     }
@@ -518,28 +745,15 @@ pub fn parse_rss(bytes: &[u8]) -> RssAnalysis {
                     // The captured element's own depth, once pushed.
                     capture_depth = stack.len() + 1;
                 }
-                if current.is_some() && is_item_path(&stack) && name == b"enclosure" {
-                    if let Some(draft) = current.as_mut() {
-                        draft.has_enclosure = true;
-                        // Extract url attribute from enclosure
-                        for attr in start.attributes() {
-                            let Ok(attr) = attr else { continue };
-                            if attr.key.as_ref() == b"url" {
-                                let Ok(value) =
-                                    attr.normalized_value(quick_xml::XmlVersion::Implicit1_0)
-                                else {
-                                    continue;
-                                };
-                                draft.enclosure_url = Some(value.trim().to_string());
-                            } else if attr.key.as_ref() == b"type" {
-                                let Ok(value) =
-                                    attr.normalized_value(quick_xml::XmlVersion::Implicit1_0)
-                                else {
-                                    continue;
-                                };
-                                draft.enclosure_type = Some(value.trim().to_string());
-                            }
-                        }
+                if let Some(draft) = current.as_mut().filter(|_| is_item_path(&stack)) {
+                    if name == b"enclosure" {
+                        read_enclosure(&start, draft);
+                    } else if let Some(href) = itunes_image_href(&start) {
+                        draft.image_url = Some(href);
+                    }
+                } else if current.is_none() && is_channel_path(&stack) {
+                    if let Some(href) = itunes_image_href(&start) {
+                        channel_itunes_image = Some(href);
                     }
                 }
                 stack.push(name);
@@ -563,31 +777,15 @@ pub fn parse_rss(bytes: &[u8]) -> RssAnalysis {
                     capture_saw_markup = true;
                     continue;
                 }
-                if current.is_some()
-                    && is_item_path(&stack)
-                    && start.name().as_ref() == b"enclosure"
-                {
-                    if let Some(draft) = current.as_mut() {
-                        draft.has_enclosure = true;
-                        // Extract url attribute from enclosure (self-closing tag)
-                        for attr in start.attributes() {
-                            let Ok(attr) = attr else { continue };
-                            if attr.key.as_ref() == b"url" {
-                                let Ok(value) =
-                                    attr.normalized_value(quick_xml::XmlVersion::Implicit1_0)
-                                else {
-                                    continue;
-                                };
-                                draft.enclosure_url = Some(value.trim().to_string());
-                            } else if attr.key.as_ref() == b"type" {
-                                let Ok(value) =
-                                    attr.normalized_value(quick_xml::XmlVersion::Implicit1_0)
-                                else {
-                                    continue;
-                                };
-                                draft.enclosure_type = Some(value.trim().to_string());
-                            }
-                        }
+                if let Some(draft) = current.as_mut().filter(|_| is_item_path(&stack)) {
+                    if start.name().as_ref() == b"enclosure" {
+                        read_enclosure(&start, draft);
+                    } else if let Some(href) = itunes_image_href(&start) {
+                        draft.image_url = Some(href);
+                    }
+                } else if current.is_none() && is_channel_path(&stack) {
+                    if let Some(href) = itunes_image_href(&start) {
+                        channel_itunes_image = Some(href);
                     }
                 }
             }
@@ -653,10 +851,18 @@ pub fn parse_rss(bytes: &[u8]) -> RssAnalysis {
                         }
                         capture = Capture::None;
                     }
+                    Capture::ChannelImageUrl => {
+                        let trimmed = text.trim().to_string();
+                        if !trimmed.is_empty() {
+                            channel_image_url = Some(trimmed);
+                        }
+                        capture = Capture::None;
+                    }
                     Capture::ItemTitle
                     | Capture::ItemDescription
                     | Capture::ItemGuid
-                    | Capture::ItemLink => {
+                    | Capture::ItemLink
+                    | Capture::ItemPubDate => {
                         if let Some(draft) = current.as_mut() {
                             let value = std::mem::take(&mut text);
                             match capture {
@@ -670,6 +876,7 @@ pub fn parse_rss(bytes: &[u8]) -> RssAnalysis {
                                 }
                                 Capture::ItemGuid => draft.guid = Some(value),
                                 Capture::ItemLink => draft.link = Some(value),
+                                Capture::ItemPubDate => draft.pub_date = Some(value),
                                 _ => unreachable!(),
                             }
                         }
@@ -712,10 +919,12 @@ pub fn parse_rss(bytes: &[u8]) -> RssAnalysis {
     if items.is_empty() {
         return RssAnalysis::empty_blocked();
     }
+    order_items_chronologically(&mut items);
     let findings = exploitable_flow_findings();
     let state = rss_import_state(&findings);
     RssAnalysis {
         channel_title,
+        channel_image_url: channel_itunes_image.or(channel_image_url),
         items,
         findings,
         state,
@@ -1166,37 +1375,57 @@ mod tests {
             has_enclosure: false,
             enclosure_url: None,
             enclosure_type: None,
+            image_url: None,
+            published_at: None,
         }
     }
 
     #[test]
-    fn item_findings_always_carry_the_source_ambiguity_floor() {
-        let findings = rss_item_findings(&plain_item(), false);
+    fn feed_findings_always_carry_the_source_ambiguity_floor() {
+        let item = plain_item();
+        let findings = rss_feed_findings(&[&item], true, false);
         assert!(findings
             .iter()
             .any(|f| f.aspect == RecognitionAspect::Source
                 && f.category == RecognitionCategory::Ambiguous));
+        assert!(findings.iter().any(|f| f.aspect == RecognitionAspect::Title
+            && f.category == RecognitionCategory::Recognized));
+        assert!(findings
+            .iter()
+            .any(|f| f.aspect == RecognitionAspect::Structure
+                && f.category == RecognitionCategory::Recognized));
+        // No enclosure anywhere: no Media aspect at all.
+        assert!(!findings
+            .iter()
+            .any(|f| f.aspect == RecognitionAspect::Media));
         assert_eq!(rss_import_state(&findings), ImportState::NeedsReview);
     }
 
     #[test]
-    fn an_adjusted_title_is_a_title_ambiguity() {
-        let item = RssItem {
-            title_adjusted: true,
-            ..plain_item()
-        };
-        let findings = rss_item_findings(&item, false);
+    fn a_fallback_title_is_a_title_ambiguity() {
+        let item = plain_item();
+        let findings = rss_feed_findings(&[&item], false, false);
         assert!(findings.iter().any(|f| f.aspect == RecognitionAspect::Title
             && f.category == RecognitionCategory::Ambiguous));
     }
 
     #[test]
-    fn an_adjusted_text_is_a_structure_ambiguity() {
-        let item = RssItem {
+    fn any_adjusted_item_is_a_structure_ambiguity() {
+        let clean = plain_item();
+        let adjusted = RssItem {
             text_adjusted: true,
             ..plain_item()
         };
-        let findings = rss_item_findings(&item, false);
+        let findings = rss_feed_findings(&[&clean, &adjusted], true, false);
+        assert!(findings
+            .iter()
+            .any(|f| f.aspect == RecognitionAspect::Structure
+                && f.category == RecognitionCategory::Ambiguous));
+        let titled = RssItem {
+            title_adjusted: true,
+            ..plain_item()
+        };
+        let findings = rss_feed_findings(&[&titled], true, false);
         assert!(findings
             .iter()
             .any(|f| f.aspect == RecognitionAspect::Structure
@@ -1204,17 +1433,22 @@ mod tests {
     }
 
     #[test]
-    fn an_enclosure_is_a_missing_media_finding_and_a_partial_state() {
+    fn a_missing_audio_is_a_missing_media_finding_and_a_partial_state() {
         let item = RssItem {
             has_enclosure: true,
             ..plain_item()
         };
-        let findings = rss_item_findings(&item, false);
+        let findings = rss_feed_findings(&[&item], true, true);
         assert!(findings
             .iter()
             .any(|f| f.aspect == RecognitionAspect::Media
                 && f.category == RecognitionCategory::Missing));
         assert_eq!(rss_import_state(&findings), ImportState::Partial);
+        // Every audio downloaded: the Media aspect is recognized.
+        let findings = rss_feed_findings(&[&item], true, false);
+        assert!(findings.iter().any(|f| f.aspect == RecognitionAspect::Media
+            && f.category == RecognitionCategory::Recognized));
+        assert_eq!(rss_import_state(&findings), ImportState::NeedsReview);
     }
 
     #[test]
@@ -1455,13 +1689,11 @@ mod tests {
         assert_eq!(item.guid.as_deref(), Some("g-nested"));
         // The stripped child markup IS an adjustment: the ingested value
         // no longer carries the author's inline tags — both fields flag it
-        // (→ the Title/Structure ambiguities), exactly like escaped-then-
-        // cleaned markup would.
+        // (→ the Structure ambiguity of the feed findings), exactly like
+        // escaped-then-cleaned markup would.
         assert!(item.title_adjusted, "stripped title markup must flag");
         assert!(item.text_adjusted, "stripped text markup must flag");
-        let findings = rss_item_findings(item, false);
-        assert!(findings.iter().any(|f| f.aspect == RecognitionAspect::Title
-            && f.category == RecognitionCategory::Ambiguous));
+        let findings = rss_feed_findings(&[item], true, false);
         assert!(findings
             .iter()
             .any(|f| f.aspect == RecognitionAspect::Structure
@@ -1618,6 +1850,156 @@ mod tests {
                 "a {label} change must change the fingerprint"
             );
         }
+    }
+
+    // ===== artwork, dates and the listening order =====
+
+    #[test]
+    fn pub_dates_parse_the_real_world_spellings_and_refuse_the_rest() {
+        assert_eq!(
+            parse_rss_pub_date("Fri, 28 Aug 2026 04:42:00 +0200"),
+            Some(1_787_884_920)
+        );
+        // Without the weekday, in UTC (named and numeric), seconds optional.
+        assert_eq!(parse_rss_pub_date("1 Jan 1970 00:00:00 GMT"), Some(0));
+        assert_eq!(parse_rss_pub_date("1 Jan 1970 00:00 +0000"), Some(0));
+        assert_eq!(
+            parse_rss_pub_date("Thu, 01 Jan 1970 01:00:00 +0100"),
+            Some(0)
+        );
+        assert_eq!(
+            parse_rss_pub_date("1 Jan 1970 00:00:00 EST"),
+            Some(5 * 3_600)
+        );
+        // A two-digit year follows the RFC 2822 interpretation.
+        assert_eq!(
+            parse_rss_pub_date("1 Jan 70 00:00:00 GMT"),
+            parse_rss_pub_date("1 Jan 1970 00:00:00 GMT")
+        );
+        // Refusals: an impossible day, an unknown zone, junk, a trailing token.
+        assert_eq!(parse_rss_pub_date("31 Feb 2026 00:00:00 GMT"), None);
+        assert_eq!(parse_rss_pub_date("1 Jan 2026 00:00:00 XYZ"), None);
+        assert_eq!(parse_rss_pub_date("demain"), None);
+        assert_eq!(parse_rss_pub_date(""), None);
+        assert_eq!(parse_rss_pub_date("1 Jan 2026 00:00:00 GMT extra"), None);
+    }
+
+    #[test]
+    fn a_dated_feed_is_ordered_oldest_first_for_listening() {
+        // A podcast feed lists its newest episode first; the story plays
+        // the series from its first episode.
+        let analysis = parse_rss(
+            "<rss version=\"2.0\"><channel><title>Série</title>\
+             <item><title>Trois</title><guid>3</guid><pubDate>Wed, 03 Mar 2026 08:00:00 +0100</pubDate></item>\
+             <item><title>Deux</title><guid>2</guid><pubDate>Tue, 02 Mar 2026 08:00:00 +0100</pubDate></item>\
+             <item><title>Un</title><guid>1</guid><pubDate>Mon, 01 Mar 2026 08:00:00 +0100</pubDate></item>\
+             </channel></rss>"
+                .as_bytes(),
+        );
+        let titles: Vec<&str> = analysis.items.iter().map(|i| i.title.as_str()).collect();
+        assert_eq!(titles, ["Un", "Deux", "Trois"]);
+        assert!(analysis.items.iter().all(|i| i.published_at.is_some()));
+    }
+
+    #[test]
+    fn a_feed_with_one_undated_item_keeps_its_own_order() {
+        // Chronology is never guessed: one missing (or unreadable) date
+        // and the feed order stands, ties included.
+        let analysis = parse_rss(
+            "<rss version=\"2.0\"><channel><title>Série</title>\
+             <item><title>Trois</title><guid>3</guid><pubDate>Wed, 03 Mar 2026 08:00:00 +0100</pubDate></item>\
+             <item><title>Deux</title><guid>2</guid><pubDate>bientôt</pubDate></item>\
+             <item><title>Un</title><guid>1</guid><pubDate>Mon, 01 Mar 2026 08:00:00 +0100</pubDate></item>\
+             </channel></rss>"
+                .as_bytes(),
+        );
+        let titles: Vec<&str> = analysis.items.iter().map(|i| i.title.as_str()).collect();
+        assert_eq!(titles, ["Trois", "Deux", "Un"]);
+        assert_eq!(analysis.items[1].published_at, None);
+    }
+
+    #[test]
+    fn same_dated_items_keep_the_feed_order() {
+        let analysis = parse_rss(
+            "<rss version=\"2.0\"><channel><title>Série</title>\
+             <item><title>A</title><guid>a</guid><pubDate>Mon, 01 Mar 2026 08:00:00 +0100</pubDate></item>\
+             <item><title>B</title><guid>b</guid><pubDate>Mon, 01 Mar 2026 08:00:00 +0100</pubDate></item>\
+             </channel></rss>"
+                .as_bytes(),
+        );
+        let titles: Vec<&str> = analysis.items.iter().map(|i| i.title.as_str()).collect();
+        assert_eq!(titles, ["A", "B"]);
+    }
+
+    #[test]
+    fn item_and_channel_artwork_are_read_with_the_itunes_tag_winning() {
+        let analysis = parse_rss(
+            "<rss version=\"2.0\" xmlns:itunes=\"http://www.itunes.com/dtds/podcast-1.0.dtd\"><channel>\
+             <title>Série</title>\
+             <image><url> https://exemple.fr/rss.jpg </url><title>Série</title></image>\
+             <itunes:image href=\"https://exemple.fr/itunes.jpg\"/>\
+             <item><title>Avec</title><guid>1</guid><itunes:image href=\"https://exemple.fr/ep1.jpg\"/></item>\
+             <item><title>Sans</title><guid>2</guid></item>\
+             <item><title>Ouvert</title><guid>3</guid><itunes:image href=\"https://exemple.fr/ep3.jpg\"></itunes:image></item>\
+             </channel></rss>"
+                .as_bytes(),
+        );
+        assert_eq!(
+            analysis.channel_image_url.as_deref(),
+            Some("https://exemple.fr/itunes.jpg")
+        );
+        assert_eq!(
+            analysis.items[0].image_url.as_deref(),
+            Some("https://exemple.fr/ep1.jpg")
+        );
+        assert_eq!(analysis.items[1].image_url, None);
+        assert_eq!(
+            analysis.items[2].image_url.as_deref(),
+            Some("https://exemple.fr/ep3.jpg")
+        );
+    }
+
+    #[test]
+    fn the_channel_image_url_is_the_artwork_fallback() {
+        let analysis = parse_rss(
+            "<rss version=\"2.0\"><channel><title>Série</title>\
+             <image><url>https://exemple.fr/rss.jpg</url></image>\
+             <item><title>Un</title><guid>1</guid></item>\
+             </channel></rss>"
+                .as_bytes(),
+        );
+        assert_eq!(
+            analysis.channel_image_url.as_deref(),
+            Some("https://exemple.fr/rss.jpg")
+        );
+        // An item-level <image> is not the channel artwork.
+        let analysis = parse_rss(
+            "<rss version=\"2.0\"><channel><title>Série</title>\
+             <item><title>Un</title><guid>1</guid><image><url>https://exemple.fr/x.jpg</url></image></item>\
+             </channel></rss>"
+                .as_bytes(),
+        );
+        assert_eq!(analysis.channel_image_url, None);
+        assert_eq!(analysis.items[0].image_url, None);
+    }
+
+    #[test]
+    fn artwork_and_date_changes_alter_the_fingerprint() {
+        let same = rss_item_fingerprint(&plain_item());
+        assert_ne!(
+            rss_item_fingerprint(&RssItem {
+                image_url: Some("https://exemple.fr/a.jpg".into()),
+                ..plain_item()
+            }),
+            same
+        );
+        assert_ne!(
+            rss_item_fingerprint(&RssItem {
+                published_at: Some(1),
+                ..plain_item()
+            }),
+            same
+        );
     }
 
     #[test]

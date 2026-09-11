@@ -290,8 +290,8 @@ vi.mock("../../ipc/commands/import-export", async () => {
     analyzeDropRequest: () => mockAnalyzeDrop(),
     discardDropRequest: () => mockDiscardDrop(),
     fetchRssSourcePreview: (url: string) => mockFetchRssPreview(url),
-    acceptRssStoryCreation: (url: string, ref: unknown) =>
-      mockAcceptRssCreation(url, ref),
+    acceptRssStoryCreation: (url: string, refs: unknown, onProgress: unknown) =>
+      mockAcceptRssCreation(url, refs, onProgress),
     fetchWebPodcastPreview: (url: string) => mockFetchWebPreview(url),
     acceptWebPodcastCreation: (url: string, checksum: string) =>
       mockAcceptWebCreation(url, checksum),
@@ -1478,11 +1478,13 @@ describe("<LibraryRoute />", () => {
     });
     mockFetchRssPreview.mockResolvedValueOnce({
       sourceHost: "exemple.fr",
+      channelTitle: null,
       items: [
         {
           title: "Episode 1",
           summary: "Premier texte.",
           hasEnclosure: false,
+          hasImage: false,
           itemRef: { kind: "guid", guid: "g-1", fingerprint: "a".repeat(64) },
         },
       ],
@@ -1519,9 +1521,17 @@ describe("<LibraryRoute />", () => {
       "https://exemple.fr/flux.xml",
     );
     await user.click(screen.getByRole("button", { name: "Récupérer le flux" }));
-    await user.click(await screen.findByRole("button", { name: /Episode 1/ }));
-    await user.click(
-      screen.getByRole("button", { name: "Créer le brouillon" }),
+    // Every episode is ticked by default: the whole feed is the story.
+    expect(
+      await screen.findByRole("checkbox", { name: "Episode 1" }),
+    ).toBeChecked();
+    await user.click(screen.getByRole("button", { name: "Créer l'histoire" }));
+    await waitFor(() =>
+      expect(mockAcceptRssCreation).toHaveBeenCalledWith(
+        "https://exemple.fr/flux.xml",
+        [{ kind: "guid", guid: "g-1", fingerprint: "a".repeat(64) }],
+        expect.any(Function),
+      ),
     );
     // The success terminal renders (live region + chip), then the reloaded
     // library card carries the review chip — THE visible materialization

@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
@@ -9,11 +9,13 @@ const FEED_URL = "https://exemple.fr/flux.xml";
 
 const EXPLOITABLE_PREVIEW = {
   sourceHost: "exemple.fr",
+  channelTitle: "Mon flux",
   items: [
     {
       title: "Episode 1",
       summary: "Premier texte.",
       hasEnclosure: false,
+      hasImage: false,
       itemRef: {
         kind: "guid" as const,
         guid: "g-1",
@@ -24,6 +26,7 @@ const EXPLOITABLE_PREVIEW = {
       title: "Episode 2",
       summary: "Deuxième texte.",
       hasEnclosure: true,
+      hasImage: true,
       itemRef: {
         kind: "guid" as const,
         guid: "g-2",
@@ -43,18 +46,28 @@ const EXPLOITABLE_PREVIEW = {
   blocked: false,
 };
 
+const KEY_1 = JSON.stringify(["guid", "g-1"]);
+const KEY_2 = JSON.stringify(["guid", "g-2"]);
+
+/** The nominal review: every item ticked (the whole podcast is the story). */
 const REVIEW: RssCreationStatus = {
   kind: "review",
   feedUrl: FEED_URL,
   preview: EXPLOITABLE_PREVIEW,
-  selectedItemRef: null,
+  selectedKeys: new Set([KEY_1, KEY_2]),
   sourceChanged: false,
 };
 
-const REVIEW_SELECTED: RssCreationStatus = {
+const REVIEW_NONE_SELECTED: RssCreationStatus = {
   ...REVIEW,
   kind: "review",
-  selectedItemRef: { kind: "guid", guid: "g-1", fingerprint: "a".repeat(64) },
+  selectedKeys: new Set(),
+};
+
+const REVIEW_ONE_SELECTED: RssCreationStatus = {
+  ...REVIEW,
+  kind: "review",
+  selectedKeys: new Set([KEY_1]),
 };
 
 const REVIEW_BLOCKED: RssCreationStatus = {
@@ -62,6 +75,7 @@ const REVIEW_BLOCKED: RssCreationStatus = {
   feedUrl: FEED_URL,
   preview: {
     sourceHost: "exemple.fr",
+    channelTitle: null,
     items: [],
     findings: [
       {
@@ -74,7 +88,7 @@ const REVIEW_BLOCKED: RssCreationStatus = {
     state: "blocked" as const,
     blocked: true,
   },
-  selectedItemRef: null,
+  selectedKeys: new Set(),
   sourceChanged: false,
 };
 
@@ -87,7 +101,9 @@ const REVIEW_SOURCE_CHANGED: RssCreationStatus = {
 function noopHandlers() {
   return {
     onFetch: vi.fn(),
-    onSelectItem: vi.fn(),
+    onToggleItem: vi.fn(),
+    onSelectAll: vi.fn(),
+    onSelectNone: vi.fn(),
     onAccept: vi.fn(),
     onAbandon: vi.fn(),
     onDismiss: vi.fn(),
@@ -166,26 +182,34 @@ describe("CreateFromRssSurface", () => {
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
 
-  it("renders the review with host, findings, selectable items and a disabled CTA before selection", () => {
+  it("renders the review with host, feed name, findings, the ticked episode list and the count", () => {
     render(<CreateFromRssSurface open status={REVIEW} {...noopHandlers()} />);
     expect(screen.getByText("exemple.fr")).toBeInTheDocument();
+    expect(screen.getByText("Mon flux")).toBeInTheDocument();
     expect(
       screen.getByText(
         "Contenu ingéré depuis une source externe (RSS). Relis le texte et complète l'histoire avant de l'utiliser.",
       ),
     ).toBeInTheDocument();
-    expect(screen.getByText("Episode 1")).toBeInTheDocument();
+    // Every episode is ticked by default: the whole podcast is the story.
+    const list = screen.getByRole("list", { name: "Épisodes du flux" });
+    const boxes = within(list).getAllByRole("checkbox");
+    expect(boxes.map((b) => b.getAttribute("aria-label"))).toEqual([
+      "Episode 1",
+      "Episode 2",
+    ]);
+    expect(boxes.every((b) => (b as HTMLInputElement).checked)).toBe(true);
     expect(screen.getByText("Deuxième texte.")).toBeInTheDocument();
-    // The enclosure note renders on the item that references a remote media.
-    expect(screen.getByText("Média distant non récupéré")).toBeInTheDocument();
-    expect(
-      screen.getByRole("button", { name: "Créer le brouillon" }),
-    ).toHaveAttribute("aria-disabled", "true");
+    expect(screen.getByText("2 épisodes sélectionnés sur 2")).toBeInTheDocument();
+    // The media markers say what the accept will download.
+    expect(screen.getByText("Média audio")).toBeInTheDocument();
+    expect(screen.getByText("Sans média audio")).toBeInTheDocument();
+    expect(screen.getByText("Image")).toBeInTheDocument();
     // No alert for a calm exploitable review.
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
 
-  it("selects an item and accepts from the enabled CTA", async () => {
+  it("ticks and unticks episodes, with the whole-list gestures, and accepts from the enabled CTA", async () => {
     const handlers = noopHandlers();
     const user = userEvent.setup();
     const { rerender } = render(
@@ -194,22 +218,62 @@ describe("CreateFromRssSurface", () => {
     // The field carries the reviewed address (the user fetched it from
     // here — the surface keeps the typed value across the state change).
     await user.type(screen.getByLabelText("Adresse du flux RSS"), FEED_URL);
-    await user.click(screen.getByRole("button", { name: /Episode 1/ }));
-    expect(handlers.onSelectItem).toHaveBeenCalledWith({
+    await user.click(screen.getByRole("checkbox", { name: "Episode 2" }));
+    expect(handlers.onToggleItem).toHaveBeenCalledWith({
       kind: "guid",
-      guid: "g-1",
-      fingerprint: "a".repeat(64),
+      guid: "g-2",
+      fingerprint: "b".repeat(64),
     });
+    // Everything ticked: only "Tout désélectionner" is live.
+    expect(
+      screen.getByRole("button", { name: "Tout sélectionner" }),
+    ).toBeDisabled();
+    await user.click(screen.getByRole("button", { name: "Tout désélectionner" }));
+    expect(handlers.onSelectNone).toHaveBeenCalledTimes(1);
 
     rerender(
-      <CreateFromRssSurface open status={REVIEW_SELECTED} {...handlers} />,
+      <CreateFromRssSurface open status={REVIEW_ONE_SELECTED} {...handlers} />,
     );
-    const selected = screen.getByRole("button", { name: /Episode 1/ });
-    expect(selected).toHaveAttribute("aria-pressed", "true");
-    await user.click(
-      screen.getByRole("button", { name: "Créer le brouillon" }),
-    );
+    expect(screen.getByRole("checkbox", { name: "Episode 1" })).toBeChecked();
+    expect(screen.getByRole("checkbox", { name: "Episode 2" })).not.toBeChecked();
+    expect(screen.getByText("1 épisode sélectionné sur 2")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Tout sélectionner" }));
+    expect(handlers.onSelectAll).toHaveBeenCalledTimes(1);
+    await user.click(screen.getByRole("button", { name: "Créer l'histoire" }));
     expect(handlers.onAccept).toHaveBeenCalledTimes(1);
+  });
+
+  it("refuses the accept with nothing ticked", async () => {
+    const handlers = noopHandlers();
+    const user = userEvent.setup();
+    render(
+      <CreateFromRssSurface open status={REVIEW_NONE_SELECTED} {...handlers} />,
+    );
+    await user.type(screen.getByLabelText("Adresse du flux RSS"), FEED_URL);
+    expect(screen.getByText("0 épisode sélectionné sur 2")).toBeInTheDocument();
+    const accept = screen.getByRole("button", { name: "Créer l'histoire" });
+    expect(accept).toHaveAttribute("aria-disabled", "true");
+    await user.click(accept);
+    expect(handlers.onAccept).not.toHaveBeenCalled();
+    expect(
+      screen.getByRole("button", { name: "Tout désélectionner" }),
+    ).toBeDisabled();
+  });
+
+  it("names an untitled episode by its rank", () => {
+    const untitled: RssCreationStatus = {
+      ...REVIEW,
+      kind: "review",
+      preview: {
+        ...EXPLOITABLE_PREVIEW,
+        channelTitle: null,
+        items: [{ ...EXPLOITABLE_PREVIEW.items[1], title: "" }],
+      },
+      selectedKeys: new Set([KEY_2]),
+    };
+    render(<CreateFromRssSurface open status={untitled} {...noopHandlers()} />);
+    expect(screen.getByRole("checkbox", { name: "Épisode 1" })).toBeChecked();
+    expect(screen.queryByText("Mon flux")).not.toBeInTheDocument();
   });
 
   it("renders a blocked verdict as an alert with only Abandonner (the field stays)", () => {
@@ -221,8 +285,9 @@ describe("CreateFromRssSurface", () => {
       "Ce contenu n'est pas un flux RSS lisible. Relance la récupération du flux.",
     );
     expect(
-      screen.queryByRole("button", { name: "Créer le brouillon" }),
+      screen.queryByRole("button", { name: "Créer l'histoire" }),
     ).not.toBeInTheDocument();
+    expect(screen.queryByRole("checkbox")).not.toBeInTheDocument();
     expect(screen.getByLabelText("Adresse du flux RSS")).toBeInTheDocument();
     expect(
       screen.getByRole("button", { name: "Abandonner" }),
@@ -242,21 +307,30 @@ describe("CreateFromRssSurface", () => {
     expect(alert).toHaveTextContent("Relance la récupération du flux.");
     expect(screen.queryByText("Episode 1")).not.toBeInTheDocument();
     expect(
-      screen.queryByRole("button", { name: "Créer le brouillon" }),
+      screen.queryByRole("button", { name: "Créer l'histoire" }),
     ).not.toBeInTheDocument();
     // The field + fetch CTA stay available for the re-fetch gesture.
     expect(screen.getByLabelText("Adresse du flux RSS")).toBeInTheDocument();
   });
 
-  it("renders the creating progress with the shared frozen label", () => {
-    render(
+  it("renders the creating progress with the shared frozen label, then the streamed percent", () => {
+    const { rerender } = render(
       <CreateFromRssSurface
         open
-        status={{ kind: "creating" }}
+        status={{ kind: "creating", progress: null }}
         {...noopHandlers()}
       />,
     );
     expect(screen.getByText("Création en cours…")).toBeInTheDocument();
+    rerender(
+      <CreateFromRssSurface
+        open
+        status={{ kind: "creating", progress: 42 }}
+        {...noopHandlers()}
+      />,
+    );
+    expect(screen.getByText("Création en cours… 42 %")).toBeInTheDocument();
+    expect(screen.getByRole("progressbar")).toHaveAttribute("aria-valuenow", "42");
   });
 
   it("renders the success terminal with the created title and Fermer", async () => {
@@ -357,12 +431,10 @@ describe("CreateFromRssSurface", () => {
   it("refuses the accept while the typed address diverges from the reviewed one", async () => {
     const handlers = noopHandlers();
     const user = userEvent.setup();
-    render(
-      <CreateFromRssSurface open status={REVIEW_SELECTED} {...handlers} />,
-    );
+    render(<CreateFromRssSurface open status={REVIEW} {...handlers} />);
     // The reviewed feedUrl is FEED_URL but the visible field is empty →
     // diverged: the accept CTA is refused even with a selection.
-    const accept = screen.getByRole("button", { name: "Créer le brouillon" });
+    const accept = screen.getByRole("button", { name: "Créer l'histoire" });
     expect(accept).toHaveAttribute("aria-disabled", "true");
     await user.click(accept);
     expect(handlers.onAccept).not.toHaveBeenCalled();
@@ -370,7 +442,7 @@ describe("CreateFromRssSurface", () => {
     // Typing the reviewed address back restores the CTA.
     await user.type(screen.getByLabelText("Adresse du flux RSS"), FEED_URL);
     const restored = screen.getByRole("button", {
-      name: "Créer le brouillon",
+      name: "Créer l'histoire",
     });
     expect(restored).not.toHaveAttribute("aria-disabled");
     await user.click(restored);
@@ -416,7 +488,7 @@ describe("CreateFromRssSurface", () => {
     rerender(
       <CreateFromRssSurface
         open
-        status={{ kind: "creating" }}
+        status={{ kind: "creating", progress: null }}
         {...handlers}
       />,
     );

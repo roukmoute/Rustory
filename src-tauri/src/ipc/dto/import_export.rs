@@ -694,27 +694,32 @@ impl RssItemRefDto {
 
 /// One selectable item of a previewed feed: the cleaned title (possibly
 /// empty — the surface then leads with the summary), a bounded summary
-/// excerpt, the enclosure fact and the round-trip reference.
+/// excerpt, the enclosure fact, whether an artwork will be attached (the
+/// item's own or the channel's) and the round-trip reference.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct RssPreviewItemDto {
     pub title: String,
     pub summary: String,
     pub has_enclosure: bool,
+    pub has_image: bool,
     pub item_ref: RssItemRefDto,
 }
 
 /// The typed outcome of `fetch_rss_source_preview`: the source HOST (the
-/// only address fragment that ever crosses), the selectable items, the
-/// flow-level findings (RSS per-pair copy) and the derived state.
-/// `blocked` is the redundant-but-explicit branch flag — always coherent
-/// with `state` (the TS guard refuses a divergence). A TRANSPORT failure
-/// rejects with `RSS_SOURCE_UNREACHABLE` instead — the functional verdict
-/// is NEVER an error.
+/// only address fragment that ever crosses), the channel title (the
+/// story title the accept will give, when the feed names one), the
+/// selectable items in LISTENING order, the flow-level findings (RSS
+/// per-pair copy) and the derived state. `blocked` is the
+/// redundant-but-explicit branch flag — always coherent with `state` (the
+/// TS guard refuses a divergence). A TRANSPORT failure rejects with
+/// `RSS_SOURCE_UNREACHABLE` instead — the functional verdict is NEVER an
+/// error.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct RssPreviewDto {
     pub source_host: String,
+    pub channel_title: Option<String>,
     pub items: Vec<RssPreviewItemDto>,
     pub findings: Vec<ImportFindingDto>,
     pub state: ImportStateDto,
@@ -730,6 +735,7 @@ impl RssPreviewDto {
     ) -> Self {
         Self {
             source_host,
+            channel_title: analysis.channel_title.clone(),
             items: analysis
                 .items
                 .iter()
@@ -737,6 +743,7 @@ impl RssPreviewDto {
                     title: item.title.clone(),
                     summary: truncate_rss_summary(&item.text),
                     has_enclosure: item.has_enclosure,
+                    has_image: item.image_url.is_some() || analysis.channel_image_url.is_some(),
                     item_ref: RssItemRefDto::from_domain(
                         &crate::domain::import::rss_item_ref(item),
                         crate::domain::import::rss_item_fingerprint(item),

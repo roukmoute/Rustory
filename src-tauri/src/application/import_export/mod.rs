@@ -22,7 +22,8 @@ pub use import::{
 pub use os_open::{analyze_pending_intent, OsOpenIntent, OsOpenState, OS_OPEN_STATE};
 pub use rss_creation::{
     accept_rss_story_creation, commit_rss_story_creation, prepare_rss_story_creation,
-    preview_rss_source, PreparedRssCreation, RssAcceptPhase, RssCreationOutcome, RssPreviewOutcome,
+    preview_rss_source, PreparedRssCreation, RssAcceptPhase, RssCreationOutcome, RssItemSelection,
+    RssPreviewOutcome,
 };
 pub use structured_creation::{
     accept_structured_creation, analyze_structured_folder, commit_structured_creation,

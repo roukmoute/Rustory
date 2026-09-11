@@ -1322,8 +1322,11 @@ fn s7_run_import(world: &mut World) {
         official_content_sources(),
         &source,
         &url,
-        &RssItemRef::Guid("fixture-1".into()),
-        &fingerprint,
+        &[rss_creation::RssItemSelection {
+            reference: RssItemRef::Guid("fixture-1".into()),
+            fingerprint: fingerprint.clone(),
+        }],
+        IMPORT_BUDGET,
         IMPORT_BUDGET,
         Some(&store_root),
     )
@@ -1415,8 +1418,9 @@ fn s7_assert_source_recognized(world: &mut World) {
 }
 
 /// S7: the import ran through the EXISTING RSS behavior, unchanged — one
-/// story for the accepted item, `rss` provenance naming the feed host,
-/// the enclosure stored as a `wav` asset wired to the start node.
+/// story for the accepted selection (named after the feed), `rss`
+/// provenance naming the feed host, the enclosure stored as a `wav` asset
+/// wired to the start node.
 fn s7_assert_import_proof(world: &mut World) {
     let proof = world
         .state
@@ -1428,8 +1432,9 @@ fn s7_assert_import_proof(world: &mut World) {
         "the import must create exactly one story"
     );
     assert_eq!(
-        proof.story_title, "Episode un",
-        "the story must keep the accepted episode's own title"
+        proof.story_title, "Flux fixture",
+        "the story is named after the feed — the podcast IS the story; the \
+         accepted episode's own title labels its node"
     );
     assert_eq!(
         proof.source_format, "rss",

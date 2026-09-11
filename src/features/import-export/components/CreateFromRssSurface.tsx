@@ -12,6 +12,7 @@ import type {
   RssItemRef,
   RssPreviewItem,
 } from "../../../shared/ipc-contracts/import-export";
+import { rssItemRefKey } from "../../../shared/ipc-contracts/import-export";
 import { categoryLabel, categoryTone } from "../lib/recognition-labels";
 import type { RssCreationStatus } from "../hooks/use-rss-creation";
 
@@ -25,9 +26,13 @@ export interface CreateFromRssSurfaceProps {
   /** Fetch the feed at the typed address (`Récupérer le flux`) — also the
    *  `Réessayer` action after a transport failure. */
   onFetch: (url: string) => void;
-  /** Select one previewed item. */
-  onSelectItem: (ref: RssItemRef) => void;
-  /** Commit the selected item (`Créer le brouillon`). */
+  /** Tick / untick one previewed item. */
+  onToggleItem: (ref: RssItemRef) => void;
+  /** Tick every previewed item (`Tout sélectionner`). */
+  onSelectAll: () => void;
+  /** Untick every previewed item (`Tout désélectionner`). */
+  onSelectNone: () => void;
+  /** Commit the ticked items as ONE story (`Créer l'histoire`). */
   onAccept: () => void;
   /** Abandon the flow (pure frontend, no mutation) and close the surface. */
   onAbandon: () => void;
@@ -48,7 +53,9 @@ export function CreateFromRssSurface({
   open,
   status,
   onFetch,
-  onSelectItem,
+  onToggleItem,
+  onSelectAll,
+  onSelectNone,
   onAccept,
   onAbandon,
   onDismiss,
@@ -178,12 +185,15 @@ export function CreateFromRssSurface({
         ) : (
           <ReviewPreview
             sourceHost={status.preview.sourceHost}
+            channelTitle={status.preview.channelTitle}
             findings={status.preview.findings}
             items={status.preview.items}
             blocked={status.preview.blocked}
-            selectedItemRef={status.selectedItemRef}
+            selectedKeys={status.selectedKeys}
             addressDiverged={feedUrl.trim() !== status.feedUrl}
-            onSelectItem={onSelectItem}
+            onToggleItem={onToggleItem}
+            onSelectAll={onSelectAll}
+            onSelectNone={onSelectNone}
             onAccept={onAccept}
             onAbandon={onAbandon}
           />
@@ -191,8 +201,19 @@ export function CreateFromRssSurface({
       ) : null}
 
       {status.kind === "creating" ? (
+        // The accept downloads every ticked episode: the bar follows the
+        // settled episodes (Rust streams the percent) so a long series
+        // never looks frozen.
         <div className="create-from-rss__pending">
-          <ProgressIndicator mode="indeterminate" label="Création en cours…" />
+          {status.progress != null ? (
+            <ProgressIndicator
+              mode="determinate"
+              label={`Création en cours… ${status.progress} %`}
+              value={status.progress}
+            />
+          ) : (
+            <ProgressIndicator mode="indeterminate" label="Création en cours…" />
+          )}
         </div>
       ) : null}
 
@@ -272,34 +293,44 @@ export function CreateFromRssSurface({
 /** The fetched-feed review. A blocked verdict is a `role="alert"` block
  *  (its findings ARE the verdict + gesture; only `Abandonner` — the field
  *  above stays available to correct and re-fetch); an exploitable one is a
- *  calm `aria-live` region with the host, the flow findings, the bounded
- *  selectable item list and the unique `Créer le brouillon` CTA. */
+ *  calm `aria-live` region with the host, the feed's name, the flow
+ *  findings, the bounded TICK LIST of its episodes (every one ticked by
+ *  default — the whole podcast is the story) and the unique `Créer
+ *  l'histoire` CTA. */
 function ReviewPreview({
   sourceHost,
+  channelTitle,
   findings,
   items,
   blocked,
-  selectedItemRef,
+  selectedKeys,
   addressDiverged,
-  onSelectItem,
+  onToggleItem,
+  onSelectAll,
+  onSelectNone,
   onAccept,
   onAbandon,
 }: {
   sourceHost: string;
+  channelTitle: string | null;
   findings: ImportFinding[];
   items: RssPreviewItem[];
   blocked: boolean;
-  selectedItemRef: RssItemRef | null;
+  selectedKeys: ReadonlySet<string>;
   /** The typed address no longer matches the reviewed one: the accept is
    *  refused (it would silently target the OLD source) until a re-fetch
    *  replaces the preview or the address is restored. */
   addressDiverged: boolean;
-  onSelectItem: (ref: RssItemRef) => void;
+  onToggleItem: (ref: RssItemRef) => void;
+  onSelectAll: () => void;
+  onSelectNone: () => void;
   onAccept: () => void;
   onAbandon: () => void;
 }): React.JSX.Element {
-  const selectedKey =
-    selectedItemRef === null ? null : itemRefKey(selectedItemRef);
+  const selectedCount = items.filter((item) =>
+    selectedKeys.has(rssItemRefKey(item.itemRef)),
+  ).length;
+  const canAccept = selectedCount > 0 && !addressDiverged;
 
   return (
     <div
@@ -308,6 +339,9 @@ function ReviewPreview({
       aria-live={blocked ? undefined : "polite"}
     >
       <p className="create-from-rss__source-host">{sourceHost}</p>
+      {!blocked && channelTitle !== null ? (
+        <p className="create-from-rss__channel-title">{channelTitle}</p>
+      ) : null}
 
       <ul className="create-from-rss__findings">
         {findings.map((finding) => (
@@ -328,62 +362,95 @@ function ReviewPreview({
       </ul>
 
       {!blocked ? (
-        <ul className="create-from-rss__items">
-          {items.map((item) => {
-            const key = itemRefKey(item.itemRef);
-            const selected = key === selectedKey;
-            return (
-              <li key={key} className="create-from-rss__item">
-                <button
-                  type="button"
-                  className={[
-                    "create-from-rss__item-button",
-                    selected ? "create-from-rss__item-button--selected" : null,
-                  ]
-                    .filter(Boolean)
-                    .join(" ")}
-                  aria-pressed={selected}
-                  onClick={() => onSelectItem(item.itemRef)}
-                >
-                  {selected ? (
-                    <span
+        <>
+          <div className="create-from-rss__selection">
+            <p className="create-from-rss__selection-count">
+              {selectionCountLabel(selectedCount, items.length)}
+            </p>
+            <div className="create-from-rss__selection-actions">
+              <Button
+                variant="quiet"
+                onClick={onSelectAll}
+                disabled={selectedCount === items.length}
+              >
+                Tout sélectionner
+              </Button>
+              <Button
+                variant="quiet"
+                onClick={onSelectNone}
+                disabled={selectedCount === 0}
+              >
+                Tout désélectionner
+              </Button>
+            </div>
+          </div>
+          <ul
+            className="create-from-rss__items"
+            aria-label="Épisodes du flux"
+          >
+            {items.map((item, index) => {
+              const key = rssItemRefKey(item.itemRef);
+              const selected = selectedKeys.has(key);
+              const name =
+                item.title.length > 0 ? item.title : `Épisode ${index + 1}`;
+              return (
+                <li key={key} className="create-from-rss__item">
+                  <label
+                    className={[
+                      "create-from-rss__item-label",
+                      selected ? "create-from-rss__item-label--selected" : null,
+                    ]
+                      .filter(Boolean)
+                      .join(" ")}
+                  >
+                    <input
+                      type="checkbox"
                       className="create-from-rss__item-check"
-                      aria-hidden="true"
-                    >
-                      ✓{" "}
+                      checked={selected}
+                      onChange={() => onToggleItem(item.itemRef)}
+                      aria-label={name}
+                    />
+                    <span className="create-from-rss__item-body">
+                      <span className="create-from-rss__item-title">{name}</span>
+                      {item.summary.length > 0 ? (
+                        <span className="create-from-rss__item-summary">
+                          {item.summary}
+                        </span>
+                      ) : null}
+                      <span className="create-from-rss__item-media">
+                        {item.hasEnclosure ? (
+                          <span className="create-from-rss__item-audio">
+                            Média audio
+                          </span>
+                        ) : (
+                          <span className="create-from-rss__item-no-audio">
+                            Sans média audio
+                          </span>
+                        )}
+                        {item.hasImage ? (
+                          <span className="create-from-rss__item-image">
+                            Image
+                          </span>
+                        ) : null}
+                      </span>
                     </span>
-                  ) : null}
-                  {item.title.length > 0 ? (
-                    <span className="create-from-rss__item-title">
-                      {item.title}
-                    </span>
-                  ) : null}
-                  {item.summary.length > 0 ? (
-                    <span className="create-from-rss__item-summary">
-                      {item.summary}
-                    </span>
-                  ) : null}
-                  {item.hasEnclosure ? (
-                    <span className="create-from-rss__item-enclosure">
-                      Média distant non récupéré
-                    </span>
-                  ) : null}
-                </button>
-              </li>
-            );
-          })}
-        </ul>
+                  </label>
+                </li>
+              );
+            })}
+          </ul>
+        </>
       ) : null}
 
       <div className="create-from-rss__actions">
         {!blocked ? (
-          selectedKey !== null && !addressDiverged ? (
+          canAccept ? (
             <Button variant="primary" onClick={onAccept}>
-              Créer le brouillon
+              Créer l'histoire
             </Button>
           ) : (
             <Button variant="primary" aria-disabled="true">
-              Créer le brouillon
+              Créer l'histoire
             </Button>
           )
         ) : null}
@@ -395,10 +462,8 @@ function ReviewPreview({
   );
 }
 
-/** A stable render key for an item reference — JSON-encoded so no field
- *  separator can collide with (or corrupt) the key content. */
-function itemRefKey(ref: RssItemRef): string {
-  return ref.kind === "guid"
-    ? JSON.stringify(["guid", ref.guid])
-    : JSON.stringify(["titleLink", ref.title, ref.link ?? ""]);
+/** `N épisodes sélectionnés sur M` — singular below two. */
+function selectionCountLabel(selected: number, total: number): string {
+  const noun = selected > 1 ? "épisodes sélectionnés" : "épisode sélectionné";
+  return `${selected} ${noun} sur ${total}`;
 }

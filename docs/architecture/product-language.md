@@ -180,9 +180,9 @@ It exists to keep the same product concepts named the same way across:
 | External source creation surface (title) | `Création depuis une source externe` | In-context surface hosting the feed address input, the fetch preview and the item selection | `import RSS`, `wizard`, `assistant` |
 | RSS feed address (field) | `Adresse du flux RSS` | The feed address the user provides for one fetch; `http(s)` only, never persisted (the provenance keeps the host only) | `URL` alone, `lien`, `adresse web` |
 | Fetch the RSS feed (action, networked, explicit) | `Récupérer le flux` | The ONLY networked action of the flow, on explicit click — the feed is fetched and analyzed, nothing is created. NO collision: `Récupérer / mettre à jour` stays the official-catalog action (different surface, different object) | `Télécharger`, `Rafraîchir`, `Sync`, reusing `Récupérer / mettre à jour` |
-| Accept the RSS item ingestion (action) | `Créer le brouillon` | Unique CTA committing the selected feed item into a canonical local draft; pairs with `Abandonner`. Distinct from `Créer l'histoire` (folder flow) — the RSS result is emphatically a DRAFT to reread | `Créer l'histoire` (folder flow), `Importer`, `Valider` |
+| Accept the RSS feed ingestion (action) | `Créer l'histoire` | Unique CTA committing the TICKED feed episodes (every one by default — the podcast is the story) into ONE canonical local draft with one node per episode; the same verb as the web-page flow; pairs with `Abandonner`. Distinct from `Créer l'histoire` (folder flow) — the RSS result is emphatically a DRAFT to reread | `Créer l'histoire` (folder flow), `Importer`, `Valider` |
 | Content-rights posture line (external sources) | `Utilise uniquement des contenus dont tu as les droits : tes contenus personnels ou des contenus libres.` | The visible, never-blocking distribution-policy posture rendered on the external-source surface | legalese, blocking consent gates |
-| Default title of an RSS ingestion (fallback) | `Histoire de {hôte}` | Title given to the created draft when the feed item carries no usable title — `{hôte}` is the feed's host (e.g. `Histoire de exemple.fr`); renamable immediately in the editor | carrying the full address, inventing a content title |
+| Default title of an RSS ingestion (fallback) | `Histoire de {hôte}` | Title given to the created draft when the feed names no usable channel title (the podcast's own name is the story title otherwise) — `{hôte}` is the feed's host (e.g. `Histoire de exemple.fr`); renamable immediately in the editor | carrying the full address, inventing a content title, an episode title as the story title |
 | Additional content source (governed) | `source de contenu` | An additional story-creation source (an RSS feed today) whose availability is decided by the official distribution's content-source registry — see [ui-states.md#Content Source Activation Contract](./ui-states.md) | `feed` as the generic term, `provider`, `intégration` |
 | Content source is activated (state) | `activée par la distribution officielle` | Activation state of a content-source kind the current distribution enables | `disponible`, `supportée` used loosely |
 | Content source is not activated (state) | `non activée dans la distribution actuelle` | Activation state of a KNOWN kind the current distribution does not enable (not implemented / not validated by the support policy) | `désactivée` (implies a user toggle), `non supportée` used loosely |
@@ -364,7 +364,12 @@ The UI should favor these labels when they are user-visible:
 | RSS feed address (field label) | `Adresse du flux RSS` |
 | Fetch the RSS feed (action, networked, explicit) | `Récupérer le flux` |
 | RSS fetch in flight | `Récupération du flux…` |
-| Accept the RSS item ingestion (action) | `Créer le brouillon` |
+| Accept the RSS feed ingestion (action) | `Créer l'histoire` |
+| RSS episode tick list (accessible name) | `Épisodes du flux` |
+| RSS episode without a title (checkbox name) | `Épisode {N}` |
+| RSS selection count | `{N} épisodes sélectionnés sur {M}` (`1 épisode sélectionné sur {M}` below two) |
+| RSS tick every / no episode (actions) | `Tout sélectionner` / `Tout désélectionner` |
+| RSS creation commit in flight, with the streamed percent | `Création en cours… {N} %` |
 | Abandon an analyzed feed (no mutation) | `Abandonner` |
 | RSS creation commit in flight | `Création en cours…` |
 | RSS creation just succeeded | `Histoire créée dans ta bibliothèque` |
@@ -377,7 +382,9 @@ The UI should favor these labels when they are user-visible:
 | RSS verdict — no exploitable item | `Ce flux ne contient aucun épisode exploitable.` |
 | RSS verdict — source changed between preview and accept | `La source a changé depuis la récupération.` |
 | RSS verdict next gesture (all four verdicts) | `Relance la récupération du flux.` |
-| RSS item references a remote enclosure (per-item note, never downloaded) | `Média distant non récupéré` |
+| RSS episode media markers (per-item, what the accept downloads) | `Média audio` / `Sans média audio` / `Image` |
+| RSS selection refused — malformed round-trip (message) | `Création impossible: la sélection d'épisodes n'est pas valide.` |
+| RSS selection refused (next gesture) | `Relance la récupération du flux, puis recommence la sélection.` |
 | Content-rights posture line (external sources) | `Utilise uniquement des contenus dont tu as les droits : tes contenus personnels ou des contenus libres.` |
 | Default title of an RSS ingestion (fallback) | `Histoire de {hôte}` |
 | Content-source activation mention (external-source surface) | `Source activée par la distribution officielle.` |

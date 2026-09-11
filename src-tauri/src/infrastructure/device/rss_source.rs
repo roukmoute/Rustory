@@ -25,7 +25,7 @@ use std::io::Read;
 use std::time::Duration;
 
 use crate::domain::shared::AppError;
-use crate::infrastructure::filesystem::MAX_MEDIA_BYTES;
+use crate::infrastructure::filesystem::WEB_MAX_MEDIA_BYTES;
 
 /// Hard ceiling on the fetched feed body. A real RSS document is a few
 /// hundred kB; 8 MiB bounds a hostile/runaway response without truncating
@@ -46,9 +46,9 @@ pub trait RssFeedSource: Send + Sync + 'static {
 
     /// Explicit fetch of ONE enclosure referenced by an ACCEPTED item —
     /// same disciplines as [`Self::fetch`] (whole-request budget, cap+1
-    /// bounded read, PII-free stage tokens) with the MEDIA ceiling
-    /// ([`MAX_MEDIA_BYTES`]) : un podcast légitime dépasse largement les
-    /// 8 MiB du flux. The bytes are UNTRUSTED — validated downstream by
+    /// bounded read, PII-free stage tokens) with the WEB media ceiling
+    /// ([`WEB_MAX_MEDIA_BYTES`]) : un épisode de podcast légitime dépasse
+    /// largement les 8 MiB du flux (the same ceiling as the web flow). The bytes are UNTRUSTED — validated downstream by
     /// the media sniff/transcode (`store_media`). The default refuses:
     /// a source that never learned enclosures degrades honestly to the
     /// « média distant non récupéré » verdict instead of lying.
@@ -117,7 +117,7 @@ impl RssFeedSource for HttpRssFeedSource {
             .send()
             .and_then(|r| r.error_for_status())
             .map_err(|_| fetch_error("request"))?;
-        read_bytes_capped(resp, MAX_MEDIA_BYTES as u64)
+        read_bytes_capped(resp, WEB_MAX_MEDIA_BYTES as u64)
     }
 }
 

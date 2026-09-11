@@ -10,48 +10,53 @@
 //! 2. [`accept_rss_story_creation`] — RE-FETCHES and RE-PARSES from zero
 //!    (**the source is the authority**, the network equivalent of the
 //!    folder flow's "the disk is the authority"; the frontend never
-//!    re-submits content). The chosen item is resolved by STRICT `guid`
-//!    (else exact `title`+`link`); a missing/ambiguous item or a feed
-//!    turned blocked is the honest recoverable refusal
+//!    re-submits content). EVERY selected item is resolved by STRICT
+//!    `guid` (else exact `title`+`link`) and re-proven against its
+//!    previewed fingerprint; a missing/ambiguous item, a diverged one or a
+//!    feed turned blocked is the honest recoverable refusal
 //!    [`RssCreationOutcome::SourceChanged`] with ZERO mutation — NEVER a
-//!    creation from the stale preview data. Otherwise ONE `BEGIN
-//!    IMMEDIATE` transaction inserts the canonical `stories` row (fresh
-//!    UUIDv7, `created_at = updated_at = now` — a BIRTH, exactly like the
-//!    structured-folder creation)
-//!    and the provenance row (`source_format = 'rss'`, host-only source
-//!    name, checksum of the SECOND fetch's bytes — the bytes actually
-//!    ingested). The item's ENCLOSURE, when it references one, is
-//!    downloaded through the same injected source during the DB-free
-//!    phase, promoted into the node-media store and wired into the start
-//!    node (its `assets` row joins the transaction) — a failed download
-//!    is a CONTENT verdict (`(Media, Missing)`, état `partial`), never a
-//!    refusal. A failed transaction rolls back fully and compensates the
-//!    promoted file best-effort: nothing durable remains.
+//!    creation from the stale preview data. Otherwise the WHOLE selection
+//!    becomes ONE story: one node per item in the reviewed (listening)
+//!    order, each carrying the item's cleaned text, its title as label,
+//!    its downloaded enclosure and its artwork (the item's own, else the
+//!    channel's), then ONE `BEGIN IMMEDIATE` transaction inserts the
+//!    canonical `stories` row (fresh UUIDv7, `created_at = updated_at =
+//!    now` — a BIRTH, exactly like the structured-folder creation), the
+//!    provenance row (`source_format = 'rss'`, host-only source name,
+//!    checksum of the SECOND fetch's bytes — the bytes actually ingested)
+//!    and every promoted media's `assets` row. A failed audio download is
+//!    a CONTENT verdict (`(Media, Missing)`, état `partial`), never a
+//!    refusal; a failed artwork download degrades silently (optional). A
+//!    failed transaction rolls back fully and compensates the promoted
+//!    files best-effort (refcounted): nothing durable remains.
 
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use crate::application::story::node::gc_unreferenced_media_file;
 use crate::application::story::now_iso_ms;
 use crate::domain::import::{
-    feed_url_host, parse_rss, resolve_rss_item, rss_import_state, rss_item_findings,
-    rss_item_fingerprint, ContentSourceKind, ContentSourceLine, RssAnalysis, RssItemRef,
-    RSS_FALLBACK_TITLE_PREFIX, RSS_SOURCE_FORMAT_VERSION,
+    feed_url_host, parse_rss, resolve_rss_item, rss_feed_findings, rss_import_state,
+    rss_item_fingerprint, ContentSourceKind, ContentSourceLine, RssAnalysis, RssItem, RssItemRef,
+    MAX_RSS_ITEMS, RSS_FALLBACK_TITLE_PREFIX, RSS_SOURCE_FORMAT_VERSION,
 };
 use crate::domain::shared::AppError;
 use crate::domain::story::{
     canonical_structure_json, content_checksum, content_checksum_bytes, normalize_title,
-    validate_title, CanonicalStructure,
+    validate_title, CanonicalNode, CanonicalStructure, CANONICAL_STORY_SCHEMA_VERSION,
+    START_NODE_ID,
 };
 use crate::infrastructure::db::DbHandle;
 use crate::infrastructure::device::RssFeedSource;
 use crate::infrastructure::filesystem::{
-    ensure_node_media_store, store_media, MediaKind, StoredMedia,
+    ensure_node_media_store, store_media_capped, MediaKind, StoredMedia, WEB_MAX_MEDIA_BYTES,
 };
 use crate::ipc::dto::import_export::rss_import_report_dto;
 use crate::ipc::dto::StoryCardDto;
 
 use super::creation_common::{
-    commit_story_creation, compensate_promoted_assets, ensure_source_enabled, PromotedAsset,
-    StoryCreationCommit,
+    commit_story_creation, ensure_source_enabled, PromotedAsset, StoryCreationCommit,
 };
 
 /// The application-level outcome of previewing a feed: the HOST (the only
@@ -96,36 +101,26 @@ pub enum RssCreationOutcome {
     SourceChanged,
 }
 
+/// ONE accepted item of the previewed feed: its round-tripped reference
+/// (a pointer, re-resolved from zero) and the previewed-content proof the
+/// fresh item must match exactly.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RssItemSelection {
+    pub reference: RssItemRef,
+    pub fingerprint: String,
+}
+
 /// The fully re-proven, ready-to-commit ingestion — everything the atomic
 /// DB transaction needs, produced WITHOUT any DB access
-/// ([`prepare_rss_story_creation`]) so the network fetch never serializes
+/// ([`prepare_rss_story_creation`]) so the network fetches never serialize
 /// other commands behind the DB lock.
 #[derive(Debug)]
 pub struct PreparedRssCreation {
     commit: StoryCreationCommit,
-    /// The downloaded-and-promoted enclosure, ready for its `assets` row —
-    /// `None` when the item has none, the caller gave no store root, or the
-    /// download degraded to the `(Media, Missing)` verdict.
+    /// The downloaded-and-promoted media (audio and artwork, one `assets`
+    /// row each) — empty when the caller gave no store root or every
+    /// download degraded to its verdict.
     assets: Vec<PromotedAsset>,
-}
-
-/// Download ONE enclosure through the injected source and PROMOTE it into
-/// the node-media store. `None` on ANY failure — transport, unsupported
-/// bytes, store I/O : le média distant reste honnêtement « non récupéré »
-/// (finding `(Media, Missing)`, état `partial`) et la création continue,
-/// exactly the pre-download behavior. A CONTENT problem never becomes an
-/// `AppError` here — the module's contract.
-fn promote_enclosure(
-    source: &dyn RssFeedSource,
-    url: &str,
-    budget: Duration,
-    app_data_dir: &std::path::Path,
-) -> Option<(StoredMedia, std::path::PathBuf)> {
-    let bytes = source.fetch_enclosure(url, budget).ok()?;
-    let (media_dir, staging_dir) = ensure_node_media_store(app_data_dir).ok()?;
-    let stored = store_media(&media_dir, &staging_dir, &bytes).ok()?;
-    let promoted_path = media_dir.join(&stored.file_name);
-    Some((stored, promoted_path))
 }
 
 /// The typed outcome of the DB-free accept phase: the honest refusal, or
@@ -136,27 +131,126 @@ pub enum RssAcceptPhase {
     Prepared(Box<PreparedRssCreation>),
 }
 
-/// Phase 2a — RE-fetch, re-parse and re-prove the chosen item, with NO DB
-/// access at all: the command runs this BEFORE taking the DB lock, so the
-/// (up to 30 s) network fetch never holds it. `expected_fingerprint` is
-/// the canonical proof of the PREVIEWED item: the fresh item must match
-/// it EXACTLY — a resolvable reference (same guid) whose content diverged
-/// is the honest `SourceChanged` refusal, never a creation from content
-/// the user never reread. The accept re-proves EVERYTHING, the policy
-/// included: the gate runs FIRST, so a direct command call can never
-/// bypass the distribution's content-source matrix.
+/// Attempts of one enclosure download: a transient network hiccup on a
+/// long series must not silently orphan an episode's audio.
+const ENCLOSURE_ATTEMPTS: usize = 2;
+
+/// The node-media store of one accept: the promoted directory pair plus a
+/// per-address memo of the artworks already fetched in THIS accept — a
+/// series shares its channel artwork across every episode, so it is
+/// downloaded (and transcoded) once, whatever the episode count; a
+/// failed artwork stays failed for the accept (no retry storm).
+struct AcceptStore {
+    media_dir: PathBuf,
+    staging_dir: PathBuf,
+    artwork_memo: HashMap<String, Option<StoredMedia>>,
+}
+
+impl AcceptStore {
+    fn open(app_data_dir: &Path) -> Option<Self> {
+        let (media_dir, staging_dir) = ensure_node_media_store(app_data_dir).ok()?;
+        Some(Self {
+            media_dir,
+            staging_dir,
+            artwork_memo: HashMap::new(),
+        })
+    }
+
+    /// Download ONE enclosure (with [`ENCLOSURE_ATTEMPTS`]) and PROMOTE it.
+    /// `None` on ANY failure — transport, over-cap, unsupported bytes,
+    /// store I/O: the media stays honestly « non récupéré » (a CONTENT
+    /// verdict, never an `AppError` — the module's contract).
+    fn promote_enclosure(
+        &self,
+        source: &dyn RssFeedSource,
+        url: &str,
+        budget: Duration,
+    ) -> Option<StoredMedia> {
+        let mut bytes = None;
+        for _ in 0..ENCLOSURE_ATTEMPTS {
+            if let Ok(fetched) = source.fetch_enclosure(url, budget) {
+                bytes = Some(fetched);
+                break;
+            }
+        }
+        store_media_capped(
+            &self.media_dir,
+            &self.staging_dir,
+            &bytes?,
+            WEB_MAX_MEDIA_BYTES,
+        )
+        .ok()
+    }
+
+    /// The artwork at `url`, fetched at most ONCE per accept. A stored
+    /// artwork that is not an image (a mislabeled audio…) is refused.
+    fn artwork(
+        &mut self,
+        source: &dyn RssFeedSource,
+        url: &str,
+        budget: Duration,
+    ) -> Option<StoredMedia> {
+        if let Some(memo) = self.artwork_memo.get(url) {
+            return memo.clone();
+        }
+        let stored = source
+            .fetch_enclosure(url, budget)
+            .ok()
+            .and_then(|bytes| {
+                store_media_capped(
+                    &self.media_dir,
+                    &self.staging_dir,
+                    &bytes,
+                    WEB_MAX_MEDIA_BYTES,
+                )
+                .ok()
+            })
+            .filter(|stored| stored.kind == MediaKind::Image);
+        self.artwork_memo.insert(url.to_string(), stored.clone());
+        stored
+    }
+
+    /// Everything ONE promoted media needs for its `assets` row, plus the
+    /// promoted file path so a failed commit can compensate the store.
+    fn asset_of(&self, stored: StoredMedia) -> PromotedAsset {
+        PromotedAsset {
+            asset_id: uuid::Uuid::now_v7().to_string(),
+            content_hash: stored.content_hash,
+            media_type: stored.kind.as_str(),
+            media_format: stored.format,
+            byte_size: stored.byte_size,
+            file_name: stored.file_name.clone(),
+            promoted_path: self.media_dir.join(stored.file_name),
+        }
+    }
+}
+
+/// Phase 2a — RE-fetch, re-parse and re-prove EVERY selected item, with NO
+/// DB access at all: the command runs this BEFORE taking the DB lock, so
+/// the network phase (the feed, then one download per episode) never
+/// holds it. Each selection's `fingerprint` is the canonical proof of the
+/// PREVIEWED item: the fresh item must match it EXACTLY — a resolvable
+/// reference (same guid) whose content diverged is the honest
+/// `SourceChanged` refusal, never a creation from content the user never
+/// reread. The accept re-proves EVERYTHING, the policy included: the gate
+/// runs FIRST, so a direct command call can never bypass the
+/// distribution's content-source matrix. `on_progress` receives the
+/// integer percent (0..99) of episodes settled — signal only.
+#[allow(clippy::too_many_arguments)]
 pub fn prepare_rss_story_creation(
     sources: &[ContentSourceLine],
     source: &dyn RssFeedSource,
     url: &str,
-    item_ref: &RssItemRef,
-    expected_fingerprint: &str,
+    selection: &[RssItemSelection],
     budget: Duration,
-    app_data_dir: Option<&std::path::Path>,
+    media_budget: Duration,
+    app_data_dir: Option<&Path>,
+    on_progress: &dyn Fn(u8),
 ) -> Result<RssAcceptPhase, AppError> {
     ensure_source_enabled(sources, ContentSourceKind::Rss)?;
     let source_host = feed_url_host(url).ok_or_else(invalid_feed_url_error)?;
-    // RE-fetch + re-parse from zero: the reference is a pointer, never an
+    validate_selection(selection)?;
+    // RE-fetch + re-parse from zero: the references are pointers, never an
     // authority; the checksum persisted below fingerprints THESE bytes.
     let bytes = source.fetch(url, budget)?;
     let feed_checksum = content_checksum_bytes(&bytes);
@@ -165,74 +259,105 @@ pub fn prepare_rss_story_creation(
         // The feed turned blocked between the preview and the accept.
         return Ok(RssAcceptPhase::SourceChanged);
     }
-    let Some(item) = resolve_rss_item(&analysis.items, item_ref) else {
-        // Missing or ambiguous — an approximate match is never taken.
-        return Ok(RssAcceptPhase::SourceChanged);
-    };
-    if rss_item_fingerprint(item) != expected_fingerprint {
-        // The reference still resolves but the CONTENT diverged since the
-        // preview (same guid, different text/title/link/enclosure).
-        return Ok(RssAcceptPhase::SourceChanged);
+    let mut items: Vec<&RssItem> = Vec::with_capacity(selection.len());
+    for selected in selection {
+        let Some(item) = resolve_rss_item(&analysis.items, &selected.reference) else {
+            // Missing or ambiguous — an approximate match is never taken.
+            return Ok(RssAcceptPhase::SourceChanged);
+        };
+        if rss_item_fingerprint(item) != selected.fingerprint {
+            // The reference still resolves but the CONTENT diverged since
+            // the preview (same guid, different text/title/enclosure…).
+            return Ok(RssAcceptPhase::SourceChanged);
+        }
+        items.push(item);
     }
 
-    // A BIRTH: the canonical v3 minimal structure whose start node carries
-    // the cleaned item text. `canonical_structure_json` keeps the bytes
-    // deterministic, so the checksum covers the ingested text exactly like
-    // any other canonical byte.
-    let mut structure = CanonicalStructure::minimal();
-    structure.nodes[0].text = item.text.clone();
+    // The store root is consulted ONLY after the re-proof, so a refusal
+    // never creates a directory or a file.
+    let mut store = app_data_dir.and_then(AcceptStore::open);
 
-    // The referenced enclosure — when the caller provided a store root —
-    // is downloaded and PROMOTED here, the network phase, so the DB lock
-    // (phase 2b) never waits on a fetch. The promoted media is wired into
-    // the start node (the library derives the card cover from it) and its
-    // `assets` row travels in the prepared creation. A failed download or
-    // unsupported bytes is a CONTENT verdict, never an `AppError`: the
-    // item keeps its honest `(Media, Missing)` finding (state `partial`,
-    // « média distant non récupéré ») and the story is still created.
+    // A BIRTH: one node per selected item, in the reviewed (listening)
+    // order — the flat ordered graph the v3 canonical model carries. Every
+    // audio is downloaded and promoted NOW (the network phase); a failed
+    // download leaves its node audio-less and flips the Media finding.
+    let mut structure = CanonicalStructure {
+        schema_version: CANONICAL_STORY_SCHEMA_VERSION,
+        start_node_id: START_NODE_ID.to_owned(),
+        nodes: Vec::with_capacity(items.len()),
+    };
     let mut assets: Vec<PromotedAsset> = Vec::new();
-    if let (true, Some(enclosure_url), Some(app_dir)) =
-        (item.has_enclosure, &item.enclosure_url, app_data_dir)
-    {
-        if let Some((stored, promoted_path)) =
-            promote_enclosure(source, enclosure_url, budget, app_dir)
-        {
-            let asset_id = uuid::Uuid::now_v7().to_string();
-            match stored.kind {
-                MediaKind::Image => {
-                    structure.nodes[0].image_asset_id = Some(asset_id.clone());
+    let mut audio_missing = false;
+    let total = items.len();
+    for (index, item) in items.iter().enumerate() {
+        let mut audio_asset_id: Option<String> = None;
+        let mut image_asset_id: Option<String> = None;
+        if let (true, Some(enclosure_url)) = (item.has_enclosure, &item.enclosure_url) {
+            match store
+                .as_ref()
+                .and_then(|store| store.promote_enclosure(source, enclosure_url, media_budget))
+            {
+                Some(stored) => {
+                    let asset = store
+                        .as_ref()
+                        .map(|store| store.asset_of(stored))
+                        .expect("a promoted media implies an open store");
+                    // An enclosure is USUALLY audio; a feed shipping an
+                    // image enclosure gets it as the node artwork.
+                    match asset.media_type {
+                        "image" => image_asset_id = Some(asset.asset_id.clone()),
+                        _ => audio_asset_id = Some(asset.asset_id.clone()),
+                    }
+                    assets.push(asset);
                 }
-                MediaKind::Audio => {
-                    structure.nodes[0].audio_asset_id = Some(asset_id.clone());
+                None => audio_missing = true,
+            }
+        }
+        // The artwork is OPTIONAL: the item's own, else the channel's; a
+        // failed download simply leaves the node image-less — no finding,
+        // no state change.
+        if image_asset_id.is_none() {
+            let artwork_url = item
+                .image_url
+                .as_deref()
+                .or(analysis.channel_image_url.as_deref());
+            if let (Some(store), Some(artwork_url)) = (store.as_mut(), artwork_url) {
+                if let Some(stored) = store.artwork(source, artwork_url, media_budget) {
+                    let asset = store.asset_of(stored);
+                    image_asset_id = Some(asset.asset_id.clone());
+                    assets.push(asset);
                 }
             }
-            assets.push(PromotedAsset {
-                asset_id,
-                content_hash: stored.content_hash,
-                media_type: stored.kind.as_str(),
-                media_format: stored.format,
-                byte_size: stored.byte_size,
-                file_name: stored.file_name,
-                promoted_path,
-            });
         }
+        structure.nodes.push(CanonicalNode {
+            id: format!("n{}", index + 1),
+            text: item.text.clone(),
+            label: item.title.clone(),
+            image_asset_id,
+            audio_asset_id,
+            options: Vec::new(),
+        });
+        on_progress(((index + 1) * 99 / total) as u8);
     }
 
-    // The ingested item's findings and durable state: a downloaded
-    // enclosure is `(Media, Recognized)`, a missing/failed one keeps the
-    // `(Media, Missing)` finding that derives `partial`.
-    let findings = rss_item_findings(item, !assets.is_empty());
-    let state = rss_import_state(&findings);
-
-    // Title: the cleaned candidate when it survives the canonical
-    // validation, else the `Histoire de {hôte}` fallback (valid by
-    // construction — the address gate proved it).
-    let candidate = normalize_title(&item.title);
-    let title = if !item.title.is_empty() && validate_title(&candidate).is_ok() {
-        candidate
-    } else {
-        format!("{RSS_FALLBACK_TITLE_PREFIX}{source_host}")
+    // Title: the channel title when it survives the canonical validation
+    // as-is (the podcast IS the story), else the `Histoire de {hôte}`
+    // fallback (valid by construction — the address gate proved it).
+    let (title, title_recognized) = match analysis.channel_title.as_deref() {
+        Some(channel) => {
+            let candidate = normalize_title(channel);
+            if validate_title(&candidate).is_ok() {
+                (candidate, true)
+            } else {
+                (format!("{RSS_FALLBACK_TITLE_PREFIX}{source_host}"), false)
+            }
+        }
+        None => (format!("{RSS_FALLBACK_TITLE_PREFIX}{source_host}"), false),
     };
+
+    // The ingestion's findings and durable state.
+    let findings = rss_feed_findings(&items, title_recognized, audio_missing);
+    let state = rss_import_state(&findings);
 
     let structure_json = canonical_structure_json(&structure);
     let checksum = content_checksum(&structure_json);
@@ -253,12 +378,29 @@ pub fn prepare_rss_story_creation(
     })))
 }
 
+/// The selection must be non-empty, bounded and free of duplicates (one
+/// node per item — a repeated reference would be a repeated episode).
+fn validate_selection(selection: &[RssItemSelection]) -> Result<(), AppError> {
+    if selection.is_empty() || selection.len() > MAX_RSS_ITEMS {
+        return Err(invalid_selection_error("count"));
+    }
+    for (index, selected) in selection.iter().enumerate() {
+        if selection[..index]
+            .iter()
+            .any(|other| other.reference == selected.reference)
+        {
+            return Err(invalid_selection_error("repeated"));
+        }
+    }
+    Ok(())
+}
+
 /// Phase 2b — the single atomic transaction (`stories` + provenance + the
-/// promoted enclosure's `assets` row, when one exists). This is the ONLY
-/// part of the accept that needs the DB lock. A failed transaction rolls
-/// back fully; the promoted media file — the only pre-transaction mutation
-/// — is then compensated best-effort, exactly like the structured flows
-/// compensate their promoted packs.
+/// promoted media's `assets` rows). This is the ONLY part of the accept
+/// that needs the DB lock. A failed transaction rolls back fully; the
+/// promoted media files — the only pre-transaction mutation — are then
+/// compensated best-effort, REFCOUNTED: a file another story already
+/// references (content-addressed sharing) is never removed.
 pub fn commit_rss_story_creation(
     db: &mut DbHandle,
     prepared: PreparedRssCreation,
@@ -273,7 +415,15 @@ pub fn commit_rss_story_creation(
         rss_import_report_dto,
     );
     if result.is_err() {
-        compensate_promoted_assets(&assets);
+        for asset in &assets {
+            if let Some(media_dir) = asset.promoted_path.parent() {
+                gc_unreferenced_media_file(
+                    db,
+                    media_dir,
+                    Some((asset.content_hash.clone(), asset.file_name.clone())),
+                );
+            }
+        }
     }
     result
 }
@@ -288,19 +438,20 @@ pub fn accept_rss_story_creation(
     sources: &[ContentSourceLine],
     source: &dyn RssFeedSource,
     url: &str,
-    item_ref: &RssItemRef,
-    expected_fingerprint: &str,
+    selection: &[RssItemSelection],
     budget: Duration,
-    app_data_dir: Option<&std::path::Path>,
+    media_budget: Duration,
+    app_data_dir: Option<&Path>,
 ) -> Result<RssCreationOutcome, AppError> {
     match prepare_rss_story_creation(
         sources,
         source,
         url,
-        item_ref,
-        expected_fingerprint,
+        selection,
         budget,
+        media_budget,
         app_data_dir,
+        &|_| {},
     )? {
         RssAcceptPhase::SourceChanged => Ok(RssCreationOutcome::SourceChanged),
         RssAcceptPhase::Prepared(prepared) => commit_rss_story_creation(db, *prepared)
@@ -320,6 +471,20 @@ pub fn invalid_feed_url_error() -> AppError {
     .with_details(serde_json::json!({
         "source": "network",
         "stage": "url_invalid",
+    }))
+}
+
+/// The selection round-tripped by the frontend is malformed (empty, over
+/// the item bound, or repeating a reference) — a boundary drift, never a
+/// content verdict. Frozen copy (`product-language.md`).
+pub fn invalid_selection_error(cause: &'static str) -> AppError {
+    AppError::import_failed(
+        "Création impossible: la sélection d'épisodes n'est pas valide.",
+        "Relance la récupération du flux, puis recommence la sélection.",
+    )
+    .with_details(serde_json::json!({
+        "source": "validation",
+        "cause": cause,
     }))
 }
 
@@ -445,8 +610,11 @@ mod tests {
             &rss_disabled_matrix(),
             &source,
             FEED_URL,
-            &RssItemRef::Guid("g-1".into()),
-            &"0".repeat(64),
+            &[RssItemSelection {
+                reference: RssItemRef::Guid("g-1".into()),
+                fingerprint: "0".repeat(64),
+            }],
+            BUDGET,
             BUDGET,
             None,
         )
@@ -469,8 +637,11 @@ mod tests {
             &blocked,
             &source,
             FEED_URL,
-            &RssItemRef::Guid("g-1".into()),
-            &"0".repeat(64),
+            &[RssItemSelection {
+                reference: RssItemRef::Guid("g-1".into()),
+                fingerprint: "0".repeat(64),
+            }],
+            BUDGET,
             BUDGET,
             None,
         )
@@ -546,8 +717,11 @@ mod tests {
             official_content_sources(),
             &source,
             FEED_URL,
-            &RssItemRef::Guid("g-2".into()),
-            &fingerprint,
+            &[RssItemSelection {
+                reference: RssItemRef::Guid("g-2".into()),
+                fingerprint: fingerprint.clone(),
+            }],
+            BUDGET,
             BUDGET,
             None,
         )
@@ -555,7 +729,9 @@ mod tests {
         let RssCreationOutcome::Created { story } = outcome else {
             panic!("expected a creation");
         };
-        assert_eq!(story.title, "Episode 2");
+        // The podcast IS the story: the channel title names it, the item
+        // title labels its node.
+        assert_eq!(story.title, "Mon flux");
         assert_eq!(story.import_state, Some(ImportStateDto::NeedsReview));
         assert!(story.import_report.is_some());
         // ONE dispatch — the accept's own re-fetch (no preview ran here).
@@ -570,8 +746,9 @@ mod tests {
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .expect("story row");
-        assert_eq!(title, "Episode 2");
+        assert_eq!(title, "Mon flux");
         assert!(text.contains("Deuxième texte."));
+        assert!(text.contains("\"label\":\"Episode 2\""));
         let (format, name, state, summary): (String, String, String, Option<String>) = db
             .conn()
             .query_row(
@@ -616,8 +793,11 @@ mod tests {
             official_content_sources(),
             &source,
             FEED_URL,
-            &RssItemRef::Guid("g-2".into()),
-            &fingerprint,
+            &[RssItemSelection {
+                reference: RssItemRef::Guid("g-2".into()),
+                fingerprint: fingerprint.clone(),
+            }],
+            BUDGET,
             BUDGET,
             None,
         )
@@ -648,8 +828,11 @@ mod tests {
             official_content_sources(),
             &source,
             FEED_URL,
-            &RssItemRef::Guid("disparu".into()),
-            &"0".repeat(64),
+            &[RssItemSelection {
+                reference: RssItemRef::Guid("disparu".into()),
+                fingerprint: "0".repeat(64),
+            }],
+            BUDGET,
             BUDGET,
             None,
         )
@@ -684,8 +867,11 @@ mod tests {
             official_content_sources(),
             &source,
             FEED_URL,
-            &reference,
-            &fingerprint,
+            &[RssItemSelection {
+                reference: reference.clone(),
+                fingerprint: fingerprint.clone(),
+            }],
+            BUDGET,
             BUDGET,
             None,
         )
@@ -723,8 +909,11 @@ mod tests {
             official_content_sources(),
             &source,
             FEED_URL,
-            &RssItemRef::Guid("g-1".into()),
-            &previewed_fingerprint,
+            &[RssItemSelection {
+                reference: RssItemRef::Guid("g-1".into()),
+                fingerprint: previewed_fingerprint.clone(),
+            }],
+            BUDGET,
             BUDGET,
             None,
         )
@@ -743,8 +932,11 @@ mod tests {
             official_content_sources(),
             &source,
             FEED_URL,
-            &RssItemRef::Guid("g-1".into()),
-            &"0".repeat(64),
+            &[RssItemSelection {
+                reference: RssItemRef::Guid("g-1".into()),
+                fingerprint: "0".repeat(64),
+            }],
+            BUDGET,
             BUDGET,
             None,
         )
@@ -765,8 +957,11 @@ mod tests {
             official_content_sources(),
             &source,
             FEED_URL,
-            &RssItemRef::Guid("g-1".into()),
-            &"0".repeat(64),
+            &[RssItemSelection {
+                reference: RssItemRef::Guid("g-1".into()),
+                fingerprint: "0".repeat(64),
+            }],
+            BUDGET,
             BUDGET,
             None,
         )
@@ -790,8 +985,11 @@ mod tests {
             official_content_sources(),
             &source,
             FEED_URL,
-            &RssItemRef::Guid("g-a".into()),
-            &fingerprint,
+            &[RssItemSelection {
+                reference: RssItemRef::Guid("g-a".into()),
+                fingerprint: fingerprint.clone(),
+            }],
+            BUDGET,
             BUDGET,
             None,
         )
@@ -817,11 +1015,13 @@ mod tests {
     }
 
     #[test]
-    fn a_titleless_item_falls_back_to_histoire_de_hote() {
+    fn a_feed_without_a_channel_title_falls_back_to_histoire_de_hote() {
         let mut db = fresh_db();
         let source = MockRssFeedSource::new();
-        let body =
-            feed_xml("<item><description>Texte sans titre.</description><guid>g-n</guid></item>");
+        let body = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<rss version=\"2.0\"><channel>\
+                    <item><title>Episode sans série</title><description>Texte.</description><guid>g-n</guid></item>\
+                    </channel></rss>"
+            .to_string();
         source.enqueue_body(body.clone());
         let fingerprint = fingerprint_in(&body, "g-n");
         let outcome = accept_rss_story_creation(
@@ -829,8 +1029,11 @@ mod tests {
             official_content_sources(),
             &source,
             FEED_URL,
-            &RssItemRef::Guid("g-n".into()),
-            &fingerprint,
+            &[RssItemSelection {
+                reference: RssItemRef::Guid("g-n".into()),
+                fingerprint: fingerprint.clone(),
+            }],
+            BUDGET,
             BUDGET,
             None,
         )
@@ -862,8 +1065,11 @@ mod tests {
             official_content_sources(),
             &source,
             FEED_URL,
-            &RssItemRef::Guid("g-1".into()),
-            &fingerprint,
+            &[RssItemSelection {
+                reference: RssItemRef::Guid("g-1".into()),
+                fingerprint: fingerprint.clone(),
+            }],
+            BUDGET,
             BUDGET,
             None,
         )
@@ -882,8 +1088,203 @@ mod tests {
         assert_eq!(schema_version, CANONICAL_STORY_SCHEMA_VERSION);
         let mut expected = CanonicalStructure::minimal();
         expected.nodes[0].text = "Premier texte.".into();
+        expected.nodes[0].label = "Episode 1".into();
         assert_eq!(structure_json, canonical_structure_json(&expected));
         assert_eq!(checksum, content_checksum(&structure_json));
+    }
+
+    // ===== the whole feed as ONE story =====
+
+    fn dated_feed() -> String {
+        // Listed newest-first, like a real podcast feed.
+        feed_xml(
+            "<item><title>Trois</title><description>Troisième.</description><guid>g-3</guid><pubDate>Wed, 03 Mar 2026 08:00:00 +0100</pubDate></item>\
+             <item><title>Deux</title><description>Deuxième.</description><guid>g-2</guid><pubDate>Tue, 02 Mar 2026 08:00:00 +0100</pubDate></item>\
+             <item><title>Un</title><description>Premier.</description><guid>g-1</guid><pubDate>Mon, 01 Mar 2026 08:00:00 +0100</pubDate></item>",
+        )
+    }
+
+    fn selection_of(feed: &str, guids: &[&str]) -> Vec<RssItemSelection> {
+        guids
+            .iter()
+            .map(|guid| RssItemSelection {
+                reference: RssItemRef::Guid((*guid).to_string()),
+                fingerprint: fingerprint_in(feed, guid),
+            })
+            .collect()
+    }
+
+    fn structure_of(db: &DbHandle, story_id: &str) -> CanonicalStructure {
+        let json: String = db
+            .conn()
+            .query_row(
+                "SELECT structure_json FROM stories WHERE id = ?1",
+                rusqlite::params![story_id],
+                |row| row.get(0),
+            )
+            .expect("story row");
+        serde_json::from_str(&json).expect("canonical structure")
+    }
+
+    #[test]
+    fn a_whole_selection_becomes_one_story_with_one_node_per_item_in_order() {
+        let mut db = fresh_db();
+        let source = MockRssFeedSource::new();
+        source.enqueue_body(dated_feed());
+        // The selection order is the reviewed (listening) order: the
+        // preview lists the dated feed oldest-first.
+        let selection = selection_of(&dated_feed(), &["g-1", "g-2", "g-3"]);
+        let outcome = accept_rss_story_creation(
+            &mut db,
+            official_content_sources(),
+            &source,
+            FEED_URL,
+            &selection,
+            BUDGET,
+            BUDGET,
+            None,
+        )
+        .expect("accept");
+        let RssCreationOutcome::Created { story } = outcome else {
+            panic!("expected a creation");
+        };
+        assert_eq!(story.title, "Mon flux");
+        let structure = structure_of(&db, &story.id);
+        assert_eq!(structure.start_node_id, "n1");
+        let nodes: Vec<(&str, &str, &str)> = structure
+            .nodes
+            .iter()
+            .map(|n| (n.id.as_str(), n.label.as_str(), n.text.as_str()))
+            .collect();
+        assert_eq!(
+            nodes,
+            [
+                ("n1", "Un", "Premier."),
+                ("n2", "Deux", "Deuxième."),
+                ("n3", "Trois", "Troisième."),
+            ]
+        );
+        assert_eq!(count_stories(&db), 1, "ONE story for the whole selection");
+    }
+
+    #[test]
+    fn the_selection_order_is_the_node_order_even_against_the_feed() {
+        // The frontend may hand a subset in its own order: the story
+        // follows the SELECTION, never the feed.
+        let mut db = fresh_db();
+        let source = MockRssFeedSource::new();
+        source.enqueue_body(dated_feed());
+        let selection = selection_of(&dated_feed(), &["g-3", "g-1"]);
+        let outcome = accept_rss_story_creation(
+            &mut db,
+            official_content_sources(),
+            &source,
+            FEED_URL,
+            &selection,
+            BUDGET,
+            BUDGET,
+            None,
+        )
+        .expect("accept");
+        let RssCreationOutcome::Created { story } = outcome else {
+            panic!("expected a creation");
+        };
+        let labels: Vec<String> = structure_of(&db, &story.id)
+            .nodes
+            .iter()
+            .map(|n| n.label.clone())
+            .collect();
+        assert_eq!(labels, ["Trois", "Un"]);
+    }
+
+    #[test]
+    fn one_diverged_item_refuses_the_whole_selection_with_zero_mutation() {
+        let mut db = fresh_db();
+        let source = MockRssFeedSource::new();
+        source.enqueue_body(dated_feed());
+        let mut selection = selection_of(&dated_feed(), &["g-1", "g-2", "g-3"]);
+        selection[1].fingerprint = "0".repeat(64);
+        let outcome = accept_rss_story_creation(
+            &mut db,
+            official_content_sources(),
+            &source,
+            FEED_URL,
+            &selection,
+            BUDGET,
+            BUDGET,
+            None,
+        )
+        .expect("a refusal, not an error");
+        assert!(matches!(outcome, RssCreationOutcome::SourceChanged));
+        assert_eq!(count_stories(&db), 0);
+        assert!(source.enclosure_requests().is_empty(), "nothing downloaded");
+    }
+
+    #[test]
+    fn an_empty_or_repeated_selection_is_a_validation_refusal_before_any_dispatch() {
+        let mut db = fresh_db();
+        let source = MockRssFeedSource::new();
+        let err = accept_rss_story_creation(
+            &mut db,
+            official_content_sources(),
+            &source,
+            FEED_URL,
+            &[],
+            BUDGET,
+            BUDGET,
+            None,
+        )
+        .expect_err("empty selection");
+        assert_eq!(err.code, AppErrorCode::ImportFailed);
+        let v = serde_json::to_value(&err).expect("ser");
+        assert_eq!(v["details"]["source"], "validation");
+        assert_eq!(v["details"]["cause"], "count");
+
+        let repeated = vec![
+            RssItemSelection {
+                reference: RssItemRef::Guid("g-1".into()),
+                fingerprint: "0".repeat(64),
+            },
+            RssItemSelection {
+                reference: RssItemRef::Guid("g-1".into()),
+                fingerprint: "1".repeat(64),
+            },
+        ];
+        let err = accept_rss_story_creation(
+            &mut db,
+            official_content_sources(),
+            &source,
+            FEED_URL,
+            &repeated,
+            BUDGET,
+            BUDGET,
+            None,
+        )
+        .expect_err("repeated reference");
+        let v = serde_json::to_value(&err).expect("ser");
+        assert_eq!(v["details"]["cause"], "repeated");
+        assert_eq!(source.fetch_count(), 0, "validated before any dispatch");
+        assert_eq!(count_stories(&db), 0);
+    }
+
+    #[test]
+    fn progress_ticks_once_per_settled_episode_up_to_99() {
+        let source = MockRssFeedSource::new();
+        source.enqueue_body(dated_feed());
+        let ticks = std::cell::RefCell::new(Vec::new());
+        let phase = prepare_rss_story_creation(
+            official_content_sources(),
+            &source,
+            FEED_URL,
+            &selection_of(&dated_feed(), &["g-1", "g-2", "g-3"]),
+            BUDGET,
+            BUDGET,
+            None,
+            &|pct| ticks.borrow_mut().push(pct),
+        )
+        .expect("prepare");
+        assert!(matches!(phase, RssAcceptPhase::Prepared(_)));
+        assert_eq!(*ticks.borrow(), vec![33, 66, 99]);
     }
 
     #[test]
@@ -895,8 +1296,11 @@ mod tests {
             official_content_sources(),
             &source,
             "file:///etc/passwd",
-            &RssItemRef::Guid("g".into()),
-            &"0".repeat(64),
+            &[RssItemSelection {
+                reference: RssItemRef::Guid("g".into()),
+                fingerprint: "0".repeat(64),
+            }],
+            BUDGET,
             BUDGET,
             None,
         )
@@ -962,8 +1366,11 @@ mod tests {
             official_content_sources(),
             &source,
             FEED_URL,
-            &RssItemRef::Guid("g-enc".into()),
-            &fingerprint,
+            &[RssItemSelection {
+                reference: RssItemRef::Guid("g-enc".into()),
+                fingerprint: fingerprint.clone(),
+            }],
+            BUDGET,
             BUDGET,
             Some(store_root.path()),
         )
@@ -1039,8 +1446,11 @@ mod tests {
             official_content_sources(),
             &source,
             FEED_URL,
-            &RssItemRef::Guid("g-webp".into()),
-            &fingerprint,
+            &[RssItemSelection {
+                reference: RssItemRef::Guid("g-webp".into()),
+                fingerprint: fingerprint.clone(),
+            }],
+            BUDGET,
             BUDGET,
             Some(store_root.path()),
         )
@@ -1083,8 +1493,11 @@ mod tests {
             official_content_sources(),
             &source,
             FEED_URL,
-            &RssItemRef::Guid("g-enc".into()),
-            &fingerprint,
+            &[RssItemSelection {
+                reference: RssItemRef::Guid("g-enc".into()),
+                fingerprint: fingerprint.clone(),
+            }],
+            BUDGET,
             BUDGET,
             Some(store_root.path()),
         )
@@ -1106,6 +1519,211 @@ mod tests {
                 .any(|f| f.aspect == ImportAspectDto::Media
                     && f.category == ImportCategoryDto::Missing),
             "the media finding must stay missing, got {report:?}"
+        );
+    }
+
+    #[test]
+    fn a_transient_download_failure_is_retried_once_and_still_wires_the_audio() {
+        let mut db = fresh_db();
+        let feed = feed_with_enclosure();
+        let fingerprint = fingerprint_in(&feed, "g-enc");
+        let source = MockRssFeedSource::new();
+        source.enqueue_body(feed.clone());
+        // First attempt fails, the second delivers the bytes.
+        source.enqueue_enclosure_failure(crate::infrastructure::device::rss_source::fetch_error(
+            "request",
+        ));
+        source.enqueue_enclosure_body(tiny_wav());
+        let store_root = tempfile::tempdir().expect("tempdir");
+        let outcome = accept_rss_story_creation(
+            &mut db,
+            official_content_sources(),
+            &source,
+            FEED_URL,
+            &[RssItemSelection {
+                reference: RssItemRef::Guid("g-enc".into()),
+                fingerprint: fingerprint.clone(),
+            }],
+            BUDGET,
+            BUDGET,
+            Some(store_root.path()),
+        )
+        .expect("creation");
+        let RssCreationOutcome::Created { story } = outcome else {
+            panic!("expected a creation");
+        };
+        assert_eq!(source.enclosure_requests().len(), 2, "one retry");
+        assert_eq!(story.import_state, Some(ImportStateDto::NeedsReview));
+        let audio_rows: i64 = db
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM assets WHERE media_type = 'audio'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count");
+        assert_eq!(audio_rows, 1);
+    }
+
+    #[test]
+    fn the_channel_artwork_is_downloaded_once_and_attached_to_every_episode() {
+        let mut db = fresh_db();
+        let feed = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<rss version=\"2.0\" xmlns:itunes=\"http://www.itunes.com/dtds/podcast-1.0.dtd\"><channel>\
+                    <title>Série</title><itunes:image href=\"https://exemple.fr/cover.webp\"/>\
+                    <item><title>Un</title><description>A.</description><guid>g-1</guid>\
+                    <enclosure url=\"https://exemple.fr/1.wav\" type=\"audio/wav\"/></item>\
+                    <item><title>Deux</title><description>B.</description><guid>g-2</guid>\
+                    <enclosure url=\"https://exemple.fr/2.wav\" type=\"audio/wav\"/></item>\
+                    </channel></rss>"
+            .to_string();
+        let source = MockRssFeedSource::new();
+        source.enqueue_body(feed.clone());
+        // Download order: audio 1, artwork (once), audio 2 — the artwork
+        // memo answers the second episode without a request.
+        source.enqueue_enclosure_body(tiny_wav());
+        source.enqueue_enclosure_body(tiny_webp());
+        source.enqueue_enclosure_body(tiny_wav());
+        let store_root = tempfile::tempdir().expect("tempdir");
+        let outcome = accept_rss_story_creation(
+            &mut db,
+            official_content_sources(),
+            &source,
+            FEED_URL,
+            &selection_of(&feed, &["g-1", "g-2"]),
+            BUDGET,
+            BUDGET,
+            Some(store_root.path()),
+        )
+        .expect("creation");
+        let RssCreationOutcome::Created { story } = outcome else {
+            panic!("expected a creation");
+        };
+        let urls: Vec<String> = source
+            .enclosure_requests()
+            .into_iter()
+            .map(|(url, _)| url)
+            .collect();
+        assert_eq!(
+            urls,
+            [
+                "https://exemple.fr/1.wav",
+                "https://exemple.fr/cover.webp",
+                "https://exemple.fr/2.wav",
+            ]
+        );
+        // Every node carries its OWN image asset row (the store shares the
+        // single promoted file by content hash).
+        let structure = structure_of(&db, &story.id);
+        let image_ids: Vec<String> = structure
+            .nodes
+            .iter()
+            .map(|n| n.image_asset_id.clone().expect("artwork on every node"))
+            .collect();
+        assert_ne!(image_ids[0], image_ids[1]);
+        assert!(structure.nodes.iter().all(|n| n.audio_asset_id.is_some()));
+        let (image_rows, distinct_files): (i64, i64) = db
+            .conn()
+            .query_row(
+                "SELECT COUNT(*), COUNT(DISTINCT file_name) FROM assets WHERE media_type = 'image'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("count");
+        assert_eq!((image_rows, distinct_files), (2, 1));
+    }
+
+    #[test]
+    fn an_item_artwork_wins_over_the_channel_artwork() {
+        let feed = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<rss version=\"2.0\" xmlns:itunes=\"http://www.itunes.com/dtds/podcast-1.0.dtd\"><channel>\
+                    <title>Série</title><itunes:image href=\"https://exemple.fr/cover.webp\"/>\
+                    <item><title>Un</title><description>A.</description><guid>g-1</guid>\
+                    <itunes:image href=\"https://exemple.fr/ep1.webp\"/></item>\
+                    </channel></rss>"
+            .to_string();
+        let source = MockRssFeedSource::new();
+        source.enqueue_body(feed.clone());
+        source.enqueue_enclosure_body(tiny_webp());
+        let store_root = tempfile::tempdir().expect("tempdir");
+        let phase = prepare_rss_story_creation(
+            official_content_sources(),
+            &source,
+            FEED_URL,
+            &selection_of(&feed, &["g-1"]),
+            BUDGET,
+            BUDGET,
+            Some(store_root.path()),
+            &|_| {},
+        )
+        .expect("prepare");
+        assert!(matches!(phase, RssAcceptPhase::Prepared(_)));
+        let urls: Vec<String> = source
+            .enclosure_requests()
+            .into_iter()
+            .map(|(url, _)| url)
+            .collect();
+        assert_eq!(urls, ["https://exemple.fr/ep1.webp"]);
+    }
+
+    #[test]
+    fn a_shared_media_file_survives_a_failed_commit_of_a_second_story() {
+        // Two stories ingest the same bytes (content-addressed sharing).
+        // When the SECOND commit fails, its compensation must not remove
+        // the file the FIRST story still references.
+        let mut db = fresh_db();
+        let feed = feed_with_enclosure();
+        let store_root = tempfile::tempdir().expect("tempdir");
+        let source = MockRssFeedSource::new();
+        source.enqueue_body(feed.clone());
+        source.enqueue_enclosure_body(tiny_wav());
+        let outcome = accept_rss_story_creation(
+            &mut db,
+            official_content_sources(),
+            &source,
+            FEED_URL,
+            &selection_of(&feed, &["g-enc"]),
+            BUDGET,
+            BUDGET,
+            Some(store_root.path()),
+        )
+        .expect("first creation");
+        let RssCreationOutcome::Created { story } = outcome else {
+            panic!("expected a creation");
+        };
+        let file_name: String = db
+            .conn()
+            .query_row(
+                "SELECT file_name FROM assets WHERE story_id = ?1",
+                rusqlite::params![&story.id],
+                |row| row.get(0),
+            )
+            .expect("asset");
+        let promoted = store_root.path().join("node-media").join(&file_name);
+        assert!(promoted.is_file());
+
+        // Second ingestion of the same bytes, whose commit is sabotaged.
+        source.enqueue_body(feed.clone());
+        source.enqueue_enclosure_body(tiny_wav());
+        let phase = prepare_rss_story_creation(
+            official_content_sources(),
+            &source,
+            FEED_URL,
+            &selection_of(&feed, &["g-enc"]),
+            BUDGET,
+            BUDGET,
+            Some(store_root.path()),
+            &|_| {},
+        )
+        .expect("prepare");
+        let RssAcceptPhase::Prepared(prepared) = phase else {
+            panic!("expected a prepared creation");
+        };
+        db.conn()
+            .execute_batch("DROP TABLE story_local_imports;")
+            .expect("sabotage");
+        assert!(commit_rss_story_creation(&mut db, *prepared).is_err());
+        assert!(
+            promoted.is_file(),
+            "the file referenced by the first story must survive the compensation"
         );
     }
 

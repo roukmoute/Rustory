@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use rustory_lib::application::import_export::{
-    accept_rss_story_creation, preview_rss_source, RssCreationOutcome,
+    accept_rss_story_creation, preview_rss_source, RssCreationOutcome, RssItemSelection,
 };
 use rustory_lib::application::story::{node, scope};
 use rustory_lib::domain::import::{
@@ -165,8 +165,11 @@ fn journey_1_preview_is_pure_then_the_accept_lands_a_reviewable_draft() {
         official_content_sources(),
         &source,
         FEED_URL,
-        &RssItemRef::Guid("g-1".into()),
-        &fingerprint_in(&nominal_feed(), "g-1"),
+        &[RssItemSelection {
+            reference: RssItemRef::Guid("g-1".into()),
+            fingerprint: fingerprint_in(&nominal_feed(), "g-1"),
+        }],
+        BUDGET,
         BUDGET,
         None,
     )
@@ -175,7 +178,8 @@ fn journey_1_preview_is_pure_then_the_accept_lands_a_reviewable_draft() {
         panic!("expected a creation");
     };
     assert_eq!(source.request_count(), 2, "preview + accept re-fetch");
-    assert_eq!(story.title, "Episode 1");
+    // The podcast IS the story: the channel title names it.
+    assert_eq!(story.title, "Mon flux");
 
     let (format, name, state, summary) = provenance_row(&db, &story.id);
     assert_eq!(format, "rss");
@@ -256,8 +260,11 @@ fn an_enclosure_item_lands_partial_with_the_missing_media_finding() {
         official_content_sources(),
         &source,
         FEED_URL,
-        &RssItemRef::Guid("g-p".into()),
-        &fingerprint_in(&body, "g-p"),
+        &[RssItemSelection {
+            reference: RssItemRef::Guid("g-p".into()),
+            fingerprint: fingerprint_in(&body, "g-p"),
+        }],
+        BUDGET,
         BUDGET,
         None,
     )
@@ -291,8 +298,11 @@ fn transport_failures_reject_and_create_nothing_on_both_phases() {
         official_content_sources(),
         &source,
         FEED_URL,
-        &RssItemRef::Guid("g-1".into()),
-        &"0".repeat(64),
+        &[RssItemSelection {
+            reference: RssItemRef::Guid("g-1".into()),
+            fingerprint: "0".repeat(64),
+        }],
+        BUDGET,
         BUDGET,
         None,
     )
@@ -334,8 +344,11 @@ fn blocked_feeds_are_typed_verdicts_and_create_nothing() {
             official_content_sources(),
             &source,
             FEED_URL,
-            &RssItemRef::Guid("g-1".into()),
-            &"0".repeat(64),
+            &[RssItemSelection {
+                reference: RssItemRef::Guid("g-1".into()),
+                fingerprint: "0".repeat(64),
+            }],
+            BUDGET,
             BUDGET,
             None,
         )
@@ -364,8 +377,11 @@ fn a_source_that_changed_between_preview_and_accept_refuses_honestly() {
         official_content_sources(),
         &source,
         FEED_URL,
-        &RssItemRef::Guid("g-1".into()),
-        &fingerprint_in(&nominal_feed(), "g-1"),
+        &[RssItemSelection {
+            reference: RssItemRef::Guid("g-1".into()),
+            fingerprint: fingerprint_in(&nominal_feed(), "g-1"),
+        }],
+        BUDGET,
         BUDGET,
         None,
     )
@@ -396,8 +412,11 @@ fn a_resolvable_item_whose_content_diverged_refuses_honestly() {
         official_content_sources(),
         &source,
         FEED_URL,
-        &RssItemRef::Guid("g-1".into()),
-        &fingerprint_in(&previewed, "g-1"),
+        &[RssItemSelection {
+            reference: RssItemRef::Guid("g-1".into()),
+            fingerprint: fingerprint_in(&previewed, "g-1"),
+        }],
+        BUDGET,
         BUDGET,
         None,
     )
@@ -420,8 +439,11 @@ fn the_created_card_surfaces_on_the_overview_projection_with_the_rss_report() {
         official_content_sources(),
         &source,
         FEED_URL,
-        &RssItemRef::Guid("g-2".into()),
-        &fingerprint_in(&nominal_feed(), "g-2"),
+        &[RssItemSelection {
+            reference: RssItemRef::Guid("g-2".into()),
+            fingerprint: fingerprint_in(&nominal_feed(), "g-2"),
+        }],
+        BUDGET,
         BUDGET,
         None,
     )

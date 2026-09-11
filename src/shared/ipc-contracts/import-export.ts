@@ -418,25 +418,41 @@ export type RssItemRef =
     };
 
 /** One selectable item of a previewed feed. `title` may be empty (the
- *  surface then leads with the summary); `summary` is a bounded excerpt. */
+ *  surface then leads with the summary); `summary` is a bounded excerpt;
+ *  `hasEnclosure` says an audio (the enclosure) will be downloaded for
+ *  the episode, `hasImage` that an artwork (the item's own, else the
+ *  channel's) will be attached. */
 export interface RssPreviewItem {
   title: string;
   summary: string;
   hasEnclosure: boolean;
+  hasImage: boolean;
   itemRef: RssItemRef;
 }
 
-/** The typed outcome of `fetch_rss_source_preview`. `blocked` mirrors
- *  `state === "blocked"` (the guard refuses a divergence); a blocked
- *  verdict carries no item. A TRANSPORT failure rejects with
- *  `RSS_SOURCE_UNREACHABLE` instead — the content verdict is NEVER an
- *  error. */
+/** The typed outcome of `fetch_rss_source_preview`. `channelTitle` is the
+ *  feed's own name (the story title the accept gives, when present);
+ *  `items` are listed in LISTENING order (oldest first when the feed
+ *  dates every item). `blocked` mirrors `state === "blocked"` (the guard
+ *  refuses a divergence); a blocked verdict carries no item. A TRANSPORT
+ *  failure rejects with `RSS_SOURCE_UNREACHABLE` instead — the content
+ *  verdict is NEVER an error. */
 export interface RssPreview {
   sourceHost: string;
+  channelTitle: string | null;
   items: RssPreviewItem[];
   findings: ImportFinding[];
   state: ImportState;
   blocked: boolean;
+}
+
+/** A stable identity key for an item reference — JSON-encoded so no field
+ *  separator can collide with (or corrupt) the key content. Two references
+ *  naming the same item share the key whatever their fingerprint. */
+export function rssItemRefKey(ref: RssItemRef): string {
+  return ref.kind === "guid"
+    ? JSON.stringify(["guid", ref.guid])
+    : JSON.stringify(["titleLink", ref.title, ref.link ?? ""]);
 }
 
 /** Tagged outcome of `accept_rss_story_creation`: the created card + its
@@ -498,6 +514,7 @@ function isRssPreviewItem(value: unknown): value is RssPreviewItem {
     typeof c.title === "string" &&
     typeof c.summary === "string" &&
     typeof c.hasEnclosure === "boolean" &&
+    typeof c.hasImage === "boolean" &&
     isRssItemRef(c.itemRef) &&
     // An item with neither a title nor a summary would be unselectable —
     // Rust never ships one (exploitability gate).
@@ -516,6 +533,9 @@ export function isRssPreview(value: unknown): value is RssPreview {
   if (typeof value !== "object" || value === null) return false;
   const c = value as Record<string, unknown>;
   if (typeof c.sourceHost !== "string" || !isHostOnly(c.sourceHost)) {
+    return false;
+  }
+  if (c.channelTitle !== null && typeof c.channelTitle !== "string") {
     return false;
   }
   if (typeof c.state !== "string" || !IMPORT_STATES.has(c.state)) return false;

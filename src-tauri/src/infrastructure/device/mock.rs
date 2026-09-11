@@ -571,6 +571,15 @@ impl MockRssFeedSource {
             .push(Ok(body.into()));
     }
 
+    /// Program the NEXT enclosure fetch to fail with `err` (a transient
+    /// transport failure the flow may retry).
+    pub fn enqueue_enclosure_failure(&self, err: AppError) {
+        self.enclosure_queue
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .push(Err(err));
+    }
+
     /// Every `(url, budget)` received by `fetch_enclosure`, in call order.
     pub fn enclosure_requests(&self) -> Vec<(String, Duration)> {
         self.enclosure_requests

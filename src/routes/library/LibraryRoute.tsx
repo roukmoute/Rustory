@@ -1284,7 +1284,9 @@ export function LibraryRoute(): React.JSX.Element {
         onFetch={(url) => {
           void rssCreation.fetchPreview(url);
         }}
-        onSelectItem={rssCreation.selectItem}
+        onToggleItem={rssCreation.toggleItem}
+        onSelectAll={rssCreation.selectAll}
+        onSelectNone={rssCreation.selectNone}
         onAccept={() => {
           void rssCreation.acceptCreation();
         }}

@@ -26,7 +26,7 @@ use rustory_lib::application::device::preflight::{
     read_story_validation, StoryValidationOutcome, Verdict,
 };
 use rustory_lib::application::import_export::{
-    accept_rss_story_creation, preview_rss_source, RssCreationOutcome,
+    accept_rss_story_creation, preview_rss_source, RssCreationOutcome, RssItemSelection,
 };
 use rustory_lib::application::transfer::{
     prepare_story, read_preparation_state, transfer_story, PreparationEventEmitter,
@@ -112,8 +112,11 @@ fn create_rss_story(db: &Mutex<DbHandle>, app_data: &Path) -> String {
             official_content_sources(),
             &source,
             FEED_URL,
-            &RssItemRef::Guid("g-c".into()),
-            &fingerprint,
+            &[RssItemSelection {
+                reference: RssItemRef::Guid("g-c".into()),
+                fingerprint: fingerprint.clone(),
+            }],
+            budget(),
             budget(),
             Some(app_data),
         )
@@ -403,8 +406,11 @@ fn a_policy_refusal_fetches_nothing_and_creates_nothing() {
             &disabled,
             &source,
             FEED_URL,
-            &RssItemRef::Guid("g-c".into()),
-            &"0".repeat(64),
+            &[RssItemSelection {
+                reference: RssItemRef::Guid("g-c".into()),
+                fingerprint: "0".repeat(64),
+            }],
+            budget(),
             budget(),
             None,
         )

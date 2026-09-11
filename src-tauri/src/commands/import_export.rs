@@ -32,6 +32,12 @@ use crate::AppState;
 /// budget: ONE bounded document, no cover downloads.
 const RSS_FETCH_BUDGET: Duration = Duration::from_secs(30);
 
+/// Whole-request budget of ONE enclosure download at the accept: a full
+/// podcast episode is tens of MiB, far beyond the feed's own budget, and a
+/// series downloads them one after the other (the wall clock of the whole
+/// accept is the sum — the frontend shows the progress, never a freeze).
+const RSS_MEDIA_BUDGET: Duration = Duration::from_secs(180);
+
 const EXPORT_DIALOG_FILTER_NAME: &str = "Artefact Rustory";
 const MAX_DESTINATION_PATH_LEN: usize = 4096;
 
@@ -765,20 +771,24 @@ pub async fn fetch_rss_source_preview(
     ))
 }
 
-/// Commit one previewed feed item into a canonical local draft (phase 2).
+/// Commit the previewed feed's accepted items into ONE canonical local
+/// story (phase 2): one node per item in the reviewed order.
 ///
 /// RE-fetches and re-parses the feed from zero on a blocking worker (the
-/// source is the authority; the wire reference is a pointer, never
+/// source is the authority; every wire reference is a pointer, never
 /// content), WITHOUT the DB lock — the lock is taken only for the single
 /// atomic transaction, INSIDE the worker so no `MutexGuard` ever lives
 /// across an `await`. A diverged source resolves with the typed
 /// `sourceChanged` refusal (nothing created); only transport rejects.
+/// `on_progress` streams the integer percent (0..99) of episodes settled
+/// (each one a download), so a long series never looks frozen.
 #[tauri::command]
 pub async fn accept_rss_story_creation(
     app: AppHandle,
     state: State<'_, AppState>,
     feed_url: String,
-    item_ref: RssItemRefDto,
+    item_refs: Vec<RssItemRefDto>,
+    on_progress: Channel<u8>,
 ) -> Result<RssCreationOutcomeDto, AppError> {
     let source = state.rss_source.clone();
     let db = state.db.clone();
@@ -790,17 +800,32 @@ pub async fn accept_rss_story_creation(
     // a policy refusal must reject before ANY address analysis, boundary
     // included.
     let feed_url_for_log = feed_url.clone();
+    let item_count = item_refs.len();
     let outcome = async_runtime::spawn_blocking(move || -> Result<RssCreationOutcome, AppError> {
-        let reference = item_ref.to_domain();
-        let expected_fingerprint = item_ref.fingerprint().to_string();
+        let selection: Vec<rss_creation::RssItemSelection> = item_refs
+            .iter()
+            .map(|item_ref| rss_creation::RssItemSelection {
+                reference: item_ref.to_domain(),
+                fingerprint: item_ref.fingerprint().to_string(),
+            })
+            .collect();
+        // Forward only on an integer-percent CHANGE (bounded IPC).
+        let last = std::cell::Cell::new(-1i16);
+        let forward = |pct: u8| {
+            if i16::from(pct) != last.get() {
+                last.set(i16::from(pct));
+                let _ = on_progress.send(pct);
+            }
+        };
         match rss_creation::prepare_rss_story_creation(
             official_content_sources(),
             source.as_ref(),
             &feed_url,
-            &reference,
-            &expected_fingerprint,
+            &selection,
             RSS_FETCH_BUDGET,
+            RSS_MEDIA_BUDGET,
             Some(app_data_dir.as_ref()),
+            &forward,
         )? {
             RssAcceptPhase::SourceChanged => Ok(RssCreationOutcome::SourceChanged),
             RssAcceptPhase::Prepared(prepared) => {
@@ -825,6 +850,7 @@ pub async fn accept_rss_story_creation(
                         .import_state
                         .map(|state| state.wire_tag())
                         .unwrap_or("unknown"),
+                    item_count,
                 },
             );
         }

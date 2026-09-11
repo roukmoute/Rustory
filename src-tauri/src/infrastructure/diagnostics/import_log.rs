@@ -36,6 +36,8 @@ pub enum Event {
     RssCreationSettled {
         host: String,
         import_state: &'static str,
+        /// The episodes ingested as nodes (the accepted selection).
+        item_count: usize,
     },
     /// The accept re-fetch refused honestly: the source diverged from the
     /// previewed state (missing/ambiguous item, or a feed turned blocked).

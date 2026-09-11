@@ -11,6 +11,7 @@ import type {
   RssItemRef,
   RssPreview,
 } from "../../../shared/ipc-contracts/import-export";
+import { rssItemRefKey } from "../../../shared/ipc-contracts/import-export";
 import type { StoryCardDto } from "../../../shared/ipc-contracts/library";
 
 export type RssCreationStatus =
@@ -23,13 +24,16 @@ export type RssCreationStatus =
        *  possibly-retyped value. */
       feedUrl: string;
       preview: RssPreview;
-      selectedItemRef: RssItemRef | null;
+      /** The keys ([`rssItemRefKey`]) of the items the accept will
+       *  ingest — EVERY previewed item by default (the whole podcast is
+       *  the story); the user unticks what should stay out. */
+      selectedKeys: ReadonlySet<string>;
       /** The accept refused honestly (`La source a changé depuis la
        *  récupération.`): the stale items are dead — the surface renders
        *  the frozen verdict and offers a re-fetch. */
       sourceChanged: boolean;
     }
-  | { kind: "creating" }
+  | { kind: "creating"; progress: number | null }
   | { kind: "created"; story: StoryCardDto }
   | { kind: "failed"; error: AppError }
   /** The content-source POLICY refused the flow
@@ -46,11 +50,16 @@ export interface UseRssCreation {
    *  explicit `Récupérer le flux` click). Resolves when the preview has
    *  settled. A re-fetch from `review` replaces the preview. */
   fetchPreview(url: string): Promise<void>;
-  /** Select one previewed item (`review` only; no-op on a blocked or
-   *  source-changed review). */
-  selectItem(ref: RssItemRef): void;
-  /** Commit the selected item (`Créer le brouillon`). No-op outside a
-   *  selectable `review`. Rust re-fetches the feed from zero. */
+  /** Tick / untick one previewed item (`review` only; no-op on a blocked
+   *  or source-changed review). */
+  toggleItem(ref: RssItemRef): void;
+  /** Tick every previewed item. */
+  selectAll(): void;
+  /** Untick every previewed item. */
+  selectNone(): void;
+  /** Commit the ticked items as ONE story (`Créer l'histoire`), in the
+   *  reviewed order. No-op outside a selectable `review` or with nothing
+   *  ticked. Rust re-fetches the feed from zero. */
   acceptCreation(): Promise<void>;
   /** Abandon the flow (pure frontend, NO mutation): reset to idle from ANY
    *  non-terminal state — including a long `fetching` / `creating` (the
@@ -139,7 +148,7 @@ export function useRssCreation(): UseRssCreation {
         kind: "review",
         feedUrl: url,
         preview,
-        selectedItemRef: null,
+        selectedKeys: allKeysOf(preview),
         sourceChanged: false,
       });
     } finally {
@@ -150,11 +159,32 @@ export function useRssCreation(): UseRssCreation {
     }
   }, []);
 
-  const selectItem = useCallback((ref: RssItemRef): void => {
+  const toggleItem = useCallback((ref: RssItemRef): void => {
     const current = statusRef.current;
     if (current.kind !== "review") return;
     if (current.preview.blocked || current.sourceChanged) return;
-    setStatus({ ...current, selectedItemRef: ref });
+    const key = rssItemRefKey(ref);
+    const next = new Set(current.selectedKeys);
+    if (next.has(key)) {
+      next.delete(key);
+    } else {
+      next.add(key);
+    }
+    setStatus({ ...current, selectedKeys: next });
+  }, []);
+
+  const selectAll = useCallback((): void => {
+    const current = statusRef.current;
+    if (current.kind !== "review") return;
+    if (current.preview.blocked || current.sourceChanged) return;
+    setStatus({ ...current, selectedKeys: allKeysOf(current.preview) });
+  }, []);
+
+  const selectNone = useCallback((): void => {
+    const current = statusRef.current;
+    if (current.kind !== "review") return;
+    if (current.preview.blocked || current.sourceChanged) return;
+    setStatus({ ...current, selectedKeys: new Set() });
   }, []);
 
   const acceptCreation = useCallback(async (): Promise<void> => {
@@ -163,19 +193,35 @@ export function useRssCreation(): UseRssCreation {
     // `unavailable` is covered by the review-only gate below; the accept
     // is a no-op there like every other retry-shaped action.
     if (current.kind !== "review") return;
-    // A blocked or diverged review has nothing to create; the CTA needs a
-    // selected item.
+    // A blocked or diverged review has nothing to create; the CTA needs at
+    // least one ticked item. The references travel in the REVIEWED order
+    // (the listening order), whatever the ticking order.
     if (current.preview.blocked || current.sourceChanged) return;
-    if (current.selectedItemRef === null) return;
+    const itemRefs = current.preview.items
+      .filter((item) => current.selectedKeys.has(rssItemRefKey(item.itemRef)))
+      .map((item) => item.itemRef);
+    if (itemRefs.length === 0) return;
 
     const generation = generationRef.current;
     inFlightGenerationRef.current = generation;
     try {
-      if (mountedRef.current) setStatus({ kind: "creating" });
+      if (mountedRef.current) setStatus({ kind: "creating", progress: null });
       try {
         const outcome = await acceptRssStoryCreation(
           current.feedUrl,
-          current.selectedItemRef,
+          itemRefs,
+          (percent) => {
+            if (!mountedRef.current || generationRef.current !== generation) {
+              return;
+            }
+            // Only refresh the in-flight bar — a late tick after the flow
+            // settled must never resurrect "creating".
+            setStatus((prev) =>
+              prev.kind === "creating"
+                ? { kind: "creating", progress: percent }
+                : prev,
+            );
+          },
         );
         if (outcome.kind === "sourceChanged") {
           // Honest refusal: nothing was created. The stale items are dead
@@ -185,7 +231,7 @@ export function useRssCreation(): UseRssCreation {
           }
           setStatus({
             ...current,
-            selectedItemRef: null,
+            selectedKeys: new Set(),
             sourceChanged: true,
           });
           return;
@@ -236,9 +282,16 @@ export function useRssCreation(): UseRssCreation {
   return {
     status,
     fetchPreview,
-    selectItem,
+    toggleItem,
+    selectAll,
+    selectNone,
     acceptCreation,
     abandon,
     dismiss,
   };
+}
+
+/** Every previewed item, ticked: the default selection of a review. */
+function allKeysOf(preview: RssPreview): ReadonlySet<string> {
+  return new Set(preview.items.map((item) => rssItemRefKey(item.itemRef)));
 }

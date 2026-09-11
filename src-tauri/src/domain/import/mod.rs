@@ -33,10 +33,11 @@ pub use recognition::{
     RecognitionCategory, RecognitionFinding, RecognitionQuality,
 };
 pub use rss::{
-    clean_rss_text, feed_url_host, is_supported_feed_url, parse_rss, resolve_rss_item,
-    rss_import_state, rss_item_findings, rss_item_fingerprint, rss_item_ref, RssAnalysis, RssItem,
-    RssItemRef, MAX_RSS_ITEMS, MAX_RSS_ITEM_TEXT_CHARS, MAX_RSS_URL_CHARS, MAX_RSS_XML_DEPTH,
-    RSS_FALLBACK_TITLE_PREFIX, RSS_SOURCE_FORMAT_VERSION,
+    clean_rss_text, feed_url_host, is_supported_feed_url, order_items_chronologically, parse_rss,
+    parse_rss_pub_date, resolve_rss_item, rss_feed_findings, rss_import_state,
+    rss_item_fingerprint, rss_item_ref, RssAnalysis, RssItem, RssItemRef, MAX_RSS_ITEMS,
+    MAX_RSS_ITEM_TEXT_CHARS, MAX_RSS_URL_CHARS, MAX_RSS_XML_DEPTH, RSS_FALLBACK_TITLE_PREFIX,
+    RSS_SOURCE_FORMAT_VERSION,
 };
 pub use structured_archive::{
     analyze_structured_archive_components, archive_referenced_media, MAX_ARCHIVE_MEDIA_FILES,
