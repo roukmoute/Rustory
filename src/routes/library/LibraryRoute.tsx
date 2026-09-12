@@ -558,9 +558,20 @@ export function LibraryRoute(): React.JSX.Element {
   // the archive engine (`devicePackSend`). A device has at most one of the two.
   // Scope the V3 send status to the card it belongs to (like the delete/import
   // statuses): selecting another card never shows this one's terminal.
+  // A `sent` terminal is true of ONE device: once the connected device's
+  // inventory has been read (and is not being re-read), the terminal stays
+  // only while that inventory lists the sent pack — another Lunii plugged in
+  // after the send never inherits the first one's success. The device is the
+  // truth; the post-send re-read of the same device lists the pack and keeps it.
+  const sentPackStillOnDevice = (packUuid: string): boolean =>
+    deviceLibrary.state.kind !== "ready" ||
+    deviceLibrary.isRefreshing ||
+    deviceLibrary.state.stories.some((story) => story.uuid === packUuid);
   const scopedSendStatus: DevicePackSendStatus =
     devicePackSend.targetStoryId !== null &&
-    devicePackSend.targetStoryId === singleSelectedStoryId
+    devicePackSend.targetStoryId === singleSelectedStoryId &&
+    (devicePackSend.status.kind !== "sent" ||
+      sentPackStillOnDevice(devicePackSend.status.packUuid))
       ? devicePackSend.status
       : { kind: "idle" };
   const transferView: TransferView =

@@ -721,6 +721,59 @@ describe("useStoryTransfer", () => {
     expect(result.current.state.kind).toBe("retryable");
   });
 
+  it("hydrate re-proves a sticky verified against the connected device and withdraws it when that device lacks the pack", async () => {
+    // A success settled from the completed event on device A…
+    vi.mocked(startTransferStory).mockResolvedValue({ jobId: "j1", storyId: STORY });
+    vi.mocked(readTransferState).mockResolvedValue({ kind: "idle" });
+    const { result } = renderHook(() => useStoryTransfer());
+    act(() => result.current.send(STORY, DEVICE));
+    await waitFor(() => expect(subscribeJobEvents).toHaveBeenCalled());
+    act(() => lastSubscription().onCompleted(completedVerified(1)));
+    await waitFor(() => expect(result.current.state.kind).toBe("verified"));
+
+    // …the same device, re-detected under its post-write identifier, proves
+    // the pack again: the terminal stays (its summary refreshed from the live read).
+    vi.mocked(readTransferState).mockReset();
+    vi.mocked(readTransferState).mockResolvedValue(verifiedState);
+    const memoryReadsBefore = vi.mocked(readTransferOutcome).mock.calls.length;
+    act(() => result.current.hydrate(STORY, "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"));
+    await waitFor(() =>
+      expect(readTransferState).toHaveBeenCalledWith({
+        storyId: STORY,
+        deviceIdentifier: "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+      }),
+    );
+    await waitFor(() => expect(result.current.state.kind).toBe("verified"));
+    // The re-proof asks the DEVICE, never the durable memory.
+    expect(vi.mocked(readTransferOutcome).mock.calls.length).toBe(memoryReadsBefore);
+
+    // ANOTHER Lunii plugged in: it does not hold the pack — the success was
+    // about the first device and is withdrawn, never inherited.
+    vi.mocked(readTransferState).mockReset();
+    vi.mocked(readTransferState).mockResolvedValue({ kind: "idle" });
+    act(() => result.current.hydrate(STORY, "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2"));
+    await waitFor(() => expect(result.current.state.kind).toBe("idle"));
+  });
+
+  it("hydrate keeps a sticky verified when the live re-proof fails (proves nothing either way)", async () => {
+    vi.mocked(startTransferStory).mockResolvedValue({ jobId: "j1", storyId: STORY });
+    vi.mocked(readTransferState).mockResolvedValue({ kind: "idle" });
+    const { result } = renderHook(() => useStoryTransfer());
+    act(() => result.current.send(STORY, DEVICE));
+    await waitFor(() => expect(subscribeJobEvents).toHaveBeenCalled());
+    act(() => lastSubscription().onCompleted(completedVerified(1)));
+    await waitFor(() => expect(result.current.state.kind).toBe("verified"));
+    vi.mocked(readTransferState).mockReset();
+    vi.mocked(readTransferState).mockRejectedValue(new Error("scan failed"));
+    act(() => result.current.hydrate(STORY, DEVICE));
+    await waitFor(() => expect(readTransferState).toHaveBeenCalledTimes(1));
+    expect(result.current.state.kind).toBe("verified");
+    // Without a device there is nothing to re-prove against: no read at all.
+    act(() => result.current.hydrate(STORY));
+    expect(readTransferState).toHaveBeenCalledTimes(1);
+    expect(result.current.state.kind).toBe("verified");
+  });
+
   it("a redundant hydrate while a terminal is shown does not swallow a later dismiss purge error (§6)", async () => {
     vi.mocked(readTransferOutcome).mockResolvedValue(rememberedRetryable);
     vi.mocked(discardTransferOutcome).mockRejectedValue({

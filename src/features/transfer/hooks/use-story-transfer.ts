@@ -526,13 +526,34 @@ export function useStoryTransfer(): UseStoryTransfer {
       // would re-read the same memory) AND bumping `activeJobRef` would supersede an
       // in-flight `dismiss` purge, swallowing its error (§6 needs it visible). Short-
       // circuit so a repeated hydrate (e.g. the route effect re-firing on a
-      // `writableDeviceId` change) is a no-op.
+      // `writableDeviceId` change) is a no-op — EXCEPT for a sticky `verified`
+      // when a device is connected: a success is only ever true of the device
+      // that proved it, so the connected device is asked again (another Lunii
+      // plugged in after the send must not inherit the first one's success; the
+      // same Lunii, re-detected under its post-write identifier, proves it again).
       const current = stateRef.current;
       if (
         current.kind !== "idle" &&
         "storyId" in current &&
         current.storyId === storyId
       ) {
+        if (current.kind === "verified" && deviceId) {
+          const callId = ++activeJobRef.current;
+          readTransferState({ storyId, deviceIdentifier: deviceId })
+            .then((live) => {
+              if (!mountedRef.current || callId !== activeJobRef.current) return;
+              if (live.kind === "verified") {
+                setState({ kind: "verified", storyId, summary: live.summary });
+              } else {
+                // The connected device does not hold the proven pack: the
+                // success was about another device — no false success.
+                setState({ kind: "idle" });
+              }
+            })
+            .catch(() => {
+              // A live-read failure proves nothing either way: keep the terminal.
+            });
+        }
         return;
       }
 

@@ -2855,10 +2855,32 @@ describe("<LibraryRoute />", () => {
       },
     };
     mockDevice.mockResolvedValue(sendableV3);
-    mockDeviceLibrary.mockResolvedValue(readableTwo);
+    const sentPackUuid = "abababab-abab-abab-abab-ababfac5562d";
+    // The device inventory BEFORE the send, then the re-read AFTER it, which
+    // lists the sent pack (the device is the truth of the success).
+    const withSentPack = {
+      ...readableTwo,
+      stories: [
+        ...readableTwo.stories,
+        {
+          ...readableTwo.stories[0],
+          uuid: sentPackUuid,
+          shortId: "FAC5562D",
+          alreadyImported: true,
+          localStoryId: "s1",
+          title: "Le soleil",
+          titleSource: "unofficial",
+        },
+      ],
+    };
+    mockDeviceLibrary.mockImplementation(() =>
+      mockSendPack.mock.calls.length > 0
+        ? Promise.resolve(withSentPack)
+        : Promise.resolve(readableTwo),
+    );
     mockStoryValidation.mockResolvedValue(presumedTransferableValidation);
     mockSendPack.mockResolvedValue({
-      packUuid: "abababab-abab-abab-abab-ababfac5562d",
+      packUuid: sentPackUuid,
       imageCount: 2,
       audioCount: 3,
     });
@@ -2888,14 +2910,47 @@ describe("<LibraryRoute />", () => {
       }),
     );
     // The settled success is announced with the pack facts, and the device
-    // inventory re-reads so the new pack appears.
+    // inventory re-reads so the new pack appears — and the terminal STAYS,
+    // the re-read device listing the pack.
     expect(
       await within(panel).findByText("Pack envoyé sur l'appareil."),
     ).toBeInTheDocument();
     await waitFor(() =>
       expect(mockDeviceLibrary.mock.calls.length).toBeGreaterThan(readsBefore),
     );
-  });
+    const main = screen.getByRole("main", { name: /collection d'histoires/i });
+    await within(main).findByRole("button", { name: "Le soleil, Sur la Lunii" });
+    expect(
+      within(panel).getByText("Pack envoyé sur l'appareil."),
+    ).toBeInTheDocument();
+
+    // ANOTHER Lunii is plugged in (a different identifier, an inventory
+    // without the pack): the success was about the first device — it is
+    // withdrawn, never inherited. The stamp goes too.
+    const otherLunii = {
+      ...sendableV3,
+      deviceIdentifier: "fedcba9876543210fedcba9876543210",
+    };
+    mockDevice.mockResolvedValue(otherLunii);
+    mockDeviceLibrary.mockImplementation(() =>
+      Promise.resolve({
+        ...readableTwo,
+        deviceIdentifier: otherLunii.deviceIdentifier,
+      }),
+    );
+    // The presence poll runs every 3 s: wait past one tick.
+    await waitFor(
+      () =>
+        expect(
+          within(panel).queryByText("Pack envoyé sur l'appareil."),
+        ).not.toBeInTheDocument(),
+      { timeout: 8000 },
+    );
+    expect(
+      within(main).queryByRole("button", { name: "Le soleil, Sur la Lunii" }),
+    ).not.toBeInTheDocument();
+    expect(mockSendPack).toHaveBeenCalledTimes(1);
+  }, 15000);
 
   it("disables the Envoyer CTA for a story a V3 cannot receive, with the card's reason", async () => {
     const user = userEvent.setup();
