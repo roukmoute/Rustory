@@ -45,7 +45,8 @@ It exists to keep the same product concepts named the same way across:
 | Order on the device — stale list refusal (message) | `Réorganisation impossible: la liste des histoires de l'appareil a changé entre-temps.` | The `reorder_diverged` refusal: the device index read by Rustory no longer matches the one on the device, nothing was written | `conflit`, `erreur de synchronisation`, blaming the device |
 | Order on the device — stale list refusal (next gesture) | `Relance la lecture de l'appareil, puis déplace à nouveau l'histoire.` | The real gesture after a stale-list refusal | `réessaie` alone, `débranche l'appareil` |
 | Copy a device story into the library (action) | `Copier dans ma bibliothèque` | User-visible act of bringing a device story from the connected device into the local library | `importer` (reserved for file artifacts), `download`, `sync` |
-| Device story already copied locally | `Dans ta bibliothèque` | Marker on a device story card: a local copy of this device story exists (provenance link present) | `imported`, `synced`, `duplicate` |
+| Device story already copied locally | `Dans ta bibliothèque` | Marker on a device story card: a local copy of this device story exists (imported from a device, sent from this library, or named by the pack) | `imported`, `synced`, `duplicate` |
+| Library story already on the connected device (stamp) | `Sur la Lunii` (Lunii families) / `Sur l'appareil` (non-Lunii) | Info chip on a LIBRARY card, folded into its accessible name (`<titre>, Sur la Lunii`): the connected device holds a copy of this story, so the user need not look for it in the device list. Presence only — never a claim that the device copy is up to date | `synchronisée`, `à jour`, `envoyée` (asserts a past send), `transférée` |
 | Default title of a copied device story (Lunii) | `Histoire de ma Lunii (XXXXXXXX)` | Title given to the local draft created by a Lunii device copy — `XXXXXXXX` is the opaque short identifier; renamable immediately in the editor. VERBATIM, family-frozen | titles asserting unverified content (`Histoire non reconnue` is a device-side state, never a local title) |
 | Default title of a copied device story (FLAM) | `Histoire de mon FLAM (XXXXXXXX)` | Family-correct sibling of the Lunii default title for a FLAM device copy — same short identifier, same renaming path | reusing the Lunii wording on a FLAM copy |
 | Complete device pack | `Contenu présent` | A listed device story whose payload folder is present on the device — a verified fact about the folder, never a claim about content quality | `valid`, `complete`, `ok`, asserting content quality |
@@ -321,6 +322,7 @@ The UI should favor these labels when they are user-visible:
 | Empty device library hint (family-neutral) | `L'appareil connecté ne contient aucune histoire lisible.` |
 | Device copy failed and user can retry | `Copie impossible` |
 | Device story with a local copy | `Dans ta bibliothèque` |
+| Library story on the connected device (stamp) | `Sur la Lunii` / `Sur l'appareil` |
 | Device story whose payload folder is present | `Contenu présent` |
 | Device story not covered by any local index | `Histoire non reconnue` |
 | Recognized title from the official commercial catalog | `Titre officiel` |

@@ -128,3 +128,10 @@
 .story-card__import-issue {
   margin: 0;
 }
+
+/* The « Sur la Lunii » stamp: a verified presence on the connected device,
+ * shown under the title like the preparation badge. */
+.story-card__device-chip {
+  margin-top: var(--space-1);
+  align-self: flex-start;
+}

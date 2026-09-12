@@ -9,6 +9,7 @@ fn story(short_id: &str, hidden: bool, content_present: bool) -> DeviceStoryDto 
         hidden,
         content_present,
         already_imported: false,
+        local_story_id: None,
         title: None,
         title_source: None,
         thumbnail: None,
@@ -81,6 +82,7 @@ fn device_library_readable_flam_round_trips_the_same_neutral_wire_shape() {
             content_present: true,
             cover_data_url: None,
             already_imported: false,
+            local_story_id: None,
             title: None,
             title_source: None,
             thumbnail: None,
@@ -184,6 +186,7 @@ fn device_story_already_imported_serializes_true_when_stamped() {
             content_present: true,
             cover_data_url: None,
             already_imported: true,
+            local_story_id: None,
             title: None,
             title_source: None,
             thumbnail: None,
@@ -204,6 +207,7 @@ fn device_story_recognized_title_serializes_with_provenance_and_cover() {
             content_present: true,
             cover_data_url: None,
             already_imported: false,
+            local_story_id: None,
             title: Some("Le Loup".into()),
             title_source: Some(PackTitleSourceDto::Official),
             thumbnail: Some("cover.png".into()),
@@ -237,4 +241,18 @@ fn none_variant_does_not_emit_extra_fields() {
     let obj = v.as_object().expect("object");
     assert_eq!(obj.len(), 1);
     assert!(obj.contains_key("kind"));
+}
+
+#[test]
+fn a_device_story_linked_to_a_local_story_carries_its_id_and_omits_it_otherwise() {
+    // The story ↔ pack join the library stamps « Sur la Lunii » from: an
+    // explicit `localStoryId` when a local copy exists, NO key otherwise.
+    let mut linked = story("0000ABCD", false, true);
+    linked.already_imported = true;
+    linked.local_story_id = Some("0197a5d0-0000-7000-8000-000000000000".into());
+    let v = serde_json::to_value(&linked).expect("ser");
+    assert_eq!(v["alreadyImported"], true);
+    assert_eq!(v["localStoryId"], "0197a5d0-0000-7000-8000-000000000000");
+    let v = serde_json::to_value(story("0000BEEF", false, true)).expect("ser");
+    assert!(v.get("localStoryId").is_none(), "absent, never null");
 }

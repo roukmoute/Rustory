@@ -1,9 +1,8 @@
-use std::collections::{HashMap, HashSet};
-
 use serde::Serialize;
 
 use crate::application::device::library::DeviceLibraryOutcome;
-use crate::domain::device::title::{PackTitle, PackTitleSource};
+use crate::application::device::title::LocalTruth;
+use crate::domain::device::title::PackTitleSource;
 use crate::domain::device::DeviceStoryEntry;
 
 use super::device::{reason_dto, UnsupportedReasonDto};
@@ -77,12 +76,18 @@ pub struct DeviceStoryDto {
     /// A `.content/<shortId>` payload folder exists; `false` flags an
     /// orphan/ambiguous entry.
     pub content_present: bool,
-    /// A `story_imports` provenance row links this pack UUID to a local
-    /// story. Stamped by RUST (local truth + device truth composed at
-    /// the boundary) — the frontend never recomposes it. Keyed on the
-    /// pack UUID: the same pack seen from another device is equally
-    /// "déjà dans ta bibliothèque".
+    /// A local story is a copy of this pack: an import provenance row links
+    /// the pack UUID to it, or the pack was SENT from this library, or a
+    /// local story is named by the UUID (a synthesized pack). Stamped by
+    /// RUST (local truth + device truth composed at the boundary) — the
+    /// frontend never recomposes it. Keyed on the pack UUID: the same pack
+    /// seen from another device is equally "déjà dans ta bibliothèque".
     pub already_imported: bool,
+    /// The id of that local story, when `already_imported` — the join the
+    /// library uses to stamp its own cards « Sur la Lunii ». Omitted
+    /// otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub local_story_id: Option<String>,
     /// The recognized title, or `null` when no index covers this pack.
     pub title: Option<String>,
     /// Provenance of `title`. `null` exactly when `title` is `null`. Lets
@@ -109,11 +114,7 @@ impl DeviceLibraryDto {
     /// UUIDs, and the recognized `title` / `titleSource` / `thumbnail` from
     /// the resolved-titles map. Both are read under a scoped DB lock around
     /// the device I/O (never held across it) and keyed by pack UUID.
-    pub fn from_outcome(
-        outcome: DeviceLibraryOutcome,
-        imported_uuids: &HashSet<String>,
-        titles: &HashMap<String, PackTitle>,
-    ) -> Self {
+    pub fn from_outcome(outcome: DeviceLibraryOutcome, local: &LocalTruth) -> Self {
         match outcome {
             DeviceLibraryOutcome::None => Self::None,
             DeviceLibraryOutcome::Unsupported {
@@ -132,22 +133,19 @@ impl DeviceLibraryDto {
                 stories: library
                     .entries
                     .into_iter()
-                    .map(|entry| story_dto(entry, imported_uuids, titles))
+                    .map(|entry| story_dto(entry, local))
                     .collect(),
             },
         }
     }
 }
 
-fn story_dto(
-    entry: DeviceStoryEntry,
-    imported_uuids: &HashSet<String>,
-    titles: &HashMap<String, PackTitle>,
-) -> DeviceStoryDto {
-    let already_imported = imported_uuids.contains(&entry.uuid);
-    let resolved = titles.get(&entry.uuid);
+fn story_dto(entry: DeviceStoryEntry, local: &LocalTruth) -> DeviceStoryDto {
+    let already_imported = local.imported.contains(&entry.uuid);
+    let resolved = local.titles.get(&entry.uuid);
     DeviceStoryDto {
         already_imported,
+        local_story_id: local.local_story_ids.get(&entry.uuid).cloned(),
         title: resolved.map(|t| t.title.clone()),
         title_source: resolved.map(|t| t.source.into()),
         thumbnail: resolved.and_then(|t| t.thumbnail.clone()),
@@ -173,6 +171,7 @@ mod tests {
     use crate::domain::device::title::PackTitle;
     use crate::domain::device::{DeviceLibrary, DeviceStoryEntry, UnsupportedReason};
     use serde_json::json;
+    use std::collections::{HashMap, HashSet};
 
     fn entry(short: &str, hidden: bool, present: bool) -> DeviceStoryEntry {
         DeviceStoryEntry {
@@ -181,6 +180,14 @@ mod tests {
             hidden,
             content_present: present,
             cover_png: None,
+        }
+    }
+
+    fn truth(imported: HashSet<String>, titles: HashMap<String, PackTitle>) -> LocalTruth {
+        LocalTruth {
+            imported,
+            local_story_ids: HashMap::new(),
+            titles,
         }
     }
 
@@ -216,8 +223,7 @@ mod tests {
                     had_trailing_bytes: false,
                 },
             },
-            &no_imports(),
-            &no_titles(),
+            &truth(no_imports(), no_titles()),
         );
         let v = serde_json::to_value(&dto).expect("ser");
         assert_eq!(v["kind"], "readable");
@@ -258,8 +264,7 @@ mod tests {
                     had_trailing_bytes: false,
                 },
             },
-            &imported,
-            &no_titles(),
+            &truth(imported, no_titles()),
         );
         let v = serde_json::to_value(&dto).expect("ser");
         assert_eq!(v["stories"][0]["alreadyImported"], true);
@@ -290,8 +295,7 @@ mod tests {
                     had_trailing_bytes: false,
                 },
             },
-            &no_imports(),
-            &titles,
+            &truth(no_imports(), titles),
         );
         let v = serde_json::to_value(&dto).expect("ser");
         // Recognized pack: title + camelCase provenance token + cover.
@@ -336,8 +340,7 @@ mod tests {
                     had_trailing_bytes: false,
                 },
             },
-            &no_imports(),
-            &titles,
+            &truth(no_imports(), titles),
         );
         let v = serde_json::to_value(&dto).expect("ser");
         assert_eq!(v["stories"][0]["titleSource"], "user");
@@ -351,8 +354,7 @@ mod tests {
                 reason: UnsupportedReason::MultipleCandidates,
                 firmware_hint: Some("count_2".into()),
             },
-            &no_imports(),
-            &no_titles(),
+            &truth(no_imports(), no_titles()),
         );
         let v = serde_json::to_value(&dto).expect("ser");
         assert_eq!(v["kind"], "unsupported");
@@ -371,8 +373,7 @@ mod tests {
                 device_identifier: "ffffffffffffffffffffffffffffffff".into(),
                 library: DeviceLibrary::default(),
             },
-            &no_imports(),
-            &no_titles(),
+            &truth(no_imports(), no_titles()),
         );
         let v = serde_json::to_value(&dto).expect("ser");
         assert_eq!(v["kind"], "readable");

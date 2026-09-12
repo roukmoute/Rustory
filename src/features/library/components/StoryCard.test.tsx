@@ -34,6 +34,22 @@ describe("StoryCard", () => {
     expect(screen.getByText(STORY.title)).toBeInTheDocument();
   });
 
+  it("stamps the card « Sur la Lunii » and folds it into the accessible name", () => {
+    render(
+      <StoryCard
+        story={STORY}
+        isSelected={false}
+        deviceStamp="Sur la Lunii"
+        onSelect={vi.fn()}
+        onOpen={vi.fn()}
+      />,
+    );
+    expect(
+      screen.getByRole("button", { name: "Le soleil couchant, Sur la Lunii" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Sur la Lunii")).toBeInTheDocument();
+  });
+
   it("click without modifier calls onSelect with replace", async () => {
     const user = userEvent.setup();
     const onSelect = vi.fn();

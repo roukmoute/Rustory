@@ -194,6 +194,28 @@ describe("isDeviceLibraryDto", () => {
     ).toBe(true);
   });
 
+  it("accepts the local-story join only with a local copy, as a non-empty id", () => {
+    const readable = (s: Record<string, unknown>) => ({
+      kind: "readable",
+      deviceIdentifier: VALID_ID,
+      stories: [s],
+    });
+    expect(
+      isDeviceLibraryDto(
+        readable(story({ alreadyImported: true, localStoryId: "s-1" })),
+      ),
+    ).toBe(true);
+    // Absent key is the "no local copy" wire (never null).
+    expect(isDeviceLibraryDto(readable(story({ localStoryId: null })))).toBe(false);
+    expect(isDeviceLibraryDto(readable(story({ localStoryId: "" })))).toBe(false);
+    // A join without the stamp is a serializer drift.
+    expect(
+      isDeviceLibraryDto(
+        readable(story({ alreadyImported: false, localStoryId: "s-1" })),
+      ),
+    ).toBe(false);
+  });
+
   // --- Title recognition fields (story 2.6) ---
 
   it("accepts a recognized title with a known provenance and a cover", () => {

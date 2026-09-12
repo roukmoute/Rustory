@@ -27,6 +27,10 @@ export interface StoryCollectionProps {
   /** Per-story preparation badge (AC2). Keyed by story id; absent ⇒ no badge.
    *  Derived from the transfer flow, never a competing source of truth. */
   preparationBadges?: ReadonlyMap<string, StoryPreparationBadge>;
+  /** Stories already on the connected device (their ids), with the
+   *  family-correct stamp label. Absent ⇒ no stamps at all. */
+  onDeviceStoryIds?: ReadonlySet<string>;
+  deviceStampLabel?: string;
   onSelectStory?: (id: string, mode: StoryCardSelectionMode) => void;
   onOpenStory?: (id: string) => void;
   /** Right-click on a card: the parent opens a context menu at the cursor. */
@@ -66,6 +70,8 @@ export function StoryCollection({
   onResetFilters,
   selectedStoryIds = EMPTY_SELECTION,
   preparationBadges,
+  onDeviceStoryIds,
+  deviceStampLabel,
   onSelectStory,
   onOpenStory,
   onStoryContextMenu,
@@ -269,6 +275,11 @@ export function StoryCollection({
                 isSelected={selectedStoryIds.has(story.id)}
                 selectionSize={selectedCount}
                 preparationBadge={preparationBadges?.get(story.id)}
+                deviceStamp={
+                  deviceStampLabel && onDeviceStoryIds?.has(story.id)
+                    ? deviceStampLabel
+                    : undefined
+                }
                 onSelect={handleSelect}
                 onOpen={handleOpen}
                 onContextMenu={onStoryContextMenu}

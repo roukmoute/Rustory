@@ -222,7 +222,7 @@ and applies a fixed priority; the wire DTO carries the resolved `title` +
 | --- | --- | --- | --- |
 | 1 | `user` | a name the user typed for the pack | highest — never silently overwritten |
 | 2 | `official` | Lunii's commercial catalog, cached locally | verified — the only label shown as "officiel" |
-| 3 | `unofficial` | inferred offline from a local story linked to the pack (import provenance) | local-library truth |
+| 3 | `unofficial` | inferred offline from a local story linked to the pack: its import provenance (`story_imports`), the send link written at every successful send (`story_device_packs`), or a local story named by the pack UUID (a synthesized pack) | local-library truth |
 | — | (none) | no index covers the pack | shown as "non reconnue" |
 
 The `user > official > unofficial` order is enforced once, in the

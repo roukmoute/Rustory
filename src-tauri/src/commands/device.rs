@@ -9,7 +9,9 @@ use crate::application::device::library::DeviceLibraryOutcome;
 use crate::application::device::reorder::ReorderDeviceStoriesRequest;
 use crate::application::device::send::{SendArchiveRequest, SendStoryPackRequest};
 use crate::application::device::story_pack::plan_story_pack;
-use crate::application::device::title::{resolve_local_truth, set_user_title, LocalTruth};
+use crate::application::device::title::{
+    record_sent_pack, resolve_local_truth, set_user_title, LocalTruth,
+};
 use crate::application::device::{self, ConnectedLuniiOutcome};
 use crate::domain::device::is_canonical_pack_uuid;
 use crate::domain::device::title::PackTitle;
@@ -307,11 +309,7 @@ pub async fn read_device_library(
         }
     };
 
-    Ok(DeviceLibraryDto::from_outcome(
-        outcome,
-        &local_truth.imported,
-        &local_truth.titles,
-    ))
+    Ok(DeviceLibraryDto::from_outcome(outcome, &local_truth))
 }
 
 /// Resolve the already-imported set and the recognized titles for the given
@@ -792,16 +790,18 @@ pub async fn send_pack_to_device(
     };
     let _ = device_log::record_event(&app, event);
 
-    // Best-effort: remember the sent pack's title locally (keyed by its pack
-    // UUID) so the device list recognizes it immediately — a custom pack is
-    // in no official catalog and would otherwise render "Histoire non
-    // reconnue" right after its own send. A title failure never reclassifies
-    // a committed send.
+    // Best-effort: remember the sent pack locally — its title (keyed by its
+    // pack UUID) so the device list recognizes it immediately (a custom pack
+    // is in no official catalog and would otherwise render "Histoire non
+    // reconnue" right after its own send), and the story ↔ pack link so the
+    // library can stamp the story « Sur la Lunii ». A failure here never
+    // reclassifies a committed send.
     if let Ok(sent) = &outcome {
         let mut db = state
             .db
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _ = record_sent_pack(&db, &input.story_id, &sent.pack_uuid);
         let title: Result<String, _> = db.conn().query_row(
             "SELECT title FROM stories WHERE id = ?1",
             rusqlite::params![&input.story_id],

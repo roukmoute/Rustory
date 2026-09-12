@@ -379,6 +379,17 @@ but never editable here; that selection is separate from the local
 | ready (n = 0) | `Aucune histoire sur l'appareil` | Distinct from the loading state. Its hint is family-neutral: `L'appareil connecté ne contient aucune histoire lisible.` |
 | error | `LibraryErrorBanner` (`role="alert"`) titled `Bibliothèque de l'appareil indisponible` + `Réessayer` | Recoverable, in-context, never a toast. The local library stays intact. |
 
+Local copies, composed by Rust: `alreadyImported` is `true` when a LOCAL
+story is a copy of the pack — imported FROM a device (`story_imports`), SENT
+to a device from this library (`story_device_packs`, written best-effort at
+every successful send, the last send winning), or simply named by the pack
+UUID (a synthesized pack is named by its story id — the case of a story sent
+before the send link existed). `localStoryId` then names that story (the
+import provenance outranks the send link, which outranks the id, when
+several stories claim one pack); absent otherwise. It is the join the
+library's « Sur la Lunii » stamp is built on, and the same link infers the
+pack's `unofficial` title from the local story.
+
 Provenance is explicit: the section heading is `Histoires sur l'appareil`
 (plus the device label when known) with a `Sur l'appareil` chip. Per
 entry, a title-provenance chip (`Titre officiel` / `Titre non-officiel` /
@@ -1220,6 +1231,22 @@ A `Story Card` is a `role="button" aria-pressed={selected}` focus stop. Interact
 | `Tab` / `Shift+Tab` | Linear traversal through the collection (no composite listbox keyboard model at this stage). |
 
 A click that lands outside a card (header, controls, empty space, other columns) MUST NOT modify the selection — UX-DR7 forbids silent disappearance of selection.
+
+### The « Sur la Lunii » stamp
+
+A library card carries an `info` chip `Sur la Lunii` (`Sur l'appareil` for a
+non-Lunii family) — folded into its accessible name (`<titre>, Sur la
+Lunii`) — when the story is ALREADY on the connected device, so the user
+never has to look for it in the device list. The stamp is the join of the
+two authoritative reads, never a third source of truth: the device inventory
+(`read_device_library`) says, per pack, which LOCAL story it is a copy of
+(`localStoryId`, composed by Rust — see `Device Library Contract`), and the
+route stamps the matching cards. No readable device ⇒ no stamp at all (there
+is nothing to compare against); the stamps follow every re-read of the
+inventory (a send, a delete, a re-plug). The stamp says presence, not
+identity of content: a story edited since its send still reads `Sur la
+Lunii` — the decision panel's comparison (`Déjà présente sur l'appareil` →
+a send REPLACES it) stays the authority on what a send would do.
 
 ## Library Routing Contract
 

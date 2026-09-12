@@ -129,6 +129,11 @@ pub const MIGRATIONS: &[(u32, &str, Option<MigrationHook>)] = &[
         include_str!("../../../migrations/0019_story_layout_auto_continue.sql"),
         None,
     ),
+    (
+        20,
+        include_str!("../../../migrations/0020_story_device_packs.sql"),
+        None,
+    ),
 ];
 
 /// Migration 0009 hook: re-stamp every v2 story to the v3 graph shape.

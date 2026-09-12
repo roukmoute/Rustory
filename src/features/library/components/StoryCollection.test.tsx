@@ -26,6 +26,8 @@ interface HarnessProps {
   onCreateStoryRequest?: () => void;
   onImportArtifactRequest?: () => void;
   isImportBusy?: boolean;
+  onDeviceStoryIds?: ReadonlySet<string>;
+  deviceStampLabel?: string;
 }
 
 /** Testing harness that owns query/sort state locally so existing
@@ -53,6 +55,8 @@ function Harness(props: HarnessProps) {
       onCreateStoryRequest={props.onCreateStoryRequest}
       onImportArtifactRequest={props.onImportArtifactRequest}
       isImportBusy={props.isImportBusy}
+      onDeviceStoryIds={props.onDeviceStoryIds}
+      deviceStampLabel={props.deviceStampLabel}
     />
   );
 }
@@ -71,6 +75,22 @@ describe("<StoryCollection />", () => {
       screen.getByRole("heading", { name: /étoile filante/i }),
     ).toBeInTheDocument();
     expect(screen.getByText(/^3 histoires$/)).toBeInTheDocument();
+  });
+
+  it("stamps only the stories listed as on the device, with the given label", () => {
+    render(
+      <Harness
+        onDeviceStoryIds={new Set(["s2"])}
+        deviceStampLabel="Sur la Lunii"
+      />,
+    );
+    expect(
+      screen.getByRole("button", { name: "La lune des chats, Sur la Lunii" }),
+    ).toBeInTheDocument();
+    expect(screen.getAllByText("Sur la Lunii")).toHaveLength(1);
+    expect(
+      screen.getByRole("button", { name: "Le soleil d'Éloi" }),
+    ).toBeInTheDocument();
   });
 
   it("filters by search query and narrows the counter to 'X sur Y'", async () => {

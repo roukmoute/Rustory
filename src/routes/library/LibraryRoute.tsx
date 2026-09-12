@@ -100,6 +100,7 @@ const DROP_BUSY_NOTICE =
 /** Stable empty device selection so an "empty" render keeps referential
  *  identity (no new Set() per render feeding the purge effect's deps). */
 const EMPTY_DEVICE_SELECTION: ReadonlySet<string> = new Set();
+const EMPTY_STORY_ID_SET: ReadonlySet<string> = new Set();
 
 export function LibraryRoute(): React.JSX.Element {
   const { state, retry, invalidate } = useLibraryOverview();
@@ -465,6 +466,21 @@ export function LibraryRoute(): React.JSX.Element {
       ? effectiveDevice.deviceIdentifier
       : null;
   const deviceLibrary = useDeviceLibrary(readableDeviceId);
+
+  // « Sur la Lunii » stamps: the join of the two authoritative reads — the
+  // device inventory says which local story each pack is a copy of
+  // (`localStoryId`, composed by Rust); the library cards carry the stamp.
+  // No readable device ⇒ no stamp at all (nothing to compare against).
+  const onDeviceStoryIds = useMemo<ReadonlySet<string>>(() => {
+    if (deviceLibrary.state.kind !== "ready") return EMPTY_STORY_ID_SET;
+    return new Set(
+      deviceLibrary.state.stories.flatMap((story) =>
+        story.localStoryId ? [story.localStoryId] : [],
+      ),
+    );
+  }, [deviceLibrary.state]);
+  const deviceStampLabel =
+    deviceFamily === "lunii" ? "Sur la Lunii" : "Sur l'appareil";
 
   // Pre-transfer comparison (read-only). Composed in Rust and only presented:
   // trigger it ONLY for a single local selection against a readable device;
@@ -1318,6 +1334,8 @@ export function LibraryRoute(): React.JSX.Element {
         resetFilters,
         handleCreateStoryRequest,
         preparationBadges,
+        onDeviceStoryIds,
+        deviceStampLabel,
         storyImport.pickAndAnalyze,
         isImportBusy ||
           isCreateFromFolderBusy ||
@@ -1950,6 +1968,8 @@ function renderCenter(
   onResetFilters: () => void,
   onCreateStoryRequest: () => void,
   preparationBadges: ReadonlyMap<string, StoryPreparationBadge>,
+  onDeviceStoryIds: ReadonlySet<string>,
+  deviceStampLabel: string,
   onImportArtifactRequest: () => void,
   isImportBusy: boolean,
   onStoryContextMenu: (id: string, x: number, y: number) => void,
@@ -1980,6 +2000,8 @@ function renderCenter(
           onResetFilters={onResetFilters}
           selectedStoryIds={selectedStoryIds}
           preparationBadges={preparationBadges}
+          onDeviceStoryIds={onDeviceStoryIds}
+          deviceStampLabel={deviceStampLabel}
           onSelectStory={onSelectStory}
           onOpenStory={onOpenStory}
           onStoryContextMenu={onStoryContextMenu}
@@ -2000,6 +2022,8 @@ function renderCenter(
           onResetFilters={onResetFilters}
           selectedStoryIds={selectedStoryIds}
           preparationBadges={preparationBadges}
+          onDeviceStoryIds={onDeviceStoryIds}
+          deviceStampLabel={deviceStampLabel}
           onSelectStory={onSelectStory}
           onOpenStory={onOpenStory}
           onStoryContextMenu={onStoryContextMenu}

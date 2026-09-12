@@ -8,9 +8,11 @@
 //!    `User > Official > Unofficial` ([`resolve_local_truth`]). The
 //!    `Unofficial` candidate is derived OFFLINE from the local library:
 //!    the title of a story already linked to that pack UUID through the
-//!    `story_imports` provenance row (Phase D). This is what keeps a story
-//!    the user imported (or, later, created and transferred) from ever
-//!    showing as "non reconnue".
+//!    `story_imports` provenance row (Phase D), or SENT to a device from
+//!    this library (`story_device_packs`), or — a pack synthesized by the
+//!    library is named by its story id — simply a local story whose id IS
+//!    the pack UUID. This is what keeps a story the user imported, created
+//!    and transferred from ever showing as "non reconnue".
 //! 2. **Persist** a user-typed title ([`set_user_title`]) and replace the
 //!    official catalog cache wholesale ([`replace_official_catalog`]).
 //!
@@ -41,9 +43,15 @@ pub struct OfficialCatalogEntry {
 /// Local truth composed onto the device inventory at the read boundary.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LocalTruth {
-    /// Device pack UUIDs that already have a local copy (an import
-    /// provenance row exists). Drives the `alreadyImported` stamp.
+    /// Device pack UUIDs that already have a local copy: an import
+    /// provenance row exists, OR the pack was sent from this library, OR a
+    /// local story is named by that UUID. Drives the `alreadyImported`
+    /// stamp.
     pub imported: HashSet<String>,
+    /// The LOCAL story each of those packs is a copy of, keyed by device
+    /// pack UUID — the join the library uses to stamp its own cards
+    /// « Sur la Lunii ». A UUID absent from the map has no local story.
+    pub local_story_ids: HashMap<String, String>,
     /// Resolved titles keyed by device pack UUID. A UUID absent from the
     /// map is genuinely unrecognized ("non reconnue").
     pub titles: HashMap<String, PackTitle>,
@@ -68,6 +76,7 @@ pub fn resolve_local_truth(db: &DbHandle, uuids: &[String]) -> Result<LocalTruth
 
     let mut candidates: HashMap<String, PackTitleCandidates> = HashMap::new();
     let mut imported: HashSet<String> = HashSet::new();
+    let mut local_story_ids: HashMap<String, String> = HashMap::new();
 
     // Query in bounded chunks: one bound parameter per device UUID, capped
     // well under SQLite's variable limit. A maximal `.pi` inventory (~4096
@@ -116,28 +125,50 @@ pub fn resolve_local_truth(db: &DbHandle, uuids: &[String]) -> Result<LocalTruth
         }
 
         // 2. Phase D — unofficial title inferred from the local library: the
-        //    title of a local story already linked to this pack UUID. This
+        //    title of a local story already linked to this pack UUID —
+        //    imported FROM a device (`story_imports`), SENT to a device from
+        //    this library (`story_device_packs`), or named by the UUID
+        //    itself (a synthesized pack is named by its story id). This
         //    OVERRIDES any community 'unofficial' row gathered above: the
         //    user's own library is more trustworthy than a community guess.
-        //    The same query yields the `imported` set for `alreadyImported`.
+        //    The same query yields the `imported` set for `alreadyImported`
+        //    and the pack → local story join. Precedence when several
+        //    stories claim one pack (an import of a pack sent earlier): the
+        //    import provenance wins, then the send link, then the id.
         {
             let sql = format!(
-                "SELECT si.pack_uuid, s.title FROM story_imports si \
+                "SELECT si.pack_uuid, s.id, s.title, 0 AS rank FROM story_imports si \
                  JOIN stories s ON s.id = si.story_id \
-                 WHERE si.pack_uuid IN ({placeholders})"
+                 WHERE si.pack_uuid IN ({placeholders}) \
+                 UNION ALL \
+                 SELECT sp.pack_uuid, s.id, s.title, 1 AS rank FROM story_device_packs sp \
+                 JOIN stories s ON s.id = sp.story_id \
+                 WHERE sp.pack_uuid IN ({placeholders}) \
+                 UNION ALL \
+                 SELECT s.id, s.id, s.title, 2 AS rank FROM stories s \
+                 WHERE s.id IN ({placeholders}) \
+                 ORDER BY rank DESC"
             );
             let mut stmt = db
                 .conn()
                 .prepare(&sql)
                 .map_err(|_| read_error("prepare_import"))?;
+            let params: Vec<&String> = chunk.iter().chain(chunk).chain(chunk).collect();
             let rows = stmt
-                .query_map(rusqlite::params_from_iter(chunk.iter()), |row| {
-                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                .query_map(rusqlite::params_from_iter(params), |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
                 })
                 .map_err(|_| read_error("query_import"))?;
+            // Rows arrive lowest-precedence first: a later (higher-precedence)
+            // row overwrites the join and the title candidate.
             for row in rows {
-                let (uuid, title) = row.map_err(|_| read_error("row_import"))?;
+                let (uuid, story_id, title) = row.map_err(|_| read_error("row_import"))?;
                 imported.insert(uuid.clone());
+                local_story_ids.insert(uuid.clone(), story_id);
                 candidates.entry(uuid).or_default().unofficial = Some(TitleValue {
                     title,
                     thumbnail: None,
@@ -153,7 +184,27 @@ pub fn resolve_local_truth(db: &DbHandle, uuids: &[String]) -> Result<LocalTruth
         }
     }
 
-    Ok(LocalTruth { imported, titles })
+    Ok(LocalTruth {
+        imported,
+        local_story_ids,
+        titles,
+    })
+}
+
+/// Remember that `story_id` was just written to a device as the pack
+/// `pack_uuid` (the last send wins). Best-effort by contract: a committed
+/// send is never reclassified by a failure here — the caller ignores the
+/// result — but a story that vanished meanwhile is an honest refusal.
+pub fn record_sent_pack(db: &DbHandle, story_id: &str, pack_uuid: &str) -> Result<(), AppError> {
+    let now = now_iso_ms()?;
+    db.conn()
+        .execute(
+            "INSERT INTO story_device_packs (story_id, pack_uuid, sent_at) VALUES (?1, ?2, ?3) \
+             ON CONFLICT(story_id) DO UPDATE SET pack_uuid = excluded.pack_uuid, sent_at = excluded.sent_at",
+            rusqlite::params![story_id, pack_uuid, now],
+        )
+        .map_err(|_| read_error("record_sent_pack"))?;
+    Ok(())
 }
 
 /// Persist (or replace) a user-typed title for a device pack. Reuses the
@@ -350,6 +401,106 @@ mod tests {
         assert_eq!(title.title, "La Sorcière du placard");
         assert_eq!(title.source, PackTitleSource::Unofficial);
         assert!(truth.imported.contains(UUID_A));
+    }
+
+    /// Seed a bare `stories` row (no provenance) named `story_id`.
+    fn insert_story(db: &DbHandle, story_id: &str, title: &str) {
+        db.conn()
+            .execute(
+                "INSERT INTO stories (id, title, schema_version, structure_json, content_checksum, created_at, updated_at) \
+                 VALUES (?1, ?2, 3, '{\"schemaVersion\":3,\"startNodeId\":\"n1\",\"nodes\":[{\"id\":\"n1\",\"text\":\"\",\"label\":\"\",\"imageAssetId\":null,\"audioAssetId\":null,\"options\":[]}]}', \
+                 '65d663fd2180630fa24693a5ccaee6d663b7a0f78b7d44b0e5ef07adc3f293b2', \
+                 '2026-06-16T00:00:00.000Z', '2026-06-16T00:00:00.000Z')",
+                rusqlite::params![story_id, title],
+            )
+            .expect("insert story");
+    }
+
+    #[test]
+    fn an_imported_story_is_the_local_copy_of_its_pack() {
+        let db = fresh_db();
+        insert_imported_story(&db, "story-1", UUID_A, "La Sorcière du placard");
+        let truth = resolve_local_truth(&db, &[UUID_A.to_string()]).expect("resolve");
+        assert_eq!(
+            truth.local_story_ids.get(UUID_A).map(String::as_str),
+            Some("story-1")
+        );
+    }
+
+    #[test]
+    fn a_pack_sent_from_the_library_is_recognized_imported_and_linked() {
+        // A story created in Rustory and sent as an ARCHIVE pack (its own
+        // entry uuid, unrelated to the story id): the send link is the
+        // only thing that ties them.
+        let db = fresh_db();
+        insert_story(&db, "story-sent", "Tina et le serpent à plumes");
+        record_sent_pack(&db, "story-sent", UUID_B).expect("record");
+        let truth = resolve_local_truth(&db, &[UUID_B.to_string()]).expect("resolve");
+        assert!(truth.imported.contains(UUID_B));
+        assert_eq!(
+            truth.local_story_ids.get(UUID_B).map(String::as_str),
+            Some("story-sent")
+        );
+        let title = truth.titles.get(UUID_B).expect("title");
+        assert_eq!(title.title, "Tina et le serpent à plumes");
+        assert_eq!(title.source, PackTitleSource::Unofficial);
+
+        // The last send wins: the same story re-sent under another uuid.
+        record_sent_pack(&db, "story-sent", UUID_C).expect("record again");
+        let truth =
+            resolve_local_truth(&db, &[UUID_B.to_string(), UUID_C.to_string()]).expect("resolve");
+        assert!(!truth.imported.contains(UUID_B));
+        assert_eq!(
+            truth.local_story_ids.get(UUID_C).map(String::as_str),
+            Some("story-sent")
+        );
+        // A story that vanished cannot be linked.
+        assert!(record_sent_pack(&db, "nope", UUID_A).is_err());
+    }
+
+    #[test]
+    fn a_synthesized_pack_is_named_by_its_story_id_even_without_a_send_link() {
+        // A pack sent BEFORE the send link existed: the story id IS the
+        // pack uuid, which is enough to recognize and link it.
+        let db = fresh_db();
+        insert_story(&db, UUID_A, "Bestioles");
+        let truth = resolve_local_truth(&db, &[UUID_A.to_string()]).expect("resolve");
+        assert!(truth.imported.contains(UUID_A));
+        assert_eq!(
+            truth.local_story_ids.get(UUID_A).map(String::as_str),
+            Some(UUID_A)
+        );
+        assert_eq!(truth.titles.get(UUID_A).expect("title").title, "Bestioles");
+    }
+
+    #[test]
+    fn the_import_provenance_outranks_the_send_link_and_the_id_for_one_pack() {
+        // One pack claimed three ways (the user imported back a pack that
+        // was sent from a story named by that uuid): the import provenance
+        // names the local copy, the send link next, the id last.
+        let db = fresh_db();
+        insert_story(&db, UUID_A, "Par son id");
+        insert_story(&db, "story-sent", "Par le lien d'envoi");
+        record_sent_pack(&db, "story-sent", UUID_A).expect("record");
+        let truth = resolve_local_truth(&db, &[UUID_A.to_string()]).expect("resolve");
+        assert_eq!(
+            truth.local_story_ids.get(UUID_A).map(String::as_str),
+            Some("story-sent")
+        );
+        assert_eq!(
+            truth.titles.get(UUID_A).expect("title").title,
+            "Par le lien d'envoi"
+        );
+        insert_imported_story(&db, "story-imported", UUID_A, "Par l'import");
+        let truth = resolve_local_truth(&db, &[UUID_A.to_string()]).expect("resolve");
+        assert_eq!(
+            truth.local_story_ids.get(UUID_A).map(String::as_str),
+            Some("story-imported")
+        );
+        assert_eq!(
+            truth.titles.get(UUID_A).expect("title").title,
+            "Par l'import"
+        );
     }
 
     #[test]

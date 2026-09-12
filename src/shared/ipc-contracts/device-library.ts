@@ -28,10 +28,15 @@ export interface DeviceStoryDto {
   /** A `.content/<shortId>` payload folder exists; `false` flags an
    *  orphan/ambiguous entry. */
   contentPresent: boolean;
-  /** A local copy of this pack already exists (provenance link present).
+  /** A local copy of this pack already exists: an import provenance link,
+   *  a send from this library, or a local story named by the pack UUID.
    *  Stamped by RUST — local truth and device truth are composed at the
    *  boundary, never recomposed by the frontend. */
   alreadyImported: boolean;
+  /** The id of that local story, when `alreadyImported` — the join the
+   *  library uses to stamp its own cards « Sur la Lunii ». Absent
+   *  otherwise. */
+  localStoryId?: string;
   /** Recognized title, or `null` when no index covers this pack ("non
    *  reconnue"). Composed by RUST from the local UUID→title index. */
   title: string | null;
@@ -83,6 +88,7 @@ const ALLOWED_STORY_KEYS: ReadonlySet<string> = new Set([
   "hidden",
   "contentPresent",
   "alreadyImported",
+  "localStoryId",
   "title",
   "titleSource",
   "thumbnail",
@@ -117,6 +123,13 @@ function isDeviceStoryDto(value: unknown): value is DeviceStoryDto {
   if (typeof s.hidden !== "boolean") return false;
   if (typeof s.contentPresent !== "boolean") return false;
   if (typeof s.alreadyImported !== "boolean") return false;
+  // The local-story join rides only with a local copy, as a non-empty id.
+  if (s.localStoryId !== undefined) {
+    if (typeof s.localStoryId !== "string" || s.localStoryId.length === 0) {
+      return false;
+    }
+    if (!s.alreadyImported) return false;
+  }
 
   // Recognition fields. `title` is either null (unrecognized) or a
   // non-empty string; `titleSource` must be null exactly when `title` is

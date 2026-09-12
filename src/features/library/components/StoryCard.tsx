@@ -34,6 +34,10 @@ export interface StoryCardProps {
   selectionSize?: number;
   /** Discreet preparation badge for this card. Omitted ⇒ no badge. */
   preparationBadge?: StoryPreparationBadge;
+  /** The stamp saying this story is already on the connected device, as
+   *  its family-correct label (`Sur la Lunii` / `Sur l'appareil`).
+   *  Omitted ⇒ no stamp (no device read, or the story is not on it). */
+  deviceStamp?: string;
   onSelect: (id: string, mode: StoryCardSelectionMode) => void;
   onOpen: (id: string) => void;
   /** Right-click on the card: the parent opens a context menu of actions at
@@ -55,6 +59,7 @@ export function StoryCard({
   isSelected,
   selectionSize = 0,
   preparationBadge,
+  deviceStamp,
   onSelect,
   onOpen,
   onContextMenu,
@@ -135,7 +140,7 @@ export function StoryCard({
         tabIndex={0}
         role="button"
         aria-pressed={isSelected}
-        aria-label={story.title}
+        aria-label={deviceStamp ? `${story.title}, ${deviceStamp}` : story.title}
         onClick={handleClick}
         onDoubleClick={handleDoubleClick}
         onContextMenu={handleContextMenu}
@@ -152,6 +157,15 @@ export function StoryCard({
           <img className="story-card__cover" src={cover} alt="" />
         ) : null}
         <h3 className="story-card__title">{story.title}</h3>
+        {deviceStamp ? (
+          // The join of two authoritative reads (the library, the device
+          // inventory's `localStoryId`): a verified presence, info tone.
+          <StateChip
+            tone="info"
+            label={deviceStamp}
+            className="story-card__device-chip"
+          />
+        ) : null}
         {preparationBadge ? (
           <StateChip
             tone={badgeTone(preparationBadge)}

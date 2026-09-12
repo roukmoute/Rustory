@@ -2235,6 +2235,69 @@ describe("<LibraryRoute />", () => {
     expect(within(deviceRegion).getByText("55667788")).toBeInTheDocument();
   });
 
+  it("stamps the local cards the device inventory names as its own copies, family-correctly", async () => {
+    mockGet.mockResolvedValue({
+      stories: [
+        { id: "s1", title: "Le soleil" },
+        { id: "s2", title: "La lune" },
+      ],
+    });
+    mockDevice.mockResolvedValue(supportedV3);
+    // Rust composes the join: the pack `u1` is a copy of the local `s1`.
+    mockDeviceLibrary.mockResolvedValue({
+      ...readableTwo,
+      stories: [
+        { ...readableTwo.stories[0], alreadyImported: true, localStoryId: "s1" },
+        readableTwo.stories[1],
+      ],
+    });
+    renderLibrary();
+    const main = await screen.findByRole("main", {
+      name: /collection d'histoires/i,
+    });
+    expect(
+      await within(main).findByRole("button", { name: "Le soleil, Sur la Lunii" }),
+    ).toBeInTheDocument();
+    expect(within(main).getByRole("button", { name: "La lune" })).toBeInTheDocument();
+    expect(within(main).getAllByText("Sur la Lunii")).toHaveLength(1);
+
+    // A FLAM names the stamp after the family-neutral device.
+    cleanup();
+    mockDevice.mockResolvedValue(
+      JSON.parse(
+        '{"kind":"supported","family":"flam","firmwareCohort":"flamGen1",' +
+          '"deviceIdentifier":"fedcba9876543210fedcba9876543210",' +
+          '"supportedOperations":{"readLibrary":true,"inspectStory":true,' +
+          '"importStory":true,"writeStory":false,"deleteStory":false,' +
+          '"sendArchive":false,"reorderStories":false}}',
+      ) as ConnectedDeviceDto,
+    );
+    mockDeviceLibrary.mockResolvedValue({
+      kind: "readable",
+      deviceIdentifier: "fedcba9876543210fedcba9876543210",
+      stories: [
+        {
+          uuid: "12345678-9abc-def0-1122-334455667788",
+          shortId: "55667788",
+          hidden: false,
+          contentPresent: true,
+          alreadyImported: true,
+          localStoryId: "s2",
+          title: "La lune",
+          titleSource: "unofficial",
+          thumbnail: null,
+        },
+      ],
+    });
+    renderLibrary();
+    const main2 = await screen.findByRole("main", {
+      name: /collection d'histoires/i,
+    });
+    expect(
+      await within(main2).findByRole("button", { name: "La lune, Sur l'appareil" }),
+    ).toBeInTheDocument();
+  });
+
   it("shows a recoverable device-library error in the center without breaking the local library (AC #3)", async () => {
     mockGet.mockResolvedValueOnce({
       stories: [{ id: "s1", title: "Le soleil" }],

@@ -146,7 +146,6 @@ fn reads_a_real_flam_inventory_in_index_order_through_scanner_and_reader() {
     // index order preserved, shortId = uppercase last 8 hex, wire flags
     // honest (`alreadyImported` stays composed at the command layer from
     // an EMPTY provenance set here).
-    use std::collections::{HashMap, HashSet};
     let (_guard, root, identifier) = flam_fixture::temp_flam_mount_with_entries(&[
         (flam_fixture::FLAM_UUID_A, false, true),
         (flam_fixture::FLAM_UUID_B, false, true),
@@ -157,8 +156,7 @@ fn reads_a_real_flam_inventory_in_index_order_through_scanner_and_reader() {
     let outcome = read_device_library(&scanner, &reader, &identifier, budget()).expect("read");
     let dto = rustory_lib::ipc::dto::DeviceLibraryDto::from_outcome(
         outcome,
-        &HashSet::new(),
-        &HashMap::new(),
+        &rustory_lib::application::device::title::LocalTruth::default(),
     );
     let v = serde_json::to_value(&dto).expect("ser");
     assert_eq!(v["kind"], "readable");
