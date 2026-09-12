@@ -14,7 +14,9 @@ use tauri::{async_runtime, AppHandle, Manager, State};
 use crate::application::settings::{read_setting, write_setting, ANNOUNCEMENT_VOICE_KEY};
 use crate::application::story::announcements::{generate_announcements, speech_error};
 use crate::application::story::node::store_node_media;
-use crate::application::story::presentation::{self, read_presentation, set_layout};
+use crate::application::story::presentation::{
+    self, read_presentation, set_auto_continue, set_layout,
+};
 use crate::commands::shared::{base64_decode, base64_encode, validate_story_id};
 use crate::domain::shared::AppError;
 use crate::infrastructure::filesystem::MediaKind;
@@ -26,7 +28,7 @@ use crate::ipc::dto::{
     AnnouncementVoiceDto, AnnouncementVoicesDto, AttachRecordedAnnouncementInputDto,
     EmbeddedVoiceStatusDto, GenerateAnnouncementsInputDto, GenerateAnnouncementsOutcomeDto,
     PreviewAnnouncementVoiceInputDto, RemoveAnnouncementInputDto, SetAnnouncementVoiceInputDto,
-    SetStoryLayoutInputDto, StoryPresentationDto, VoicePreviewDto,
+    SetStoryAutoContinueInputDto, SetStoryLayoutInputDto, StoryPresentationDto, VoicePreviewDto,
 };
 use crate::AppState;
 
@@ -75,6 +77,26 @@ pub async fn set_story_layout(
         let selected = selected_voice_id(&db, speech.as_ref())?;
         let guard = db.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         set_layout(&guard, &input.story_id, input.layout.to_domain())?;
+        presentation_dto(&guard, &input.story_id, selected.as_deref())
+    })
+    .await
+    .map_err(|_| join_error())?
+}
+
+/// Set whether, in the menu layout, an episode's end chains straight into
+/// the next one instead of returning to the wheel. A per-story choice.
+#[tauri::command]
+pub async fn set_story_auto_continue(
+    state: State<'_, AppState>,
+    input: SetStoryAutoContinueInputDto,
+) -> Result<StoryPresentationDto, AppError> {
+    validate_story_id(&input.story_id)?;
+    let db = state.db.clone();
+    let speech = state.speech.clone();
+    async_runtime::spawn_blocking(move || {
+        let selected = selected_voice_id(&db, speech.as_ref())?;
+        let guard = db.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        set_auto_continue(&guard, &input.story_id, input.auto_continue)?;
         presentation_dto(&guard, &input.story_id, selected.as_deref())
     })
     .await

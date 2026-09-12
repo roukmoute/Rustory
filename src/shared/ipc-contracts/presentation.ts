@@ -58,6 +58,9 @@ export interface LinearBlockerDto {
 
 export interface StoryPresentationDto {
   layout: StoryLayout;
+  /** Menu layout: an episode's end chains into the next one instead of
+   *  returning to the wheel (a per-story choice). */
+  autoContinue: boolean;
   /** The voice the stored announcements were generated with. */
   voiceId?: string;
   /** `true` iff the story is sent from its retained source archive — the
@@ -76,6 +79,11 @@ export interface StoryPresentationDto {
 export interface SetStoryLayoutInput {
   storyId: string;
   layout: StoryLayout;
+}
+
+export interface SetStoryAutoContinueInput {
+  storyId: string;
+  autoContinue: boolean;
 }
 
 export interface GenerateAnnouncementsInput {
@@ -203,6 +211,7 @@ export function isStoryPresentationDto(
   if (!isRecord(value)) return false;
   return (
     isStoryLayout(value.layout) &&
+    typeof value.autoContinue === "boolean" &&
     isOptionalString(value.voiceId) &&
     typeof value.archiveRetained === "boolean" &&
     typeof value.linear === "boolean" &&

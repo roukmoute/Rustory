@@ -637,6 +637,7 @@ pub fn run() {
             commands::device::set_device_story_title,
             commands::story::set_node_option_link,
             commands::presentation::set_story_layout,
+            commands::presentation::set_story_auto_continue,
             commands::transfer::start_prepare_story,
             commands::transfer::start_transfer_story,
             commands::settings::start_update_apply,

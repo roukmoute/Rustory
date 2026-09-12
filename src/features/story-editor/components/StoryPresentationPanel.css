@@ -184,3 +184,8 @@
   margin: 0;
   color: var(--color-text-primary);
 }
+
+/* The menu layout's own option sits under its radio, visibly subordinate. */
+.story-presentation__choice--nested {
+  margin-left: var(--space-4);
+}

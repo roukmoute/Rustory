@@ -7,6 +7,7 @@ import {
   readStoryPresentation,
   removeStoryAnnouncement,
   setStoryLayout,
+  setStoryAutoContinue,
 } from "../../../ipc/commands/presentation";
 import { readNodeMedia } from "../../../ipc/commands/story";
 import { toAppError } from "../../../shared/errors/app-error";
@@ -48,7 +49,10 @@ const SEQUENTIAL_LABEL = "À la suite";
 const SEQUENTIAL_HINT = "Les épisodes s'enchaînent dans l'ordre.";
 const MENU_LABEL = "Au choix";
 const MENU_HINT =
-  "L'enfant choisit l'épisode sur la molette, puis revient au menu à la fin.";
+  "L'enfant choisit l'épisode sur la molette ; à la fin, la Lunii revient au menu sur cet épisode.";
+const AUTO_CONTINUE_LABEL = "Passer automatiquement à l'épisode suivant";
+const AUTO_CONTINUE_HINT =
+  "À la fin d'un épisode, la Lunii enchaîne le suivant au lieu de revenir au menu. Le bouton maison ramène toujours au menu.";
 const ANNOUNCEMENTS_TITLE = "Annonces";
 const ANNOUNCEMENTS_LEAD =
   "Les annonces sont lues par la voix des réglages : le titre de la série sur la molette, la question, puis le titre de chaque épisode.";
@@ -171,6 +175,16 @@ export function StoryPresentationPanel({
     setNote(null);
     try {
       const data = await setStoryLayout({ storyId, layout });
+      setRead({ kind: "loaded", data });
+    } catch (err) {
+      setNote(toAppError(err).message);
+    }
+  };
+
+  const changeAutoContinue = async (autoContinue: boolean): Promise<void> => {
+    setNote(null);
+    try {
+      const data = await setStoryAutoContinue({ storyId, autoContinue });
       setRead({ kind: "loaded", data });
     } catch (err) {
       setNote(toAppError(err).message);
@@ -301,6 +315,28 @@ export function StoryPresentationPanel({
                 <span className="story-presentation__choice-hint">{MENU_HINT}</span>
               </span>
             </label>
+            {read.data.layout === "menu" && read.data.linear && (
+              // A per-story option of the menu layout: one child wants the
+              // series to roll on, another wants to pick every time.
+              <label className="story-presentation__choice story-presentation__choice--nested">
+                <input
+                  type="checkbox"
+                  name="story-auto-continue"
+                  checked={read.data.autoContinue}
+                  onChange={(event) =>
+                    void changeAutoContinue(event.currentTarget.checked)
+                  }
+                />
+                <span>
+                  <span className="story-presentation__choice-label">
+                    {AUTO_CONTINUE_LABEL}
+                  </span>
+                  <span className="story-presentation__choice-hint">
+                    {AUTO_CONTINUE_HINT}
+                  </span>
+                </span>
+              </label>
+            )}
             {!read.data.linear && (
               <p className="story-presentation__state" role="status">
                 {notLinearReason(read.data.linearBlocker)}

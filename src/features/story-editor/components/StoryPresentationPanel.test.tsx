@@ -5,6 +5,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 vi.mock("../../../ipc/commands/presentation", () => ({
   readStoryPresentation: vi.fn(),
   setStoryLayout: vi.fn(),
+  setStoryAutoContinue: vi.fn(),
   generateStoryAnnouncements: vi.fn(),
   attachRecordedAnnouncement: vi.fn(),
   removeStoryAnnouncement: vi.fn(),
@@ -18,6 +19,7 @@ import {
   generateStoryAnnouncements,
   readStoryPresentation,
   removeStoryAnnouncement,
+  setStoryAutoContinue,
   setStoryLayout,
 } from "../../../ipc/commands/presentation";
 import { readNodeMedia } from "../../../ipc/commands/story";
@@ -28,6 +30,7 @@ import { StoryPresentationPanel } from "./StoryPresentationPanel";
 
 const SEQUENTIAL: StoryPresentationDto = {
   layout: "sequential",
+  autoContinue: false,
   archiveRetained: false,
   linear: true,
   title: { spokenText: "Tina.", status: "missing" },
@@ -67,6 +70,7 @@ describe("StoryPresentationPanel", () => {
   beforeEach(() => {
     vi.mocked(readStoryPresentation).mockReset();
     vi.mocked(setStoryLayout).mockReset();
+    vi.mocked(setStoryAutoContinue).mockReset();
     vi.mocked(generateStoryAnnouncements).mockReset();
     vi.mocked(readNodeMedia).mockReset();
     vi.spyOn(HTMLMediaElement.prototype, "play").mockImplementation(() => Promise.resolve());
@@ -100,6 +104,53 @@ describe("StoryPresentationPanel", () => {
     expect(within(list).queryByRole("button", { name: /écouter/i })).not.toBeInTheDocument();
     expect(within(list).getAllByRole("button", { name: /^enregistrer — /i })).toHaveLength(4);
     expect(screen.getByRole("button", { name: "Générer les annonces" })).toBeInTheDocument();
+  });
+
+  it("offers the auto-continue option under the menu layout only, and sets it through Rust", async () => {
+    const user = userEvent.setup();
+    vi.mocked(readStoryPresentation).mockResolvedValueOnce(SEQUENTIAL);
+    renderPanel();
+    await screen.findByRole("radio", { name: /à la suite/i });
+    // Sequential already chains: no option to show.
+    expect(
+      screen.queryByRole("checkbox", { name: /passer automatiquement/i }),
+    ).not.toBeInTheDocument();
+
+    vi.mocked(setStoryLayout).mockResolvedValueOnce(MENU_READY);
+    await user.click(screen.getByRole("radio", { name: /au choix/i }));
+    const box = await screen.findByRole("checkbox", {
+      name: /passer automatiquement à l'épisode suivant/i,
+    });
+    expect(box).not.toBeChecked();
+    expect(
+      screen.getByText(/enchaîne le suivant au lieu de revenir au menu/i),
+    ).toBeInTheDocument();
+
+    vi.mocked(setStoryAutoContinue).mockResolvedValueOnce({ ...MENU_READY, autoContinue: true });
+    await user.click(box);
+    expect(setStoryAutoContinue).toHaveBeenCalledWith({ storyId: "s1", autoContinue: true });
+    await waitFor(() =>
+      expect(
+        screen.getByRole("checkbox", { name: /passer automatiquement/i }),
+      ).toBeChecked(),
+    );
+  });
+
+  it("surfaces a refused auto-continue change with the Rust message", async () => {
+    const user = userEvent.setup();
+    vi.mocked(readStoryPresentation).mockResolvedValueOnce(MENU_READY);
+    vi.mocked(setStoryAutoContinue).mockRejectedValueOnce({
+      code: "LIBRARY_INCONSISTENT",
+      message: "Histoire introuvable.",
+      userAction: null,
+      details: null,
+    });
+    renderPanel();
+    await user.click(
+      await screen.findByRole("checkbox", { name: /passer automatiquement/i }),
+    );
+    expect(await screen.findByText("Histoire introuvable.")).toBeInTheDocument();
+    expect(screen.getByRole("checkbox", { name: /passer automatiquement/i })).not.toBeChecked();
   });
 
   it("records an announcement with the microphone and attaches it through Rust", async () => {

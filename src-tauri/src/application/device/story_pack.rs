@@ -110,6 +110,7 @@ pub fn plan_story_pack(db: &DbHandle, story_id: &str) -> Result<StudioStoryPack,
                     title_ref,
                     question_ref,
                     episodes: menu_episodes,
+                    auto_continue: presentation.auto_continue,
                 },
             ))
         }
@@ -120,6 +121,7 @@ pub fn plan_story_pack(db: &DbHandle, story_id: &str) -> Result<StudioStoryPack,
 /// question asset ids, and the (node id → asset id) spoken titles.
 struct PresentationRows {
     layout: StoryLayout,
+    auto_continue: bool,
     title_asset_id: Option<String>,
     question_asset_id: Option<String>,
     prompts: Vec<(String, String)>,
@@ -127,22 +129,24 @@ struct PresentationRows {
 
 fn read_presentation_rows(db: &DbHandle, story_id: &str) -> Result<PresentationRows, AppError> {
     use rusqlite::OptionalExtension;
-    let layout_row: Option<(String, Option<String>, Option<String>)> = db
+    let layout_row: Option<(String, bool, Option<String>, Option<String>)> = db
         .conn()
         .query_row(
-            "SELECT layout, title_audio_asset_id, question_audio_asset_id FROM story_layouts WHERE story_id = ?1",
+            "SELECT layout, auto_continue, title_audio_asset_id, question_audio_asset_id \
+             FROM story_layouts WHERE story_id = ?1",
             rusqlite::params![story_id],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
         )
         .optional()
         .map_err(|_| storage_error("read_layout"))?;
-    let (layout, title_asset_id, question_asset_id) = match layout_row {
-        Some((tag, title, question)) => (
+    let (layout, auto_continue, title_asset_id, question_asset_id) = match layout_row {
+        Some((tag, auto_continue, title, question)) => (
             StoryLayout::parse(&tag).unwrap_or_default(),
+            auto_continue,
             title,
             question,
         ),
-        None => (StoryLayout::Sequential, None, None),
+        None => (StoryLayout::Sequential, false, None, None),
     };
     let mut stmt = db
         .conn()
@@ -155,6 +159,7 @@ fn read_presentation_rows(db: &DbHandle, story_id: &str) -> Result<PresentationR
         .map_err(|_| storage_error("read_prompts"))?;
     Ok(PresentationRows {
         layout,
+        auto_continue,
         title_asset_id,
         question_asset_id,
         prompts,
@@ -460,6 +465,27 @@ mod tests {
         assert_eq!(pack.stage_nodes[3].audio.as_deref(), Some("cccc2222.wav"));
         assert_eq!(pack.stage_nodes[4].audio.as_deref(), Some("aaaa1111.mp3"));
         assert_eq!(pack.stage_nodes[5].audio.as_deref(), Some("aaaa2222.mp3"));
+        // Off by default: the end of an episode returns to the wheel on it.
+        let end = pack.stage_nodes[4].ok_transition.as_ref().unwrap();
+        assert_eq!(end.action_node, pack.action_nodes[1].id);
+        assert_eq!(end.option_index, 0);
+        let end = pack.stage_nodes[5].ok_transition.as_ref().unwrap();
+        assert_eq!(end.action_node, pack.action_nodes[1].id);
+        assert_eq!(end.option_index, 1);
+
+        // With the per-story flag, the first episode chains into the second.
+        db.conn()
+            .execute(
+                "UPDATE story_layouts SET auto_continue = 1 WHERE story_id = ?1",
+                rusqlite::params![&id],
+            )
+            .expect("flag");
+        let pack = plan_story_pack(&db, &id).expect("plan");
+        let end = pack.stage_nodes[4].ok_transition.as_ref().unwrap();
+        assert_eq!(end.action_node, pack.action_nodes[3].id, "next episode");
+        let end = pack.stage_nodes[5].ok_transition.as_ref().unwrap();
+        assert_eq!(end.action_node, pack.action_nodes[1].id, "last: the wheel");
+        assert_eq!(end.option_index, 1);
     }
 
     #[test]

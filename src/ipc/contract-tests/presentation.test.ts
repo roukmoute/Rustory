@@ -18,6 +18,7 @@ type ChannelLike = { onmessage?: ((msg: number) => void) | null };
 // Symmetric twins of the Rust `tests/contracts/presentation.rs` shapes.
 const PRESENTATION = {
   layout: "menu",
+  autoContinue: true,
   voiceId: "system:say:Thomas",
   archiveRetained: false,
   linear: true,
@@ -66,6 +67,11 @@ describe("presentation guards", () => {
   it("accept the Rust wire shapes and refuse drifted ones", () => {
     expect(isStoryPresentationDto(PRESENTATION)).toBe(true);
     expect(isStoryPresentationDto({ ...PRESENTATION, layout: "grid" })).toBe(false);
+    // The chaining flag is always emitted by Rust: absent or non-boolean = drift.
+    expect(isStoryPresentationDto({ ...PRESENTATION, autoContinue: "yes" })).toBe(false);
+    const { autoContinue: _dropped, ...withoutAutoContinue } = PRESENTATION;
+    void _dropped;
+    expect(isStoryPresentationDto(withoutAutoContinue)).toBe(false);
     expect(
       isStoryPresentationDto({
         ...PRESENTATION,
@@ -138,6 +144,13 @@ describe("presentation IPC facade", () => {
     expect(set.layout).toBe("sequential");
     expect(vi.mocked(core.invoke)).toHaveBeenCalledWith("set_story_layout", {
       input: { storyId: "s1", layout: "sequential" },
+    });
+
+    vi.mocked(core.invoke).mockResolvedValueOnce({ ...PRESENTATION, autoContinue: false });
+    const chained = await facade.setStoryAutoContinue({ storyId: "s1", autoContinue: false });
+    expect(chained.autoContinue).toBe(false);
+    expect(vi.mocked(core.invoke)).toHaveBeenCalledWith("set_story_auto_continue", {
+      input: { storyId: "s1", autoContinue: false },
     });
   });
 

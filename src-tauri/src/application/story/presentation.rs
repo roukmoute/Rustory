@@ -91,6 +91,9 @@ pub struct LinearBlocker {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoryPresentation {
     pub layout: StoryLayout,
+    /// Menu layout: an episode's end chains into the next one instead of
+    /// returning to the wheel.
+    pub auto_continue: bool,
     /// The voice the stored announcements were generated with, if any.
     pub voice_id: Option<String>,
     /// Whether the story's structure lays out as episodes at all (a story
@@ -129,6 +132,7 @@ pub fn read_presentation(
     let (title, structure) = read_story(db, story_id)?;
     let layout_row = read_layout_row(db, story_id)?;
     let layout = layout_row.as_ref().map(|r| r.layout).unwrap_or_default();
+    let auto_continue = layout_row.as_ref().is_some_and(|r| r.auto_continue);
     let voice_id = layout_row.as_ref().and_then(|r| r.voice_id.clone());
     let judge = |spoken_now: &str, stored: Option<(&str, &str, &str)>| -> Announcement {
         match stored {
@@ -234,6 +238,7 @@ pub fn read_presentation(
 
     Ok(StoryPresentation {
         layout,
+        auto_continue,
         voice_id,
         linear,
         linear_blocker,
@@ -272,6 +277,25 @@ pub fn set_layout(db: &DbHandle, story_id: &str, layout: StoryLayout) -> Result<
             rusqlite::params![story_id, layout.as_str(), now],
         )
         .map_err(|e| storage_error(&e, "set_layout"))?;
+    Ok(())
+}
+
+/// Set whether an episode's end chains into the next one (menu layout) for
+/// `story_id` (creates the row on first use, keeping the default layout).
+pub fn set_auto_continue(
+    db: &DbHandle,
+    story_id: &str,
+    auto_continue: bool,
+) -> Result<(), AppError> {
+    ensure_story(db, story_id)?;
+    let now = now_iso_ms()?;
+    db.conn()
+        .execute(
+            "INSERT INTO story_layouts (story_id, layout, auto_continue, updated_at) VALUES (?1, 'sequential', ?2, ?3) \
+             ON CONFLICT(story_id) DO UPDATE SET auto_continue = excluded.auto_continue, updated_at = excluded.updated_at",
+            rusqlite::params![story_id, auto_continue, now],
+        )
+        .map_err(|e| storage_error(&e, "set_auto_continue"))?;
     Ok(())
 }
 
@@ -655,6 +679,7 @@ struct LayoutRow {
     question_audio_asset_id: Option<String>,
     question_spoken_text: Option<String>,
     voice_id: Option<String>,
+    auto_continue: bool,
 }
 
 pub(crate) struct PromptRow {
@@ -667,7 +692,7 @@ pub(crate) struct PromptRow {
 fn read_layout_row(db: &DbHandle, story_id: &str) -> Result<Option<LayoutRow>, AppError> {
     db.conn()
         .query_row(
-            "SELECT layout, title_audio_asset_id, title_spoken_text, question_audio_asset_id, question_spoken_text, voice_id \
+            "SELECT layout, title_audio_asset_id, title_spoken_text, question_audio_asset_id, question_spoken_text, voice_id, auto_continue \
              FROM story_layouts WHERE story_id = ?1",
             rusqlite::params![story_id],
             |r| {
@@ -678,6 +703,7 @@ fn read_layout_row(db: &DbHandle, story_id: &str) -> Result<Option<LayoutRow>, A
                     question_audio_asset_id: r.get(3)?,
                     question_spoken_text: r.get(4)?,
                     voice_id: r.get(5)?,
+                    auto_continue: r.get(6)?,
                 })
             },
         )
@@ -864,6 +890,29 @@ mod tests {
             StoryLayout::Sequential
         );
         assert!(set_layout(&db, "nope", StoryLayout::Menu).is_err());
+    }
+
+    #[test]
+    fn auto_continue_is_off_by_default_persists_and_survives_a_layout_change() {
+        let mut db = fresh_db();
+        let id = story(&mut db, "Série");
+        assert!(!read_presentation(&db, &id, None).unwrap().auto_continue);
+        // Set before any layout row exists: the row is created with the
+        // default layout and the flag.
+        set_auto_continue(&db, &id, true).expect("set");
+        let p = read_presentation(&db, &id, None).unwrap();
+        assert!(p.auto_continue);
+        assert_eq!(p.layout, StoryLayout::Sequential);
+        // A layout change keeps the flag; clearing it keeps the layout.
+        set_layout(&db, &id, StoryLayout::Menu).expect("set");
+        let p = read_presentation(&db, &id, None).unwrap();
+        assert!(p.auto_continue);
+        assert_eq!(p.layout, StoryLayout::Menu);
+        set_auto_continue(&db, &id, false).expect("clear");
+        let p = read_presentation(&db, &id, None).unwrap();
+        assert!(!p.auto_continue);
+        assert_eq!(p.layout, StoryLayout::Menu);
+        assert!(set_auto_continue(&db, "nope", true).is_err());
     }
 
     #[test]

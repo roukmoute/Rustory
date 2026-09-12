@@ -6,13 +6,15 @@ use rustory_lib::ipc::dto::{
     AnnouncementVoiceDto, AnnouncementVoicesDto, AttachRecordedAnnouncementInputDto,
     ChapterAnnouncementDto, EmbeddedVoiceStateDto, EmbeddedVoiceStatusDto,
     GenerateAnnouncementsInputDto, LinearBlockerDto, SendBlockerDto, SetAnnouncementVoiceInputDto,
-    SetStoryLayoutInputDto, StoryLayoutDto, StoryPresentationDto, VoiceEngineDto, VoicePreviewDto,
+    SetStoryAutoContinueInputDto, SetStoryLayoutInputDto, StoryLayoutDto, StoryPresentationDto,
+    VoiceEngineDto, VoicePreviewDto,
 };
 
 #[test]
 fn story_presentation_wire_shape() {
     let dto = StoryPresentationDto {
         layout: StoryLayoutDto::Menu,
+        auto_continue: true,
         voice_id: Some("system:say:Thomas".into()),
         archive_retained: false,
         linear: true,
@@ -43,6 +45,7 @@ fn story_presentation_wire_shape() {
         v,
         serde_json::json!({
             "layout": "menu",
+            "autoContinue": true,
             "voiceId": "system:say:Thomas",
             "archiveRetained": false,
             "linear": true,
@@ -64,6 +67,7 @@ fn story_presentation_wire_shape() {
 fn a_non_linear_presentation_names_the_node_to_fix() {
     let dto = StoryPresentationDto {
         layout: StoryLayoutDto::Sequential,
+        auto_continue: false,
         voice_id: None,
         archive_retained: false,
         linear: false,
@@ -107,6 +111,18 @@ fn recording_inputs_parse_their_target_kind() {
         }
     );
     assert!(serde_json::from_str::<AnnouncementTargetDto>(r#"{"kind":"chapter"}"#).is_err());
+}
+
+#[test]
+fn the_auto_continue_input_parses_from_camel_case() {
+    let input: SetStoryAutoContinueInputDto =
+        serde_json::from_str(r#"{"storyId":"s1","autoContinue":true}"#).expect("parse");
+    assert_eq!(input.story_id, "s1");
+    assert!(input.auto_continue);
+    assert!(
+        serde_json::from_str::<SetStoryAutoContinueInputDto>(r#"{"storyId":"s1"}"#).is_err(),
+        "the flag is required"
+    );
 }
 
 #[test]

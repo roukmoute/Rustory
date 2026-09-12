@@ -168,6 +168,9 @@ impl ChapterAnnouncementDto {
 #[serde(rename_all = "camelCase")]
 pub struct StoryPresentationDto {
     pub layout: StoryLayoutDto,
+    /// Menu layout: an episode's end chains into the next one instead of
+    /// returning to the wheel (a per-story choice).
+    pub auto_continue: bool,
     /// The voice the stored announcements were generated with.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub voice_id: Option<String>,
@@ -210,6 +213,7 @@ impl StoryPresentationDto {
     pub fn from_domain(presentation: &StoryPresentation, archive_retained: bool) -> Self {
         Self {
             layout: StoryLayoutDto::from_domain(presentation.layout),
+            auto_continue: presentation.auto_continue,
             voice_id: presentation.voice_id.clone(),
             archive_retained,
             linear: presentation.linear,
@@ -233,6 +237,13 @@ impl StoryPresentationDto {
 pub struct SetStoryLayoutInputDto {
     pub story_id: String,
     pub layout: StoryLayoutDto,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetStoryAutoContinueInputDto {
+    pub story_id: String,
+    pub auto_continue: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -378,6 +389,7 @@ mod tests {
     #[test]
     fn the_presentation_serializes_in_camel_case_with_closed_tags() {
         let dto = StoryPresentationDto {
+            auto_continue: false,
             layout: StoryLayoutDto::Menu,
             voice_id: Some("system:say:Thomas".into()),
             archive_retained: false,
@@ -406,6 +418,7 @@ mod tests {
         };
         let v = serde_json::to_value(&dto).unwrap();
         assert_eq!(v["layout"], "menu");
+        assert_eq!(v["autoContinue"], false);
         assert_eq!(v["voiceId"], "system:say:Thomas");
         assert_eq!(v["archiveRetained"], false);
         assert_eq!(v["title"]["status"], "ready");

@@ -10,6 +10,7 @@ import type {
   SetStoryLayoutInput,
   StoryPresentationDto,
   VoicePreviewDto,
+  SetStoryAutoContinueInput,
 } from "../../shared/ipc-contracts/presentation";
 import {
   isAnnouncementVoicesDto,
@@ -75,6 +76,14 @@ export function setStoryLayout(
   input: SetStoryLayoutInput,
 ): Promise<StoryPresentationDto> {
   return call("set_story_layout", { input }, isStoryPresentationDto);
+}
+
+/** Set whether, in the menu layout, an episode's end chains straight into
+ *  the next one instead of returning to the wheel (a per-story choice). */
+export function setStoryAutoContinue(
+  input: SetStoryAutoContinueInput,
+): Promise<StoryPresentationDto> {
+  return call("set_story_auto_continue", { input }, isStoryPresentationDto);
 }
 
 /**

@@ -31,10 +31,15 @@
 //!    écouter ? ») whose OK transition enters the options action node; one
 //!    OPTION stage per episode (wheel + OK + home; its image and its SPOKEN
 //!    TITLE), whose OK leads to the episode's story stage; every story stage
-//!    ends (OK) and homes back to the question, so the child chooses again.
-//!    Those spoken announcements are audio assets the application
-//!    synthesizes beforehand — [`menu_blocker`] refuses the layout while any
-//!    is missing.
+//!    ends (OK) and homes back to the WHEEL POSITIONED ON THAT EPISODE (the
+//!    options action node at the episode's own index — the child hears the
+//!    episode's title again and scrolls on to the next one, like an
+//!    official pack), never back to the first episode. With
+//!    [`MenuPackAssets::auto_continue`], the end of an episode chains
+//!    straight into the next one instead (the last episode still returns
+//!    to the wheel, on itself); home keeps returning to the wheel. Those
+//!    spoken announcements are audio assets the application synthesizes
+//!    beforehand — [`menu_blocker`] refuses the layout while any is missing.
 //!
 //! The pack UUID is the cover stage's uuid (see the send engine's
 //! `pack_entry_uuid`): the caller passes the STORY id, a canonical lowercase
@@ -261,12 +266,15 @@ pub struct MenuEpisode {
 }
 
 /// Everything the menu layout carries: the optional spoken series title (the
-/// cover prompt), the spoken question, and the episodes in wheel order.
+/// cover prompt), the spoken question, the episodes in wheel order, and
+/// whether an episode's end chains into the next one (`auto_continue`)
+/// rather than returning to the wheel.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MenuPackAssets {
     pub title_ref: Option<String>,
     pub question_ref: String,
     pub episodes: Vec<MenuEpisode>,
+    pub auto_continue: bool,
 }
 
 /// Lay `assets` out as a menu STUdio pack whose entry uuid is `pack_uuid`.
@@ -349,17 +357,25 @@ pub fn synthesize_menu_pack(pack_uuid: &str, assets: &MenuPackAssets) -> StudioS
             control_settings: option_controls,
         });
     }
+    let last = assets.episodes.len().saturating_sub(1);
     for (index, episode) in assets.episodes.iter().enumerate() {
+        // Back to the wheel ON THIS EPISODE: the option stage plays the
+        // episode's spoken title and the child scrolls on from there.
+        let back_to_wheel = to(&options_action, index as i32);
         stage_nodes.push(StudioStageNode {
             uuid: episode_uuid(index),
             square_one: false,
             image: episode.image_ref.clone(),
             audio: Some(episode.audio_ref.clone()),
-            // End and home both return to the question — the child chooses
-            // again (STUdio: a story's default transitions go to the first
-            // useful node after the cover).
-            ok_transition: to(&question_action, 0),
-            home_transition: to(&question_action, 0),
+            // The end of an episode: the next one when chaining is on (the
+            // last episode has none to chain into), else the wheel on the
+            // episode just heard. Home always returns to that wheel spot.
+            ok_transition: if assets.auto_continue && index < last {
+                to(&episode_action(index + 1), 0)
+            } else {
+                back_to_wheel.clone()
+            },
+            home_transition: back_to_wheel,
             control_settings: story_controls,
         });
     }
@@ -610,6 +626,7 @@ mod tests {
                     prompt_ref: format!("{i:0>56}cccc{i:04}.wav"),
                 })
                 .collect(),
+            auto_continue: false,
         }
     }
 
@@ -723,10 +740,12 @@ mod tests {
                 (cs.wheel, cs.ok, cs.home, cs.pause, cs.autoplay)
                     == (false, false, true, true, true)
             );
+            // End and home both return to the WHEEL, positioned on this
+            // very episode — never on the first one.
             for t in [story.ok_transition.as_ref(), story.home_transition.as_ref()] {
-                let t = t.expect("back to the question");
-                assert_eq!(t.action_node, pack.action_nodes[0].id);
-                assert_eq!(t.option_index, 0);
+                let t = t.expect("back to the wheel");
+                assert_eq!(t.action_node, pack.action_nodes[1].id);
+                assert_eq!(t.option_index, index as i32);
             }
         }
         // Unique ids, and the whole graph transcodes.
@@ -753,6 +772,44 @@ mod tests {
             "title + question + prompts + episodes"
         );
         assert_eq!(out.images.len(), 2);
+    }
+
+    #[test]
+    fn with_auto_continue_an_episode_chains_into_the_next_and_the_last_returns_to_the_wheel() {
+        let mut assets = menu_assets(3);
+        assets.auto_continue = true;
+        let pack = synthesize_menu_pack(PACK, &assets);
+        let stories = &pack.stage_nodes[5..8];
+        for (index, story) in stories.iter().enumerate() {
+            let ok = story.ok_transition.as_ref().expect("end transition");
+            if index < 2 {
+                // Straight into the next episode's own action node.
+                assert_eq!(ok.action_node, pack.action_nodes[2 + index + 1].id);
+                assert_eq!(ok.option_index, 0);
+            } else {
+                // The last one has nothing to chain into: the wheel, on itself.
+                assert_eq!(ok.action_node, pack.action_nodes[1].id);
+                assert_eq!(ok.option_index, 2);
+            }
+            // Home never chains: back to the wheel on this episode.
+            let home = story.home_transition.as_ref().expect("home transition");
+            assert_eq!(home.action_node, pack.action_nodes[1].id);
+            assert_eq!(home.option_index, index as i32);
+        }
+        // The wheel itself is untouched by the chaining.
+        for (index, option) in pack.stage_nodes[2..5].iter().enumerate() {
+            let ok = option.ok_transition.as_ref().unwrap();
+            assert_eq!(ok.action_node, pack.action_nodes[2 + index].id);
+        }
+        transcode_pack(&pack).expect("the chained graph transcodes");
+
+        // A single-episode series: chaining has nothing to do.
+        let mut single = menu_assets(1);
+        single.auto_continue = true;
+        let pack = synthesize_menu_pack(PACK, &single);
+        let ok = pack.stage_nodes[3].ok_transition.as_ref().unwrap();
+        assert_eq!(ok.action_node, pack.action_nodes[1].id);
+        assert_eq!(ok.option_index, 0);
     }
 
     #[test]
