@@ -78,6 +78,34 @@ unprovable one, see "Write on an already-present pack" below — so it converges
 safely); orphan staging directories (`.rustory-staging-*`) and set-aside
 replaced packs (`.rustory-replaced-*`) are swept best-effort.
 
+**Room on the device, checked before any byte** (the V3 pack engine). The
+writer stages the WHOLE pack on the volume, promotes it by `rename`, and only
+THEN drops the pack it replaces — so the peak need is the full NEW pack,
+whatever the old one weighed, and a replacement discounts nothing. The send
+therefore reads the volume's free bytes ONCE (the enumerated mount point that
+is the longest prefix of the mount path) and refuses before writing:
+
+| Check | When | What it compares | Wording |
+| --- | --- | --- | --- |
+| Lower bound | after each asset is normalized, inside the asset loop | the device-ready bytes produced so far, which the assembled pack necessarily carries | `Envoi impossible: il manque au moins {taille} d'espace libre sur l'appareil.` |
+| Exact | after the assembly, before the first device byte | the assembled files, deduplicated by relative path (a repeated asset lands on one path, so it costs its bytes once) | `Envoi impossible: il manque {taille} d'espace libre sur l'appareil.` |
+
+Both carry `details.source = "device_space"`, `cause = "not_enough_space"`, the
+`exact` flag and the raw `required_bytes` / `available_bytes` /
+`missing_bytes`; the next gesture is `Supprime une histoire de l'appareil puis
+relance l'envoi.` The lower-bound check exists to stop a hopeless send DURING
+the transcoding instead of at the end of it, and it never overstates what it
+knows — hence `au moins`. Neither check ever produces a false refusal: a pack
+refused here could not have fitted. The converse is not promised — the model
+ignores filesystem slack (cluster rounding, directory entries), so a pack that
+fits by a hair can still be refused by the device itself, which keeps its own
+`write_rejected` reason. A volume whose free space cannot be read answers
+`None`, meaning UNKNOWN and never "full": both checks stand down rather than
+refuse a send they cannot justify. The V1/V2 round-trip write keeps its
+reactive terminal (`write_rejected`, whose next gesture already names the
+device's free space): it rewrites a pack the device held before, so the case
+barely arises there.
+
 ## Detection Strategy
 
 Rustory recognizes a Lunii in two stages:

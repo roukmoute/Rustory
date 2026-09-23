@@ -46,6 +46,31 @@ pub trait DeviceV3PackWriter: Send + Sync + 'static {
         files: &[AssembledFile],
         progress: &dyn Fn(WriteProgress),
     ) -> Result<(), TransferFailureCause>;
+
+    /// Free bytes on the volume that would receive the pack, or `None` when
+    /// the platform cannot answer. `None` means UNKNOWN, never "full": the
+    /// caller then skips its pre-write space check rather than refusing a
+    /// send it cannot justify. The default answers `None` so a writer that
+    /// never learned about volumes degrades to the pre-check-free behavior.
+    fn free_space(&self, mount_path: &Path) -> Option<u64> {
+        let _ = mount_path;
+        None
+    }
+}
+
+/// Free bytes of the volume holding `path`: the enumerated mount point that
+/// is the LONGEST prefix of the path — the volume the staging copy and the
+/// promotion actually land on, even when a parent mount also matches.
+/// `None` when no mount point matches (the path is unreachable, or the
+/// platform enumerates nothing).
+pub fn volume_free_space(path: &Path) -> Option<u64> {
+    let target = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let disks = sysinfo::Disks::new_with_refreshed_list();
+    disks
+        .iter()
+        .filter(|disk| target.starts_with(disk.mount_point()))
+        .max_by_key(|disk| disk.mount_point().as_os_str().len())
+        .map(|disk| disk.available_space())
 }
 
 /// Production writer: stage on the volume + atomic promotion + fsync + `.pi`.
@@ -53,6 +78,10 @@ pub trait DeviceV3PackWriter: Send + Sync + 'static {
 pub struct SystemDeviceV3PackWriter;
 
 impl DeviceV3PackWriter for SystemDeviceV3PackWriter {
+    fn free_space(&self, mount_path: &Path) -> Option<u64> {
+        volume_free_space(mount_path)
+    }
+
     fn write_pack(
         &self,
         mount_path: &Path,

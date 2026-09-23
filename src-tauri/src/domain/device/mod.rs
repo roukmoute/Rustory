@@ -7,6 +7,7 @@
 //! converts these types into wire DTOs at the boundary.
 
 pub mod family;
+pub mod free_space;
 pub mod library;
 pub mod markers;
 pub mod operations;
@@ -18,6 +19,7 @@ pub mod support_matrix;
 pub mod title;
 
 pub use family::{DeviceFamily, FirmwareCohort, FlamFirmwareCohort, LuniiFirmwareCohort};
+pub use free_space::{check_device_space, format_device_bytes, DeviceSpaceVerdict};
 pub use library::{
     format_pack_uuid, is_canonical_pack_uuid, pack_short_id, parse_canonical_pack_uuid,
     parse_flam_library_index, parse_pack_index, DeviceLibrary, DeviceStoryEntry, PackIndex,

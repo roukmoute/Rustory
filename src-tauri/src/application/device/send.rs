@@ -22,8 +22,8 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use crate::domain::device::{
-    transcode_pack, DeviceFamily, DeviceProfile, FirmwareCohort, StudioStoryPack,
-    SupportedOperation, LUNII_PRIMARY_MARKER,
+    check_device_space, format_device_bytes, transcode_pack, DeviceFamily, DeviceProfile,
+    DeviceSpaceVerdict, FirmwareCohort, StudioStoryPack, SupportedOperation, LUNII_PRIMARY_MARKER,
 };
 use crate::domain::shared::AppError;
 use crate::domain::transfer::short_id_from_pack_uuid;
@@ -215,6 +215,19 @@ fn send_pack(
     // is BEFORE the work starts — a cheap header peek decides), then the
     // write, on one shared scale.
     let plan = ProgressPlan::new(&transcoded, source)?;
+
+    // The device's free bytes, read ONCE before any work: every room check
+    // below compares against this single snapshot. `None` = the platform
+    // cannot answer, and the checks stand down rather than refuse a send
+    // they cannot justify (the write itself stays the last word).
+    let free_space = writer.free_space(mount_path);
+    // Running total of the DEVICE-READY asset bytes normalized so far. The
+    // assembled pack carries every one of them plus its index files, so this
+    // is a genuine LOWER BOUND of what the write will need: the moment it
+    // alone exceeds the free space, the send is certainly too big and stops
+    // there, instead of transcoding to the end for nothing.
+    let mut device_ready_bytes: u64 = 0;
+
     let mut done_cost = 0.0f64;
     let report = |done: f64| {
         let pct = (done / plan.total * f64::from(PROGRESS_END)).round() as u8;
@@ -236,6 +249,8 @@ fn send_pack(
                 .ok_or_else(|| source.missing_asset_error(filename))?;
             let device_ready =
                 to_device_image(&bytes).map_err(|e| asset_convert_error(filename, e))?;
+            device_ready_bytes += device_ready.len() as u64;
+            ensure_device_room(free_space, device_ready_bytes, SpaceProof::AtLeast)?;
             assets.insert(filename.clone(), device_ready);
         }
         done_cost += plan.cost_of(filename);
@@ -248,6 +263,8 @@ fn send_pack(
                 .ok_or_else(|| source.missing_asset_error(filename))?;
             let device_ready =
                 to_device_audio(&bytes).map_err(|e| asset_convert_error(filename, e))?;
+            device_ready_bytes += device_ready.len() as u64;
+            ensure_device_room(free_space, device_ready_bytes, SpaceProof::AtLeast)?;
             assets.insert(filename.clone(), device_ready);
         }
         done_cost += plan.cost_of(filename);
@@ -266,6 +283,24 @@ fn send_pack(
             AssembleError::UnreadableDeviceMetadata => device_write_error("md_unreadable"),
             AssembleError::MissingAsset(f) => source.missing_asset_error(&f),
         })?;
+
+    // The EXACT room check, on the bytes actually about to be written and
+    // BEFORE the first of them. A repeated asset lands on the SAME relative
+    // path, so it costs its bytes once. The writer stages the whole pack on
+    // the volume before promoting it and only then drops the pack it
+    // replaces, so a replacement discounts nothing. This models no
+    // filesystem slack (cluster rounding, directory entries), so a pack that
+    // fits by a hair can still be refused by the device itself — with its
+    // own reason, after this check passed.
+    let required_bytes: u64 = {
+        let mut counted = std::collections::HashSet::new();
+        files
+            .iter()
+            .filter(|file| counted.insert(file.rel_path.as_str()))
+            .map(|file| file.bytes.len() as u64)
+            .sum()
+    };
+    ensure_device_room(free_space, required_bytes, SpaceProof::Exact)?;
 
     // Write to the device (atomic staging + promotion + `.pi`). The writer's
     // per-file byte progress fills the write share of the scale so the bar
@@ -573,6 +608,67 @@ fn asset_convert_error(filename: &str, err: AssetConvertError) -> AppError {
     }))
 }
 
+/// How well the caller knows the byte need it is checking: the running
+/// lower bound during asset normalization, or the assembled pack's exact
+/// size. Only the wording differs — both refuse before any device byte.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SpaceProof {
+    AtLeast,
+    Exact,
+}
+
+/// Refuse the send when the device cannot hold `required` bytes. An unknown
+/// free space (`None`) never refuses.
+fn ensure_device_room(
+    free_space: Option<u64>,
+    required: u64,
+    proof: SpaceProof,
+) -> Result<(), AppError> {
+    let Some(available) = free_space else {
+        return Ok(());
+    };
+    match check_device_space(required, available) {
+        DeviceSpaceVerdict::Fits => Ok(()),
+        DeviceSpaceVerdict::Short { missing } => {
+            Err(not_enough_space_error(required, available, missing, proof))
+        }
+    }
+}
+
+/// The device has less free space than the pack needs — refused with the
+/// missing amount named, BEFORE any device byte. `details` carries the raw
+/// figures for support; the message carries the one the user acts on.
+fn not_enough_space_error(
+    required: u64,
+    available: u64,
+    missing: u64,
+    proof: SpaceProof,
+) -> AppError {
+    let missing_text = format_device_bytes(missing);
+    let message = match proof {
+        SpaceProof::Exact => {
+            format!("Envoi impossible: il manque {missing_text} d'espace libre sur l'appareil.")
+        }
+        SpaceProof::AtLeast => {
+            format!(
+                "Envoi impossible: il manque au moins {missing_text} d'espace libre sur l'appareil."
+            )
+        }
+    };
+    AppError::device_write_failed(
+        message,
+        "Supprime une histoire de l'appareil puis relance l'envoi.",
+    )
+    .with_details(serde_json::json!({
+        "source": "device_space",
+        "cause": "not_enough_space",
+        "exact": proof == SpaceProof::Exact,
+        "required_bytes": required,
+        "available_bytes": available,
+        "missing_bytes": missing,
+    }))
+}
+
 fn device_write_error(cause: &'static str) -> AppError {
     AppError::device_write_failed(
         "Envoi impossible: l'appareil a refusé l'écriture.",
@@ -596,12 +692,28 @@ mod tests {
     }
 
     /// A `DeviceV3PackWriter` that records the pack UUID + file count it was
-    /// asked to write.
+    /// asked to write, the deduplicated byte total it would land on the
+    /// volume, and answers a programmable free space (`None` by default —
+    /// unknown, so the room checks stand down).
     #[derive(Default)]
     struct RecordingWriter {
         calls: std::sync::Mutex<Vec<(String, usize)>>,
+        written_bytes: std::sync::Mutex<u64>,
+        free_space: Option<u64>,
+    }
+    impl RecordingWriter {
+        fn with_free_space(bytes: u64) -> Self {
+            Self {
+                free_space: Some(bytes),
+                ..Self::default()
+            }
+        }
     }
     impl DeviceV3PackWriter for RecordingWriter {
+        fn free_space(&self, _mount: &Path) -> Option<u64> {
+            self.free_space
+        }
+
         fn write_pack(
             &self,
             _mount: &Path,
@@ -613,6 +725,14 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push((pack_uuid.to_string(), files.len()));
+            // What the volume actually gains: a repeated asset lands on the
+            // same relative path, so it counts once.
+            let mut counted = std::collections::HashSet::new();
+            *self.written_bytes.lock().unwrap() = files
+                .iter()
+                .filter(|f| counted.insert(f.rel_path.clone()))
+                .map(|f| f.bytes.len() as u64)
+                .sum();
             // Report a complete write, like the real writer's last tick.
             let total: u64 = files.iter().map(|f| f.bytes.len() as u64).sum();
             progress(WriteProgress {
@@ -1022,6 +1142,148 @@ mod tests {
             99,
             "the recorded write completes"
         );
+    }
+
+    /// The two-episode synthesized pack the room-check tests send.
+    fn scratch_story_pack(
+        audio_name: &str,
+        image_name: &str,
+    ) -> crate::domain::device::StudioStoryPack {
+        use crate::domain::device::{synthesize_sequential_pack, EpisodeAssets};
+        synthesize_sequential_pack(
+            STORY_ID,
+            &[
+                EpisodeAssets {
+                    audio_ref: audio_name.to_string(),
+                    image_ref: Some(image_name.to_string()),
+                },
+                EpisodeAssets {
+                    audio_ref: audio_name.to_string(),
+                    image_ref: None,
+                },
+            ],
+        )
+    }
+
+    #[test]
+    fn a_device_one_byte_short_refuses_the_send_before_any_device_byte() {
+        let (media, audio_name, image_name) = scratch_media_store();
+
+        // A first send with an UNKNOWN free space: no room check runs (the
+        // send succeeds exactly as before), and the writer tells us what the
+        // assembled pack weighs on the volume. Each send gets its own mock
+        // scan (the scanner answers one re-scan per send).
+        let (_mount, scanner, device_identifier) = scratch_v3_mount();
+        let writer = RecordingWriter::default();
+        send_story_pack_to_device(
+            &scanner,
+            &writer,
+            &SendStoryPackRequest {
+                device_identifier,
+                pack: scratch_story_pack(&audio_name, &image_name),
+                media_dir: media.path().to_path_buf(),
+            },
+            Duration::from_millis(500),
+            &|_| {},
+        )
+        .expect("an unknown free space never refuses");
+        let needed = *writer.written_bytes.lock().unwrap();
+        assert!(needed > 0, "the pack weighs something");
+
+        // The SAME send onto a device one byte short: refused, with the exact
+        // figures, and not a single byte written.
+        let (_mount, scanner, device_identifier) = scratch_v3_mount();
+        let writer = RecordingWriter::with_free_space(needed - 1);
+        let err = send_story_pack_to_device(
+            &scanner,
+            &writer,
+            &SendStoryPackRequest {
+                device_identifier,
+                pack: scratch_story_pack(&audio_name, &image_name),
+                media_dir: media.path().to_path_buf(),
+            },
+            Duration::from_millis(500),
+            &|_| {},
+        )
+        .expect_err("a device without room refuses");
+        let v = serde_json::to_value(&err).expect("ser");
+        assert_eq!(v["code"], "DEVICE_WRITE_FAILED");
+        assert_eq!(
+            v["message"],
+            "Envoi impossible: il manque moins de 1 Mo d'espace libre sur l'appareil."
+        );
+        assert_eq!(
+            v["userAction"],
+            "Supprime une histoire de l'appareil puis relance l'envoi."
+        );
+        assert_eq!(v["details"]["source"], "device_space");
+        assert_eq!(v["details"]["cause"], "not_enough_space");
+        assert_eq!(v["details"]["exact"], true);
+        assert_eq!(v["details"]["required_bytes"], needed);
+        assert_eq!(v["details"]["available_bytes"], needed - 1);
+        assert_eq!(v["details"]["missing_bytes"], 1);
+        assert!(
+            writer.calls.lock().unwrap().is_empty(),
+            "zero device write on a refusal"
+        );
+    }
+
+    #[test]
+    fn a_device_far_too_small_stops_during_the_asset_work_instead_of_transcoding_to_the_end() {
+        let (_mount, scanner, device_identifier) = scratch_v3_mount();
+        let (media, audio_name, image_name) = scratch_media_store();
+
+        // 32 free bytes: the FIRST normalized asset alone already exceeds
+        // them. The lower-bound check fires inside the asset loop, so the
+        // remaining assets are never read nor transcoded, and the pack is
+        // never assembled — `exact: false` is that proof.
+        let writer = RecordingWriter::with_free_space(32);
+        let err = send_story_pack_to_device(
+            &scanner,
+            &writer,
+            &SendStoryPackRequest {
+                device_identifier,
+                pack: scratch_story_pack(&audio_name, &image_name),
+                media_dir: media.path().to_path_buf(),
+            },
+            Duration::from_millis(500),
+            &|_| {},
+        )
+        .expect_err("a device far too small refuses");
+        let v = serde_json::to_value(&err).expect("ser");
+        assert_eq!(v["code"], "DEVICE_WRITE_FAILED");
+        assert_eq!(v["details"]["source"], "device_space");
+        assert_eq!(v["details"]["exact"], false);
+        assert_eq!(v["details"]["available_bytes"], 32);
+        let message = v["message"].as_str().expect("message");
+        assert!(
+            message.starts_with("Envoi impossible: il manque au moins "),
+            "the early refusal never overstates what it knows: {message}"
+        );
+        assert!(
+            writer.calls.lock().unwrap().is_empty(),
+            "zero device write on a refusal"
+        );
+    }
+
+    #[test]
+    fn a_device_with_room_to_spare_sends_normally() {
+        let (_mount, scanner, device_identifier) = scratch_v3_mount();
+        let (media, audio_name, image_name) = scratch_media_store();
+        let writer = RecordingWriter::with_free_space(8_000_000_000);
+        send_story_pack_to_device(
+            &scanner,
+            &writer,
+            &SendStoryPackRequest {
+                device_identifier,
+                pack: scratch_story_pack(&audio_name, &image_name),
+                media_dir: media.path().to_path_buf(),
+            },
+            Duration::from_millis(500),
+            &|_| {},
+        )
+        .expect("a device with room sends");
+        assert_eq!(writer.calls.lock().unwrap().len(), 1);
     }
 
     #[test]

@@ -54,7 +54,7 @@ pub use reorderer::{
 pub use rss_source::{HttpRssFeedSource, RssFeedSource, MAX_RSS_RESPONSE_BYTES};
 pub use scanner::{CandidateFacts, DeviceCandidate, DeviceScanReport, DeviceScanner};
 pub use system::{SystemDeviceScanner, EXTRA_MOUNT_ROOTS_ENV, SYSTEM_SCANNER_DEFAULT};
-pub use v3_pack_writer::{DeviceV3PackWriter, SystemDeviceV3PackWriter};
+pub use v3_pack_writer::{volume_free_space, DeviceV3PackWriter, SystemDeviceV3PackWriter};
 pub use writer::{
     sweep_device_transfer_staging, DevicePackWriter, SystemDevicePackWriter, WriteFailure,
     WriteProgress,
