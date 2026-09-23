@@ -43,11 +43,11 @@ use super::structured_folder::{
 pub const MAX_ARCHIVE_MEDIA_FILES: usize = 8192;
 
 /// Ceiling on the SUM of the retained media bytes of a community pack.
-/// Real packs reach several hundred MB (a rich pack with long narration);
-/// the folder flow's 256 MiB bound rejected large-but-legitimate packs.
-/// Sized to admit the vast majority of real packs while still bounding the
-/// total acceptance I/O.
-pub const MAX_ARCHIVE_TOTAL_MEDIA_BYTES: u64 = 4 * 1024 * 1024 * 1024;
+/// Complete audio collections can exceed 4 GiB even though each individual
+/// media remains within the 32 MiB store bound. ZIP64 archives support these
+/// collections; retain a finite aggregate bound without forcing users to
+/// split a collection or lower its audio quality.
+pub const MAX_ARCHIVE_TOTAL_MEDIA_BYTES: u64 = 32 * 1024 * 1024 * 1024;
 
 /// The exact descriptor entry name inside the archive — ONE listed name,
 /// no alias (the folder-manifest discipline).
@@ -468,6 +468,62 @@ fn exceeds_media_file_bound(refs: &[ArchiveMediaReference]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn analyze_audio_total(total_bytes: u64) -> StructuredFolderAnalysis {
+        let per_file = 32 * 1024 * 1024;
+        let count = total_bytes.div_ceil(per_file);
+        let mut stages = Vec::new();
+        let mut probes = BTreeMap::new();
+        for i in 0..count {
+            let audio = format!("episode-{i}.mp3");
+            stages.push(serde_json::json!({
+                "uuid": format!("stage-{i}"),
+                "squareOne": i == 0,
+                "audio": audio,
+                "okTransition": null,
+                "controlSettings": {}
+            }));
+            probes.insert(
+                audio,
+                MediaProbe::Usable {
+                    kind: FolderMediaKind::Audio,
+                    byte_size: (total_bytes - i * per_file).min(per_file),
+                },
+            );
+        }
+        let descriptor = serde_json::to_vec(&serde_json::json!({
+            "title": "Collection complète",
+            "stageNodes": stages,
+            "actionNodes": []
+        }))
+        .expect("descriptor");
+        analyze_structured_archive_components(Some(&descriptor), &probes, None)
+    }
+
+    #[test]
+    fn a_collection_above_four_gib_is_importable() {
+        let analysis = analyze_audio_total(5 * 1024 * 1024 * 1024);
+        assert_eq!(analysis.quality, RecognitionQuality::Clean);
+        assert!(analysis.creatable.is_some());
+    }
+
+    #[test]
+    fn the_aggregate_media_limit_is_inclusive() {
+        let analysis = analyze_audio_total(MAX_ARCHIVE_TOTAL_MEDIA_BYTES);
+        assert_eq!(analysis.quality, RecognitionQuality::Clean);
+        assert!(analysis.creatable.is_some());
+    }
+
+    #[test]
+    fn one_byte_above_the_aggregate_media_limit_is_blocked() {
+        let analysis = analyze_audio_total(MAX_ARCHIVE_TOTAL_MEDIA_BYTES + 1);
+        assert_eq!(analysis.quality, RecognitionQuality::Unusable);
+        assert!(analysis.creatable.is_none());
+        assert_eq!(
+            category_of(&analysis, RecognitionAspect::Structure),
+            RecognitionCategory::Blocking
+        );
+    }
 
     fn analyze(
         story_json: &str,

@@ -795,7 +795,7 @@ flow; the "drop on a node slot" gesture is a dedicated deferred workstream.
 | --- | --- | --- | --- |
 | Rustory story artifact | `.rustory` | `formatVersion == 1` | ✅ supported (import + export) |
 | Structured folder (`histoire.json` + referenced media) | — (a local folder) | `formatVersion == 1` | ✅ supported (creation) |
-| Structured archive (zip…) | — | — | ❌ deferred (no archive reader; zero-dependency rule) |
+| Structured archive (`story.json` + `assets/`, zipped) | `.zip` | `formatVersion == 1` (OUR reader-support revision — the foreign format declares none) | ✅ supported (creation) — activated 2026-07-22, the zero-dependency rationale lifted (the zip reader crate was already compiled in the tree) |
 
 ### `.rustory` v1 format contract
 
@@ -963,6 +963,42 @@ that turned blocking refuses and creates nothing.
 Bounds & safety: offline, zero dependency, never writes a device, analysis is
 strictly read-only (no row, no promoted file), and the commit is atomic (a
 failure leaves the previous library state intact, media files compensated).
+
+### Structured archive v1 format contract
+
+The community `.zip` pack (a `story.json` stage/action graph plus an
+`assets/` directory) is the creation entry point for the files users actually
+hold. It rides the folder flow's analysis, findings and commit discipline —
+only the bounds below are its own, and ONE constant governs both the analysis
+verdict and the promotion, so the two can never disagree.
+
+| Bound | Value | Why |
+| --- | --- | --- |
+| Distinct referenced media | 8192 | A real pack carries one image + one sound per stage node — hundreds to a few thousand. An anti-runaway guard, sized for real packs. |
+| Aggregate referenced media bytes | 32 GiB, inclusive | A COMPLETE audio collection (a whole podcast series, a long narrated collection) exceeds a few gigabytes while every single media stays well under the per-file bound. ZIP64 carries such an archive; the user should not have to split the collection or lower its audio quality to import it. Only REFERENCED media count, and a media referenced twice counts once. |
+| One media file | 32 MiB | The node-media store's own ceiling, applied when each file is promoted. |
+| Archive entries | 32 768 | Bounds the enumeration of a hostile or runaway archive. |
+| `story.json` | 4 MiB | The descriptor is a graph, never a payload. |
+
+What the aggregate bound actually protects is the LOCAL DISK, never the
+device: at import only images are transcoded (audio is stored verbatim), and a
+structured-archive import ALSO retains the original `.zip` so the V3 send can
+reuse it without re-picking the file. One imported archive therefore costs
+roughly twice its size, durably — up to about 64 GiB at the ceiling. Device
+capacity is a separate constraint, checked at send time (see "Room on the
+device, checked before any byte"), and so are the device-pack import bounds
+(`MAX_IMPORT_PACK_BYTES`, 2 GiB) and the free space of the user's own disk.
+
+KNOWN ROUGH EDGE: an archive over the aggregate bound blocks on the
+`Structure` aspect, so the user reads `La structure interne de l'histoire est
+illisible ou incohérente.` — the generic structure copy, not a size reason.
+Saying it honestly needs a new aspect in the finding matrix, which is shared
+by every import flow (domain enum, DTO, TS contract, per-flow message
+matrices, contract tests); it is deliberately NOT bundled with a bound change.
+
+The `.rustory` artifact is unaffected: it stays a JSON document that embeds NO
+media (see its contract above), so a portable story WITH its images and sounds
+travels as a structured archive, not as a `.rustory`.
 
 ## File Association Contract
 
