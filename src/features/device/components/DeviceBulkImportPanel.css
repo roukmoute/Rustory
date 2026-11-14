@@ -1,15 +1,22 @@
 .device-bulk {
   display: flex;
   flex-direction: column;
-  gap: var(--space-3);
+  gap: 16px;
+  min-width: 0;
+  padding: 20px;
+  background: #fffdf8;
 }
 
 .device-bulk__title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-family: var(--font-family-display);
   margin: 0;
-  font-size: var(--font-size-title);
-  font-weight: var(--font-weight-semibold);
+  font-size: 21px;
+  font-weight: 500;
   line-height: var(--line-height-tight);
-  color: var(--color-text-default);
+  color: var(--color-text-primary);
 }
 
 .device-bulk__provenance {
@@ -31,7 +38,7 @@
 
 .device-bulk__triage-importable {
   font-weight: var(--font-weight-semibold);
-  color: var(--color-text-default);
+  color: var(--color-text-primary);
 }
 
 .device-bulk__triage-skip {
@@ -67,4 +74,31 @@
   display: flex;
   flex-wrap: wrap;
   gap: var(--space-2);
+}
+
+.device-bulk__title > svg {
+  color: #1f7a55;
+  flex-shrink: 0;
+}
+
+.device-bulk__triage {
+  gap: 8px;
+  padding: 14px;
+  border-radius: 12px;
+  background: #f3f6ed;
+  line-height: 1.5;
+}
+
+.device-bulk__summary {
+  padding: 14px;
+  border: 1px solid #bdddc9;
+  border-radius: 12px;
+  background: #e3f3ea;
+}
+
+.device-bulk__actions > button {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  padding-inline: 12px;
 }

@@ -1,18 +1,24 @@
 .story-node-editor-host {
   display: flex;
   flex-direction: column;
-  gap: var(--space-2);
-  padding: var(--space-3);
+  gap: 18px;
+  padding: 24px;
   border: 1px solid var(--color-border-subtle, rgba(0, 0, 0, 0.12));
-  border-radius: var(--radius-md);
-  background: var(--color-surface-base);
+  border-radius: 18px;
+  background: var(--color-surface-raised);
   min-height: 160px;
 }
 
 .story-node-editor-host__heading {
+  display: flex;
+  align-items: center;
+  gap: 10px;
   margin: 0;
-  font-size: var(--font-size-h4, var(--font-size-body));
-  font-weight: var(--font-weight-semibold);
+  padding-bottom: 16px;
+  border-bottom: 1px solid var(--color-border-subtle);
+  font-family: var(--font-family-display, var(--font-family-ui));
+  font-size: 1.3rem;
+  font-weight: 500;
   color: var(--color-text-primary);
   line-height: var(--line-height-tight);
 }
@@ -54,7 +60,7 @@
 .story-node-editor-host__pack-explanation {
   margin: 0;
   color: var(--color-text-secondary);
-  font-size: var(--font-size-caption, var(--font-size-body));
+  font-size: var(--font-size-label);
   line-height: var(--line-height-normal);
 }
 
@@ -65,19 +71,21 @@
 }
 
 .story-node-editor-host__label {
-  font-size: var(--font-size-caption, var(--font-size-body));
+  font-size: var(--font-size-label);
   font-weight: var(--font-weight-medium, var(--font-weight-semibold));
   color: var(--color-text-secondary);
 }
 
 .story-node-editor-host__textarea {
   width: 100%;
-  padding: var(--space-2);
-  border: 1px solid var(--color-border-subtle, rgba(0, 0, 0, 0.18));
+  padding: 14px 16px;
+  border: 1px solid var(--color-border-strong);
   border-radius: var(--radius-sm);
   font: inherit;
   color: var(--color-text-primary);
   background: var(--color-surface-base);
+  min-height: 140px;
+  line-height: 1.7;
   resize: vertical;
 }
 
@@ -95,7 +103,8 @@
   margin: 0;
   padding: var(--space-2);
   border-radius: var(--radius-sm);
-  border: 1px solid var(--color-status-error, rgba(180, 30, 30, 0.5));
+  border: 1px solid #edc2cc;
+  background: #fff2f4;
   color: var(--color-text-primary);
   font-size: var(--font-size-body);
 }
@@ -105,23 +114,24 @@
 }
 
 .story-node-editor-host__media-slots {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-3);
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr));
+  gap: 16px;
 }
 
 .story-node-editor-host__media {
   display: flex;
   flex-direction: column;
   gap: var(--space-1);
-  padding: var(--space-2);
-  border: 1px solid var(--color-border-subtle, rgba(0, 0, 0, 0.12));
-  border-radius: var(--radius-sm);
+  padding: 16px;
+  border: 1px dashed var(--color-border-strong);
+  border-radius: 14px;
+  background: var(--color-surface-base);
 }
 
 .story-node-editor-host__media-heading {
   margin: 0;
-  font-size: var(--font-size-caption, var(--font-size-body));
+  font-size: var(--font-size-label);
   font-weight: var(--font-weight-semibold);
   color: var(--color-text-secondary);
 }
@@ -130,7 +140,7 @@
 .story-node-editor-host__media-empty {
   display: flex;
   flex-direction: column;
-  gap: var(--space-1);
+  gap: 12px;
 }
 
 .story-node-editor-host__media-actions {
@@ -143,7 +153,7 @@
 .story-node-editor-host__media-status {
   margin: 0;
   color: var(--color-text-secondary);
-  font-size: var(--font-size-caption, var(--font-size-body));
+  font-size: var(--font-size-label);
 }
 
 .story-node-editor-host__media-status:empty {
@@ -183,3 +193,14 @@
   flex-wrap: wrap;
   gap: var(--space-1);
 }
+
+.story-node-editor-host { min-width: 0; }
+.story-node-editor-host__heading svg { color: var(--color-action-primary); flex-shrink: 0; }
+.story-node-editor-host__media { min-width: 0; }
+.story-node-editor-host__media-heading { margin-bottom: 8px; font-weight: 800; color: var(--color-text-primary); }
+.story-node-editor-host__media-empty { align-items: flex-start; }
+.story-node-editor-host__preview-audio { width: 100%; min-width: 0; max-width: 100%; }
+.story-node-editor-host__recovery { padding: 18px; background: #fff6d9; border-color: #e1c971; border-radius: 14px; }
+.story-node-editor-host__recovery p { margin: 0; overflow-wrap: anywhere; }
+.story-node-editor-host__recovery-error { padding: 12px; background: #fff2f4; border-radius: 12px; }
+@media (max-width: 900px) { .story-node-editor-host { padding: 18px; } }

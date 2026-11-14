@@ -3,7 +3,7 @@ import { useEffect, useId, useMemo, useState } from "react";
 
 import type { SupportedOperationsDto } from "../../../shared/ipc-contracts/device";
 import type { DeviceStoryDto } from "../../../shared/ipc-contracts/device-library";
-import { Button, Field, StateChip, SurfacePanel } from "../../../shared/ui";
+import { Button, Field, Icon, StateChip, SurfacePanel } from "../../../shared/ui";
 import {
   MAX_STORY_TITLE_CHARS,
   normalizeStoryTitle,
@@ -273,6 +273,7 @@ export function DeviceStoryInspector({
       className="device-inspector"
     >
       <h2 id={titleId} className="device-inspector__title">
+        <Icon name="book" />
         Histoire sélectionnée
       </h2>
 
@@ -292,7 +293,11 @@ export function DeviceStoryInspector({
           alt=""
           aria-hidden="true"
         />
-      ) : null}
+      ) : (
+        <div className="device-inspector__placeholder" aria-hidden="true">
+          <Icon name="book" />
+        </div>
+      )}
       <h3 className="device-inspector__name">
         {recognized ? story.title : "Histoire non reconnue"}
       </h3>

@@ -5,7 +5,7 @@ import { createStory } from "../../../ipc/commands/story";
 import { toAppError, type AppError } from "../../../shared/errors/app-error";
 import type { ContentSourcePolicy } from "../../../shared/ipc-contracts/import-export";
 import type { StoryCardDto } from "../../../shared/ipc-contracts/library";
-import { Button, Dialog, Field, ProgressIndicator } from "../../../shared/ui";
+import { Button, Dialog, Field, Icon, ProgressIndicator } from "../../../shared/ui";
 import {
   MAX_STORY_TITLE_CHARS,
   normalizeStoryTitle,
@@ -250,220 +250,243 @@ export function CreateStoryDialog({
       title="Créer une histoire"
       ariaDescribedBy={descriptionId}
     >
-      <p id={descriptionId} className="create-story-dialog__description">
-        Donne un titre à ta nouvelle histoire. Rustory crée un brouillon local
-        que tu peux éditer plus tard.
-      </p>
-      <Field
-        id={titleFieldId}
-        label="Titre"
-        value={title}
-        onChange={handleTitleChange}
-        placeholder="Le soleil couchant…"
-        autoFocus
-        aria-describedby={describedBy || undefined}
-        onKeyDown={handleFieldKeyDown}
-        inputRef={fieldRef}
-      />
-      <p
-        id={counterId}
-        className={[
-          "create-story-dialog__counter",
-          charCount > MAX_STORY_TITLE_CHARS
-            ? "create-story-dialog__counter--over"
-            : null,
-        ]
-          .filter(Boolean)
-          .join(" ")}
-        aria-live="polite"
-      >
-        {charCount} / {MAX_STORY_TITLE_CHARS} caractères
-      </p>
-      {issue !== null && !isSubmitting ? (
-        <p id={reasonId} className="create-story-dialog__reason">
-          {reasonFor(issue, { charCount })}
-        </p>
-      ) : null}
-      {serverError !== null ? (
-        <p
-          id={serverErrorId}
-          className="create-story-dialog__server-error"
-          role="alert"
-        >
-          {serverError.message}
-          {serverError.userAction ? ` ${serverError.userAction}` : ""}
-        </p>
-      ) : null}
-      {isSubmitting ? (
-        <div id={progressId} className="create-story-dialog__progress">
-          <ProgressIndicator mode="indeterminate" label="Création en cours…" />
-        </div>
-      ) : null}
-      <div className="create-story-dialog__actions">
-        <Button
-          variant="secondary"
-          onClick={handleCancel}
-          aria-disabled={isSubmitting || undefined}
-        >
-          Annuler
-        </Button>
-        {canSubmit ? (
-          <Button variant="primary" onClick={() => void handleSubmit()}>
-            Créer
-          </Button>
-        ) : (
-          <Button
-            variant="primary"
-            aria-disabled="true"
-            aria-describedby={
-              issue !== null ? reasonId : isSubmitting ? progressId : undefined
-            }
-          >
-            Créer
-          </Button>
-        )}
-      </div>
-      {onCreateFromFolderRequest ? (
-        <div className="create-story-dialog__folder-entry">
-          <p className="create-story-dialog__folder-hint">
-            Ou démarre depuis un dossier préparé hors de Rustory
+      <div className="create-story-dialog">
+        <div className="create-story-dialog__new-story">
+          <span className="create-story-dialog__illustration" aria-hidden="true">
+            <Icon name="wand" />
+          </span>
+          <p id={descriptionId} className="create-story-dialog__description">
+            Donne un titre à ta nouvelle histoire. Rustory crée un brouillon local
+            que tu peux éditer plus tard.
           </p>
-          <Button
-            variant="quiet"
-            onClick={handleCreateFromFolder}
-            aria-disabled={
-              isSubmitting || isCreateFromFolderUnavailable || undefined
-            }
+          <Field
+            id={titleFieldId}
+            label="Titre"
+            value={title}
+            onChange={handleTitleChange}
+            placeholder="Le soleil couchant…"
+            autoFocus
+            aria-describedby={describedBy || undefined}
+            onKeyDown={handleFieldKeyDown}
+            inputRef={fieldRef}
+          />
+          <p
+            id={counterId}
+            className={[
+              "create-story-dialog__counter",
+              charCount > MAX_STORY_TITLE_CHARS
+                ? "create-story-dialog__counter--over"
+                : null,
+            ]
+              .filter(Boolean)
+              .join(" ")}
+            aria-live="polite"
           >
-            Choisir un dossier…
-          </Button>
-        </div>
-      ) : null}
-      {onCreateFromArchiveRequest ? (
-        <div className="create-story-dialog__folder-entry">
-          <p className="create-story-dialog__folder-hint">
-            Ou importe une archive de pack au format communautaire
+            {charCount} / {MAX_STORY_TITLE_CHARS} caractères
           </p>
-          <Button
-            variant="quiet"
-            onClick={handleCreateFromArchive}
-            aria-disabled={
-              isSubmitting || isCreateFromArchiveUnavailable || undefined
-            }
-          >
-            Choisir une archive de pack (.zip)…
-          </Button>
+          {issue !== null && !isSubmitting ? (
+            <p id={reasonId} className="create-story-dialog__reason">
+              {reasonFor(issue, { charCount })}
+            </p>
+          ) : null}
+          {serverError !== null ? (
+            <p
+              id={serverErrorId}
+              className="create-story-dialog__server-error"
+              role="alert"
+            >
+              {serverError.message}
+              {serverError.userAction ? ` ${serverError.userAction}` : ""}
+            </p>
+          ) : null}
+          {isSubmitting ? (
+            <div id={progressId} className="create-story-dialog__progress">
+              <ProgressIndicator mode="indeterminate" label="Création en cours…" />
+            </div>
+          ) : null}
+          <div className="create-story-dialog__actions">
+            <Button
+              variant="secondary"
+              onClick={handleCancel}
+              aria-disabled={isSubmitting || undefined}
+            >
+              Annuler
+            </Button>
+            {canSubmit ? (
+              <Button variant="primary" onClick={() => void handleSubmit()}>
+                <Icon name="plus" />
+                Créer
+              </Button>
+            ) : (
+              <Button
+                variant="primary"
+                aria-disabled="true"
+                aria-describedby={
+                  issue !== null ? reasonId : isSubmitting ? progressId : undefined
+                }
+              >
+                <Icon name="plus" />
+                Créer
+              </Button>
+            )}
+          </div>
         </div>
-      ) : null}
-      {onCreateFromRssRequest || onCreateFromWebRequest ? (
-        <div
-          className="create-story-dialog__sources"
-          role="group"
-          aria-label="Sources de contenu"
-        >
-          {contentSourcePolicy !== null &&
-          contentSourcePolicy.sources.some(
-            (s) => s.kind === "rss" || s.kind === "web",
-          ) ? (
-            contentSourcePolicy.sources.map((entry) => {
-              const isRssEntry = entry.kind === "rss";
-              const isWebEntry = entry.kind === "web";
-              const isActionable =
-                entry.activation === "enabled" &&
-                ((isRssEntry && onCreateFromRssRequest) ||
-                  (isWebEntry && onCreateFromWebRequest));
-              const subTextId = `${sourcesId}-${entry.kind}`;
-              return (
-                <div key={entry.kind} className="create-story-dialog__source">
-                  {isActionable ? (
-                    <>
-                      <Button
-                        variant="quiet"
-                        onClick={
-                          isWebEntry
-                            ? handleCreateFromWeb
-                            : handleCreateFromRss
-                        }
-                        aria-disabled={
-                          isSubmitting ||
-                          (isWebEntry
-                            ? isCreateFromWebUnavailable
-                            : isCreateFromRssUnavailable) ||
-                          undefined
-                        }
-                        aria-describedby={subTextId}
-                      >
-                        {isWebEntry
-                          ? "Démarrer depuis une page web"
-                          : "Démarrer depuis une source externe (RSS)"}
-                      </Button>
-                      <p
-                        id={subTextId}
-                        className="create-story-dialog__source-note"
-                      >
-                        <span className="create-story-dialog__source-label">
-                          {entry.label}
-                        </span>
-                        <span className="create-story-dialog__source-marker">
-                          {entry.activationMarker}
-                        </span>
-                      </p>
-                    </>
-                  ) : (
-                    <>
-                      {/* A non-enabled kind (or a non-RSS kind — no
-                          ingestion flow exists for it) renders VISIBLE but
-                          DISABLED, its Rust-carried reason reachable from
-                          the keyboard (Disabled Actions pattern). The
-                          reason-less fallback (an enabled non-RSS kind —
-                          refused upstream by the policy guard) stays
-                          honest: the fail-closed reason, NEVER the
-                          activation marker on a disabled entry. */}
-                      <Button
-                        variant="quiet"
-                        aria-disabled="true"
-                        aria-describedby={subTextId}
-                      >
-                        {isRssEntry
-                          ? "Démarrer depuis une source externe (RSS)"
-                          : isWebEntry
-                            ? "Démarrer depuis une page web"
-                            : entry.label}
-                      </Button>
-                      <p
-                        id={subTextId}
-                        className="create-story-dialog__source-reason"
-                      >
-                        {entry.reason ?? POLICY_FAIL_CLOSED_REASON}
-                      </p>
-                    </>
-                  )}
-                </div>
-              );
-            })
-          ) : (
-            <div className="create-story-dialog__source">
-              {/* FAIL-CLOSED: no readable policy (absent, failed read, or a
-                  policy without the rss line) — the external-source entry
-                  renders disabled with the frozen frontend-owned reason,
-                  never active-by-default. The title path above is intact. */}
+        <div className="create-story-dialog__choices">
+          {onCreateFromFolderRequest ? (
+            <div className="create-story-dialog__folder-entry">
+              <span className="create-story-dialog__choice-icon" aria-hidden="true">
+                <Icon name="folder" />
+              </span>
+              <p className="create-story-dialog__folder-hint">
+                Ou démarre depuis un dossier préparé hors de Rustory
+              </p>
               <Button
                 variant="quiet"
-                aria-disabled="true"
-                aria-describedby={`${sourcesId}-fail-closed`}
+                onClick={handleCreateFromFolder}
+                aria-disabled={
+                  isSubmitting || isCreateFromFolderUnavailable || undefined
+                }
               >
-                Démarrer depuis une source externe (RSS)
+                Choisir un dossier…
               </Button>
-              <p
-                id={`${sourcesId}-fail-closed`}
-                className="create-story-dialog__source-reason"
-              >
-                {POLICY_FAIL_CLOSED_REASON}
-              </p>
             </div>
-          )}
+          ) : null}
+          {onCreateFromArchiveRequest ? (
+            <div className="create-story-dialog__folder-entry create-story-dialog__folder-entry--archive">
+              <span className="create-story-dialog__choice-icon" aria-hidden="true">
+                <Icon name="upload" />
+              </span>
+              <p className="create-story-dialog__folder-hint">
+                Ou importe une archive de pack au format communautaire
+              </p>
+              <Button
+                variant="quiet"
+                onClick={handleCreateFromArchive}
+                aria-disabled={
+                  isSubmitting || isCreateFromArchiveUnavailable || undefined
+                }
+              >
+                Choisir une archive de pack (.zip)…
+              </Button>
+            </div>
+          ) : null}
+          {onCreateFromRssRequest || onCreateFromWebRequest ? (
+            <div
+              className="create-story-dialog__sources"
+              role="group"
+              aria-label="Sources de contenu"
+            >
+              {contentSourcePolicy !== null &&
+              contentSourcePolicy.sources.some(
+                (s) => s.kind === "rss" || s.kind === "web",
+              ) ? (
+                contentSourcePolicy.sources.map((entry) => {
+                  const isRssEntry = entry.kind === "rss";
+                  const isWebEntry = entry.kind === "web";
+                  const isActionable =
+                    entry.activation === "enabled" &&
+                    ((isRssEntry && onCreateFromRssRequest) ||
+                      (isWebEntry && onCreateFromWebRequest));
+                  const subTextId = `${sourcesId}-${entry.kind}`;
+                  return (
+                    <div key={entry.kind} className={`create-story-dialog__source${isActionable ? " create-story-dialog__source--active" : ""}`}>
+                      <span className="create-story-dialog__choice-icon" aria-hidden="true">
+                        <Icon name={isWebEntry ? "link" : "headphones"} />
+                      </span>
+                      {isActionable ? (
+                        <>
+                          <Button
+                            variant="quiet"
+                            onClick={
+                              isWebEntry
+                                ? handleCreateFromWeb
+                                : handleCreateFromRss
+                            }
+                            aria-disabled={
+                              isSubmitting ||
+                              (isWebEntry
+                                ? isCreateFromWebUnavailable
+                                : isCreateFromRssUnavailable) ||
+                              undefined
+                            }
+                            aria-describedby={subTextId}
+                          >
+                            {isWebEntry
+                              ? "Démarrer depuis une page web"
+                              : "Démarrer depuis une source externe (RSS)"}
+                          </Button>
+                          <p
+                            id={subTextId}
+                            className="create-story-dialog__source-note"
+                          >
+                            <span className="create-story-dialog__source-label">
+                              {entry.label}
+                            </span>
+                            <span className="create-story-dialog__source-marker">
+                              {entry.activationMarker}
+                            </span>
+                          </p>
+                        </>
+                      ) : (
+                        <>
+                          {/* A non-enabled kind (or a non-RSS kind — no
+                              ingestion flow exists for it) renders VISIBLE but
+                              DISABLED, its Rust-carried reason reachable from
+                              the keyboard (Disabled Actions pattern). The
+                              reason-less fallback (an enabled non-RSS kind —
+                              refused upstream by the policy guard) stays
+                              honest: the fail-closed reason, NEVER the
+                              activation marker on a disabled entry. */}
+                          <Button
+                            variant="quiet"
+                            aria-disabled="true"
+                            aria-describedby={subTextId}
+                          >
+                            {isRssEntry
+                              ? "Démarrer depuis une source externe (RSS)"
+                              : isWebEntry
+                                ? "Démarrer depuis une page web"
+                                : entry.label}
+                          </Button>
+                          <p
+                            id={subTextId}
+                            className="create-story-dialog__source-reason"
+                          >
+                            {entry.reason ?? POLICY_FAIL_CLOSED_REASON}
+                          </p>
+                        </>
+                      )}
+                    </div>
+                  );
+                })
+              ) : (
+                <div className="create-story-dialog__source">
+                  <span className="create-story-dialog__choice-icon" aria-hidden="true">
+                    <Icon name="headphones" />
+                  </span>
+                  {/* FAIL-CLOSED: no readable policy (absent, failed read, or a
+                      policy without the rss line) — the external-source entry
+                      renders disabled with the frozen frontend-owned reason,
+                      never active-by-default. The title path above is intact. */}
+                  <Button
+                    variant="quiet"
+                    aria-disabled="true"
+                    aria-describedby={`${sourcesId}-fail-closed`}
+                  >
+                    Démarrer depuis une source externe (RSS)
+                  </Button>
+                  <p
+                    id={`${sourcesId}-fail-closed`}
+                    className="create-story-dialog__source-reason"
+                  >
+                    {POLICY_FAIL_CLOSED_REASON}
+                  </p>
+                </div>
+              )}
+            </div>
+          ) : null}
         </div>
-      ) : null}
+      </div>
     </Dialog>
   );
 }

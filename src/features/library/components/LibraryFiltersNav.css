@@ -1,38 +1,75 @@
 .library-filters-nav {
   display: flex;
   flex-direction: column;
-  gap: var(--space-2);
+  gap: 8px;
 }
 
-.library-filters-nav__title {
-  margin: 0;
-  font-size: var(--font-size-label);
-  font-weight: var(--font-weight-semibold);
+.library-filters-nav__brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--color-action-primary);
+  font-family: var(--font-family-display);
+  font-size: 30px;
+  font-weight: 600;
+  letter-spacing: -.6px;
+}
+
+.library-filters-nav__brand-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  border-radius: 14px;
+  background: var(--color-action-primary);
+  color: #fffbf3;
+  transform: rotate(-6deg);
+}
+
+.library-filters-nav__brand-dot {
+  color: #d18a00;
+  margin-left: -9px;
+}
+
+.library-filters-nav__tagline {
   color: var(--color-text-secondary);
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
+  font-size: 12px;
+  margin: 5px 0 32px;
 }
 
 .library-filters-nav__list {
-  list-style: none;
-  margin: 0;
-  padding: 0;
   display: flex;
   flex-direction: column;
-  gap: var(--space-1);
+  gap: 8px;
 }
 
-.library-filters-nav__list .ds-button {
+.library-filters-nav__entry {
+  display: flex;
+  align-items: center;
+  gap: 12px;
   width: 100%;
-  justify-content: flex-start;
+  min-height: 48px;
+  padding: 12px;
+  border: 0;
+  border-radius: 14px;
+  background: transparent;
+  color: var(--color-text-secondary);
+  font: 700 14px var(--font-family-ui);
+  text-align: left;
+  cursor: pointer;
+  transition: background .15s;
 }
 
-.library-filters-nav__item--selected {
-  background: var(--color-surface-sunken);
+.library-filters-nav__entry:hover {
+  background: #f0ecdf;
 }
 
-.library-filters-nav__reason {
-  margin: var(--space-2) 0 0 0;
-  font-size: var(--font-size-meta);
-  color: var(--color-text-muted);
+.library-filters-nav__entry[aria-current] {
+  color: var(--color-action-primary);
+  background: #e3f3ea;
+}
+
+.library-filters-nav__entry svg {
+  flex-shrink: 0;
 }

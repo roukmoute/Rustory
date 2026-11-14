@@ -1,6 +1,6 @@
 import type React from "react";
 
-import { Button, ProgressIndicator, StateChip } from "../../../shared/ui";
+import { Button, Icon, ProgressIndicator, StateChip } from "../../../shared/ui";
 import type {
   CreatableSummary,
   ImportFinding,
@@ -17,6 +17,7 @@ import type {
 } from "../hooks/use-archive-creation";
 
 import "./CreateFromArchiveSurface.css";
+import "./ImportSurface.css";
 
 export interface CreateFromArchiveSurfaceProps {
   status: ArchiveCreationStatus;
@@ -49,9 +50,15 @@ export function CreateFromArchiveSurface({
 
   return (
     <section
-      className="create-from-archive"
+      className="create-from-archive import-flow"
       aria-label="Création depuis une archive de pack"
     >
+      <header className="import-flow__header">
+        <span className="import-flow__icon" aria-hidden="true">
+          <Icon name="upload" />
+        </span>
+        <h2 className="import-flow__title">Création depuis une archive de pack</h2>
+      </header>
       {/* Polite region mounted while the surface is shown so AT picks up
           the success announcement atomically. */}
       <div

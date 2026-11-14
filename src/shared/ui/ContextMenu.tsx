@@ -40,6 +40,7 @@ export function ContextMenu({
   onClose,
 }: ContextMenuProps): React.JSX.Element {
   const menuRef = useRef<HTMLDivElement>(null);
+  const returnFocusRef = useRef<HTMLElement | null>(null);
   const [pos, setPos] = useState<{ left: number; top: number }>({
     left: x,
     top: y,
@@ -67,7 +68,14 @@ export function ContextMenu({
       Math.min(y, window.innerHeight - rect.height - margin),
     );
     setPos({ left, top });
-    // Move focus into the menu so keyboard users land on it.
+    // Capture the keyboard trigger before moving focus into the menu. Do not
+    // replace it with the menu itself on StrictMode's second effect pass.
+    if (!el.contains(document.activeElement)) {
+      returnFocusRef.current =
+        document.activeElement instanceof HTMLElement
+          ? document.activeElement
+          : null;
+    }
     el.focus();
   }, [x, y]);
 
@@ -75,6 +83,7 @@ export function ContextMenu({
     const onKey = (event: KeyboardEvent): void => {
       if (event.key === "Escape") {
         event.preventDefault();
+        if (returnFocusRef.current?.isConnected) returnFocusRef.current.focus();
         onClose();
       }
     };
@@ -113,7 +122,8 @@ export function ContextMenu({
   const activate = (index: number): void => {
     const item = items[index];
     if (!item || item.disabled) return;
-    // Close first so the menu is gone before the action's own surface opens.
+    // Restore the trigger before an action opens its own dialog/route.
+    if (returnFocusRef.current?.isConnected) returnFocusRef.current.focus();
     onClose();
     item.onSelect();
   };

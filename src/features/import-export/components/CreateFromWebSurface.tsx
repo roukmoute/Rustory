@@ -3,6 +3,7 @@ import { useEffect, useId, useState } from "react";
 
 import {
   Button,
+  Icon,
   Field,
   ProgressIndicator,
   StateChip,
@@ -11,6 +12,7 @@ import type { WebPreviewItem } from "../../../shared/ipc-contracts/import-export
 import type { WebCreationStatus } from "../hooks/use-web-creation";
 
 import "./CreateFromWebSurface.css";
+import "./ImportSurface.css";
 
 export interface CreateFromWebSurfaceProps {
   /** The surface renders NOTHING while closed. Opened by the creation
@@ -80,9 +82,15 @@ export function CreateFromWebSurface({
 
   return (
     <section
-      className="create-from-web"
+      className="create-from-web import-flow"
       aria-label="Création depuis une page web"
     >
+      <header className="import-flow__header">
+        <span className="import-flow__icon" aria-hidden="true">
+          <Icon name="link" />
+        </span>
+        <h2 className="import-flow__title">Création depuis une page web</h2>
+      </header>
       {/* Polite region mounted while the surface is shown so AT picks up
           the terminal announcements atomically: the success chip AND the
           policy refusal route through THIS persistent region (a live

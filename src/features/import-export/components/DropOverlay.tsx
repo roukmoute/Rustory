@@ -1,4 +1,5 @@
 import type React from "react";
+import { Icon } from "../../../shared/ui";
 
 import { useDropShell } from "../../../shell/state/drop-shell-store";
 
@@ -28,7 +29,10 @@ export function DropOverlay(): React.JSX.Element | null {
 
   return (
     <div className="drop-overlay" aria-hidden="true">
-      <p className="drop-overlay__copy">{DROP_OVERLAY_COPY}</p>
+      <p className="drop-overlay__copy">
+        <Icon name="upload" />
+        {DROP_OVERLAY_COPY}
+      </p>
     </div>
   );
 }

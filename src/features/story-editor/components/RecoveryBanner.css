@@ -2,14 +2,17 @@
   display: grid;
   gap: var(--space-3);
   padding: var(--space-4);
-  margin-bottom: var(--space-4);
-  border-left: 3px solid var(--color-accent-warning, #b88b3a);
+  margin-bottom: 0;
+  border-radius: 18px;
+  background: #fff6d9;
+  border-left: 4px solid #c68d15;
 }
 
 .recovery-banner__title {
   margin: 0;
-  font-size: 1.125rem;
-  font-weight: 600;
+  font-family: var(--font-family-display, var(--font-family-ui));
+  font-size: 1.3rem;
+  font-weight: 500;
   color: var(--color-text-primary);
 }
 
@@ -69,8 +72,9 @@
   gap: var(--space-2);
   padding: var(--space-3);
   margin-top: var(--space-2);
-  background: var(--color-surface-error, rgba(178, 73, 73, 0.08));
-  border-left: 3px solid var(--color-accent-error, #b24949);
+  background: #fff2f4;
+  border-radius: 12px;
+  border-left: 3px solid var(--color-state-error);
 }
 
 .recovery-banner__alert-message {
@@ -83,3 +87,5 @@
   color: var(--color-text-secondary);
   font-size: 0.875rem;
 }
+
+@media (max-width: 640px) { .recovery-banner { padding: 18px; } .recovery-banner__diff-row { grid-template-columns: 1fr; gap: 4px; } }

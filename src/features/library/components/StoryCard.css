@@ -1,137 +1,261 @@
-/* Uniform-height cards keep the grid tidy when a row mixes short and long
- * titles. The `__focusable` element carries the entire clickable zone so
- * there is no dead padding around the title. */
 .story-card {
-  min-height: 120px;
-  height: 100%;
+  position: relative;
   display: flex;
-  /* Override the default SurfacePanel padding: the clickable focusable
-   * child handles its own padding so clicks on the outer ring are never
-   * lost to an intermediate non-reactive area. */
-  padding: 0;
+  flex-direction: column;
+  height: 100%;
+  padding: 8px;
+  border: 1px solid var(--color-border-subtle);
+  border-radius: 22px;
+  box-shadow: none;
+  transition: box-shadow .18s,border-color .18s,transform .18s;
+  min-width: 0;
+  background: #fffefa;
+}
+
+.story-card:hover {
+  box-shadow: 0 8px 24px #23314a0b;
+  border-color: #93baa7;
+  transform: translateY(-2px);
+}
+
+.story-card--selected {
+  border-color: var(--color-action-primary);
+  box-shadow: 0 0 0 2px #1f7a5524;
+  background: #f1f9f3;
 }
 
 .story-card__focusable {
   position: relative;
   display: flex;
   flex-direction: column;
-  justify-content: center;
-  outline: none;
-  /* Inherit the surface's rounding so the selection border hugs the card
-   * outline exactly — no inner-offset ghost. */
-  border-radius: var(--radius-md);
   cursor: pointer;
-  padding: var(--space-3);
   width: 100%;
   flex: 1;
-  /* Two borders here: a transparent one so the layout does not reflow when
-   * the card becomes selected, and the colored one revealed by the
-   * --selected modifier. */
-  border: 2px solid transparent;
-  transition: border-color 120ms ease, background-color 120ms ease;
+  border-radius: 16px;
+  min-width: 0;
 }
 
-.story-card__focusable--selected {
-  border-color: var(--color-action-primary);
-  background: var(--color-surface-sunken);
+.story-card__artwork {
+  width: 100%;
+  aspect-ratio: 1.18;
+  border-radius: 15px;
+  overflow: hidden;
+  position: relative;
+  background: #cfe9f8;
+  margin-bottom: 14px;
 }
 
-/* The check mark lives in the top-right corner so the title can span the
- * full width of the card and keep a uniform typographic rhythm whether the
- * card is selected or not. */
-.story-card__marker {
-  position: absolute;
-  top: var(--space-2);
-  right: var(--space-2);
-  font-weight: var(--font-weight-semibold);
-  color: var(--color-action-primary);
-  line-height: 1;
+.story-card__artwork[data-color="1"] {
+  background: #ffdf82;
+  color: #895616;
 }
 
-/* Story cover (start-node image): same quiet sizing as the device-story
- * cards so the two collections read as one family. Decorative — the card's
- * accessible name stays the title. */
+.story-card__artwork[data-color="2"] {
+  background: #c2e6d5;
+  color: #23624b;
+}
+
+.story-card__artwork[data-color="3"] {
+  background: #f4bad0;
+  color: #8f315a;
+}
+
+.story-card__artwork[data-color="4"] {
+  background: #d9d1ed;
+  color: #605183;
+}
+
+.story-card__artwork[data-color="5"] {
+  background: #f4c4a1;
+  color: #915034;
+}
+
 .story-card__cover {
   width: 100%;
-  max-width: 96px;
-  height: auto;
-  border-radius: var(--radius-2, 8px);
-  margin-bottom: var(--space-2);
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.story-card__placeholder {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  color: inherit;
+  isolation: isolate;
+}
+
+.story-card__placeholder>svg {
+  transform: rotate(-10deg);
+  stroke-width: 1.3;
+  opacity: .75;
+  z-index: 1;
+}
+
+.story-card__placeholder::after {
+  content: "";
+  position: absolute;
+  bottom: -18%;
+  left: -12%;
+  width: 125%;
+  height: 48%;
+  border-radius: 50%;
+  background: #fff5;
+  transform: rotate(-10deg);
+}
+
+.story-card__sun {
+  position: absolute;
+  width: 44%;
+  aspect-ratio: 1;
+  border-radius: 50%;
+  background: #fff6;
+  top: 15%;
+  right: 14%;
+}
+
+.story-card__spark {
+  position: absolute;
+  top: 16%;
+  left: 18%;
+  font-size: 22px;
+  opacity: .65;
 }
 
 .story-card__title {
-  margin: 0;
-  font-size: var(--font-size-h3);
-  font-weight: var(--font-weight-semibold);
+  font: 800 15px/1.4 var(--font-family-ui);
   color: var(--color-text-primary);
-  line-height: var(--line-height-tight);
-  /* Guard the grid against titles that lack obvious word breaks so they
-   * wrap inside the card instead of blowing out the column width. */
+  margin: 0 5px 8px;
   overflow-wrap: anywhere;
-  /* Clamp to three lines so a common-sized title (~30 characters) fits
-   * comfortably without ellipsis, while the hard cap at 120 characters
-   * still collapses into a readable truncation. */
   display: -webkit-box;
   -webkit-line-clamp: 3;
   -webkit-box-orient: vertical;
   overflow: hidden;
 }
 
-/* File-import provenance + issue marker, below the focusable selection
- * zone so the on-demand report disclosure is a sibling of (never nested
- * inside) the card's role="button". */
+.story-card__marker {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  z-index: 2;
+  width: 23px;
+  height: 23px;
+  border: 1px solid #ffffffdd;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  color: white;
+  background: #ffffff90;
+  box-shadow: 0 1px 4px #23314a12;
+}
+
+.story-card__focusable--selected .story-card__marker {
+  background: var(--color-action-primary);
+  border-color: var(--color-action-primary);
+}
+
+.story-card__more {
+  position: absolute;
+  top: 16px;
+  right: 16px;
+  z-index: 2;
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border: 0;
+  border-radius: 50%;
+  background: #ffffffe6;
+  color: var(--color-text-primary);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity .15s;
+}
+
+.story-card:hover .story-card__more,
+.story-card:focus-within .story-card__more {
+  opacity: 1;
+}
+
+@media (hover:none) {
+  .story-card__more {
+    opacity: 1;
+  }
+}
+
 .story-card__import {
   display: flex;
   flex-direction: column;
-  gap: var(--space-1);
-  padding: 0 var(--space-3) var(--space-3);
+  gap: 6px;
+  padding: 0 5px 6px;
 }
 
 .story-card__provenance {
-  font-size: var(--font-size-caption, 0.75rem);
+  font-size: 12px;
+  font-weight: 700;
   color: var(--color-text-secondary);
 }
 
 .story-card__import-report {
-  font-size: var(--font-size-caption, 0.75rem);
+  font-size: 12px;
 }
 
 .story-card__import-summary {
-  display: inline-flex;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
   align-items: center;
-  gap: var(--space-2);
   cursor: pointer;
-  list-style: none;
 }
 
 .story-card__import-disclose {
-  color: var(--color-text-secondary);
+  color: var(--color-action-primary);
+  font-size: 11px;
   text-decoration: underline;
 }
 
 .story-card__import-body {
-  margin-top: var(--space-2);
+  margin-top: 8px;
 }
 
 .story-card__import-heading {
-  margin: 0 0 var(--space-1);
-  font-weight: var(--font-weight-semibold);
-  color: var(--color-text-primary);
+  margin: 8px 0 4px;
+  font-weight: 800;
 }
 
 .story-card__import-issues {
+  padding-left: 18px;
   margin: 0;
-  padding-left: var(--space-4);
   color: var(--color-text-secondary);
 }
 
 .story-card__import-issue {
-  margin: 0;
+  margin: 0 0 4px;
 }
 
-/* The « Sur la Lunii » stamp: a verified presence on the connected device,
- * shown under the title like the preparation badge. */
-.story-card__device-chip {
-  margin-top: var(--space-1);
+.story-card__device-chip,
+.story-card__preparation-chip {
   align-self: flex-start;
+  margin: 0 5px 8px;
+  font-size: 10px;
+}
+
+.story-card__actions {
+  padding: 8px 3px 3px;
+  margin-top: auto;
+}
+
+.story-card__actions .ds-button {
+  width: 100%;
+  min-height: 34px;
+  padding: 6px 9px;
+  background: #e3f3ea;
+  color: var(--color-action-primary);
+  font-size: 12px;
+  gap: 7px;
+}
+
+.story-card__actions .ds-button>svg:last-child {
+  margin-left: auto;
 }

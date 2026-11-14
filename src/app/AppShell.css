@@ -15,6 +15,8 @@
   font-family: var(--font-family-ui);
   font-size: 16px;
   line-height: var(--line-height-normal);
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
   background: var(--color-surface-base);
   color: var(--color-text-primary);
 }
@@ -34,4 +36,32 @@ html,
 .app-shell {
   min-height: 100vh;
   background: var(--color-surface-base);
+}
+
+body {
+  font-size: var(--font-size-body);
+  -webkit-font-smoothing: antialiased;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+  accent-color: var(--color-action-primary);
+}
+
+h1,
+h2,
+h3,
+h4 {
+  font-family: var(--font-family-display);
+  font-weight: var(--font-weight-display);
+  line-height: var(--line-height-tight);
+  letter-spacing: 0.005em;
+}
+
+a {
+  color: var(--color-action-primary);
+  text-underline-offset: 0.2em;
 }

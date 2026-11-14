@@ -164,8 +164,9 @@ function officialProfile() {
       {
         kind: "structuredArchive",
         label: "Archive structurée",
-        available: false,
-        reason: "Lecture d'archives non prise en charge",
+        formatLabel: "Format v1",
+        available: true,
+        capabilitiesLabel: "Création d'une histoire",
       },
     ],
     fileAssociation: {

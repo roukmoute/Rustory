@@ -522,6 +522,21 @@ recoverable refusal — a tagged outcome discriminant, never a persisted
 finding pair (nothing was created). The `source` aspect exists for every
 flow's defensive rendering, but only the RSS flow ever emits it.
 
+### Library navigation and visual presentation
+
+- `Ma bibliothèque` is the friendly heading/navigation label for the existing local library.
+- `Sur l'appareil` leads to the distinct device inventory. It never filters local
+  stories or claims a transfer took place.
+- `Aide et réglages` opens the existing settings and support-profile route.
+- `Afficher le panneau de l'appareil` / `Fermer le panneau de l'appareil` disclose
+  existing controls without discarding selection or a running operation.
+- `Reprendre` opens the existing story editor. It does not imply an unsaved draft.
+- `Affichage en cartes` / `Affichage en liste` change presentation only.
+- `Catalogue officiel` opens the existing catalogue maintenance panel, not a
+  store or a collection of downloadable commercial stories.
+- `Des histoires à emporter.`, `À lire, à écouter, à imaginer` and
+  `La première page de tes aventures` are decorative editorial copy, not states.
+
 ## Copy Rules
 
 - Prefer `Créer une histoire` over `Nouveau projet`.

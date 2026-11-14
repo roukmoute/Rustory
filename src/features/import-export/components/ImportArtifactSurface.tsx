@@ -1,6 +1,6 @@
 import type React from "react";
 
-import { Button, ProgressIndicator, StateChip } from "../../../shared/ui";
+import { Button, Icon, ProgressIndicator, StateChip } from "../../../shared/ui";
 import type { ImportFinding } from "../../../shared/ipc-contracts/import-export";
 import {
   categoryLabel,
@@ -14,6 +14,7 @@ import type {
 } from "../hooks/use-story-import";
 
 import "./ImportArtifactSurface.css";
+import "./ImportSurface.css";
 
 export interface ImportArtifactSurfaceProps {
   status: StoryImportStatus;
@@ -43,7 +44,13 @@ export function ImportArtifactSurface({
   if (status.kind === "idle") return null;
 
   return (
-    <section className="import-artifact" aria-label="Import d'une histoire">
+    <section className="import-artifact import-flow" aria-label="Import d'une histoire">
+      <header className="import-flow__header">
+        <span className="import-flow__icon" aria-hidden="true">
+          <Icon name="download" />
+        </span>
+        <h2 className="import-flow__title">Import d'une histoire</h2>
+      </header>
       {/* Polite region mounted while the surface is shown so AT picks up the
           success announcement atomically. */}
       <div

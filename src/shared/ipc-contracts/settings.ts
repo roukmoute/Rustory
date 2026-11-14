@@ -228,7 +228,7 @@ const ARTIFACT_FORMAT_LABELS: Readonly<
 > = {
   rustoryArtifact: "Format v1",
   structuredFolder: "Format v1",
-  structuredArchive: undefined,
+  structuredArchive: "Format v1",
 };
 
 /** The frozen kind → capabilities-label couples of the AVAILABLE
@@ -239,7 +239,7 @@ const ARTIFACT_CAPABILITIES_LABELS: Readonly<
 > = {
   rustoryArtifact: "Import et export",
   structuredFolder: "Création d'une histoire",
-  structuredArchive: undefined,
+  structuredArchive: "Création d'une histoire",
 };
 
 /** The frozen kind → reason couples of the DEFERRED lines. */
@@ -248,7 +248,7 @@ const ARTIFACT_LIMIT_REASONS: Readonly<
 > = {
   rustoryArtifact: undefined,
   structuredFolder: undefined,
-  structuredArchive: "Lecture d'archives non prise en charge",
+  structuredArchive: undefined,
 };
 
 /** The frozen extension label of the file-association block (the
@@ -465,9 +465,8 @@ export function isLocalArtifactLine(
   if (c.formatLabel !== ARTIFACT_FORMAT_LABELS[c.kind]) return false;
   if (c.available === true) {
     // An available line carries EXACTLY its frozen capability wording
-    // and no reason. A kind with no frozen wording (the deferred
-    // archive) can never arrive available — its capability copy does
-    // not exist, so the guard fails closed.
+    // and no reason. A kind with no frozen wording can never arrive
+    // available — its capability copy does not exist, so the guard fails closed.
     if (ARTIFACT_CAPABILITIES_LABELS[c.kind] === undefined) return false;
     return (
       c.capabilitiesLabel === ARTIFACT_CAPABILITIES_LABELS[c.kind] &&

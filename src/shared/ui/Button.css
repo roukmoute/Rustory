@@ -3,34 +3,38 @@
   align-items: center;
   justify-content: center;
   gap: var(--space-2);
-  padding: var(--space-2) var(--space-3);
+  min-height: 42px;
+  padding: 10px 20px;
   font-family: var(--font-family-ui);
   font-size: var(--font-size-label);
-  font-weight: var(--font-weight-medium);
+  font-weight: var(--font-weight-bold);
   line-height: var(--line-height-tight);
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-pill);
   border: 1px solid transparent;
   cursor: pointer;
   transition: background-color 120ms ease, border-color 120ms ease,
-    color 120ms ease;
+    color 120ms ease, box-shadow 120ms ease, transform 120ms ease;
 }
 
 .ds-button--primary {
-  background: var(--color-action-primary);
-  color: var(--color-action-on-primary);
-  border-color: var(--color-action-primary);
+  background: var(--color-action-bright);
+  color: var(--color-action-on-bright);
+  border-color: var(--color-action-bright);
+  box-shadow: 0 3px 0 rgb(18 64 43 / 10%);
 }
-.ds-button--primary:hover:not([aria-disabled="true"]) {
-  background: var(--color-action-primary-hover);
-  border-color: var(--color-action-primary-hover);
+.ds-button--primary:hover:not([aria-disabled="true"]):not(:disabled) {
+  background: var(--color-action-bright-hover);
+  border-color: var(--color-action-bright-hover);
+  box-shadow: 0 4px 8px rgb(18 64 43 / 14%);
 }
 
 .ds-button--secondary {
   background: var(--color-surface-raised);
   color: var(--color-text-primary);
-  border-color: var(--color-border-strong);
+  border-color: var(--color-border-subtle);
+  box-shadow: var(--shadow-sm);
 }
-.ds-button--secondary:hover:not([aria-disabled="true"]) {
+.ds-button--secondary:hover:not([aria-disabled="true"]):not(:disabled) {
   background: var(--color-surface-sunken);
 }
 
@@ -39,7 +43,7 @@
   color: var(--color-text-primary);
   border-color: transparent;
 }
-.ds-button--quiet:hover:not([aria-disabled="true"]) {
+.ds-button--quiet:hover:not([aria-disabled="true"]):not(:disabled) {
   background: var(--color-surface-sunken);
 }
 
@@ -49,7 +53,17 @@
   border-color: var(--color-action-destructive);
 }
 
-.ds-button[aria-disabled="true"] {
+.ds-button--destructive:hover:not([aria-disabled="true"]):not(:disabled) {
+  background: var(--color-action-destructive-hover);
+}
+
+.ds-button:active:not([aria-disabled="true"]):not(:disabled) {
+  transform: translateY(1px);
+}
+
+.ds-button[aria-disabled="true"],
+.ds-button:disabled {
   cursor: not-allowed;
-  opacity: 0.6;
+  opacity: 0.55;
+  box-shadow: none;
 }

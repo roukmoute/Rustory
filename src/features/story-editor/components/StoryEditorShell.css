@@ -1,64 +1,89 @@
 .story-editor-shell {
   display: flex;
   flex-direction: column;
-  gap: var(--space-4);
-  padding: var(--space-5);
-  max-width: 1120px;
-  margin: 0 auto;
+  gap: 24px;
   width: 100%;
+  max-width: 1240px;
+  margin: 0 auto;
+  padding: 32px clamp(20px, 3vw, 40px) 24px;
 }
 
-/* State bandeau: persisted title, editable field, autosave chip, recovery
- * banner (priority) and the save alert. Styled as an elevated card to match
- * the rest of the app surfaces. */
 .story-editor-shell__state {
+  display: grid;
+  grid-template-columns: minmax(0, 1.2fr) minmax(240px, 0.8fr);
+  gap: 24px 32px;
+  align-items: center;
+  padding: 28px;
+  background: var(--color-surface-raised);
+  border: 1px solid var(--color-border-subtle);
+  border-radius: 24px;
+  box-shadow: 0 6px 24px rgb(35 49 74 / 4%);
+}
+
+.story-editor-shell__state > .recovery-banner,
+.story-editor-shell__recovery-loading,
+.story-editor-shell__save-alert {
+  grid-column: 1 / -1;
+}
+
+.story-editor-shell__identity {
+  display: flex;
+  align-items: flex-start;
+  gap: 16px;
+  min-width: 0;
+}
+
+.story-editor-shell__emblem {
+  display: grid;
+  place-items: center;
+  flex: 0 0 56px;
+  height: 56px;
+  border-radius: 18px;
+  background: #FFC845;
+  color: #23314A;
+  transform: rotate(-4deg);
+}
+
+.story-editor-shell__emblem svg { width: 28px; height: 28px; }
+
+.story-editor-shell__heading {
   display: flex;
   flex-direction: column;
-  gap: var(--space-3);
-  padding: var(--space-4);
-  background: var(--color-surface-elevated, var(--color-surface-base));
-  border: 1px solid var(--color-border-subtle, rgba(0, 0, 0, 0.12));
-  border-radius: var(--radius-lg);
+  gap: 10px;
+  min-width: 0;
 }
 
 .story-editor-shell__title {
   margin: 0;
-  font-size: var(--font-size-h2);
-  font-weight: var(--font-weight-semibold);
+  font-family: var(--font-family-display, var(--font-family-ui));
+  font-size: clamp(1.65rem, 2.4vw, 2.15rem);
+  font-weight: 500;
   color: var(--color-text-primary);
-  line-height: var(--line-height-tight);
+  line-height: 1.15;
   overflow-wrap: anywhere;
 }
 
-.story-editor-shell__message {
-  margin: 0;
-  font-size: var(--font-size-body);
-  color: var(--color-text-secondary);
-  line-height: var(--line-height-normal);
-}
-
+.story-editor-shell__message,
 .story-editor-shell__recovery-loading {
   margin: 0;
+  font-size: var(--font-size-label);
   color: var(--color-text-secondary);
-  font-size: var(--font-size-body);
-  line-height: var(--line-height-normal);
+  line-height: 1.6;
 }
 
 .story-editor-shell__editor {
   display: flex;
   flex-direction: column;
-  gap: var(--space-2);
+  gap: 8px;
+  min-width: 0;
+  padding-left: 28px;
+  border-left: 1px solid var(--color-border-subtle);
 }
 
-.story-editor-shell__save-status {
-  display: flex;
-  align-items: center;
-  min-height: calc(var(--space-3) + var(--space-4));
-}
+.story-editor-shell__save-status { display: flex; align-items: center; min-height: 28px; }
+.story-editor-shell__review-chip { display: flex; }
 
-/* Screen-reader-only announce region: visually hidden, but still discoverable
- * by AT so `saved` transitions are spoken without a visual echo next to the
- * StateChip. */
+/* Only successful saves are spoken; transient pending/saving states stay visual. */
 .story-editor-shell__save-announce {
   position: absolute;
   width: 1px;
@@ -74,121 +99,93 @@
 .story-editor-shell__save-alert {
   display: flex;
   flex-direction: column;
-  gap: var(--space-2);
-  padding: var(--space-3);
-  border-left: 3px solid var(--color-feedback-error-border, #c3391c);
-  background: var(--color-surface-elevated, rgba(195, 57, 28, 0.06));
-  border-radius: var(--radius-2);
+  align-items: flex-start;
+  gap: 8px;
+  padding: 18px;
+  background: #fff2f4;
+  border: 1px solid #edc2cc;
+  border-left: 4px solid var(--color-state-error);
+  border-radius: 12px;
 }
 
-.story-editor-shell__save-alert-message {
-  margin: 0;
-  font-weight: var(--font-weight-semibold);
-  color: var(--color-text-primary);
+.story-editor-shell__save-alert-message { margin: 0; font-weight: 700; color: var(--color-text-primary); }
+.story-editor-shell__save-alert-action { margin: 0; color: var(--color-text-secondary); line-height: 1.6; }
+
+.story-editor-shell__zones {
+  display: grid;
+  grid-template-columns: minmax(260px, 0.8fr) minmax(0, 1.65fr);
+  gap: 24px;
+  align-items: start;
 }
 
-.story-editor-shell__save-alert-action {
-  margin: 0;
-  color: var(--color-text-secondary);
-  font-size: var(--font-size-body);
-  line-height: var(--line-height-normal);
-}
-
-/* Static review chip in the banner — a durable state, visually quiet. */
-.story-editor-shell__review-chip {
-  display: flex;
-}
-
-/* Named pack state replacing the structure navigator for a device-pack
- * story (titleOnly edit scope) — same zone framing as the navigator. */
 .story-editor-shell__pack-structure {
   display: flex;
   flex-direction: column;
-  gap: var(--space-2);
-  padding: var(--space-3);
-  border: 1px solid var(--color-border-subtle, rgba(0, 0, 0, 0.12));
-  border-radius: var(--radius-md);
-  background: var(--color-surface, transparent);
+  gap: 16px;
+  padding: 24px;
+  border: 1px solid var(--color-border-subtle);
+  border-radius: 18px;
+  background: var(--color-surface-raised);
 }
 
 .story-editor-shell__pack-structure-heading {
   margin: 0;
-  font-size: var(--font-size-h4, var(--font-size-body));
-  font-weight: var(--font-weight-semibold);
-  color: var(--color-text-primary);
-  line-height: var(--line-height-tight);
+  font-family: var(--font-family-display, var(--font-family-ui));
+  font-size: 1.25rem;
+  font-weight: 500;
+  line-height: 1.3;
 }
 
 .story-editor-shell__pack-structure-state {
   margin: 0;
-  padding: var(--space-3);
-  border: 1px dashed var(--color-border-subtle, rgba(0, 0, 0, 0.18));
-  border-radius: var(--radius-sm);
+  padding: 24px 16px;
+  border: 1px dashed var(--color-border-strong);
+  border-radius: 12px;
   color: var(--color-text-secondary);
+  background: var(--color-surface-base);
   font-size: var(--font-size-body);
-  line-height: var(--line-height-normal);
+  line-height: 1.6;
   text-align: center;
 }
 
-/* The two content zones coexist side by side (structure | current node);
- * stack on narrow widths so neither zone gets crushed. */
-.story-editor-shell__zones {
-  display: grid;
-  grid-template-columns: minmax(220px, 1fr) minmax(0, 2fr);
-  gap: var(--space-4);
-  align-items: start;
-}
-
-/*
- * The current-node zone FOLLOWS the scroll (the library decision-panel
- * pattern): selecting a node deep in a long structure list must not force a
- * scroll back up to edit it. `align-items: start` on the grid keeps the zone
- * at its content height so it has room to stick within its grid area; the
- * offset matches the shell's vertical rhythm. Taller than the viewport, the
- * zone scrolls internally (the bottom action bar is sticky too — the
- * max-height leaves it room) rather than hiding its foot.
- */
+/* Keep the selected node available beside long episode lists. */
 .story-editor-shell__zones > .story-node-editor-host {
   position: sticky;
-  top: var(--space-3);
-  max-height: calc(100vh - var(--space-3) - 6rem);
+  top: 20px;
+  max-height: calc(100vh - 112px);
   overflow-y: auto;
-  background: var(--color-surface-base);
-}
-
-@media (max-width: 720px) {
-  .story-editor-shell__zones {
-    grid-template-columns: 1fr;
-  }
-
-  /* Stacked zones: the node zone sits under the structure, nothing to pin. */
-  .story-editor-shell__zones > .story-node-editor-host {
-    position: static;
-    max-height: none;
-    overflow: visible;
-  }
+  scrollbar-gutter: stable;
+  scroll-padding-block: 20px;
 }
 
 .story-editor-shell__actions-region {
   display: flex;
   flex-direction: column;
-  gap: var(--space-2);
-  /* Always-visible action bar: the export status + the Exporter / Retour
-     buttons stick to the bottom of the viewport while the editor scrolls,
-     so they are reachable without scrolling to the very end of the page.
-     The negative horizontal margin + matching padding let the opaque
-     background span the shell's gutters and cover content scrolling behind. */
+  gap: 12px;
   position: sticky;
-  bottom: 0;
+  bottom: 12px;
   z-index: 5;
-  margin: 0 calc(-1 * var(--space-5)) calc(-1 * var(--space-5));
-  padding: var(--space-3) var(--space-5);
-  background: var(--color-surface-base);
-  border-top: 1px solid var(--color-border-subtle);
+  padding: 14px 20px;
+  border: 1px solid var(--color-border-subtle);
+  border-radius: 18px;
+  background: var(--color-surface-raised);
+  box-shadow: 0 8px 28px rgb(35 49 74 / 10%);
 }
 
-.story-editor-shell__actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--space-2);
+.story-editor-shell__actions { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; }
+
+@media (max-width: 900px) {
+  .story-editor-shell__state { grid-template-columns: 1fr; padding: 24px; }
+  .story-editor-shell__editor { padding: 20px 0 0; border-left: 0; border-top: 1px solid var(--color-border-subtle); }
+  .story-editor-shell__zones { grid-template-columns: minmax(220px, 0.8fr) minmax(0, 1.3fr); gap: 16px; }
+}
+
+@media (max-width: 720px) {
+  .story-editor-shell { gap: 16px; padding: 20px 16px; }
+  .story-editor-shell__state { padding: 20px; gap: 20px; }
+  .story-editor-shell__emblem { flex-basis: 44px; height: 44px; border-radius: 14px; }
+  .story-editor-shell__zones { grid-template-columns: 1fr; }
+  .story-editor-shell__zones > .story-node-editor-host { position: static; max-height: none; overflow: visible; }
+  .story-editor-shell__actions-region { bottom: 8px; padding: 12px; }
+  .story-editor-shell__actions { justify-content: flex-start; }
 }

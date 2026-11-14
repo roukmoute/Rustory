@@ -1,11 +1,12 @@
 import type React from "react";
+import { useId } from "react";
 
 import type { StoryCardDto } from "../../../shared/ipc-contracts/library";
 import type {
   ImportFinding,
   ImportState,
 } from "../../../shared/ipc-contracts/import-export";
-import { StateChip, SurfacePanel } from "../../../shared/ui";
+import { Button, Icon, StateChip, SurfacePanel } from "../../../shared/ui";
 import { useStoryCover } from "../hooks/use-story-cover";
 
 import "./StoryCard.css";
@@ -65,10 +66,9 @@ export function StoryCard({
   onContextMenu,
 }: StoryCardProps): React.JSX.Element {
   // The story's cover (start-node image), loaded lazily as a data URL.
+  const titleId = useId();
   const cover = useStoryCover(story.id, story.coverAssetId);
-  const handleContextMenu = (
-    event: React.MouseEvent<HTMLDivElement>,
-  ): void => {
+  const handleContextMenu = (event: React.MouseEvent<HTMLDivElement>): void => {
     if (!onContextMenu) return;
     // Replace the browser's default menu with ours, and make this card the
     // acted-on selection so the menu's actions target it.
@@ -110,7 +110,11 @@ export function StoryCard({
     // Swallow OS-level key auto-repeat so a held Space / Enter does not
     // flicker the selection or navigate repeatedly.
     if (event.repeat) {
-      if (event.key === " " || event.key === "Spacebar" || event.key === "Enter") {
+      if (
+        event.key === " " ||
+        event.key === "Spacebar" ||
+        event.key === "Enter"
+      ) {
         event.preventDefault();
       }
       return;
@@ -134,29 +138,48 @@ export function StoryCard({
     .join(" ");
 
   return (
-    <SurfacePanel elevation={1} as="article" className="story-card">
+    <SurfacePanel
+      elevation={1}
+      as="article"
+      className={`story-card${isSelected ? " story-card--selected" : ""}`}
+    >
       <div
         className={className}
         tabIndex={0}
         role="button"
         aria-pressed={isSelected}
-        aria-label={deviceStamp ? `${story.title}, ${deviceStamp}` : story.title}
+        aria-label={
+          deviceStamp ? `${story.title}, ${deviceStamp}` : story.title
+        }
         onClick={handleClick}
         onDoubleClick={handleDoubleClick}
         onContextMenu={handleContextMenu}
         onKeyDown={handleKeyDown}
       >
-        {isSelected ? (
-          <span className="story-card__marker" aria-hidden="true">
-            ✓
-          </span>
-        ) : null}
-        {cover ? (
-          // Decorative: the accessible name stays the title (aria-label on
-          // the button), so the cover never speaks twice.
-          <img className="story-card__cover" src={cover} alt="" />
-        ) : null}
-        <h3 className="story-card__title">{story.title}</h3>
+        <span className="story-card__marker" aria-hidden="true">
+          {isSelected ? "✓" : null}
+        </span>
+        <div
+          className="story-card__artwork"
+          data-color={
+            [...story.id].reduce((sum, char) => sum + char.charCodeAt(0), 0) % 6
+          }
+        >
+          {cover ? (
+            // Decorative: the accessible name stays the title (aria-label on
+            // the button), so the cover never speaks twice.
+            <img className="story-card__cover" src={cover} alt="" />
+          ) : (
+            <div className="story-card__placeholder" aria-hidden="true">
+              <span className="story-card__sun" />
+              <Icon name="book" size={64} />
+              <span className="story-card__spark">✦</span>
+            </div>
+          )}
+        </div>
+        <h3 id={titleId} className="story-card__title">
+          {story.title}
+        </h3>
         {deviceStamp ? (
           // The join of two authoritative reads (the library, the device
           // inventory's `localStoryId`): a verified presence, info tone.
@@ -174,12 +197,38 @@ export function StoryCard({
           />
         ) : null}
       </div>
+      {onContextMenu ? (
+        <button
+          type="button"
+          className="story-card__more"
+          aria-label="Actions de l’histoire"
+          aria-describedby={titleId}
+          onClick={(event) => {
+            if (!isSelected) onSelect(story.id, "replace");
+            const bounds = event.currentTarget.getBoundingClientRect();
+            onContextMenu(story.id, bounds.left, bounds.bottom);
+          }}
+        >
+          <Icon name="more" size={18} />
+        </button>
+      ) : null}
       {story.importState ? (
         <ImportProvenance
           state={story.importState}
           report={story.importReport ?? []}
         />
       ) : null}
+      <div className="story-card__actions">
+        <Button
+          variant="quiet"
+          onClick={() => onOpen(story.id)}
+          aria-describedby={titleId}
+        >
+          <Icon name="edit" size={15} />
+          Reprendre
+          <Icon name="arrow-right" size={15} />
+        </Button>
+      </div>
     </SurfacePanel>
   );
 }

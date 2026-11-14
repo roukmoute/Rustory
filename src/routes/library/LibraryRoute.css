@@ -31,9 +31,127 @@
 }
 
 /* Action row of the context-menu delete confirmation dialog. */
+
 .library-route__confirm-actions {
   display: flex;
   flex-wrap: wrap;
   gap: var(--space-2);
   margin-top: var(--space-3);
+}
+
+.library-route__local-section,
+.library-route__device-section {
+  min-width: 0;
+  scroll-margin-top: 24px;
+}
+
+.library-route__device-section:empty {
+  display: none;
+}
+
+.library-route__nav-footer {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  margin-top: auto;
+  padding-top: 48px;
+}
+
+.library-route__device-status {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 15px 11px;
+  background: #fffbf3;
+  border: 1px solid var(--color-border-subtle);
+  border-radius: 18px;
+  color: var(--color-text-primary);
+  text-align: left;
+  font: inherit;
+  cursor: pointer;
+}
+
+.library-route__device-status>span:nth-child(2) {
+  min-width: 0;
+  flex: 1;
+}
+
+.library-route__device-status strong {
+  display: block;
+  font-size: 14px;
+}
+
+.library-route__device-status>svg {
+  flex-shrink: 0;
+}
+
+.library-route__device-icon {
+  color: var(--color-action-primary);
+}
+
+.library-route__connection {
+  display: flex;
+  align-items: baseline;
+  gap: 5px;
+  margin-top: 5px;
+  font-size: 11px;
+  color: var(--color-text-secondary);
+  line-height: 1.4;
+}
+
+.library-route__connection i {
+  display: inline-block;
+  flex-shrink: 0;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #d89b12;
+}
+
+.library-route__connection i[data-connected="true"] {
+  background: var(--color-action-primary);
+}
+
+.library-route__local-note {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  color: var(--color-text-secondary);
+  font-size: 11px;
+  line-height: 1.5;
+  padding: 0 5px;
+}
+
+.library-route__local-note svg {
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+
+.library-route__details-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  color: var(--color-text-secondary);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.library-route__close {
+  background: transparent;
+  border: 1px solid var(--color-border-subtle);
+  border-radius: 50%;
+  width: 36px;
+  height: 36px;
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+  color: var(--color-text-primary);
+  flex-shrink: 0;
+}
+
+.library-route__close:disabled {
+  opacity: .45;
+  cursor: default;
 }

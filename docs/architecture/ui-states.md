@@ -210,30 +210,36 @@ Rustory is desktop-only. No `mobile` or `tablet` UI is supported.
 
 Enforced in `src-tauri/tauri.conf.json` via `app.windows[0].{width, height, minWidth, minHeight}`.
 
-Two visual modes only:
-
-- **standard mode**: target configuration, full layout, stable hierarchy
-- **reduced-density mode**: same architecture, margins and secondary columns lightly compressed. No structural rework, no hamburger, no bottom navigation, no second interface.
-
-Below the minimum size, the window refuses to shrink further through the Tauri constraint. No responsive fallback is attempted.
+The desktop layout adapts to the available width without changing the business
+flows. At 1024–1200px, navigation and spacing are reduced. Under 980 CSS pixels
+(e.g. browser preview or text zoom), the decision panel follows the collection
+instead of covering it. The native minimum window size remains unchanged.
 
 ## Library Layout Contract
 
-The library context is a stable three-column desktop grid. Future routes that
-compose the library must reuse this contract rather than invent a variant.
+The library opens on a two-column surface: navigation and the local collection.
+The device decision panel is disclosed on demand, or automatically when a story
+is selected in either collection. In-flight transfers keep the panel open.
 
-| Zone | Role | ARIA region | CSS column (standard mode) | CSS column (reduced-density) |
-| --- | --- | --- | --- | --- |
-| Left column | Global filters / navigation entry points | `<nav aria-label="Navigation bibliothèque">` | `minmax(240px, 280px)` | `200px` |
-| Center column | Story collection — the main work surface | `<main aria-label="Collection d'histoires">` | `1fr` | `1fr` |
-| Right column | Decision panel (device state + send CTA) | `<aside aria-label="Panneau de décision">` | `minmax(320px, 360px)` | `300px` |
+| Zone | Role | ARIA region |
+| --- | --- | --- |
+| Left | Library/device/catalogue navigation, settings, live device summary | `<nav aria-label="Navigation bibliothèque">` |
+| Center | Local collection and distinct device inventory | `<main aria-label="Collection d'histoires">` |
+| Optional right | Existing inspection, send and catalogue actions | `<aside aria-label="Panneau de décision">` |
 
-Rules:
-
-- The center column is the only working surface; the two side columns support decision without stealing focus.
-- Error, empty, filtered-empty and loading states all live inside the center column — never in the nav or in the panel.
-- The right-column panel stays intentionally minimal: device state + one primary CTA + a short, standardized reason when the CTA is disabled.
-- No fourth column, no collapsible drawer, no hamburger.
+- The panel and import surfaces stay mounted when closed: closing a presentation
+  must not reset a transfer, import, event listener or selection.
+- Selecting a story reveals its actions without stealing keyboard focus. Closing
+  the panel returns focus to its disclosure button in the sidebar.
+- The sidebar device summary stays visible even while the panel is closed. Its
+  wording reflects the scan result, never unproven write or synchronization status.
+- Device inventory stays separate from local stories, inside the central region.
+- The library supports cards and list views. This display choice preserves the
+  search, sort and selection. Search/empty/error/loading states remain local.
+- Each card has a direct `Reprendre` action and an accessible actions button in
+  addition to the existing click, Ctrl/Cmd+click, double-click and keyboard behavior.
+- Missing cover art uses a decorative illustration, never a fake content preview.
+- Unimplemented filter placeholders are removed from navigation.
 
 ## Device Detection Contract
 
@@ -1256,7 +1262,7 @@ a send REPLACES it) stays the authority on what a send would do.
 | Path | Route | Purpose |
 | --- | --- | --- |
 | `/` | redirect to `/library` | Default entry point. |
-| `/library` | `LibraryRoute` | Three-column library context (see `Library Layout Contract`). |
+| `/library` | `LibraryRoute` | Library with optional decision panel (see `Library Layout Contract`). |
 | `/story/:storyId/edit` | `StoryEditRoute` | Resume a `brouillon local` for a library-owned story. No device call, no mutation at this stage. |
 | `/settings` | `SettingsRoute` | Read-only `Profil de support` screen (see `Support Profile Screen Contract`). Standalone single-column view; zero network, zero mutation. |
 | `*` | redirect to `/library` | Unknown paths bounce back to the library. |

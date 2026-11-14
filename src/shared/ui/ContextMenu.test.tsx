@@ -1,4 +1,5 @@
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
+import { useState } from "react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
@@ -34,6 +35,21 @@ function renderMenu(overrides?: {
 }
 
 describe("<ContextMenu />", () => {
+  it("returns focus to the keyboard trigger after Escape", async () => {
+    const user = userEvent.setup();
+    function Harness() {
+      const [open, setOpen] = useState(false);
+      return <><button onClick={() => setOpen(true)}>Actions de l’histoire</button>{open ? <ContextMenu x={100} y={100} ariaLabel="Actions" onClose={() => setOpen(false)} items={[{label: "Éditer", onSelect: () => undefined}]} /> : null}</>;
+    }
+    render(<Harness />);
+    const trigger = screen.getByRole("button", { name: "Actions de l’histoire" });
+    await user.click(trigger);
+    expect(screen.getByRole("menu")).toHaveFocus();
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(screen.queryByRole("menu")).not.toBeInTheDocument();
+    expect(trigger).toHaveFocus();
+  });
+
   it("renders the items as a labelled menu", () => {
     renderMenu();
     const menu = screen.getByRole("menu", { name: "Actions pour Mon histoire" });

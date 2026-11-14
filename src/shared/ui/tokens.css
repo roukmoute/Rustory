@@ -1,76 +1,123 @@
-/*
- * Semantic design tokens. Neutral, warm palette (ivory / sand / graphite /
- * deep teal). WCAG AA contrast on primary text (≥ 4.5:1) is required at this
- * token level — any future palette change must re-verify contrast.
- *
- * Spacing uses an 8px base grid with an optional 4px micro-scale for short
- * labels and optical adjustments.
- */
+@import "../../assets/fonts/fonts.css";
 
+/* Rustory's warm, playful palette. Dark semantic colors carry text; the
+ * brighter accents are surfaces, always paired with a dark foreground. */
 :root {
-  /* Surfaces */
-  --color-surface-base: #fbfaf6;
+  --color-surface-base: #fffbf3;
   --color-surface-raised: #ffffff;
-  --color-surface-sunken: #f3f1ec;
-  --color-border-subtle: #e3ded4;
-  --color-border-strong: #b8b0a2;
+  --color-surface-sunken: #efe7d6;
+  --color-surface-shell: #efe7d6;
+  --color-surface-selected: #e3f3ea;
+  --color-border-subtle: #cdbfa0;
+  --color-border-strong: #a99a7b;
 
-  /* Text */
-  --color-text-primary: #1f2328;
-  --color-text-secondary: #57606a;
-  --color-text-muted: #7a7265;
+  --color-text-primary: #23314a;
+  --color-text-secondary: #4f5a6e;
+  --color-text-muted: #596477;
   --color-text-inverse: #ffffff;
 
-  /* Actions */
-  --color-action-primary: #1f4d44;
-  --color-action-primary-hover: #1a3f38;
+  --color-action-primary: #1f7a55;
+  --color-action-primary-hover: #155e40;
   --color-action-on-primary: #ffffff;
-  --color-action-destructive: #8f2f2f;
+  --color-action-bright: #3dd68c;
+  --color-action-bright-hover: #2bc77c;
+  --color-action-on-bright: #12402b;
+  --color-action-destructive: #a4354b;
+  --color-action-destructive-hover: #87263a;
 
-  /* States */
-  --color-state-info: #3a6b8a;
-  --color-state-success: #3d6b47;
-  --color-state-warning: #8a6a1f;
-  --color-state-error: #8f2f2f;
-  --color-state-neutral: #6a6258;
+  --color-accent-sky: #cfe9f8;
+  --color-accent-sun: #ffc845;
+  --color-accent-berry: #e8618c;
+  --color-state-info: #245e7c;
+  --color-state-success: #1f704c;
+  --color-state-warning: #79540b;
+  --color-state-error: #a4354b;
+  --color-state-neutral: #4f5a6e;
+  --color-surface-info: #e6f3fb;
+  --color-surface-success: #e3f3ea;
+  --color-surface-warning: #fff1c6;
+  --color-surface-error: #fbe8ee;
+  --color-border-info: #96c3db;
+  --color-border-success: #9acbb1;
+  --color-border-warning: #d5b458;
+  --color-border-error: #d79aa9;
 
-  /* Typography */
-  --font-family-ui: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
-    "Helvetica Neue", Arial, sans-serif;
-  --font-size-h1: 1.75rem; /* ~28-32px */
-  --font-size-h2: 1.375rem; /* ~22-24px */
-  --font-size-h3: 1.125rem; /* ~18-20px */
-  --font-size-body: 0.9375rem; /* ~15px */
-  --font-size-label: 0.8125rem; /* ~13px */
-  --font-size-meta: 0.75rem; /* ~12px */
+  --font-family-ui: "Nunito", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font-family-display: "Fredoka", "Nunito", sans-serif;
+  --font-family-mono: ui-monospace, "SFMono-Regular", Consolas, monospace;
+  --font-size-h1: 2rem;
+  --font-size-h2: 1.5rem;
+  --font-size-h3: 1.1875rem;
+  --font-size-h4: 1.0625rem;
+  --font-size-body: 0.9375rem;
+  --font-size-label: 0.875rem;
+  --font-size-meta: 0.8125rem;
   --font-weight-regular: 400;
-  --font-weight-medium: 500;
-  --font-weight-semibold: 600;
+  --font-weight-medium: 600;
+  --font-weight-semibold: 700;
+  --font-weight-bold: 800;
+  --font-weight-display: 600;
   --line-height-tight: 1.25;
   --line-height-normal: 1.5;
 
-  /* Spacing — 8px base grid, 4px micro-scale */
-  --space-1: 0.25rem; /* 4px */
-  --space-2: 0.5rem; /* 8px */
-  --space-3: 1rem; /* 16px */
-  --space-4: 1.5rem; /* 24px */
-  --space-5: 2rem; /* 32px */
-  --space-6: 3rem; /* 48px */
+  --space-1: 0.25rem;
+  --space-2: 0.5rem;
+  --space-3: 1rem;
+  --space-4: 1.5rem;
+  --space-5: 2rem;
+  --space-6: 3rem;
+  --radius-sm: 12px;
+  --radius-md: 18px;
+  --radius-lg: 24px;
+  --radius-field: 14px;
+  --radius-pill: 999px;
+  --shadow-sm: 0 2px 5px rgb(88 71 39 / 6%);
+  --shadow-md: 0 6px 20px rgb(88 71 39 / 9%);
+  --shadow-lg: 0 18px 50px rgb(35 49 74 / 16%);
+  --focus-ring: 0 0 0 2px var(--color-surface-base), 0 0 0 4px var(--color-action-primary);
 
-  /* Radii */
-  --radius-sm: 4px;
-  --radius-md: 8px;
-  --radius-lg: 12px;
-
-  /* Focus ring — visible, never only-by-color */
-  --focus-ring: 0 0 0 2px var(--color-surface-base),
-    0 0 0 4px var(--color-action-primary);
+  /* Compatibility aliases used by existing feature surfaces. */
+  --color-accent: var(--color-action-primary);
+  --color-accent-error: var(--color-state-error);
+  --color-accent-warning: var(--color-state-warning);
+  --color-border: var(--color-border-subtle);
+  --color-danger: var(--color-state-error);
+  --color-danger-border: var(--color-border-error);
+  --color-danger-surface: var(--color-surface-error);
+  --color-feedback-error: var(--color-state-error);
+  --color-feedback-error-border: var(--color-border-error);
+  --color-status-error: var(--color-state-error);
+  --color-surface: var(--color-surface-raised);
+  --color-surface-elevated: var(--color-surface-raised);
+  --color-text: var(--color-text-primary);
+  --color-text-default: var(--color-text-primary);
+  --color-warning-border: var(--color-border-warning);
+  --color-warning-text: var(--color-state-warning);
+  --font-size-caption: var(--font-size-meta);
+  --font-size-small: var(--font-size-label);
+  --font-size-title: var(--font-size-h2);
+  --radius-2: var(--radius-md);
+  --surface-error-border: var(--color-border-error);
+  --surface-warning-subtle: var(--color-surface-warning);
+  --text-primary: var(--color-text-primary);
+  --text-secondary: var(--color-text-secondary);
 }
 
+/* Outline survives forced-color modes and component-specific shadows. */
 *:focus-visible {
-  outline: none;
-  box-shadow: var(--focus-ring);
-  border-radius: var(--radius-sm);
+  outline: 2px solid var(--color-action-primary);
+  outline-offset: 3px;
+}
+
+::selection {
+  color: var(--color-action-on-bright);
+  background: var(--color-surface-selected);
+}
+
+.ds-icon {
+  display: inline-block;
+  flex: 0 0 auto;
+  vertical-align: middle;
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -80,5 +127,6 @@
     animation-duration: 0.01ms !important;
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
   }
 }

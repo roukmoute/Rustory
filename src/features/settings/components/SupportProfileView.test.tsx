@@ -148,8 +148,9 @@ function officialProfile(): SupportProfile {
       {
         kind: "structuredArchive",
         label: "Archive structurée",
-        available: false,
-        reason: "Lecture d'archives non prise en charge",
+        formatLabel: "Format v1",
+        available: true,
+        capabilitiesLabel: "Création d'une histoire",
       },
     ],
     fileAssociation: {
@@ -294,10 +295,10 @@ describe("<SupportProfileView />", () => {
   it("renders a non-available capability as a calm neutral chip plus its frozen reason — never a bare ✗", () => {
     renderView();
     // 13 available capabilities, 3 non-available ones (V3 ×2, FLAM ×1).
-    expect(screen.getAllByText("Disponible")).toHaveLength(13 + 2); // +2 artifacts
+    expect(screen.getAllByText("Disponible")).toHaveLength(13 + 3); // +3 artifacts
     expect(
       screen.getAllByText("Non disponible dans cette version"),
-    ).toHaveLength(3 + 1); // +1 deferred artifact
+    ).toHaveLength(3);
     expect(
       screen.getAllByText("Rétro-ingénierie du format en cours"),
     ).toHaveLength(2);
@@ -341,14 +342,14 @@ describe("<SupportProfileView />", () => {
     expect(openChip).toHaveClass("ds-chip--success");
     expect(openChip).toHaveTextContent("Disponible");
     expect(openItem.querySelector(".ds-chip--neutral")).toBeNull();
-    // The deferred artifact line follows the same couple.
-    const archiveReason = screen.getByText(
-      "Lecture d'archives non prise en charge",
-    );
-    const archiveItem = archiveReason.closest("li") as HTMLElement;
+    // The archive is available for story creation in the Rust registry.
+    const archiveItem = screen
+      .getByText("Archive structurée")
+      .closest("li") as HTMLElement;
     expect(archiveItem.querySelector(".ds-chip")).toHaveClass(
-      "ds-chip--neutral",
+      "ds-chip--success",
     );
+    expect(archiveItem).toHaveTextContent("Création d'une histoire");
   });
 
   it("renders the three artifact registry lines plus the node-media formats line verbatim", () => {
@@ -358,12 +359,12 @@ describe("<SupportProfileView />", () => {
     ).toBeInTheDocument();
     expect(screen.getByText("Dossier structuré")).toBeInTheDocument();
     expect(screen.getByText("Archive structurée")).toBeInTheDocument();
-    expect(screen.getAllByText("Format v1")).toHaveLength(2);
+    expect(screen.getAllByText("Format v1")).toHaveLength(3);
     expect(screen.getByText("Import et export")).toBeInTheDocument();
-    expect(screen.getByText("Création d'une histoire")).toBeInTheDocument();
+    expect(screen.getAllByText("Création d'une histoire")).toHaveLength(2);
     expect(
-      screen.getByText("Lecture d'archives non prise en charge"),
-    ).toBeInTheDocument();
+      screen.queryByText("Lecture d'archives non prise en charge"),
+    ).not.toBeInTheDocument();
     expect(
       screen.getByText(
         "Formats acceptés : images PNG, JPEG, BMP ; sons MP3, WAV, OGG",

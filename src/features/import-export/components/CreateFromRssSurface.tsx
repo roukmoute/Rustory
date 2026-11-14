@@ -3,6 +3,7 @@ import { useEffect, useId, useState } from "react";
 
 import {
   Button,
+  Icon,
   Field,
   ProgressIndicator,
   StateChip,
@@ -17,6 +18,7 @@ import { categoryLabel, categoryTone } from "../lib/recognition-labels";
 import type { RssCreationStatus } from "../hooks/use-rss-creation";
 
 import "./CreateFromRssSurface.css";
+import "./ImportSurface.css";
 
 export interface CreateFromRssSurfaceProps {
   /** The surface renders NOTHING while closed. Opened by the creation
@@ -89,9 +91,15 @@ export function CreateFromRssSurface({
 
   return (
     <section
-      className="create-from-rss"
+      className="create-from-rss import-flow"
       aria-label="Création depuis une source externe"
     >
+      <header className="import-flow__header">
+        <span className="import-flow__icon" aria-hidden="true">
+          <Icon name="headphones" />
+        </span>
+        <h2 className="import-flow__title">Création depuis une source externe</h2>
+      </header>
       {/* Polite region mounted while the surface is shown so AT picks up
           the terminal announcements atomically: the success chip AND the
           policy refusal route through THIS persistent region (a live

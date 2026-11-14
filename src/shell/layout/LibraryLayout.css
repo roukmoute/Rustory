@@ -1,50 +1,129 @@
 .library-layout {
   display: grid;
-  grid-template-columns: minmax(240px, 280px) 1fr minmax(320px, 360px);
-  gap: var(--space-3);
+  grid-template-columns: 220px minmax(0,1fr);
   min-height: 100vh;
-  padding: var(--space-3);
   background: var(--color-surface-base);
 }
 
-.library-layout__nav,
-.library-layout__main,
-.library-layout__panel {
+.library-layout__nav {
+  position: sticky;
+  top: 0;
+  height: 100vh;
   display: flex;
   flex-direction: column;
-  gap: var(--space-3);
-}
-
-/*
- * The decision panel follows the center's scroll so its actions stay reachable
- * without scrolling back up. `align-self: start` keeps the grid item at its
- * content height (not stretched to the tall center column) so it has room to
- * stick within its grid area; the offset matches the layout's top padding so
- * there is no jump when it pins. If the panel is taller than the viewport it
- * scrolls internally (max-height + overflow) rather than hiding its foot.
- */
-.library-layout__panel {
-  position: sticky;
-  top: var(--space-3);
-  align-self: start;
-  max-height: calc(100vh - 2 * var(--space-3));
+  gap: 24px;
+  padding: 30px 18px 22px;
+  border-right: 1px solid var(--color-border-subtle);
+  background: #f7f2e7;
   overflow-y: auto;
 }
 
-/*
- * Reduced-density mode. Exclusive upper bound (1279.98px) keeps the switch
- * point clean and avoids a 1px overlap with the standard mode rule.
- */
-@media (max-width: 1279.98px) {
+.library-layout__main {
+  min-width: 0;
+  padding: 40px clamp(24px,4vw,64px);
+  display: flex;
+  flex-direction: column;
+  gap: 28px;
+}
+
+.library-layout__panel {
+  position: sticky;
+  top: 0;
+  height: 100vh;
+  align-self: start;
+  overflow: auto;
+  padding: 22px 18px;
+  border-left: 1px solid var(--color-border-subtle);
+  background: #f7f2e7;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-width: 0;
+}
+
+.library-layout__panel[hidden] {
+  display: none;
+}
+
+.library-layout--details {
+  grid-template-columns: 220px minmax(0,1fr) 320px;
+}
+
+.library-layout--details .library-layout__main {
+  padding: 36px 28px;
+}
+
+@media (min-width:1700px) {
   .library-layout {
-    grid-template-columns: 200px 1fr 300px;
-    gap: var(--space-2);
-    padding: var(--space-2);
+    grid-template-columns: 248px minmax(0,1fr);
   }
 
-  /* Match the reduced padding so the pinned panel keeps aligning cleanly. */
-  .library-layout__panel {
-    top: var(--space-2);
-    max-height: calc(100vh - 2 * var(--space-2));
+  .library-layout--details {
+    grid-template-columns: 248px minmax(0,1fr) 360px;
+  }
+}
+
+@media (max-width:1200px) {
+  .library-layout {
+    grid-template-columns: 192px minmax(0,1fr);
+  }
+
+  .library-layout--details {
+    grid-template-columns: 192px minmax(0,1fr) 300px;
+  }
+
+  .library-layout__nav {
+    padding: 26px 12px 20px;
+  }
+
+  .library-layout__main {
+    padding: 30px 24px;
+  }
+
+  .library-layout--details .library-layout__main {
+    padding: 30px 20px;
+  }
+}
+
+@media (max-width:760px) {
+  .library-layout,
+  .library-layout--details {
+    grid-template-columns: 160px minmax(0,1fr);
+  }
+
+  .library-layout__main,
+  .library-layout--details .library-layout__main {
+    padding: 24px 16px;
+  }
+
+  .library-filters-nav__brand {
+    font-size: 24px;
+  }
+
+  .library-filters-nav__brand-icon {
+    display: none;
+  }
+
+  .library-filters-nav__entry {
+    font-size: 13px;
+    gap: 8px;
+    padding: 10px 8px;
+  }
+}
+
+@media (max-width:980px) {
+  .library-layout--details {
+    grid-template-columns: 160px minmax(0,1fr);
+  }
+
+  .library-layout--details .library-layout__nav {
+    grid-row: 1 / span 2;
+  }
+
+  .library-layout--details .library-layout__panel {
+    grid-column: 2;
+    position: static;
+    height: auto;
+    border-top: 1px solid var(--color-border-subtle);
   }
 }

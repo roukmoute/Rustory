@@ -25,6 +25,7 @@ import { bytesToBase64 } from "../lib/wav";
 import { AnnouncementRecorder } from "./AnnouncementRecorder";
 import {
   Button,
+  Icon,
   ProgressIndicator,
   StateChip,
   SurfacePanel,
@@ -263,6 +264,7 @@ export function StoryPresentationPanel({
       ariaLabelledBy="story-presentation-title"
     >
       <h2 id="story-presentation-title" className="story-presentation__title">
+        <Icon name="headphones" />
         {PANEL_TITLE}
       </h2>
       {read.kind === "loading" && (

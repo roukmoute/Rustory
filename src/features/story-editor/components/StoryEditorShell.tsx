@@ -4,7 +4,7 @@ import { useEffect, useRef } from "react";
 import { ExportStatusSurface } from "../../import-export/components/ExportStatusSurface";
 import { ExportStoryButton } from "../../import-export/components/ExportStoryButton";
 import type { UseStoryExport } from "../../import-export/hooks/use-story-export";
-import { Button, Field, StateChip } from "../../../shared/ui";
+import { Button, Field, Icon, StateChip } from "../../../shared/ui";
 import type { StateChipProps } from "../../../shared/ui";
 import type { AppError } from "../../../shared/errors/app-error";
 import type {
@@ -227,16 +227,23 @@ export function StoryEditorShell({
             draft — the latter would re-announce at every keystroke and
             misrepresent what is actually saved. The editable Field below
             carries the draft. */}
-        <h1 className="story-editor-shell__title">{detail.title}</h1>
-        {reviewChipLabel ? (
-          <div className="story-editor-shell__review-chip">
-            <StateChip tone="warning" label={reviewChipLabel} />
+        <div className="story-editor-shell__identity">
+          <span className="story-editor-shell__emblem" aria-hidden="true">
+            <Icon name="book" />
+          </span>
+          <div className="story-editor-shell__heading">
+            <h1 className="story-editor-shell__title">{detail.title}</h1>
+            {reviewChipLabel ? (
+              <div className="story-editor-shell__review-chip">
+                <StateChip tone="warning" label={reviewChipLabel} />
+              </div>
+            ) : null}
+            <p className="story-editor-shell__message">
+              Tu reprends le dernier brouillon local de cette histoire. L'appareil
+              n'est pas consulté.
+            </p>
           </div>
-        ) : null}
-        <p className="story-editor-shell__message">
-          Tu reprends le dernier brouillon local de cette histoire. L'appareil
-          n'est pas consulté.
-        </p>
+        </div>
         <div className="story-editor-shell__editor">
           <Field
             id="story-title"
@@ -439,6 +446,7 @@ export function StoryEditorShell({
             disabled={recoveryActive}
           />
           <Button variant="quiet" onClick={onBack}>
+            <Icon name="arrow-left" />
             Retour à la bibliothèque
           </Button>
         </div>

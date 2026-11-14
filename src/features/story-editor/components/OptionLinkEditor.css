@@ -51,14 +51,14 @@
 
 .option-link-editor__state {
   color: var(--color-text-secondary);
-  font-size: var(--font-size-caption, var(--font-size-body));
+  font-size: var(--font-size-label);
 }
 
 .option-link-editor__state--issue {
   display: inline-flex;
   align-items: baseline;
   gap: var(--space-1);
-  color: var(--color-warning-text, var(--color-text-primary));
+  color: var(--color-state-warning);
 }
 
 .option-link-editor__glyph {
@@ -68,9 +68,9 @@
 .option-link-editor__issue-note {
   margin: 0;
   padding: var(--space-1) var(--space-2);
-  border-left: 2px solid var(--color-warning-border, rgba(0, 0, 0, 0.2));
+  border-left: 3px solid var(--color-state-warning);
   color: var(--color-text-primary);
-  font-size: var(--font-size-caption, var(--font-size-body));
+  font-size: var(--font-size-label);
   line-height: var(--line-height-normal);
 }
 
@@ -89,11 +89,12 @@
 
 .option-link-editor__select-label {
   color: var(--color-text-secondary);
-  font-size: var(--font-size-caption, var(--font-size-body));
+  font-size: var(--font-size-label);
 }
 
 .option-link-editor__select {
-  min-width: 12rem;
+  min-width: min(12rem, 100%);
+  max-width: 100%;
   padding: var(--space-1) var(--space-2);
   border: 1px solid var(--color-border-subtle, rgba(0, 0, 0, 0.2));
   border-radius: var(--radius-sm);
@@ -104,15 +105,15 @@
 
 .option-link-editor__error {
   padding: var(--space-2);
-  border: 1px solid var(--color-danger-border, rgba(0, 0, 0, 0.2));
+  border: 1px solid #edc2cc;
   border-radius: var(--radius-sm);
-  background: var(--color-danger-surface, rgba(0, 0, 0, 0.04));
+  background: #fff2f4;
 }
 
 .option-link-editor__error-message,
 .option-link-editor__error-action {
   margin: 0;
-  font-size: var(--font-size-caption, var(--font-size-body));
+  font-size: var(--font-size-label);
   line-height: var(--line-height-normal);
   color: var(--color-text-primary);
 }
@@ -123,3 +124,9 @@
   align-items: flex-end;
   gap: var(--space-2);
 }
+
+.option-link-editor { gap: 16px; padding-top: 20px; }
+.option-link-editor__heading { font-family: var(--font-family-display, var(--font-family-ui)); font-size: 1.2rem; font-weight: 500; }
+.option-link-editor__item { gap: 12px; padding: 16px; background: var(--color-surface-base); border: 1px solid var(--color-border-subtle); border-radius: 14px; }
+.option-link-editor__select { min-height: 40px; border-radius: 10px; }
+.option-link-editor__add > .ds-field { flex: 1 1 160px; min-width: 0; }

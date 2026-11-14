@@ -2,7 +2,7 @@ import type React from "react";
 import { useLayoutEffect, useRef } from "react";
 
 import { LibraryErrorBanner } from "../../library/components/LibraryErrorBanner";
-import { Button, ProgressIndicator, StateChip, SurfacePanel } from "../../../shared/ui";
+import { Button, Icon, ProgressIndicator, StateChip, SurfacePanel } from "../../../shared/ui";
 import type { AppError } from "../../../shared/errors/app-error";
 import type { DeviceStoryDto } from "../../../shared/ipc-contracts/device-library";
 import type { DeviceLibraryState } from "../hooks/use-device-library";
@@ -137,6 +137,7 @@ export function DeviceStoryCollection({
           ref={headingRef}
           tabIndex={-1}
         >
+          <Icon name="device" />
           {heading}
         </h2>
         <StateChip tone="info" label="Sur l'appareil" />
@@ -416,14 +417,23 @@ function DeviceStoryCard({
             ✓
           </span>
         ) : null}
-        {coverUrl ? (
-          <img
-            className="device-story-card__cover"
-            src={coverUrl}
-            alt=""
-            aria-hidden="true"
-          />
-        ) : null}
+        <div className="device-story-card__artwork" aria-hidden="true">
+          {coverUrl ? (
+            <img
+              className="device-story-card__cover"
+              src={coverUrl}
+              alt=""
+              aria-hidden="true"
+            />
+          ) : (
+            <span className="device-story-card__placeholder">
+              <Icon name="book" />
+            </span>
+          )}
+          <span className="device-story-card__device-mark">
+            <Icon name="device" />
+          </span>
+        </div>
         <h3 className="device-story-card__title">{displayTitle}</h3>
         <p className="device-story-card__id">
           <span className="device-story-card__id-label">

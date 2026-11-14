@@ -9,7 +9,7 @@ import {
 } from "../../../ipc/commands/presentation";
 import { toAppError } from "../../../shared/errors/app-error";
 import type { AnnouncementVoicesDto } from "../../../shared/ipc-contracts/presentation";
-import { Button, ProgressIndicator, StateChip, SurfacePanel } from "../../../shared/ui";
+import { Button, Icon, ProgressIndicator, StateChip, SurfacePanel } from "../../../shared/ui";
 
 import "./AnnouncementVoiceSettings.css";
 
@@ -128,6 +128,7 @@ export function AnnouncementVoiceSettings(): React.JSX.Element {
       ariaLabelledBy="announcement-voices-title"
     >
       <h2 id="announcement-voices-title" className="announcement-voices__title">
+        <Icon name="mic" />
         {SECTION_TITLE}
       </h2>
       <p className="announcement-voices__lead">{SECTION_LEAD}</p>
@@ -174,6 +175,7 @@ export function AnnouncementVoiceSettings(): React.JSX.Element {
                       aria-label={`${PREVIEW_LABEL} — ${voice.name}`}
                       disabled={previewing !== null}
                     >
+                      <Icon name="headphones" />
                       {previewing === voice.id ? PREVIEWING_LABEL : PREVIEW_LABEL}
                     </Button>
                   </li>

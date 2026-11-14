@@ -21,3 +21,6 @@ export type { ContextMenuItem, ContextMenuProps } from "./ContextMenu";
 
 export { Toast } from "./Toast";
 export type { ToastProps } from "./Toast";
+
+export { Icon } from "./Icon";
+export type { IconName, IconProps } from "./Icon";

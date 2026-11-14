@@ -35,6 +35,19 @@ Un hook `pre-commit` versionné dans [`.githooks/`](.githooks/) refuse tout comm
 - En cas de refus : `cargo fmt --all --manifest-path src-tauri/Cargo.toml`, puis réindexer les fichiers listés.
 - Contournement délibéré et assumé : `git commit --no-verify` — la CI reste le juge final.
 
+## Aperçu visuel dans le navigateur
+
+Après `pnpm dev`, ouvrir `http://localhost:1420/design-preview.html` pour
+contrôler l'interface sans Tauri ni appareil. Cette entrée de développement
+utilise des données de démonstration en mémoire et n'est pas incluse dans
+la compilation de production.
+
+Variantes disponibles : `?scenario=empty`, `?scenario=connected`,
+`?screen=editor` et `?screen=settings`. Pour recommencer après un rechargement,
+revenir à l'URL `design-preview.html` : les routes normales nécessitent le
+backend Tauri. Les opérations non simulées échouent explicitement ; cet aperçu
+ne remplace pas les tests sur appareil.
+
 ## Contrats IPC
 
 Toute modification d'un DTO ou d'un code d'erreur IPC passe par trois points **simultanés** :

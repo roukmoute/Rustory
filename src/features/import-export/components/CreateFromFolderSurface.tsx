@@ -1,6 +1,6 @@
 import type React from "react";
 
-import { Button, ProgressIndicator, StateChip } from "../../../shared/ui";
+import { Button, Icon, ProgressIndicator, StateChip } from "../../../shared/ui";
 import type {
   CreatableSummary,
   ImportFinding,
@@ -17,6 +17,7 @@ import type {
 } from "../hooks/use-structured-creation";
 
 import "./CreateFromFolderSurface.css";
+import "./ImportSurface.css";
 
 export interface CreateFromFolderSurfaceProps {
   status: StructuredCreationStatus;
@@ -49,9 +50,15 @@ export function CreateFromFolderSurface({
 
   return (
     <section
-      className="create-from-folder"
+      className="create-from-folder import-flow"
       aria-label="Création depuis un dossier"
     >
+      <header className="import-flow__header">
+        <span className="import-flow__icon" aria-hidden="true">
+          <Icon name="folder" />
+        </span>
+        <h2 className="import-flow__title">Création depuis un dossier</h2>
+      </header>
       {/* Polite region mounted while the surface is shown so AT picks up
           the success announcement atomically. */}
       <div

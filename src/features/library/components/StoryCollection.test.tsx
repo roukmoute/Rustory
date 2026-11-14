@@ -195,39 +195,29 @@ describe("<StoryCollection />", () => {
     expect(counter).not.toHaveAttribute("aria-live");
   });
 
-  it("exposes a disabled filter placeholder with the canonical 'Filtres avancés à venir' reason", () => {
-    render(<Harness />);
-    const filter = screen.getByRole("button", {
-      name: /toutes les histoires/i,
-    });
-    expect(filter).not.toBeDisabled();
-    expect(filter).toHaveAttribute("aria-disabled", "true");
-
-    const reasonId = filter.getAttribute("aria-describedby");
-    expect(reasonId).toBeTruthy();
-    const reason = document.getElementById(reasonId as string);
-    expect(reason).toHaveTextContent(/filtres avancés à venir/i);
+  it("switches to a list without losing the selected story or search", async () => {
+    const user = userEvent.setup();
+    render(<Harness initialQuery="soleil" selectedStoryIds={new Set(["s1"])} />);
+    await user.click(screen.getByRole("button", { name: "Affichage en liste" }));
+    expect(screen.getByRole("button", { name: "Affichage en liste" })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByRole("button", { name: "Le soleil d'Éloi" })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByLabelText(/rechercher une histoire/i)).toHaveValue("soleil");
+    expect(screen.getByText("1 sur 3 — 1 sélectionnée")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Affichage en cartes" }));
+    expect(screen.getByRole("button", { name: "Affichage en cartes" })).toHaveAttribute("aria-pressed", "true");
   });
 
-  it("Tab walks through search → sort → filter placeholder → first Story Card", async () => {
+  it("keeps search, sort and both view controls reachable in keyboard order", async () => {
     const user = userEvent.setup();
     render(<Harness />);
-
     await user.tab();
     expect(screen.getByLabelText(/rechercher une histoire/i)).toHaveFocus();
-
     await user.tab();
     expect(screen.getByLabelText(/trier par/i)).toHaveFocus();
-
     await user.tab();
-    expect(
-      screen.getByRole("button", { name: /toutes les histoires/i }),
-    ).toHaveFocus();
-
+    expect(screen.getByRole("button", { name: "Affichage en cartes" })).toHaveFocus();
     await user.tab();
-    expect(
-      screen.getByRole("button", { name: /étoile filante/i }),
-    ).toHaveFocus();
+    expect(screen.getByRole("button", { name: "Affichage en liste" })).toHaveFocus();
   });
 
   it("resets both the query and the sort when Réinitialiser les filtres is pressed", async () => {

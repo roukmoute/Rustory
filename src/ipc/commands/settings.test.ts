@@ -115,8 +115,9 @@ function officialProfile() {
       {
         kind: "structuredArchive",
         label: "Archive structurée",
-        available: false,
-        reason: "Lecture d'archives non prise en charge",
+        formatLabel: "Format v1",
+        available: true,
+        capabilitiesLabel: "Création d'une histoire",
       },
     ],
     fileAssociation: {
@@ -176,9 +177,13 @@ describe("readSupportProfile", () => {
       "Écriture non prouvée sur matériel réel",
     );
     expect(profile.localArtifacts).toHaveLength(3);
-    expect(profile.localArtifacts[2].reason).toBe(
-      "Lecture d'archives non prise en charge",
-    );
+    expect(profile.localArtifacts[2]).toEqual({
+      kind: "structuredArchive",
+      label: "Archive structurée",
+      formatLabel: "Format v1",
+      available: true,
+      capabilitiesLabel: "Création d'une histoire",
+    });
     expect(profile.fileAssociation.channels).toHaveLength(4);
     expect(profile.fileAssociation.channels[1].reason).toBe(
       "Tu peux ajouter l'association avec un outil d'intégration AppImage ou une entrée d'application manuelle.",

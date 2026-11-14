@@ -1,8 +1,8 @@
 import type React from "react";
-import { useId, useMemo } from "react";
+import { useId, useMemo, useState } from "react";
 
 import type { StoryCardDto } from "../../../shared/ipc-contracts/library";
-import { Button, Field, ProgressIndicator } from "../../../shared/ui";
+import { Button, Field, Icon, ProgressIndicator } from "../../../shared/ui";
 import {
   applyLibraryFilters,
   type LibrarySortKey,
@@ -82,9 +82,7 @@ export function StoryCollection({
   const titleId = useId();
   const searchId = useId();
   const sortId = useId();
-  const filterLabelId = useId();
-  const filterButtonId = useId();
-  const filterReasonId = useId();
+  const [view, setView] = useState<"grid" | "list">("grid");
   const createDisabledId = useId();
 
   const visible = useMemo(
@@ -113,20 +111,49 @@ export function StoryCollection({
   return (
     <section className="story-collection" aria-labelledby={titleId}>
       <header className="story-collection__header">
-        <h1 id={titleId} className="story-collection__title">
-          Bibliothèque
-        </h1>
+        <div className="story-collection__heading-row">
+          <div>
+            <p className="story-collection__eyebrow">
+              À lire, à écouter, à imaginer
+            </p>
+            <h1 id={titleId} className="story-collection__title">
+              Ma bibliothèque
+            </h1>
+          </div>
+          <div className="story-collection__actions">
+            {onImportArtifactRequest ? (
+              <Button
+                variant="quiet"
+                onClick={onImportArtifactRequest}
+                disabled={isImportBusy}
+                aria-busy={isImportBusy}
+              >
+                <Icon name="upload" size={17} />
+                Importer une histoire
+              </Button>
+            ) : null}
+            {onCreateStoryRequest ? (
+              <Button variant="primary" onClick={onCreateStoryRequest}>
+                <Icon name="plus" size={18} />
+                Créer une histoire
+              </Button>
+            ) : null}
+          </div>
+        </div>
         <div className="story-collection__controls">
-          <Field
-            id={searchId}
-            label="Rechercher une histoire"
-            type="search"
-            value={query}
-            onChange={onQueryChange}
-            placeholder="Titre…"
-          />
-          <div className="story-collection__control">
-            <label className="ds-field__label" htmlFor={sortId}>
+          <div className="story-collection__search">
+            <Icon name="search" size={20} />
+            <Field
+              id={searchId}
+              label="Rechercher une histoire"
+              type="search"
+              value={query}
+              onChange={onQueryChange}
+              placeholder="Chercher une histoire…"
+            />
+          </div>
+          <div className="story-collection__sort">
+            <label className="story-collection__sr-only" htmlFor={sortId}>
               Trier par
             </label>
             <select
@@ -135,55 +162,35 @@ export function StoryCollection({
               value={sort}
               onChange={(event) => {
                 const next = event.target.value;
-                if (isLibrarySortKey(next)) {
-                  onSortChange(next);
-                }
+                if (isLibrarySortKey(next)) onSortChange(next);
               }}
             >
               <option value="titre-asc">Titre (A → Z)</option>
               <option value="titre-desc">Titre (Z → A)</option>
             </select>
           </div>
-          <div className="story-collection__control">
-            <span id={filterLabelId} className="ds-field__label">
-              Filtre
-            </span>
-            <Button
-              id={filterButtonId}
-              variant="quiet"
-              aria-disabled="true"
-              aria-labelledby={`${filterLabelId} ${filterButtonId}`}
-              aria-describedby={filterReasonId}
-              className="story-collection__filter"
+          <div
+            className="story-collection__view"
+            role="group"
+            aria-label="Affichage"
+          >
+            <button
+              type="button"
+              aria-label="Affichage en cartes"
+              aria-pressed={view === "grid"}
+              onClick={() => setView("grid")}
             >
-              Toutes les histoires
-            </Button>
-            <p
-              id={filterReasonId}
-              className="story-collection__filter-reason"
+              <Icon name="grid" />
+            </button>
+            <button
+              type="button"
+              aria-label="Affichage en liste"
+              aria-pressed={view === "list"}
+              onClick={() => setView("list")}
             >
-              Filtres avancés à venir
-            </p>
+              <Icon name="list" />
+            </button>
           </div>
-          {onCreateStoryRequest ? (
-            <div className="story-collection__control">
-              <Button variant="primary" onClick={onCreateStoryRequest}>
-                Créer une histoire
-              </Button>
-            </div>
-          ) : null}
-          {onImportArtifactRequest ? (
-            <div className="story-collection__control">
-              <Button
-                variant="secondary"
-                onClick={onImportArtifactRequest}
-                disabled={isImportBusy}
-                aria-busy={isImportBusy}
-              >
-                Importer une histoire
-              </Button>
-            </div>
-          ) : null}
         </div>
         {/*
          * Counter is read by the empty / filtered-empty / pending regions via
@@ -194,14 +201,14 @@ export function StoryCollection({
           {countersLabel(stories.length, state, selectedCount)}
         </p>
         {state.kind === "loaded" ? (
-          <p className="story-collection__selection-hint">
-            Clique une carte pour la sélectionner.{" "}
-            <kbd className="story-collection__kbd">Ctrl</kbd>
-            <span aria-hidden="true">+</span>clic (ou{" "}
-            <kbd className="story-collection__kbd">Cmd</kbd>
-            <span aria-hidden="true">+</span>clic sur macOS) pour en
-            sélectionner plusieurs. Double-clic pour ouvrir l'édition.
-          </p>
+          <details className="story-collection__selection-help">
+            <summary>Sélectionner plusieurs histoires</summary>
+            <p>
+              Clique une carte pour la sélectionner. Ctrl+clic (ou Cmd+clic sur
+              macOS) pour en sélectionner plusieurs. Double-clic pour ouvrir
+              l'édition.
+            </p>
+          </details>
         ) : null}
       </header>
 
@@ -224,6 +231,13 @@ export function StoryCollection({
           role="status"
           aria-live="polite"
         >
+          <div className="story-collection__empty-art" aria-hidden="true">
+            <Icon name="book" size={70} />
+            <span>✦</span>
+          </div>
+          <p className="story-collection__eyebrow">
+            La première page de tes aventures
+          </p>
           <h2 className="story-collection__empty-title">
             Ta bibliothèque est vide
           </h2>
@@ -267,7 +281,9 @@ export function StoryCollection({
       ) : null}
 
       {state.kind === "loaded" ? (
-        <ul className="story-collection__list">
+        <ul
+          className={`story-collection__list${view === "list" ? " story-collection__list--rows" : ""}`}
+        >
           {state.visible.map((story) => (
             <li key={story.id} className="story-collection__item">
               <StoryCard

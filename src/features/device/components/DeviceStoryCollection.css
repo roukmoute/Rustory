@@ -1,84 +1,84 @@
-/* Device library lives in the center column, BELOW the local collection,
- * separated by a clear rule + extra top spacing so the two levels never
- * read as one merged list (AC1 — local vs appareil stay distinguishable). */
 .device-story-collection {
   display: flex;
   flex-direction: column;
-  gap: var(--space-3);
-  margin-top: var(--space-5);
-  padding-top: var(--space-4);
+  gap: 18px;
+  margin-top: 36px;
+  padding-top: 28px;
   border-top: 1px solid var(--color-border-subtle);
 }
 
 .device-story-collection__header {
   display: flex;
   align-items: center;
-  gap: var(--space-2);
+  gap: 12px;
   flex-wrap: wrap;
 }
 
 .device-story-collection__title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
   margin: 0;
-  font-size: var(--font-size-h2, var(--font-size-h3));
-  font-weight: var(--font-weight-semibold);
+  font-family: var(--font-family-display);
+  font-size: 23px;
+  font-weight: 500;
   color: var(--color-text-primary);
-  line-height: var(--line-height-tight);
+  line-height: 1.3;
+}
+
+.device-story-collection__title > svg {
+  flex-shrink: 0;
+  color: #1f7a55;
 }
 
 .device-story-collection__pending {
-  padding: var(--space-3) 0;
+  padding: 16px 0;
 }
 
-.device-story-collection__counter {
-  margin: 0;
-  font-size: var(--font-size-meta);
-  color: var(--color-text-secondary);
-}
-
+.device-story-collection__counter,
 .device-story-collection__selection-hint {
   margin: 0;
   font-size: var(--font-size-meta);
-  color: var(--color-text-muted);
-  line-height: var(--line-height-normal);
+  color: var(--color-text-secondary);
+  line-height: 1.5;
 }
 
 .device-story-collection__kbd {
   display: inline-block;
-  padding: 0 var(--space-1);
+  padding: 1px 5px;
   border: 1px solid var(--color-border-subtle);
-  border-radius: var(--radius-sm);
-  background: var(--color-surface-raised);
-  color: var(--color-text-secondary);
-  font-family: var(--font-family-mono);
+  border-bottom-width: 2px;
+  border-radius: 5px;
+  background: #fffdf8;
+  font-family: inherit;
   font-size: 0.9em;
-  font-weight: var(--font-weight-semibold);
-  line-height: 1;
-  vertical-align: baseline;
+  font-weight: 700;
+  line-height: 1.3;
 }
 
 .device-story-collection__empty {
   display: flex;
   flex-direction: column;
   align-items: flex-start;
-  gap: var(--space-2);
-  padding: var(--space-4);
-  background: var(--color-surface-raised);
-  border: 1px solid var(--color-border-subtle);
-  border-radius: var(--radius-md);
+  gap: 10px;
+  padding: 28px;
+  background: #f4f7ee;
+  border: 1px dashed #b9cbb8;
+  border-radius: 24px;
 }
 
 .device-story-collection__empty-title {
   margin: 0;
-  font-size: var(--font-size-h3);
-  font-weight: var(--font-weight-semibold);
+  font-family: var(--font-family-display);
+  font-size: 22px;
+  font-weight: 500;
   color: var(--color-text-primary);
 }
 
 .device-story-collection__empty-hint {
   margin: 0;
-  font-size: var(--font-size-body);
   color: var(--color-text-secondary);
-  line-height: var(--line-height-normal);
+  line-height: 1.6;
 }
 
 .device-story-collection__list {
@@ -86,108 +86,192 @@
   margin: 0;
   padding: 0;
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
-  gap: var(--space-3);
+  grid-template-columns: repeat(auto-fill, minmax(min(185px, 100%), 1fr));
+  gap: 18px;
 }
 
 .device-story-collection__item {
-  /* The card fills the grid cell; the optional move controls sit under it. */
   display: flex;
   flex-direction: column;
-  gap: var(--space-1);
+  gap: 8px;
   min-width: 0;
 }
 
 .device-story-collection__move {
   display: flex;
   justify-content: flex-end;
-  gap: var(--space-1);
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.device-story-collection__move > button {
+  min-height: 32px;
+  font-size: 12px;
+  padding: 5px 10px;
 }
 
 .device-story-card {
-  /* Override the default SurfacePanel padding: the focusable child carries
-   * its own padding so the selection border hugs the card outline exactly
-   * and clicks on the outer ring are never lost to a non-reactive area. */
   padding: 0;
-  min-height: 96px;
+  min-width: 0;
+  flex: 1;
   display: flex;
+  border-radius: 18px;
+  overflow: hidden;
+  background: #fffdf8;
 }
 
 .device-story-card__focusable {
   position: relative;
   display: flex;
   flex-direction: column;
-  gap: var(--space-2);
+  align-items: flex-start;
+  gap: 10px;
   width: 100%;
+  min-width: 0;
   flex: 1;
-  padding: var(--space-3);
-  /* Transparent 2px border reserves the space so selecting a card never
-   * reflows the grid; the colored border is revealed by the --selected
-   * modifier. */
+  padding: 10px 10px 16px;
   border: 2px solid transparent;
-  border-radius: var(--radius-md);
+  border-radius: 18px;
   outline: none;
 }
 
-/* Only the interactive (selectable) variant gets a pointer + transition. */
 .device-story-card__focusable[role="button"] {
   cursor: pointer;
-  transition: border-color 120ms ease, background-color 120ms ease;
+  transition: border-color 150ms ease, background-color 150ms ease;
 }
 
-.device-story-card__focusable--selected {
-  border-color: var(--color-action-primary);
-  background: var(--color-surface-sunken);
+.device-story-card__focusable[role="button"]:hover {
+  background: #f5f8ef;
+}
+
+.device-story-card__focusable[role="button"]:focus-visible {
+  outline: 3px solid #1f7a55;
+  outline-offset: -3px;
+}
+
+.device-story-card__focusable--selected,
+.device-story-card__focusable--selected[role="button"]:hover {
+  border-color: #1f7a55;
+  background: #e3f3ea;
 }
 
 .device-story-card__marker {
   position: absolute;
-  top: var(--space-2);
-  right: var(--space-2);
-  font-weight: var(--font-weight-semibold);
-  color: var(--color-action-primary);
-  line-height: 1;
+  z-index: 1;
+  top: 18px;
+  right: 18px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: #1f7a55;
+  color: white;
+  box-shadow: 0 0 0 3px #fffdf8;
+}
+
+.device-story-card__marker > svg {
+  width: 16px;
+  height: 16px;
+}
+
+.device-story-card__artwork {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 1;
+  overflow: hidden;
+  border-radius: 12px;
+  background: #cfe9f8;
+}
+
+.device-story-collection__item:nth-child(3n + 2) .device-story-card__artwork {
+  background: #f7e8bc;
+}
+
+.device-story-collection__item:nth-child(3n) .device-story-card__artwork {
+  background: #eddcec;
 }
 
 .device-story-card__cover {
+  display: block;
   width: 100%;
-  max-width: 96px;
-  height: auto;
-  border-radius: var(--radius-2, 8px);
-  margin-bottom: var(--space-2);
+  height: 100%;
+  object-fit: cover;
+}
+
+.device-story-card__placeholder {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 100%;
+  color: #23314a;
+}
+
+.device-story-card__placeholder > svg {
+  width: 62px;
+  height: 62px;
+  opacity: 0.65;
+  transform: rotate(-8deg);
+  stroke-width: 1.4;
+}
+
+.device-story-card__device-mark {
+  position: absolute;
+  bottom: 10px;
+  right: 10px;
+  display: flex;
+  padding: 7px;
+  border-radius: 10px;
+  background: #fffbf3ed;
+  color: #1f7a55;
+}
+
+.device-story-card__device-mark > svg {
+  width: 16px;
+  height: 16px;
 }
 
 .device-story-card__title {
-  margin: 0;
-  font-size: var(--font-size-h3);
-  font-weight: var(--font-weight-semibold);
-  color: var(--color-text-secondary);
-  line-height: var(--line-height-tight);
+  margin: 4px 4px 0;
+  font-size: 16px;
+  font-weight: 800;
+  color: var(--color-text-primary);
+  line-height: 1.4;
+  overflow-wrap: anywhere;
 }
 
 .device-story-card__id {
-  margin: 0;
-  font-size: var(--font-size-meta);
-  color: var(--color-text-muted);
+  margin: 0 4px;
+  font-size: 11px;
+  color: var(--color-text-secondary);
 }
 
 .device-story-card__id-value {
   font-family: var(--font-family-mono);
-  color: var(--color-text-secondary);
 }
 
 .device-story-card__flags {
   display: flex;
   flex-wrap: wrap;
-  gap: var(--space-1);
+  gap: 5px;
+  margin-inline: 4px;
+}
+
+.device-story-card__flags > * {
+  font-size: 10px;
+  padding: 3px 7px;
 }
 
 .device-story-collection__move-error {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: var(--space-2);
+  gap: 12px;
   width: 100%;
+  padding: 12px 16px;
+  border-radius: 12px;
+  background: #fff1d0;
   color: var(--color-text-primary);
-  font-size: var(--font-size-body);
 }

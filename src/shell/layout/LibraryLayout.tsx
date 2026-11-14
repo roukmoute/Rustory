@@ -6,26 +6,19 @@ export interface LibraryLayoutProps {
   leftNav: React.ReactNode;
   center: React.ReactNode;
   rightPanel: React.ReactNode;
+  panelOpen?: boolean;
 }
 
-/**
- * Desktop 3-column grid for the library context.
- *
- * Standard mode  (≥ 1280px): minmax(240px, 280px) | 1fr | minmax(320px, 360px)
- * Reduced mode   (1024–1279px, via @media): 200px | 1fr | 300px
- * Under 1024px: handled by the Tauri minWidth contract — the window refuses
- * to shrink further, so no additional responsive fallback is needed.
- *
- * Purely presentational: receives 3 slots, applies semantic regions, no
- * fetching or business logic.
- */
+/** Two-column library with an optional, permanently mounted decision panel.
+ * Keeping the slots mounted preserves in-flight operations and live regions. */
 export function LibraryLayout({
   leftNav,
   center,
   rightPanel,
+  panelOpen = true,
 }: LibraryLayoutProps): React.JSX.Element {
   return (
-    <div className="library-layout">
+    <div className={`library-layout${panelOpen ? " library-layout--details" : ""}`}>
       <nav className="library-layout__nav" aria-label="Navigation bibliothèque">
         {leftNav}
       </nav>
@@ -38,6 +31,7 @@ export function LibraryLayout({
       <aside
         className="library-layout__panel"
         aria-label="Panneau de décision"
+        hidden={!panelOpen}
       >
         {rightPanel}
       </aside>

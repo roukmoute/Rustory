@@ -14,7 +14,7 @@ import { readContentSourcePolicy } from "../../ipc/commands/import-export";
 import { readSupportProfile } from "../../ipc/commands/settings";
 import type { ContentSourcePolicy } from "../../shared/ipc-contracts/import-export";
 import type { SupportProfile } from "../../shared/ipc-contracts/settings";
-import { Button } from "../../shared/ui";
+import { Button, Icon } from "../../shared/ui";
 
 import "./SettingsRoute.css";
 
@@ -103,7 +103,12 @@ export function SettingsRoute(): React.JSX.Element {
     >
       <header className="settings-route__header">
         <div className="settings-route__heading">
-          <h1 className="settings-route__title">Profil de support</h1>
+          <h1 className="settings-route__title">
+            <span className="settings-route__emblem" aria-hidden="true">
+              <Icon name="settings" />
+            </span>
+            Profil de support
+          </h1>
           {version !== null && (
             <p className="settings-route__version">Version {version}</p>
           )}
@@ -133,6 +138,7 @@ export function SettingsRoute(): React.JSX.Element {
             navigate("/library", { replace: true });
           }}
         >
+          <Icon name="arrow-left" />
           Retour à la bibliothèque
         </Button>
       </header>

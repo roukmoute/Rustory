@@ -156,8 +156,9 @@ function officialProfile() {
       {
         kind: "structuredArchive",
         label: "Archive structurée",
-        available: false,
-        reason: "Lecture d'archives non prise en charge",
+        formatLabel: "Format v1",
+        available: true,
+        capabilitiesLabel: "Création d'une histoire",
       },
     ],
     fileAssociation: officialFileAssociation(),
@@ -229,7 +230,7 @@ describe("isSupportProfile", () => {
 
   it("rejects a profile with an artifact line missing", () => {
     const profile = officialProfile();
-    profile.localArtifacts.pop(); // drop the deferred archive line
+    profile.localArtifacts.pop(); // drop the archive line
     expect(isSupportProfile(profile)).toBe(false);
   });
 
@@ -529,7 +530,17 @@ describe("isLocalArtifactLine", () => {
     );
   });
 
-  it("rejects a deferred archive arriving available (its capability copy does not exist)", () => {
+  it("accepts the available archive revision serialized by the Rust registry", () => {
+    expect(isLocalArtifactLine({
+      kind: "structuredArchive",
+      label: "Archive structurée",
+      formatLabel: "Format v1",
+      available: true,
+      capabilitiesLabel: "Création d'une histoire",
+    })).toBe(true);
+  });
+
+  it("rejects an archive with drifted capability wording", () => {
     expect(
       isLocalArtifactLine({
         ...archiveLine(),
@@ -551,13 +562,25 @@ describe("isLocalArtifactLine", () => {
     ).toBe(false);
   });
 
-  it("rejects an archive line carrying an invented format label", () => {
+  it("rejects an archive with a missing or unsupported reader revision", () => {
     expect(
-      isLocalArtifactLine({ ...archiveLine(), formatLabel: "Format v1" }),
+      isLocalArtifactLine({ ...archiveLine(), formatLabel: "Format v2" }),
+    ).toBe(false);
+    expect(
+      isLocalArtifactLine({ ...archiveLine(), formatLabel: undefined }),
     ).toBe(false);
   });
 
-  it("rejects a deferred line whose reason drifted", () => {
+  it("rejects the obsolete deferred archive payload", () => {
+    expect(isLocalArtifactLine({
+      kind: "structuredArchive",
+      label: "Archive structurée",
+      available: false,
+      reason: "Lecture d'archives non prise en charge",
+    })).toBe(false);
+  });
+
+  it("rejects an available archive carrying a reason", () => {
     expect(
       isLocalArtifactLine({ ...archiveLine(), reason: "Pas encore prête" }),
     ).toBe(false);

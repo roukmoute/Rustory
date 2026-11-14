@@ -319,7 +319,7 @@ import {
 
 const STORY_EDIT_MARKER_TITLE = "Edit stub for";
 
-function renderLibrary(options: { strict?: boolean } = {}) {
+function renderLibrary(options: { strict?: boolean; collapsed?: boolean } = {}) {
   const routes: RouteObject[] = [
     { path: "/library", element: <LibraryRoute /> },
     {
@@ -337,6 +337,12 @@ function renderLibrary(options: { strict?: boolean } = {}) {
   });
   const tree = <RouterProvider router={router} />;
   render(options.strict ? <StrictMode>{tree}</StrictMode> : tree);
+  // Most scenarios exercise device/transfer actions. Open their real disclosure
+  // explicitly; dedicated tests below cover the initial collapsed layout.
+  if (!options.collapsed) {
+    const trigger = screen.getByRole("button", { name: "Afficher le panneau de l'appareil" });
+    if (trigger.getAttribute("aria-expanded") === "false") fireEvent.click(trigger);
+  }
   return router;
 }
 
@@ -471,6 +477,106 @@ describe("<LibraryRoute />", () => {
     useOsOpenShell.setState({ pendingSignal: false });
     useDropShell.setState({ hoverActive: false, pendingSignal: false });
     useUpdateShell.setState({ availability: null });
+  });
+
+  it("marks a local selection immediately but waits 500 ms before resizing the collection", async () => {
+    mockGet.mockResolvedValue({ stories: [{ id: "s1", title: "Le jardin des étoiles" }] });
+    renderLibrary({ collapsed: true });
+    const story = await screen.findByRole("button", { name: "Le jardin des étoiles" });
+    expect(screen.queryByRole("complementary", { name: "Panneau de décision" })).not.toBeInTheDocument();
+    vi.useFakeTimers();
+    try {
+      fireEvent.click(story);
+      expect(story).toHaveAttribute("aria-pressed", "true");
+      act(() => vi.advanceTimersByTime(499));
+      expect(screen.queryByRole("complementary", { name: "Panneau de décision" })).not.toBeInTheDocument();
+      act(() => vi.advanceTimersByTime(1));
+      expect(screen.getByRole("complementary", { name: "Panneau de décision" })).toBeInTheDocument();
+      fireEvent.click(screen.getByRole("button", { name: "Fermer le panneau de l'appareil" }));
+      expect(screen.getByRole("button", { name: "Afficher le panneau de l'appareil" })).toHaveFocus();
+      expect(story).toHaveAttribute("aria-pressed", "true");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("cancels a pending reveal on deselection and restarts it for a different local story", async () => {
+    mockGet.mockResolvedValue({ stories: [{ id: "s1", title: "Le jardin" }, { id: "s2", title: "La lune" }] });
+    mockDevice.mockResolvedValue({ kind: "none" });
+    renderLibrary({ collapsed: true });
+    const first = await screen.findByRole("button", { name: "Le jardin" });
+    const second = screen.getByRole("button", { name: "La lune" });
+    vi.useFakeTimers();
+    try {
+      fireEvent.click(first);
+      act(() => vi.advanceTimersByTime(250));
+      fireEvent.click(first);
+      act(() => vi.advanceTimersByTime(500));
+      expect(first).toHaveAttribute("aria-pressed", "false");
+      expect(screen.queryByRole("complementary", { name: "Panneau de décision" })).not.toBeInTheDocument();
+      fireEvent.click(first);
+      act(() => vi.advanceTimersByTime(250));
+      fireEvent.click(second);
+      act(() => vi.advanceTimersByTime(250));
+      expect(screen.queryByRole("complementary", { name: "Panneau de décision" })).not.toBeInTheDocument();
+      act(() => vi.advanceTimersByTime(250));
+      expect(screen.getByRole("complementary", { name: "Panneau de décision" })).toBeInTheDocument();
+    } finally {
+      cleanup();
+      vi.useRealTimers();
+    }
+  });
+
+  it("cancels the pending reveal when a double-click opens the editor", async () => {
+    mockGet.mockResolvedValue({ stories: [{ id: "s1", title: "Le jardin" }] });
+    mockDevice.mockResolvedValue({ kind: "none" });
+    const router = renderLibrary({ collapsed: true });
+    const story = await screen.findByRole("button", { name: "Le jardin" });
+    vi.useFakeTimers();
+    try {
+      const before = vi.getTimerCount();
+      fireEvent.click(story);
+      expect(vi.getTimerCount()).toBe(before + 1);
+      act(() => vi.advanceTimersByTime(100));
+      expect(screen.queryByRole("complementary", { name: "Panneau de décision" })).not.toBeInTheDocument();
+      fireEvent.doubleClick(story);
+      expect(router.state.location.pathname).toBe("/story/s1/edit");
+      expect(screen.getByTestId("story-edit-stub")).toBeInTheDocument();
+      expect(vi.getTimerCount()).toBe(before);
+    } finally {
+      cleanup();
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not reopen a manually closed panel when the selection delay expires", async () => {
+    mockGet.mockResolvedValue({ stories: [{ id: "s1", title: "Le jardin" }] });
+    mockDevice.mockResolvedValue({ kind: "none" });
+    renderLibrary({ collapsed: true });
+    const story = await screen.findByRole("button", { name: "Le jardin" });
+    vi.useFakeTimers();
+    try {
+      fireEvent.click(story);
+      const disclosure = screen.getByRole("button", { name: "Afficher le panneau de l'appareil" });
+      fireEvent.click(disclosure);
+      expect(screen.getByRole("complementary", { name: "Panneau de décision" })).toBeInTheDocument();
+      fireEvent.click(disclosure);
+      act(() => vi.advanceTimersByTime(500));
+      expect(screen.queryByRole("complementary", { name: "Panneau de décision" })).not.toBeInTheDocument();
+    } finally {
+      cleanup();
+      vi.useRealTimers();
+    }
+  });
+
+  it("opens the device actions on request even with an empty offline library", async () => {
+    mockGet.mockResolvedValue({ stories: [] });
+    mockDevice.mockResolvedValue({ kind: "none" });
+    renderLibrary({ collapsed: true });
+    await screen.findByRole("heading", { name: "Ta bibliothèque est vide" });
+    fireEvent.click(screen.getByRole("button", { name: "Afficher le panneau de l'appareil" }));
+    expect(screen.getByRole("complementary", { name: "Panneau de décision" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Réessayer la détection de l'appareil" })).toBeInTheDocument();
   });
 
   it("shows the loading state before the IPC call resolves", () => {
@@ -1896,7 +2002,7 @@ describe("<LibraryRoute />", () => {
     });
     const user = userEvent.setup();
     await user.click(
-      within(nav).getByRole("button", { name: "Profil de support" }),
+      within(nav).getByRole("button", { name: "Aide et réglages — Profil de support" }),
     );
     await waitFor(() => {
       expect(screen.getByTestId("settings-stub")).toBeInTheDocument();
@@ -2352,6 +2458,23 @@ describe("<LibraryRoute />", () => {
       },
     ],
   };
+
+  it("reveals device-story actions immediately without waiting for the local-selection delay", async () => {
+    mockGet.mockResolvedValue({ stories: [] });
+    mockDevice.mockResolvedValue(supportedV3);
+    mockDeviceLibrary.mockResolvedValue(readableTwo);
+    renderLibrary({ collapsed: true });
+    const card = await screen.findByRole("button", { name: /identifiant 0000abcd/i });
+    vi.useFakeTimers();
+    try {
+      fireEvent.click(card);
+      expect(screen.getByRole("complementary", { name: "Panneau de décision" })).toBeInTheDocument();
+      expect(card).toHaveAttribute("aria-pressed", "true");
+    } finally {
+      cleanup();
+      vi.useRealTimers();
+    }
+  });
 
   it("selecting a device story opens the right-column inspector with its identity + provenance (AC1)", async () => {
     const user = userEvent.setup();

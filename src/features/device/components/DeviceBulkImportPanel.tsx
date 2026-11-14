@@ -1,7 +1,7 @@
 import type React from "react";
 import { useId } from "react";
 
-import { Button, ProgressIndicator, StateChip, SurfacePanel } from "../../../shared/ui";
+import { Button, Icon, ProgressIndicator, StateChip, SurfacePanel } from "../../../shared/ui";
 import type { DeviceStoryDto } from "../../../shared/ipc-contracts/device-library";
 import type { DeviceBulkImportStatus } from "../hooks/use-device-bulk-import";
 
@@ -69,6 +69,7 @@ export function DeviceBulkImportPanel({
       className="device-bulk"
     >
       <h2 id={titleId} className="device-bulk__title">
+        <Icon name="download" />
         {total} histoires sélectionnées
       </h2>
 

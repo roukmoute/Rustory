@@ -1,5 +1,12 @@
 import type React from "react";
-import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useId,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { useNavigate } from "react-router-dom";
 
 import {
@@ -70,7 +77,13 @@ import type {
   SendBlocker,
   StoryCardDto,
 } from "../../shared/ipc-contracts/library";
-import { Button, ContextMenu, Dialog, SurfacePanel } from "../../shared/ui";
+import {
+  Button,
+  ContextMenu,
+  Dialog,
+  Icon,
+  SurfacePanel,
+} from "../../shared/ui";
 import { LibraryLayout } from "../../shell/layout/LibraryLayout";
 import { useDropShell } from "../../shell/state/drop-shell-store";
 import { useLibraryShell } from "../../shell/state/library-shell-store";
@@ -124,6 +137,15 @@ export function LibraryRoute(): React.JSX.Element {
     navigate("/settings");
   };
 
+  const [detailsOpen, setDetailsOpen] = useState(false);
+  const [activeSection, setActiveSection] = useState<"library" | "device">(
+    "library",
+  );
+  const localSectionRef = useRef<HTMLDivElement>(null);
+  const deviceSectionRef = useRef<HTMLDivElement>(null);
+  const catalogSectionRef = useRef<HTMLDivElement>(null);
+  const detailsTriggerRef = useRef<HTMLButtonElement>(null);
+  const selectionPanelTimerRef = useRef<number | null>(null);
   const [isCreateOpen, setIsCreateOpen] = useState<boolean>(false);
   // Mirror of the creation dialog's INTERNAL submission state, reported
   // upward so the primary title creation joins the flows' mutual
@@ -196,7 +218,9 @@ export function LibraryRoute(): React.JSX.Element {
   // a rejection means the library was NOT touched, so the selection is
   // kept for a retry; a success clears it and re-reads the overview.
   const [deleteState, setDeleteState] = useState<
-    { kind: "idle" } | { kind: "deleting" } | { kind: "failed"; message: string }
+    | { kind: "idle" }
+    | { kind: "deleting" }
+    | { kind: "failed"; message: string }
   >({ kind: "idle" });
 
   // Core deletion, shared by the panel's Supprimer and the card context
@@ -870,12 +894,7 @@ export function LibraryRoute(): React.JSX.Element {
       return;
     }
     void handleDropIntent();
-  }, [
-    dropSignal,
-    clearDropSignal,
-    isDropBlockedByLiveFlow,
-    handleDropIntent,
-  ]);
+  }, [dropSignal, clearDropSignal, isDropBlockedByLiveFlow, handleDropIntent]);
 
   const handleImportRetry = (): void => {
     if (storyImport.origin === "osOpen") {
@@ -1016,7 +1035,7 @@ export function LibraryRoute(): React.JSX.Element {
   // scoped behavior is preserved verbatim from the single-selection era.
   const singleDeviceUuid =
     selectedDeviceUuids.size === 1
-      ? selectedDeviceUuids.values().next().value ?? null
+      ? (selectedDeviceUuids.values().next().value ?? null)
       : null;
 
   // Resolve the lone selection against the CURRENT inventory so a stale id
@@ -1025,8 +1044,8 @@ export function LibraryRoute(): React.JSX.Element {
   // target (AC3).
   const selectedDeviceStory =
     canInspect && singleDeviceUuid && deviceLibrary.state.kind === "ready"
-      ? deviceLibrary.state.stories.find((s) => s.uuid === singleDeviceUuid) ??
-        null
+      ? (deviceLibrary.state.stories.find((s) => s.uuid === singleDeviceUuid) ??
+        null)
       : null;
 
   // The multi-selection resolved to live stories, for the bulk surface.
@@ -1049,9 +1068,7 @@ export function LibraryRoute(): React.JSX.Element {
       return;
     }
     if (deviceLibrary.state.kind === "ready") {
-      const present = new Set(
-        deviceLibrary.state.stories.map((s) => s.uuid),
-      );
+      const present = new Set(deviceLibrary.state.stories.map((s) => s.uuid));
       const kept = [...selectedDeviceUuids].filter((u) => present.has(u));
       if (kept.length !== selectedDeviceUuids.size) {
         setSelectedDeviceUuids(new Set(kept));
@@ -1162,7 +1179,12 @@ export function LibraryRoute(): React.JSX.Element {
       : [];
   const handleMoveDeviceStory = (uuid: string, direction: -1 | 1): void => {
     if (reorderableDeviceId === null) return;
-    void deviceReorder.move(reorderableDeviceId, visibleDeviceOrder, uuid, direction);
+    void deviceReorder.move(
+      reorderableDeviceId,
+      visibleDeviceOrder,
+      uuid,
+      direction,
+    );
   };
 
   const handleRequestDeleteDeviceStory = (story: DeviceStoryDto): void => {
@@ -1202,8 +1224,7 @@ export function LibraryRoute(): React.JSX.Element {
   // Scope the naming status to the card it actually belongs to, exactly like
   // the import status (`targetPackUuid`).
   const selectedDeviceTitleState =
-    singleDeviceUuid !== null &&
-    singleDeviceUuid === deviceTitle.targetPackUuid
+    singleDeviceUuid !== null && singleDeviceUuid === deviceTitle.targetPackUuid
       ? deviceTitle.status
       : undefined;
 
@@ -1233,6 +1254,56 @@ export function LibraryRoute(): React.JSX.Element {
     singleDeviceUuid === deviceImport.targetPackUuid
       ? deviceImport.status
       : undefined;
+
+  // Keep cards in place while a local selection can still become a double-click.
+  // The selected marker updates immediately; a second selection, deselection or
+  // navigation cancels the pending reveal before it can resize the collection.
+  useEffect(() => {
+    if (presentSelectedIds.size === 0) return;
+    const timer = window.setTimeout(() => {
+      selectionPanelTimerRef.current = null;
+      setDetailsOpen(true);
+    }, 500);
+    selectionPanelTimerRef.current = timer;
+    return () => {
+      window.clearTimeout(timer);
+      if (selectionPanelTimerRef.current === timer)
+        selectionPanelTimerRef.current = null;
+    };
+  }, [presentSelectedIds]);
+  // Device selection and active transfers still expose their actions immediately.
+  useEffect(() => {
+    if (selectedDeviceUuids.size > 0) setDetailsOpen(true);
+  }, [selectedDeviceUuids]);
+  const transferInFlight =
+    storyTransfer.state.kind === "transferring" ||
+    devicePackSend.status.kind === "sending";
+  useEffect(() => {
+    if (transferInFlight) setDetailsOpen(true);
+  }, [transferInFlight]);
+  const panelOpen = detailsOpen || transferInFlight;
+  const connectionLabel =
+    deviceState === "idle"
+      ? (deviceLabel ?? "Appareil connecté")
+      : deviceState === "scanning"
+        ? "Recherche de l'appareil…"
+        : deviceState === "absent"
+          ? "Aucun appareil connecté"
+          : "Appareil à vérifier";
+  const showDeviceSection = (): void => {
+    setActiveSection("device");
+    if (deviceLibrary.state.kind === "idle") setDetailsOpen(true);
+    else deviceSectionRef.current?.scrollIntoView?.({ block: "start" });
+  };
+  const closeDetails = (): void => {
+    if (transferInFlight) return;
+    if (selectionPanelTimerRef.current !== null) {
+      window.clearTimeout(selectionPanelTimerRef.current);
+      selectionPanelTimerRef.current = null;
+    }
+    setDetailsOpen(false);
+    detailsTriggerRef.current?.focus();
+  };
 
   const center = (
     <>
@@ -1332,44 +1403,56 @@ export function LibraryRoute(): React.JSX.Element {
         onAbandon={handleWebAbandon}
         onDismiss={handleWebDismiss}
       />
-      {renderCenter(
-        state,
-        retry,
-        presentSelectedIds,
-        selectStory,
-        handleOpenStory,
-        query,
-        sort,
-        setQuery,
-        setSort,
-        resetFilters,
-        handleCreateStoryRequest,
-        preparationBadges,
-        onDeviceStoryIds,
-        deviceStampLabel,
-        storyImport.pickAndAnalyze,
-        isImportBusy ||
-          isCreateFromFolderBusy ||
-          isRssCreationActive ||
-          isWebCreationActive,
-        handleStoryContextMenu,
-      )}
-      <DeviceStoryCollection
-        state={deviceLibrary.state}
-        isRefreshing={deviceLibrary.isRefreshing}
-        deviceLabel={deviceLabel}
-        selectedUuids={canInspect ? selectedDeviceUuids : EMPTY_DEVICE_SELECTION}
-        onSelectStory={canInspect ? handleSelectDeviceStory : undefined}
-        onRetry={deviceLibrary.refresh}
-        onMoveStory={reorderableDeviceId !== null ? handleMoveDeviceStory : undefined}
-        movingUuid={
-          deviceReorder.status.kind === "moving" ? deviceReorder.status.packUuid : null
-        }
-        moveError={
-          deviceReorder.status.kind === "failed" ? deviceReorder.status.error : null
-        }
-        onDismissMoveError={deviceReorder.dismissStatus}
-      />
+      <div ref={localSectionRef} className="library-route__local-section">
+        {renderCenter(
+          state,
+          retry,
+          presentSelectedIds,
+          selectStory,
+          handleOpenStory,
+          query,
+          sort,
+          setQuery,
+          setSort,
+          resetFilters,
+          handleCreateStoryRequest,
+          preparationBadges,
+          onDeviceStoryIds,
+          deviceStampLabel,
+          storyImport.pickAndAnalyze,
+          isImportBusy ||
+            isCreateFromFolderBusy ||
+            isRssCreationActive ||
+            isWebCreationActive,
+          handleStoryContextMenu,
+        )}
+      </div>
+      <div ref={deviceSectionRef} className="library-route__device-section">
+        <DeviceStoryCollection
+          state={deviceLibrary.state}
+          isRefreshing={deviceLibrary.isRefreshing}
+          deviceLabel={deviceLabel}
+          selectedUuids={
+            canInspect ? selectedDeviceUuids : EMPTY_DEVICE_SELECTION
+          }
+          onSelectStory={canInspect ? handleSelectDeviceStory : undefined}
+          onRetry={deviceLibrary.refresh}
+          onMoveStory={
+            reorderableDeviceId !== null ? handleMoveDeviceStory : undefined
+          }
+          movingUuid={
+            deviceReorder.status.kind === "moving"
+              ? deviceReorder.status.packUuid
+              : null
+          }
+          moveError={
+            deviceReorder.status.kind === "failed"
+              ? deviceReorder.status.error
+              : null
+          }
+          onDismissMoveError={deviceReorder.dismissStatus}
+        />
+      </div>
     </>
   );
 
@@ -1380,22 +1463,83 @@ export function LibraryRoute(): React.JSX.Element {
           hover overlay is already gone by then). */}
       <DropAnalyzingOverlay active={storyImport.isDropSettling} />
       <LibraryLayout
+        panelOpen={panelOpen}
         leftNav={
           <>
-            <LibraryFiltersNav />
-            {/* Permanent navigation entry to the support-profile
-                screen — a light block with no business state (the UX
-                constraint of the left column). */}
-            <SurfacePanel elevation={0}>
-              <Button variant="quiet" onClick={openSupportProfile}>
-                Profil de support
-              </Button>
-            </SurfacePanel>
+            <LibraryFiltersNav
+              activeSection={activeSection}
+              onLibrary={() => {
+                setActiveSection("library");
+                localSectionRef.current?.scrollIntoView?.({ block: "start" });
+              }}
+              onDevice={showDeviceSection}
+              onCatalog={() => {
+                setDetailsOpen(true);
+                requestAnimationFrame(() =>
+                  catalogSectionRef.current?.scrollIntoView?.({
+                    block: "nearest",
+                  }),
+                );
+              }}
+            />
+            <div className="library-route__nav-footer">
+              <button
+                className="library-filters-nav__entry"
+                type="button"
+                onClick={openSupportProfile}
+                aria-label="Aide et réglages — Profil de support"
+              >
+                <Icon name="settings" />
+                Aide et réglages
+              </button>
+              <button
+                ref={detailsTriggerRef}
+                type="button"
+                className="library-route__device-status"
+                aria-label="Afficher le panneau de l'appareil"
+                aria-expanded={panelOpen}
+                disabled={transferInFlight}
+                onClick={() => {
+                  if (panelOpen) closeDetails();
+                  else setDetailsOpen(true);
+                }}
+              >
+                <span className="library-route__device-icon">
+                  <Icon name="device" size={26} />
+                </span>
+                <span>
+                  <strong>
+                    {deviceFamily === "flam" ? "Mon FLAM" : "Ma Lunii"}
+                  </strong>
+                  <span className="library-route__connection">
+                    <i data-connected={deviceState === "idle"} />
+                    {connectionLabel}
+                  </span>
+                </span>
+                <Icon name="chevron-down" size={16} />
+              </button>
+              <span className="library-route__local-note">
+                <Icon name="leaf" size={14} />
+                Tes histoires restent sur ton ordinateur.
+              </span>
+            </div>
           </>
         }
         center={center}
         rightPanel={
           <>
+            <div className="library-route__details-heading">
+              <span>Ton appareil & tes histoires</span>
+              <button
+                type="button"
+                className="library-route__close"
+                onClick={closeDetails}
+                disabled={transferInFlight}
+                aria-label="Fermer le panneau de l'appareil"
+              >
+                <Icon name="close" />
+              </button>
+            </div>
             {/* 2+ device stories selected → the bulk-import surface replaces
                 the single-story inspector; 0 or 1 → the inspector as before
                 (its own placeholder covers the empty case). */}
@@ -1460,7 +1604,9 @@ export function LibraryRoute(): React.JSX.Element {
               onRefreshDevice={device.refresh}
               onConsultSupportProfile={openSupportProfile}
             />
-            <CatalogPanel catalog={officialCatalog} />
+            <div ref={catalogSectionRef}>
+              <CatalogPanel catalog={officialCatalog} />
+            </div>
           </>
         }
       />
@@ -1766,7 +1912,10 @@ export function mapArchiveSendToTransferView(
     };
   }
   if (selectionCount > 1) {
-    return { kind: "unavailable", reason: "Envoi indisponible: sélection multiple" };
+    return {
+      kind: "unavailable",
+      reason: "Envoi indisponible: sélection multiple",
+    };
   }
   if (selectedStoryId === null || !sendable) {
     return { kind: "unavailable", reason: sendBlockerReason(sendBlocker) };
@@ -1814,7 +1963,11 @@ export function mapTransferView(
         // vérification à venir" view, distinct from the calm "en transfert".
         return state.phase === "verify"
           ? { kind: "verifying" }
-          : { kind: "transferring", progress: state.progress, phase: state.phase };
+          : {
+              kind: "transferring",
+              progress: state.progress,
+              phase: state.phase,
+            };
       case "verified":
         return {
           kind: "verified",
@@ -1934,10 +2087,7 @@ function formatSupportedLabel(cohort: FirmwareCohortDto): string {
   }
 }
 
-function formatUnsupportedReason(
-  reason: string,
-  hint: string | null,
-): string {
+function formatUnsupportedReason(reason: string, hint: string | null): string {
   switch (reason) {
     case "metadataUnsupported":
       // Only a genuine version hint (`metadata_v{n}`, the Lunii
@@ -1992,11 +2142,7 @@ function renderCenter(
           ? "Bibliothèque incohérente, recharge nécessaire"
           : "Bibliothèque indisponible";
       return (
-        <LibraryErrorBanner
-          error={state.error}
-          onRetry={retry}
-          title={title}
-        />
+        <LibraryErrorBanner error={state.error} onRetry={retry} title={title} />
       );
     }
     case "loading":

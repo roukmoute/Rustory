@@ -2,7 +2,7 @@ import type React from "react";
 import { useEffect, useId, useRef, useState } from "react";
 
 import { readNodeMedia } from "../../../ipc/commands/story";
-import { Button, Field, StateChip } from "../../../shared/ui";
+import { Button, Field, Icon, StateChip } from "../../../shared/ui";
 import type { StateChipProps } from "../../../shared/ui";
 import type { AppError } from "../../../shared/errors/app-error";
 import type {
@@ -303,6 +303,7 @@ export function StoryNodeEditorHost({
   return (
     <section className="story-node-editor-host" aria-labelledby={headingId}>
       <h2 id={headingId} className="story-node-editor-host__heading">
+        <Icon name="edit" />
         Nœud courant
       </h2>
 

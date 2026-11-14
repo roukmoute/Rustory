@@ -12,6 +12,7 @@ import type {
 } from "../../../shared/ipc-contracts/story-validation";
 import {
   Button,
+  Icon,
   ProgressIndicator,
   StateChip,
   SurfacePanel,
@@ -276,6 +277,9 @@ export function LuniiDecisionPanel({
       className="lunii-panel"
     >
       <h2 id={titleId} className="lunii-panel__title">
+        <span className="lunii-panel__title-icon" aria-hidden="true">
+          <Icon name="device" />
+        </span>
         Panneau de décision
       </h2>
 
@@ -283,6 +287,7 @@ export function LuniiDecisionPanel({
         <StateChip tone={selectionChipTone} label={selectionChipLabel} />
         {editIsActive ? (
           <Button variant="secondary" onClick={onEdit}>
+            <Icon name="edit" />
             Éditer
           </Button>
         ) : (
@@ -292,6 +297,7 @@ export function LuniiDecisionPanel({
               aria-disabled="true"
               aria-describedby={editReasonId}
             >
+              <Icon name="edit" />
               Éditer
             </Button>
             <p id={editReasonId} className="lunii-panel__reason">

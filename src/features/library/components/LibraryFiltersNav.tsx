@@ -1,55 +1,58 @@
 import type React from "react";
-import { useId } from "react";
-
-import { Button, SurfacePanel } from "../../../shared/ui";
-
+import { Icon } from "../../../shared/ui";
 import "./LibraryFiltersNav.css";
 
-interface FilterEntry {
-  id: string;
-  label: string;
+interface LibraryFiltersNavProps {
+  activeSection?: "library" | "device";
+  onLibrary?: () => void;
+  onDevice?: () => void;
+  onCatalog?: () => void;
 }
 
-const FILTER_ENTRIES: FilterEntry[] = [
-  { id: "all", label: "Toutes les histoires" },
-  { id: "drafts", label: "Brouillons locaux" },
-  { id: "transferred", label: "Histoires transférées" },
-];
-
-/**
- * Left column of the library context. Renders the entry points for future
- * global filters. Everything is disabled today with a single canonical
- * reason — the purpose here is structural readability, not filter logic.
- */
-export function LibraryFiltersNav(): React.JSX.Element {
-  const titleId = useId();
-  const reasonId = useId();
-
+/** Navigation to real collections. Device content stays distinct from local stories. */
+export function LibraryFiltersNav({
+  activeSection = "library",
+  onLibrary,
+  onDevice,
+  onCatalog,
+}: LibraryFiltersNavProps): React.JSX.Element {
   return (
-    <SurfacePanel
-      elevation={0}
-      ariaLabelledBy={titleId}
-      className="library-filters-nav"
-    >
-      <h2 id={titleId} className="library-filters-nav__title">
-        Filtres
-      </h2>
-      <ul className="library-filters-nav__list">
-        {FILTER_ENTRIES.map((entry) => (
-          <li key={entry.id}>
-            <Button
-              variant="quiet"
-              aria-disabled="true"
-              aria-describedby={reasonId}
-            >
-              {entry.label}
-            </Button>
-          </li>
-        ))}
-      </ul>
-      <p id={reasonId} className="library-filters-nav__reason">
-        Filtres avancés à venir
-      </p>
-    </SurfacePanel>
+    <div className="library-filters-nav">
+      <div className="library-filters-nav__brand">
+        <span className="library-filters-nav__brand-icon">
+          <Icon name="book" size={27} />
+        </span>
+        Rustory<span className="library-filters-nav__brand-dot">•</span>
+      </div>
+      <p className="library-filters-nav__tagline">Des histoires à emporter.</p>
+      <div className="library-filters-nav__list">
+        <button
+          type="button"
+          className="library-filters-nav__entry"
+          aria-current={activeSection === "library" ? "page" : undefined}
+          onClick={onLibrary}
+        >
+          <Icon name="grid" />
+          Ma bibliothèque
+        </button>
+        <button
+          type="button"
+          className="library-filters-nav__entry"
+          aria-current={activeSection === "device" ? "page" : undefined}
+          onClick={onDevice}
+        >
+          <Icon name="device" />
+          Sur l'appareil
+        </button>
+        <button
+          type="button"
+          className="library-filters-nav__entry"
+          onClick={onCatalog}
+        >
+          <Icon name="book" />
+          Catalogue officiel
+        </button>
+      </div>
+    </div>
   );
 }

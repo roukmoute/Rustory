@@ -3,6 +3,7 @@ import { useId } from "react";
 
 import {
   Button,
+  Icon,
   ProgressIndicator,
   StateChip,
   SurfacePanel,
@@ -61,6 +62,7 @@ export function CatalogPanel({ catalog }: CatalogPanelProps): React.JSX.Element 
       className="catalog-panel"
     >
       <h2 id={titleId} className="catalog-panel__title">
+        <Icon name="book" />
         Catalogue officiel
       </h2>
 

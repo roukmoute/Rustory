@@ -1,7 +1,7 @@
 import type React from "react";
 import { useEffect, useId, useRef, useState } from "react";
 
-import { Button } from "../../../shared/ui";
+import { Button, Icon } from "../../../shared/ui";
 import type { AppError } from "../../../shared/errors/app-error";
 import type { StoryStructure } from "../../../shared/ipc-contracts/story";
 
@@ -154,6 +154,7 @@ export function StoryStructureNavigator({
   return (
     <section className="story-structure-navigator" aria-labelledby={headingId}>
       <h2 id={headingId} className="story-structure-navigator__heading">
+        <Icon name="list" />
         Structure de l'histoire
       </h2>
       {structure === null ? (

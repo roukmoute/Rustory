@@ -5,7 +5,7 @@ import type {
   DeviceSupportLine,
   SupportProfile,
 } from "../../../shared/ipc-contracts/settings";
-import { StateChip, SurfacePanel } from "../../../shared/ui";
+import { Icon, StateChip, SurfacePanel } from "../../../shared/ui";
 
 import "./SupportProfileView.css";
 
@@ -99,7 +99,10 @@ export function SupportProfileView({
         elevation={1}
         className="support-profile__section"
       >
-        <h2 className="support-profile__section-title">{SECTION_DEVICES}</h2>
+        <h2 className="support-profile__section-title">
+          <Icon name="device" />
+          {SECTION_DEVICES}
+        </h2>
         <div
           className="support-profile__section-body"
           aria-busy={profileRead.kind === "loading" || undefined}
@@ -113,45 +116,47 @@ export function SupportProfileView({
                 <h3 className="support-profile__family-title">
                   {group.familyLabel}
                 </h3>
-                {group.lines.map((line) => (
-                  <div key={line.cohort} className="support-profile__cohort">
-                    <div className="support-profile__cohort-head">
-                      <span className="support-profile__cohort-name">
-                        {line.cohortLabel}
-                      </span>
-                      {line.metadataFormatLabel !== undefined && (
-                        <span className="support-profile__cohort-format">
-                          {line.metadataFormatLabel}
+                <div className="support-profile__cohorts">
+                  {group.lines.map((line) => (
+                    <div key={line.cohort} className="support-profile__cohort">
+                      <div className="support-profile__cohort-head">
+                        <span className="support-profile__cohort-name">
+                          {line.cohortLabel}
                         </span>
-                      )}
-                    </div>
-                    <ul className="support-profile__capabilities">
-                      {line.capabilities.map((capability) => (
-                        <li
-                          key={capability.operation}
-                          className="support-profile__capability"
-                        >
-                          <span className="support-profile__capability-label">
-                            {capability.label}
+                        {line.metadataFormatLabel !== undefined && (
+                          <span className="support-profile__cohort-format">
+                            {line.metadataFormatLabel}
                           </span>
-                          <StateChip
-                            tone={capability.available ? "success" : "neutral"}
-                            label={
-                              capability.available
-                                ? CHIP_AVAILABLE
-                                : CHIP_NOT_AVAILABLE
-                            }
-                          />
-                          {capability.reason !== undefined && (
-                            <span className="support-profile__reason">
-                              {capability.reason}
+                        )}
+                      </div>
+                      <ul className="support-profile__capabilities">
+                        {line.capabilities.map((capability) => (
+                          <li
+                            key={capability.operation}
+                            className="support-profile__capability"
+                          >
+                            <span className="support-profile__capability-label">
+                              {capability.label}
                             </span>
-                          )}
-                        </li>
-                      ))}
-                    </ul>
-                  </div>
-                ))}
+                            <StateChip
+                              tone={capability.available ? "success" : "neutral"}
+                              label={
+                                capability.available
+                                  ? CHIP_AVAILABLE
+                                  : CHIP_NOT_AVAILABLE
+                              }
+                            />
+                            {capability.reason !== undefined && (
+                              <span className="support-profile__reason">
+                                {capability.reason}
+                              </span>
+                            )}
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  ))}
+                </div>
               </div>
             ))}
         </div>
@@ -162,7 +167,10 @@ export function SupportProfileView({
         elevation={1}
         className="support-profile__section"
       >
-        <h2 className="support-profile__section-title">{SECTION_ARTIFACTS}</h2>
+        <h2 className="support-profile__section-title">
+          <Icon name="folder" />
+          {SECTION_ARTIFACTS}
+        </h2>
         <div
           className="support-profile__section-body"
           aria-busy={profileRead.kind === "loading" || undefined}
@@ -220,6 +228,7 @@ export function SupportProfileView({
         className="support-profile__section"
       >
         <h2 className="support-profile__section-title">
+          <Icon name="link" />
           {SECTION_FILE_ASSOCIATION}
         </h2>
         <div
@@ -279,7 +288,10 @@ export function SupportProfileView({
         elevation={1}
         className="support-profile__section"
       >
-        <h2 className="support-profile__section-title">{SECTION_SOURCES}</h2>
+        <h2 className="support-profile__section-title">
+          <Icon name="headphones" />
+          {SECTION_SOURCES}
+        </h2>
         <div
           className="support-profile__section-body"
           aria-busy={policyRead.kind === "loading" || undefined}
@@ -315,7 +327,10 @@ export function SupportProfileView({
         elevation={1}
         className="support-profile__section"
       >
-        <h2 className="support-profile__section-title">{SECTION_POSTURE}</h2>
+        <h2 className="support-profile__section-title">
+          <Icon name="leaf" />
+          {SECTION_POSTURE}
+        </h2>
         <p className="support-profile__posture">{DISTRIBUTION_POSTURE}</p>
       </SurfacePanel>
     </div>

@@ -28,35 +28,49 @@
 .export-status-surface__path {
   margin: 0;
   font-size: 0.875rem;
-  color: var(--text-secondary, #475569);
+  color: var(--color-text-secondary);
   word-break: break-all;
 }
 
 .export-status-surface--failed {
   padding: 1rem;
-  background: var(--surface-warning-subtle, #fef3c7);
-  border: 1px solid var(--surface-error-border, #f87171);
-  border-radius: 0.5rem;
+  background: #fff3d4;
+  border: 1px solid #e5c675;
+  border-radius: 14px;
 }
 
 .export-status-surface__alert-title {
   margin: 0;
   font-weight: 600;
-  color: var(--text-primary, #0f172a);
+  color: var(--color-text-primary);
 }
 
 .export-status-surface__alert-message,
 .export-status-surface__alert-action {
   margin: 0.25rem 0 0;
-  color: var(--text-primary, #0f172a);
+  color: var(--color-text-primary);
 }
 
 .export-status-surface__alert-action {
-  color: var(--text-secondary, #475569);
+  color: var(--color-text-secondary);
 }
 
 .export-status-surface__actions {
   display: flex;
+  flex-wrap: wrap;
   gap: 0.5rem;
   margin-top: 0.75rem;
+}
+
+.export-status-surface__chip {
+  padding: 16px;
+  border: 1px solid #bdddc9;
+  border-radius: 14px;
+  background: #e3f3ea;
+}
+
+.export-status-surface__alert-message,
+.export-status-surface__alert-action {
+  font-size: 13px;
+  line-height: 1.6;
 }

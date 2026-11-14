@@ -42,9 +42,9 @@
 
 .device-import-status__alert {
   padding: var(--space-3);
-  background: var(--surface-warning-subtle, #fef3c7);
-  border: 1px solid var(--surface-error-border, #f87171);
-  border-radius: 0.5rem;
+  background: #fff3d4;
+  border: 1px solid #e5c675;
+  border-radius: 14px;
 }
 
 .device-import-status__alert-title {
@@ -65,6 +65,20 @@
 
 .device-import-status__actions {
   display: flex;
+  flex-wrap: wrap;
   gap: var(--space-2);
   margin-top: var(--space-2);
+}
+
+.device-import-status__success {
+  padding: 14px;
+  border: 1px solid #bdddc9;
+  border-radius: 14px;
+  background: #e3f3ea;
+}
+
+.device-import-status__alert-message,
+.device-import-status__alert-action {
+  font-size: 13px;
+  line-height: 1.6;
 }

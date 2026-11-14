@@ -1,7 +1,7 @@
 import type React from "react";
 import { useEffect, useState } from "react";
 
-import { ProgressIndicator } from "../../../shared/ui";
+import { Icon, ProgressIndicator } from "../../../shared/ui";
 
 import "./DropOverlay.css";
 
@@ -45,6 +45,9 @@ export function DropAnalyzingOverlay({
   return (
     <div className="drop-overlay drop-overlay--analyzing" role="status">
       <div className="drop-overlay__panel">
+        <span className="drop-overlay__icon" aria-hidden="true">
+          <Icon name="folder" />
+        </span>
         <p className="drop-overlay__title">Analyse en cours…</p>
         <ProgressIndicator
           mode="indeterminate"
