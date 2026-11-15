@@ -402,16 +402,18 @@ function closeDetails() {
     );
 }
 
-/** Follow the guided dialog from either the toolbar choice or an empty-card
+/** Follow the creation dialog from either the toolbar choice or an empty-card
  * entry. These are navigation gestures only; the IPC-backed actions stay real. */
 async function selectCreationStep(
   user: Pick<ReturnType<typeof userEvent.setup>, "click">,
-  step: "title" | "import",
+  step: "title" | "import" | "web",
 ) {
   const target =
     step === "title"
       ? "Comment s'appelle ton histoire ?"
-      : "Comment veux-tu importer ?";
+      : step === "import"
+        ? "Comment veux-tu importer ?"
+        : "Depuis une page web";
   let dialog = screen.getByRole("dialog");
   if (within(dialog).queryByRole("heading", { name: target })) return dialog;
   if (!within(dialog).queryByRole("button", { name: "Écrire une histoire" })) {
@@ -420,7 +422,12 @@ async function selectCreationStep(
   }
   await user.click(
     within(dialog).getByRole("button", {
-      name: step === "title" ? "Écrire une histoire" : "Importer",
+      name:
+        step === "title"
+          ? "Écrire une histoire"
+          : step === "import"
+            ? "Importer"
+            : "Depuis une page web",
     }),
   );
   return screen.findByRole("dialog", { name: target });
@@ -1405,6 +1412,129 @@ describe("<LibraryRoute />", () => {
     expect(useLibraryShell.getState().selectedStoryIds.size).toBe(0);
   });
 
+  it.each([
+    {
+      initialScreen: "library" as const,
+      stories: [],
+      caseName: "empty library",
+    },
+    { initialScreen: "drafts" as const, stories: [], caseName: "empty drafts" },
+    {
+      initialScreen: "library" as const,
+      stories: [{ id: "native", title: "Mon brouillon" }],
+      caseName: "populated library",
+    },
+    {
+      initialScreen: "drafts" as const,
+      stories: [{ id: "native", title: "Mon brouillon" }],
+      caseName: "populated drafts",
+    },
+    {
+      initialScreen: "drafts" as const,
+      stories: [
+        { id: "imported", title: "Importée", importState: "resolved" as const },
+      ],
+      caseName: "drafts with only imported stories in storage",
+    },
+  ])(
+    "opens only the three creation choices from $caseName",
+    async ({ initialScreen, stories }) => {
+      const user = userEvent.setup();
+      mockGet.mockResolvedValue({ stories });
+      renderLibrary({ initialScreen });
+      if (
+        stories.length === 0 ||
+        (initialScreen === "drafts" &&
+          stories.every((story) => "importState" in story))
+      ) {
+        await screen.findByRole("heading", {
+          name:
+            initialScreen === "drafts"
+              ? "Aucun brouillon pour l'instant"
+              : "Par quoi veux-tu commencer ?",
+        });
+      } else {
+        await screen.findByRole("button", { name: "Mon brouillon" });
+      }
+      await user.click(
+        await screen.findByRole("button", { name: "Créer une histoire" }),
+      );
+      const dialog = screen.getByRole("dialog", {
+        name: "Que veux-tu faire ?",
+      });
+      expect(
+        within(dialog)
+          .getAllByRole("button")
+          .map(
+            (button) => button.getAttribute("aria-label") ?? button.textContent,
+          ),
+      ).toEqual([
+        "Écrire une histoire",
+        "Importer",
+        "Depuis une page web",
+        "Annuler",
+      ]);
+      expect(within(dialog).queryByRole("textbox")).not.toBeInTheDocument();
+      expect(
+        within(dialog).queryByRole("button", { name: "Choisir un dossier…" }),
+      ).not.toBeInTheDocument();
+      expect(mockCreateStory).not.toHaveBeenCalled();
+      expect(mockAnalyzeArtifact).not.toHaveBeenCalled();
+      expect(mockAnalyzeFolder).not.toHaveBeenCalled();
+      expect(mockAnalyzeArchive).not.toHaveBeenCalled();
+      expect(mockFetchWebPreview).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(["empty", "populated"] as const)(
+    "opens the format choices from the %s library import action before any picker",
+    async (libraryState) => {
+      const user = userEvent.setup();
+      mockGet.mockResolvedValue({
+        stories:
+          libraryState === "empty"
+            ? []
+            : [{ id: "native", title: "Mon brouillon" }],
+      });
+      renderLibrary();
+      if (libraryState === "empty")
+        await screen.findByRole("heading", {
+          name: "Par quoi veux-tu commencer ?",
+        });
+      else await screen.findByRole("button", { name: "Mon brouillon" });
+      await user.click(
+        screen.getByRole("button", { name: "Importer une histoire" }),
+      );
+      const dialog = screen.getByRole("dialog", {
+        name: "Comment veux-tu importer ?",
+      });
+      expect(within(dialog).queryByRole("textbox")).not.toBeInTheDocument();
+      expect(
+        within(dialog)
+          .getAllByRole("button")
+          .map(
+            (button) => button.getAttribute("aria-label") ?? button.textContent,
+          ),
+      ).toEqual([
+        "Choisir un fichier .rustory…",
+        "Choisir un dossier…",
+        "Choisir une archive de pack (.zip)…",
+        "Démarrer depuis une source externe (RSS)",
+        "Retour",
+      ]);
+      expect(mockAnalyzeArtifact).not.toHaveBeenCalled();
+      expect(mockAnalyzeFolder).not.toHaveBeenCalled();
+      expect(mockAnalyzeArchive).not.toHaveBeenCalled();
+      await user.click(
+        within(dialog).getByRole("button", {
+          name: "Choisir un fichier .rustory…",
+        }),
+      );
+      expect(mockAnalyzeArtifact).toHaveBeenCalledOnce();
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    },
+  );
+
   it("opens the Créer dialog when the header CTA is pressed", async () => {
     const user = userEvent.setup();
     mockGet.mockResolvedValueOnce({
@@ -1438,6 +1568,9 @@ describe("<LibraryRoute />", () => {
     await screen.findByRole("button", { name: /le soleil/i });
     await user.click(
       screen.getByRole("button", { name: /importer une histoire/i }),
+    );
+    await user.click(
+      screen.getByRole("button", { name: "Choisir un fichier .rustory…" }),
     );
 
     await user.click(
@@ -1509,12 +1642,7 @@ describe("<LibraryRoute />", () => {
     await user.click(
       screen.getByRole("button", { name: /créer une histoire/i }),
     );
-    await selectCreationStep(user, "import");
-    await user.click(
-      await screen.findByRole("button", {
-        name: "Démarrer depuis une page web",
-      }),
-    );
+    await selectCreationStep(user, "web");
     // Type an address and fetch — the flow is now busy.
     await user.type(
       screen.getByLabelText("Adresse de la page web"),
@@ -1587,19 +1715,25 @@ describe("<LibraryRoute />", () => {
     await user.click(
       screen.getByRole("button", { name: /créer une histoire/i }),
     );
-    await selectCreationStep(user, "import");
+    const choice = screen.getByRole("dialog", { name: "Que veux-tu faire ?" });
     await user.click(
-      await screen.findByRole("button", {
-        name: "Démarrer depuis une page web",
-      }),
+      within(choice).getByRole("button", { name: "Depuis une page web" }),
     );
+    expect(
+      screen.getByRole("dialog", { name: "Depuis une page web" }),
+    ).toBeInTheDocument();
+    expect(mockFetchWebPreview).not.toHaveBeenCalled();
     expect(screen.getByLabelText("Adresse de la page web")).toBeInTheDocument();
     await user.type(
       screen.getByLabelText("Adresse de la page web"),
       WEB_PAGE_URL,
     );
     await user.click(screen.getByRole("button", { name: "Récupérer la page" }));
-    expect(mockFetchWebPreview).toHaveBeenCalledWith(WEB_PAGE_URL);
+    expect(mockFetchWebPreview).toHaveBeenCalledExactlyOnceWith(WEB_PAGE_URL);
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(screen.getByLabelText("Adresse de la page web")).toHaveValue(
+      WEB_PAGE_URL,
+    );
     // The review lists every previewed episode, in page order.
     expect(await screen.findByText("Épisode 1")).toBeInTheDocument();
     expect(screen.getByText("Épisode 2")).toBeInTheDocument();
@@ -1610,6 +1744,47 @@ describe("<LibraryRoute />", () => {
       WEB_PAGE_URL,
       WEB_PREVIEW_FIXTURE.pageChecksum,
     );
+  });
+
+  it("preserves the submitted web address in the review surface so a failed fetch can retry it", async () => {
+    const user = userEvent.setup();
+    mockGet.mockResolvedValue({ stories: [{ id: "s1", title: "Le soleil" }] });
+    mockReadContentSourcePolicy.mockResolvedValue(
+      WEB_ENABLED_CONTENT_SOURCE_POLICY,
+    );
+    mockFetchWebPreview
+      .mockRejectedValueOnce({
+        code: "IMPORT_FAILED",
+        message: "La page est temporairement inaccessible.",
+        userAction: "Réessaie la récupération.",
+        details: null,
+      })
+      .mockResolvedValueOnce(WEB_PREVIEW_FIXTURE);
+    renderLibrary();
+    await user.click(
+      await screen.findByRole("button", { name: "Créer une histoire" }),
+    );
+    await user.click(
+      screen.getByRole("button", { name: "Depuis une page web" }),
+    );
+    await user.type(
+      screen.getByLabelText("Adresse de la page web"),
+      WEB_PAGE_URL,
+    );
+    await user.click(screen.getByRole("button", { name: "Récupérer la page" }));
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("La page est temporairement inaccessible.");
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(screen.getByLabelText("Adresse de la page web")).toHaveValue(
+      WEB_PAGE_URL,
+    );
+    await user.click(within(alert).getByRole("button", { name: "Réessayer" }));
+    expect(await screen.findByText("Épisode 1")).toBeInTheDocument();
+    expect(mockFetchWebPreview.mock.calls).toEqual([
+      [WEB_PAGE_URL],
+      [WEB_PAGE_URL],
+    ]);
+    expect(mockAcceptWebCreation).not.toHaveBeenCalled();
   });
 
   it("keeps the folder, RSS and web entries inert while the web surface is open (cross-flow exclusivity)", async () => {
@@ -1630,13 +1805,15 @@ describe("<LibraryRoute />", () => {
     await user.click(
       screen.getByRole("button", { name: /créer une histoire/i }),
     );
-    await selectCreationStep(user, "import");
-    await user.click(
-      await screen.findByRole("button", {
-        name: "Démarrer depuis une page web",
-      }),
-    );
+    await selectCreationStep(user, "web");
     expect(screen.getByLabelText("Adresse de la page web")).toBeInTheDocument();
+    await user.type(
+      screen.getByLabelText("Adresse de la page web"),
+      WEB_PAGE_URL,
+    );
+    await user.click(screen.getByRole("button", { name: "Récupérer la page" }));
+    expect(mockFetchWebPreview).toHaveBeenCalledWith(WEB_PAGE_URL);
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
 
     // Re-open the creation dialog: every secondary entry is inert while
     // the web surface is open — two review surfaces must never stack.
@@ -1653,8 +1830,9 @@ describe("<LibraryRoute />", () => {
       name: "Démarrer depuis une source externe (RSS)",
     });
     expect(rssButton).toHaveAttribute("aria-disabled", "true");
-    const webButton = within(dialog).getByRole("button", {
-      name: "Démarrer depuis une page web",
+    await user.click(within(dialog).getByRole("button", { name: "Retour" }));
+    const webButton = screen.getByRole("button", {
+      name: "Depuis une page web",
     });
     expect(webButton).toHaveAttribute("aria-disabled", "true");
   });
@@ -1772,22 +1950,21 @@ describe("<LibraryRoute />", () => {
       name: "Démarrer depuis une source externe (RSS)",
     });
     await waitFor(() => expect(rssButton).not.toHaveAttribute("aria-disabled"));
-    expect(within(dialog).getByText("Flux RSS")).toBeInTheDocument();
+    expect(rssButton).toHaveAccessibleDescription(
+      "Activée par la distribution officielle",
+    );
     expect(
       within(dialog).getByText("Activée par la distribution officielle"),
     ).toBeInTheDocument();
-    // The known non-activated kinds render VISIBLE but DISABLED with the
-    // Rust-carried reason.
-    for (const label of ["Flux Atom", "Flux JSON Feed"]) {
+    for (const label of [
+      "Flux Atom",
+      "Flux JSON Feed",
+      "Démarrer depuis une page web",
+    ]) {
       expect(
-        within(dialog).getByRole("button", { name: label }),
-      ).toHaveAttribute("aria-disabled", "true");
+        within(dialog).queryByRole("button", { name: label }),
+      ).not.toBeInTheDocument();
     }
-    expect(
-      within(dialog).getAllByText(
-        "Source indisponible: non activée dans la distribution officielle",
-      ),
-    ).toHaveLength(2);
 
     // Close, reopen: the policy is read ANEW (point-in-time, no cache).
     await cancelCreation(user);
@@ -6078,6 +6255,9 @@ describe("<LibraryRoute />", () => {
     await userEvent.click(
       screen.getAllByRole("button", { name: /créer une histoire/i })[0],
     );
+    await userEvent.click(
+      screen.getByRole("button", { name: "Écrire une histoire" }),
+    );
     await userEvent.type(screen.getByLabelText("Titre"), "Mon histoire");
     await userEvent.click(screen.getByRole("button", { name: "Créer" }));
     expect(screen.getByText("Création en cours…")).toBeInTheDocument();
@@ -6483,13 +6663,15 @@ describe("<LibraryRoute />", () => {
     await user.click(
       screen.getByRole("button", { name: /créer une histoire/i }),
     );
-    await selectCreationStep(user, "import");
-    await user.click(
-      await screen.findByRole("button", {
-        name: "Démarrer depuis une page web",
-      }),
-    );
+    await selectCreationStep(user, "web");
     expect(screen.getByLabelText("Adresse de la page web")).toBeInTheDocument();
+    await user.type(
+      screen.getByLabelText("Adresse de la page web"),
+      WEB_PAGE_URL,
+    );
+    await user.click(screen.getByRole("button", { name: "Récupérer la page" }));
+    expect(mockFetchWebPreview).toHaveBeenCalledWith(WEB_PAGE_URL);
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
 
     act(() => {
       useDropShell.getState().raiseSignal();
@@ -6591,13 +6773,15 @@ describe("<LibraryRoute />", () => {
     await user.click(
       screen.getByRole("button", { name: /créer une histoire/i }),
     );
-    await selectCreationStep(user, "import");
-    await user.click(
-      await screen.findByRole("button", {
-        name: "Démarrer depuis une page web",
-      }),
-    );
+    await selectCreationStep(user, "web");
     expect(screen.getByLabelText("Adresse de la page web")).toBeInTheDocument();
+    await user.type(
+      screen.getByLabelText("Adresse de la page web"),
+      WEB_PAGE_URL,
+    );
+    await user.click(screen.getByRole("button", { name: "Récupérer la page" }));
+    expect(mockFetchWebPreview).toHaveBeenCalledWith(WEB_PAGE_URL);
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
 
     const pullsSoFar = mockAnalyzeOsOpen.mock.calls.length;
     act(() => {

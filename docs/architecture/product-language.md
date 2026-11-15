@@ -169,7 +169,7 @@ It exists to keep the same product concepts named the same way across:
 | Drop — a library flow is busy (calm limit, frontend-frozen literal, unique) | `Une opération est déjà en cours dans la bibliothèque. Termine-la, puis dépose à nouveau ton fichier ou ton dossier.` | Frozen copy when a drop intent arrives while an import/creation/transfer/OS-open settlement is in flight: the intent is declined calmly (`role="status"`) and the LIVING flow is never interrupted. SISTER literal of the OS-open busy copy — same family, distinct words | reusing the OS-open busy copy verbatim, `indisponible` (policy refusal), `échoué` (transport), queuing the intent |
 | Drop hover overlay (frontend-frozen literal, `aria-hidden`) | `Dépose ton fichier ou ton dossier pour l'analyser` | Frozen copy of the global hover overlay while a drag hovers the window — honest: the drop triggers an ANALYSIS, never a direct import; purely decorative (`aria-hidden`, no focus, no pointer events) | `Déposer pour importer` (a drop never imports directly), `lâcher`, `drop here` |
 | Structured input folder | `dossier structuré` | A local folder (`histoire.json` + referenced media) explicitly supported as a story-creation entry point; its format contract lives in [device-support-profile.md#Structured folder v1 format contract](./device-support-profile.md) | `dossier projet`, `archive`, `template` |
-| Create from a structured folder (dialog secondary entry) | `Ou démarre depuis un dossier préparé hors de Rustory` | Secondary entry of the creation dialog introducing the structured-folder path; the interactive path (title → `Créer`) stays primary | a third bar CTA, `Importer un dossier` |
+| Create from a structured folder (dialog secondary entry) | `Ou démarre depuis un dossier préparé hors de Rustory` | Structured-folder entry on the import step, separate from the title form | a third bar CTA, `Importer un dossier` |
 | Pick the structured folder (action) | `Choisir un dossier…` | Opens the native folder picker for the structured-folder creation | `Parcourir`, `Browse`, `Ouvrir` |
 | Structured-folder creation surface (title) | `Création depuis un dossier` | In-context surface presenting the recognition report of an analyzed structured folder | `import`, `wizard`, `assistant` |
 | Structured-folder report — what-will-be-created header | `Ce qui sera créé` | Report group naming exactly what an accepted folder will create: the (normalized) title, the node count, the retained media and the discarded ones by basename | `résumé`, `aperçu`, `preview` |
@@ -179,7 +179,7 @@ It exists to keep the same product concepts named the same way across:
 | Structured-folder report — discarded media line | `Médias écartés : {basenames}` | The referenced media files that will NOT be wired (absent or unusable — the empty slots stay repairable in the editor); absent when none | `rejetés`, `erreurs`, absolute paths |
 | Accept the structured-folder creation (action) | `Créer l'histoire` | Unique CTA committing the analyzed folder into a canonical story — the report already says what will be discarded (no second CTA); pairs with `Abandonner` | `Importer` (reserved for `.rustory`), `Valider`, dual-CTA variants |
 | External content source (RSS) | `source externe` / `flux RSS` | A content source outside Rustory the user follows (an RSS 2.0 feed) usable as a story-creation entry point; the type is activated by the official distribution, the address is provided at creation time and never stored | `feed`, `abonnement`, `podcast` as the generic term |
-| Start a story from an external source (dialog third entry) | `Démarrer depuis une source externe (RSS)` | Secondary entry of the creation dialog introducing the RSS ingestion path; the interactive path (title → `Créer`) stays primary | a bar CTA, `Importer un flux`, `Suivre un flux` |
+| Start a story from an external source (dialog third entry) | `Démarrer depuis une source externe (RSS)` | RSS entry on the import step, separate from the title form | a bar CTA, `Importer un flux`, `Suivre un flux` |
 | External source creation surface (title) | `Création depuis une source externe` | In-context surface hosting the feed address input, the fetch preview and the item selection | `import RSS`, `wizard`, `assistant` |
 | RSS feed address (field) | `Adresse du flux RSS` | The feed address the user provides for one fetch; `http(s)` only, never persisted (the provenance keeps the host only) | `URL` alone, `lien`, `adresse web` |
 | Fetch the RSS feed (action, networked, explicit) | `Récupérer le flux` | The ONLY networked action of the flow, on explicit click — the feed is fetched and analyzed, nothing is created. NO collision: `Récupérer / mettre à jour` stays the official-catalog action (different surface, different object) | `Télécharger`, `Rafraîchir`, `Sync`, reusing `Récupérer / mettre à jour` |
@@ -523,6 +523,19 @@ finding pair (nothing was created). The `source` aspect exists for every
 flow's defensive rendering, but only the RSS flow ever emits it.
 
 ### Library navigation and visual presentation
+
+- Story creation always begins with `Étape 1 sur 2` and `Que veux-tu faire ?`:
+  `Écrire une histoire` / `Partir d'une page blanche`, `Importer` / `Fichier,
+  dossier ou lien`, and `Depuis une page web` / `Coller l'adresse d'une page`.
+  This screen contains no title or address input. `Annuler` closes it.
+- `Étape 2 sur 2` asks only for the chosen input: `Comment s'appelle ton histoire ?`
+  and `Titre`, `Comment veux-tu importer ?` and the implemented import sources,
+  or `Depuis une page web` and `Adresse de la page web`. `Retour` returns to the
+  three choices. `Tu pourras le changer plus tard.` describes the story title.
+- `Récupérer la page` starts the real web preview only after an address is entered;
+  choosing the web card itself does not make a network request. Source policy
+  and operation guards remain authoritative. Unsupported source kinds without
+  an implemented handler are omitted; supported choices retain their refusal reasons.
 
 - `Ma bibliothèque` names the local-library screen at `/library`.
 - `Mes brouillons` opens `/drafts`: the editable stories created here, excluding

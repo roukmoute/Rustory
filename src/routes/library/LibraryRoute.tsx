@@ -183,7 +183,7 @@ export function LibraryRoute(): React.JSX.Element {
   const setCollectionView = (view: "grid" | "list"): void =>
     setCollectionViews((current) => ({ ...current, [collectionKey]: view }));
   const [createInitialStep, setCreateInitialStep] = useState<
-    "choice" | "title" | "import"
+    "choice" | "import"
   >("choice");
   const [isCreateOpen, setIsCreateOpen] = useState<boolean>(false);
   // Mirror of the creation dialog's INTERNAL submission state, reported
@@ -313,7 +313,7 @@ export function LibraryRoute(): React.JSX.Element {
   };
 
   const handleCreateStoryRequest = (
-    step: "choice" | "title" | "import" = "choice",
+    step: "choice" | "import" = "choice",
   ): void => {
     setCreateInitialStep(step);
     setIsCreateOpen(true);
@@ -465,6 +465,7 @@ export function LibraryRoute(): React.JSX.Element {
 
   const webCreation = useWebCreation();
   const [isWebCreationOpen, setIsWebCreationOpen] = useState(false);
+  const [webCreationInitialUrl, setWebCreationInitialUrl] = useState("");
   // ACTIVE covers the whole lifetime of the flow (surface open, or any
   // non-idle machine state) — same cross-flow exclusivity as the RSS
   // flow, never a stacked second creation surface.
@@ -480,11 +481,13 @@ export function LibraryRoute(): React.JSX.Element {
   const handleWebAbandon = (): void => {
     webCreation.abandon();
     setIsWebCreationOpen(false);
+    setWebCreationInitialUrl("");
   };
 
   const handleWebDismiss = (): void => {
     webCreation.dismiss();
     setIsWebCreationOpen(false);
+    setWebCreationInitialUrl("");
   };
 
   const handleCreated = (story: StoryCardDto): void => {
@@ -1650,6 +1653,7 @@ export function LibraryRoute(): React.JSX.Element {
         onDismiss={handleRssDismiss}
       />
       <CreateFromWebSurface
+        initialUrl={webCreationInitialUrl}
         open={isWebCreationOpen}
         status={webCreation.status}
         onFetch={(url) => {
@@ -1728,18 +1732,14 @@ export function LibraryRoute(): React.JSX.Element {
             setQuery,
             setSort,
             resetFilters,
-            () =>
-              handleCreateStoryRequest(
-                state.kind === "ready" && state.overview.stories.length === 0
-                  ? "title"
-                  : "choice",
-              ),
+            () => handleCreateStoryRequest(),
             preparationBadges,
             onDeviceStoryIds,
             deviceStampLabel,
-            storyImport.pickAndAnalyze,
+            () => handleCreateStoryRequest("import"),
             isImportBusy ||
               isCreateFromFolderBusy ||
+              isCreateFromArchiveBusy ||
               isRssCreationActive ||
               isWebCreationActive,
             handleStoryContextMenu,
@@ -1768,18 +1768,14 @@ export function LibraryRoute(): React.JSX.Element {
             setQuery,
             setSort,
             resetFilters,
-            () =>
-              handleCreateStoryRequest(
-                state.kind === "ready" && state.overview.stories.length === 0
-                  ? "title"
-                  : "choice",
-              ),
+            () => handleCreateStoryRequest(),
             preparationBadges,
             onDeviceStoryIds,
             deviceStampLabel,
-            storyImport.pickAndAnalyze,
+            () => handleCreateStoryRequest("import"),
             isImportBusy ||
               isCreateFromFolderBusy ||
+              isCreateFromArchiveBusy ||
               isRssCreationActive ||
               isWebCreationActive,
             handleStoryContextMenu,
@@ -2151,7 +2147,6 @@ export function LibraryRoute(): React.JSX.Element {
         </Dialog>
       )}
       <CreateStoryDialog
-        flow="guided"
         initialStep={createInitialStep}
         onImportArtifactRequest={storyImport.pickAndAnalyze}
         isImportArtifactUnavailable={
@@ -2194,8 +2189,12 @@ export function LibraryRoute(): React.JSX.Element {
           isRssCreationActive ||
           isWebCreationActive
         }
-        onCreateFromWebRequest={() => {
+        onCreateFromWebRequest={(url) => {
+          // The wizard has collected the address without network access. The
+          // explicit fetch gesture now hands it to the existing preview flow.
+          setWebCreationInitialUrl(url);
           setIsWebCreationOpen(true);
+          void webCreation.fetchPreview(url);
         }}
         isCreateFromWebUnavailable={
           isImportBusy ||

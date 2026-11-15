@@ -282,7 +282,7 @@ progress/results visible independently of selection and screen.
 - Creation uses a choice screen then a title or import-source screen. The title
   validation, distribution policy and busy guards remain authoritative; changing
   presentation never enables a blocked source. Empty-library actions open the
-  relevant title/import step directly.
+  choice step for writing and the import-source step for importing.
 
 Historical contracts below retain their state machines and capability gates.
 References to a "right column" or "decision panel" now mean the explicitly
@@ -1336,7 +1336,7 @@ A new `brouillon local` is created through a single modal dialog in the `library
 | Aspect | Value |
 | --- | --- |
 | Entry points | Header CTA `Créer une histoire` inside `Story Collection`, plus the same CTA inside the `loaded-empty` region. Both are active in parallel whenever the route wires a handler; they dispatch the exact same flow. |
-| Input | A single `Titre` field. No `description`, `genre` or `cover image` at this stage — richer story inputs are deferred. After a successful creation the router lands on the `Story Editor Shell` (see `Story Editor Shell Contract`). |
+| Input | The writing branch alone presents a single `Titre` field, after the choice step. No `description`, `genre` or `cover image` at this stage — richer story inputs are deferred. After a successful creation the router lands on the `Story Editor Shell` (see `Story Editor Shell Contract`). |
 | UI validation | Mirrors the Rust domain rules so `aria-disabled` flips at typing speed: the normalized title (NFC + trim) must be non-empty, at most `120` Unicode code points, and contain no C0 / C1 control characters nor any code point from the Unicode denylist below. |
 | Unicode denylist | Beyond C0 (`U+0000..U+001F`) and C1 (`U+007F..U+009F`) controls, the following `Cf` and line-separator code points are rejected because they would make a title hidden, bidirectionally ambiguous, or carry embedded line breaks: `U+FEFF` (BOM / ZWNBSP), `U+202A..U+202E` (LRE / RLE / PDF / LRO / RLO bidi overrides), `U+2066..U+2069` (LRI / RLI / FSI / PDI bidi isolates), `U+200E` (LRM), `U+200F` (RLM), `U+061C` (ALM), `U+2028` (LINE SEPARATOR), `U+2029` (PARAGRAPH SEPARATOR). ZWJ (`U+200D`) and ZWNJ (`U+200C`) are deliberately allowed — they are load-bearing for many scripts and emoji sequences. |
 | Authoritative validation | Rust re-validates on every `create_story` call; a title that slipped past the UI is refused via `AppError { code: "INVALID_STORY_TITLE" }` and no row is inserted. |
@@ -1347,31 +1347,37 @@ A new `brouillon local` is created through a single modal dialog in the `library
 | Post-success flow | The module-local SWR cache for `useLibraryOverview` is invalidated, a fresh fetch is triggered, and the router navigates to `/story/:storyId/edit` with `replace: true` so the history stack stays flat. |
 | Failure recovery | On rejection, the dialog stays open, the typed title survives, the focus returns to the field, and the Rust-supplied `message` + `userAction` are rendered inside a `role="alert"` region below the field. |
 
-The dialog is the creation CHOICE: the interactive path (title → `Créer`)
-stays primary, and up to two OPTIONAL secondary entries hand over to the
-other creation flows — `Ou démarre depuis un dossier préparé hors de
-Rustory` + `Choisir un dossier…` (see `Structured Folder Creation
-Contract`) and `Démarrer depuis une source externe (RSS)` (see `External
-Source Creation Contract (RSS)`). Each secondary entry renders ONLY when
-the route wires its handler, closes the dialog first, then delegates; both
-are gated by the same cross-flow busy exclusivity (two review surfaces /
-native dialogs must never stack). No extra button lands in the library bar.
+The creation dialog has ONE guided presentation, never an all-in-one title and
+source form. Every `Créer une histoire` entry in the library and drafts opens
+`Étape 1 sur 2` / `Que veux-tu faire ?`, whether the collection is empty or full.
+The three vertically stacked cards are writing, importing and web-page creation.
+No title input or detailed source list is present at this step.
 
-The CONTENT-SOURCE section of the dialog (the RSS entry plus the known
-non-activated kinds) is additionally DRIVEN by the distribution policy
-(see `Content Source Activation Contract`): the route reads
-`read_content_source_policy` when the dialog opens (a pure, point-in-time
-read — no cache, no authoritative frontend state) and hands the result to
-the dialog. An `enabled` kind renders its active entry plus the frozen
-entry-level activation marker (`Activée par la distribution officielle`);
-a non-enabled kind renders VISIBLE but DISABLED (`aria-disabled`, the
-reason keyboard-reachable) with the Rust-carried frozen reason (the
-`Disabled Actions and Reasons` pattern); a missing or failed policy read
-renders EVERY external-source entry disabled with the fail-closed reason
-`Sources externes indisponibles pour l'instant.` — never
-active-by-default. The title path and the structured-folder entry are
-NEVER policy-gated: they are local flows, not "additional content
-sources", and a policy read failure must never block them.
+At `Étape 2 sur 2`, the chosen branch alone is visible:
+- Writing: title, validation, `Retour` and `Créer`. Returning preserves the typed
+  title; closing resets it. The Rust validation and successful editor navigation
+  are unchanged. The title form has no import choices.
+- Import: the `.rustory`, structured-folder, `.zip` and RSS entries whose handlers
+  exist. Web is not duplicated here and unimplemented source kinds are omitted.
+  Both the header import action and the empty-library import card open this step.
+  A native picker is launched only after its explicit source choice.
+- Web: address, `Retour` and `Récupérer la page`. Choosing the first-step web card
+  performs no fetch. Submitting a nonempty address closes this dialog, opens the
+  existing web preview surface and fetches once. That surface retains the handed
+  address for correction/retry; closing clears it. The review and explicit
+  `Créer l'histoire` acceptance remain separate from this initial setup.
+
+The step indicator appears before the dialog heading in the DOM and visually.
+Changing steps moves focus to the relevant input or first choice; no operation
+starts through step navigation. Busy guards apply to clicks and Enter. Closing
+or returning is unavailable during title submission.
+
+The route reads `read_content_source_policy` for every dialog opening, with the
+existing opening token preventing stale responses. RSS and web remain active
+only if both their handler and an `enabled` policy entry are present. Their
+Rust-carried refusal reason stays accessible when disabled; policy absence or
+failure uses `Sources externes indisponibles pour l'instant.`. Local writing,
+files, folders and archives never depend on that network-source policy.
 
 ## Story Editor Shell Contract
 
@@ -1766,11 +1772,9 @@ UI state machine (owned by `use-structured-creation`, mounted in the library):
 | `created` | `Histoire créée dans ta bibliothèque` (success chip) + the created title + explicit `Fermer`; the library reloads (authoritative re-read); the editor is NOT auto-opened — the fresh card (with its possible marker) IS the sober success feedback | `aria-live="polite"`, mounted, `aria-atomic` |
 | `failed` | `Création impossible` block with the canonical `message` + `userAction`, buttons `Réessayer` THEN `Fermer` | `role="alert"` |
 
-Entry point: the library bar keeps ONE primary CTA (`Créer une histoire`,
-UX-DR26). The `CreateStoryDialog` is the creation CHOICE: the interactive path
-(title → `Créer`) stays primary; a secondary entry `Ou démarre depuis un
-dossier préparé hors de Rustory` + `Choisir un dossier…` closes the dialog and
-starts this flow. No third button in the bar.
+Entry point: the library bar keeps `Créer une histoire`, which opens the
+choice step. `Importer` opens the second step's source choices; the folder
+picker remains an explicit action there, without a simultaneous title form.
 
 Inherited behavior (documented honestly): the created story carries the FULL
 edit scope by construction and joins the `Import Review Resolution Contract`
@@ -1871,7 +1875,8 @@ Where the policy is decided, enforced and surfaced:
   (`product-language.md`). Fail-closed everywhere: a kind missing from the
   received matrix refuses exactly like a `notActivated` one.
 - **The creation dialog renders the policy.** See `Story Creation
-  Contract`: the content-source entries are DRIVEN by the read policy —
+  Contract`: entries with implemented handlers (RSS and web) are driven by the
+  read policy; source kinds without a handler are not creation options —
   `enabled` → active entry with the frozen activation marker;
   `notActivated` / `blockedByPolicy` → visible but disabled with the
   frozen reason (the `Disabled Actions and Reasons` pattern); policy read

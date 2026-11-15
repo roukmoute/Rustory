@@ -1,4 +1,11 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import {
   afterAll,
@@ -114,6 +121,7 @@ describe("<CreateStoryDialog />", () => {
     const view = render(
       <CreateStoryDialog
         open
+        initialStep="title"
         onClose={onClose}
         onCreated={onCreated}
         {...override}
@@ -122,15 +130,19 @@ describe("<CreateStoryDialog />", () => {
     return { onClose, onCreated, ...view };
   }
 
-  it("renders the dialog heading, labelled title field and both CTAs", () => {
+  function renderImportDialog(
+    override?: Partial<React.ComponentProps<typeof CreateStoryDialog>>,
+  ) {
+    return renderDialog({ ...override, initialStep: "import" });
+  }
+
+  it("renders only the writing step with its heading, title and actions", () => {
     renderDialog();
     expect(
-      screen.getByRole("heading", { name: /créer une histoire/i }),
+      screen.getByRole("heading", { name: "Comment s'appelle ton histoire ?" }),
     ).toBeInTheDocument();
     expect(screen.getByLabelText(/^titre$/i)).toBeInTheDocument();
-    expect(
-      screen.getByRole("button", { name: /annuler/i }),
-    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Retour" })).toBeInTheDocument();
     expect(
       screen.getByRole("button", { name: /^créer$/i }),
     ).toBeInTheDocument();
@@ -295,7 +307,7 @@ describe("<CreateStoryDialog />", () => {
 
   it("clicks Annuler → calls onClose without any IPC", async () => {
     const user = userEvent.setup();
-    const { onClose } = renderDialog();
+    const { onClose } = renderDialog({ initialStep: "choice" });
     await user.click(screen.getByRole("button", { name: /annuler/i }));
     expect(onClose).toHaveBeenCalled();
     expect(createStory).not.toHaveBeenCalled();
@@ -315,13 +327,13 @@ describe("<CreateStoryDialog />", () => {
   it("renders no story, BMAD or epic jargon in the dialog", () => {
     renderDialog();
     const dialog = screen.getByRole("dialog", {
-      name: /créer une histoire/i,
+      name: "Comment s'appelle ton histoire ?",
     });
     expect(dialog.textContent).not.toMatch(/\b(BMAD|épic|story\s*1)\b/i);
   });
 
   it("hides the folder entry when no folder handler is wired", () => {
-    renderDialog();
+    renderImportDialog();
     expect(
       screen.queryByRole("button", { name: /choisir un dossier/i }),
     ).not.toBeInTheDocument();
@@ -330,16 +342,15 @@ describe("<CreateStoryDialog />", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("renders the secondary folder entry and keeps the interactive path primary", () => {
-    renderDialog({ onCreateFromFolderRequest: vi.fn() });
-    // The interactive path is INTACT: field + both CTAs still there.
-    expect(screen.getByLabelText(/^titre$/i)).toBeInTheDocument();
+  it("renders the folder entry only within the import step", () => {
+    renderImportDialog({ onCreateFromFolderRequest: vi.fn() });
+    expect(screen.queryByLabelText(/^titre$/i)).not.toBeInTheDocument();
     expect(
-      screen.getByRole("button", { name: /^créer$/i }),
-    ).toBeInTheDocument();
+      screen.queryByRole("button", { name: /^créer$/i }),
+    ).not.toBeInTheDocument();
     // The secondary entry, with its frozen copy.
     expect(
-      screen.getByText("Ou démarre depuis un dossier préparé hors de Rustory"),
+      screen.getByText("Un dossier préparé hors de Rustory"),
     ).toBeInTheDocument();
     expect(
       screen.getByRole("button", { name: "Choisir un dossier…" }),
@@ -349,7 +360,7 @@ describe("<CreateStoryDialog />", () => {
   it("Choisir un dossier… closes the dialog THEN hands over to the folder flow, without any interactive IPC", async () => {
     const user = userEvent.setup();
     const onCreateFromFolderRequest = vi.fn();
-    const { onClose } = renderDialog({ onCreateFromFolderRequest });
+    const { onClose } = renderImportDialog({ onCreateFromFolderRequest });
     await user.click(
       screen.getByRole("button", { name: "Choisir un dossier…" }),
     );
@@ -366,7 +377,7 @@ describe("<CreateStoryDialog />", () => {
   it("disables the folder entry while a sibling import/creation flow is busy (cross-flow exclusivity)", async () => {
     const user = userEvent.setup();
     const onCreateFromFolderRequest = vi.fn();
-    const { onClose } = renderDialog({
+    const { onClose } = renderImportDialog({
       onCreateFromFolderRequest,
       isCreateFromFolderUnavailable: true,
     });
@@ -384,12 +395,14 @@ describe("<CreateStoryDialog />", () => {
   it("Choisir une archive de pack (.zip)… closes the dialog THEN hands over to the archive flow", async () => {
     const user = userEvent.setup();
     const onCreateFromArchiveRequest = vi.fn();
-    const { onClose } = renderDialog({ onCreateFromArchiveRequest });
+    const { onClose } = renderImportDialog({ onCreateFromArchiveRequest });
     expect(
-      screen.getByText("Ou importe une archive de pack au format communautaire"),
+      screen.getByText("Une archive de pack au format communautaire"),
     ).toBeInTheDocument();
     await user.click(
-      screen.getByRole("button", { name: "Choisir une archive de pack (.zip)…" }),
+      screen.getByRole("button", {
+        name: "Choisir une archive de pack (.zip)…",
+      }),
     );
     expect(onClose).toHaveBeenCalledTimes(1);
     expect(onCreateFromArchiveRequest).toHaveBeenCalledTimes(1);
@@ -404,7 +417,7 @@ describe("<CreateStoryDialog />", () => {
   it("disables the archive entry while a sibling flow is busy, and hides it when unwired", async () => {
     const user = userEvent.setup();
     const onCreateFromArchiveRequest = vi.fn();
-    const { onClose } = renderDialog({
+    const { onClose } = renderImportDialog({
       onCreateFromArchiveRequest,
       isCreateFromArchiveUnavailable: true,
     });
@@ -418,7 +431,7 @@ describe("<CreateStoryDialog />", () => {
   });
 
   it("hides the archive entry when no archive handler is wired", () => {
-    renderDialog();
+    renderImportDialog();
     expect(
       screen.queryByRole("button", {
         name: "Choisir une archive de pack (.zip)…",
@@ -427,7 +440,7 @@ describe("<CreateStoryDialog />", () => {
   });
 
   it("hides the RSS entry when no RSS handler is wired", () => {
-    renderDialog();
+    renderImportDialog();
     expect(
       screen.queryByRole("button", {
         name: "Démarrer depuis une source externe (RSS)",
@@ -438,17 +451,16 @@ describe("<CreateStoryDialog />", () => {
   // RE-SCOPED with the content-source policy: the entry is ACTIVE only
   // when the read policy enables `rss` (fail-closed without one), so
   // every "active entry" journey now hands the enabled policy in.
-  it("renders the third RSS entry without touching the title and folder paths", () => {
-    renderDialog({
+  it("renders RSS beside the folder entry without mixing in the title step", () => {
+    renderImportDialog({
       onCreateFromFolderRequest: vi.fn(),
       onCreateFromRssRequest: vi.fn(),
       contentSourcePolicy: RSS_ENABLED_POLICY,
     });
-    // The interactive path is INTACT: field + primary CTA still there.
-    expect(screen.getByLabelText(/^titre$/i)).toBeInTheDocument();
+    expect(screen.queryByLabelText(/^titre$/i)).not.toBeInTheDocument();
     expect(
-      screen.getByRole("button", { name: /^créer$/i }),
-    ).toBeInTheDocument();
+      screen.queryByRole("button", { name: /^créer$/i }),
+    ).not.toBeInTheDocument();
     // The folder entry is INTACT.
     expect(
       screen.getByRole("button", { name: "Choisir un dossier…" }),
@@ -464,7 +476,7 @@ describe("<CreateStoryDialog />", () => {
   it("Démarrer depuis une source externe (RSS) closes the dialog THEN hands over, without any interactive IPC", async () => {
     const user = userEvent.setup();
     const onCreateFromRssRequest = vi.fn();
-    const { onClose } = renderDialog({
+    const { onClose } = renderImportDialog({
       onCreateFromRssRequest,
       contentSourcePolicy: RSS_ENABLED_POLICY,
     });
@@ -486,7 +498,7 @@ describe("<CreateStoryDialog />", () => {
   it("disables the RSS entry while a sibling import/creation flow is busy (cross-flow exclusivity)", async () => {
     const user = userEvent.setup();
     const onCreateFromRssRequest = vi.fn();
-    const { onClose } = renderDialog({
+    const { onClose } = renderImportDialog({
       onCreateFromRssRequest,
       isCreateFromRssUnavailable: true,
       contentSourcePolicy: RSS_ENABLED_POLICY,
@@ -502,8 +514,8 @@ describe("<CreateStoryDialog />", () => {
 
   // ===== Content-source section (policy-driven) =====
 
-  it("renders the enabled RSS entry with its label and the frozen activation marker", () => {
-    renderDialog({
+  it("renders the enabled RSS action with its frozen activation description", () => {
+    renderImportDialog({
       onCreateFromRssRequest: vi.fn(),
       contentSourcePolicy: RSS_ENABLED_POLICY,
     });
@@ -512,95 +524,60 @@ describe("<CreateStoryDialog />", () => {
     });
     expect(rssButton).not.toHaveAttribute("aria-disabled");
     // The kind label and the frozen entry-level marker, VERBATIM.
-    expect(screen.getByText("Flux RSS")).toBeInTheDocument();
+    expect(rssButton).toHaveAccessibleDescription(
+      "Activée par la distribution officielle",
+    );
     expect(
       screen.getByText("Activée par la distribution officielle"),
     ).toBeInTheDocument();
   });
 
-  it("renders the non-activated kinds visible but disabled with their Rust-carried reason, keyboard-reachable", () => {
-    renderDialog({
-      onCreateFromRssRequest: vi.fn(),
-      contentSourcePolicy: RSS_ENABLED_POLICY,
-    });
-    for (const label of ["Flux Atom", "Flux JSON Feed"]) {
-      const entry = screen.getByRole("button", { name: label });
-      expect(entry).toHaveAttribute("aria-disabled", "true");
-      // The reason is reachable from the entry (aria-describedby → the
-      // frozen Rust-carried copy).
-      const describedBy = entry.getAttribute("aria-describedby");
-      expect(describedBy).toBeTruthy();
-      const reason = document.getElementById(describedBy as string);
-      expect(reason).toHaveTextContent(
-        "Source indisponible: non activée dans la distribution officielle",
-      );
-    }
-  });
-
-  it("renders an enabled non-RSS kind (unguarded prop) disabled with the fail-closed reason, never the marker", () => {
-    // The IPC guard refuses such a policy upstream; the component still
-    // renders honestly if handed one directly: a disabled entry is never
-    // "justified" by the activation marker.
-    renderDialog({
-      onCreateFromRssRequest: vi.fn(),
-      contentSourcePolicy: {
-        sources: [
-          {
-            kind: "rss",
-            label: "Flux RSS",
-            activation: "enabled",
-            activationMarker: "Activée par la distribution officielle",
-          },
-          { kind: "atom", label: "Flux Atom", activation: "enabled" },
-        ],
-      },
-    });
-    const entry = screen.getByRole("button", { name: "Flux Atom" });
-    expect(entry).toHaveAttribute("aria-disabled", "true");
-    const describedBy = entry.getAttribute("aria-describedby");
-    const subText = document.getElementById(describedBy as string);
-    expect(subText).toHaveTextContent(
-      "Sources externes indisponibles pour l'instant.",
-    );
-    expect(subText).not.toHaveTextContent(
-      "Activée par la distribution officielle",
-    );
-  });
-
-  it("renders a blocked-by-policy kind with its own frozen reason", () => {
-    renderDialog({
-      onCreateFromRssRequest: vi.fn(),
-      contentSourcePolicy: {
-        sources: [
-          {
-            kind: "rss",
-            label: "Flux RSS",
-            activation: "enabled",
-            activationMarker: "Activée par la distribution officielle",
-          },
-          {
-            kind: "atom",
-            label: "Flux Atom",
-            activation: "blockedByPolicy",
-            reason:
-              "Source indisponible: bloquée par la politique de distribution",
-          },
-        ],
-      },
-    });
-    const entry = screen.getByRole("button", { name: "Flux Atom" });
-    expect(entry).toHaveAttribute("aria-disabled", "true");
-    expect(
-      screen.getByText(
-        "Source indisponible: bloquée par la politique de distribution",
-      ),
-    ).toBeInTheDocument();
-  });
+  it.each(["notActivated", "enabled", "blockedByPolicy"] as const)(
+    "omits unimplemented source kinds even when their policy is %s",
+    (activation) => {
+      renderImportDialog({
+        onCreateFromRssRequest: vi.fn(),
+        onCreateFromWebRequest: vi.fn(),
+        contentSourcePolicy: {
+          sources: [
+            RSS_ENABLED_POLICY.sources[0],
+            {
+              kind: "atom",
+              label: "Flux Atom",
+              activation,
+              reason: "Source indisponible",
+            },
+            {
+              kind: "jsonFeed",
+              label: "Flux JSON Feed",
+              activation,
+              reason: "Source indisponible",
+            },
+            WEB_ENABLED_POLICY.sources[3],
+          ],
+        },
+      });
+      expect(
+        screen.queryByRole("button", { name: "Flux Atom" }),
+      ).not.toBeInTheDocument();
+      expect(
+        screen.queryByRole("button", { name: "Flux JSON Feed" }),
+      ).not.toBeInTheDocument();
+      expect(
+        screen.queryByRole("button", { name: /page web/i }),
+      ).not.toBeInTheDocument();
+      expect(
+        screen.getByRole("button", {
+          name: "Démarrer depuis une source externe (RSS)",
+        }),
+      ).not.toHaveAttribute("aria-disabled", "true");
+    },
+  );
 
   it("renders the RSS entry disabled with the Rust reason when the policy does not enable it", async () => {
     const user = userEvent.setup();
     const onCreateFromRssRequest = vi.fn();
-    renderDialog({
+    renderImportDialog({
       onCreateFromRssRequest,
       contentSourcePolicy: {
         sources: [
@@ -633,7 +610,7 @@ describe("<CreateStoryDialog />", () => {
   it("renders the RSS entry disabled fail-closed when the callback is wired but no policy was read", async () => {
     const user = userEvent.setup();
     const onCreateFromRssRequest = vi.fn();
-    const { onClose } = renderDialog({ onCreateFromRssRequest });
+    const { onClose } = renderImportDialog({ onCreateFromRssRequest });
     const rssButton = screen.getByRole("button", {
       name: "Démarrer depuis une source externe (RSS)",
     });
@@ -644,12 +621,16 @@ describe("<CreateStoryDialog />", () => {
     expect(
       screen.getByText("Sources externes indisponibles pour l'instant."),
     ).toBeInTheDocument();
-    // The primary title path is NEVER blocked by a policy failure.
+    // The title path remains accessible through the choice step despite the policy failure.
+    await user.click(screen.getByRole("button", { name: "Retour" }));
+    await user.click(
+      screen.getByRole("button", { name: "Écrire une histoire" }),
+    );
     expect(screen.getByLabelText(/^titre$/i)).toBeInTheDocument();
   });
 
   it("renders the fail-closed entry when the read policy carries no rss line", () => {
-    renderDialog({
+    renderImportDialog({
       onCreateFromRssRequest: vi.fn(),
       contentSourcePolicy: {
         sources: [
@@ -672,93 +653,139 @@ describe("<CreateStoryDialog />", () => {
     ).toBeInTheDocument();
   });
 
-  // ===== Web-page entry (TDD-7) =====
-
-  it("renders the web entry fail-closed when the web handler is not wired", () => {
+  // Web navigation and submission are distinct: selecting the card never fetches.
+  it("keeps the web choice fail-closed when its handler is absent", () => {
     renderDialog({
-      onCreateFromRssRequest: vi.fn(),
+      initialStep: "choice",
       contentSourcePolicy: WEB_ENABLED_POLICY,
     });
-    const webButton = screen.getByRole("button", {
-      name: "Démarrer depuis une page web",
-    });
-    expect(webButton).toHaveAttribute("aria-disabled", "true");
-    const describedBy = webButton.getAttribute("aria-describedby");
-    expect(describedBy).toBeTruthy();
-    const reason = document.getElementById(describedBy as string);
-    expect(reason).toHaveTextContent(
+    const web = screen.getByRole("button", { name: "Depuis une page web" });
+    expect(web).toHaveAttribute("aria-disabled", "true");
+    expect(web).toHaveAccessibleDescription(
       "Sources externes indisponibles pour l'instant.",
     );
-  });
-
-  it("renders the enabled web entry with its label and the frozen activation marker", () => {
-    renderDialog({
-      onCreateFromRssRequest: vi.fn(),
-      onCreateFromWebRequest: vi.fn(),
-      contentSourcePolicy: WEB_ENABLED_POLICY,
-    });
-    const webButton = screen.getByRole("button", {
-      name: "Démarrer depuis une page web",
-    });
-    expect(webButton).not.toHaveAttribute("aria-disabled");
-    expect(screen.getByText("Page web")).toBeInTheDocument();
-    // Both enabled entries carry the frozen marker, VERBATIM.
+    fireEvent.click(web);
     expect(
-      screen.getAllByText("Activée par la distribution officielle"),
-    ).toHaveLength(2);
+      screen.queryByLabelText("Adresse de la page web"),
+    ).not.toBeInTheDocument();
   });
 
-  it("Démarrer depuis une page web closes the dialog THEN hands over, without any interactive IPC", async () => {
+  it("opens the web address step without starting a fetch or closing the dialog", async () => {
     const user = userEvent.setup();
     const onCreateFromWebRequest = vi.fn();
     const { onClose } = renderDialog({
-      onCreateFromRssRequest: vi.fn(),
+      initialStep: "choice",
       onCreateFromWebRequest,
       contentSourcePolicy: WEB_ENABLED_POLICY,
     });
     await user.click(
-      screen.getByRole("button", { name: "Démarrer depuis une page web" }),
+      screen.getByRole("button", { name: "Depuis une page web" }),
     );
-    expect(onClose).toHaveBeenCalledTimes(1);
-    expect(onCreateFromWebRequest).toHaveBeenCalledTimes(1);
-    // The dialog closes BEFORE the handover (the in-context surface must
-    // never sit under a modal).
+    expect(
+      screen.getByRole("dialog", { name: "Depuis une page web" }),
+    ).toBeInTheDocument();
+    expect(screen.getByLabelText("Adresse de la page web")).toHaveFocus();
+    expect(screen.queryByLabelText("Titre")).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Choisir un dossier…" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Récupérer la page" }),
+    ).toHaveAttribute("aria-disabled", "true");
+    expect(onCreateFromWebRequest).not.toHaveBeenCalled();
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it("closes the dialog before requesting the trimmed web address, without creating a draft", async () => {
+    const user = userEvent.setup();
+    const onCreateFromWebRequest = vi.fn();
+    const { onClose } = renderDialog({
+      initialStep: "choice",
+      onCreateFromWebRequest,
+      contentSourcePolicy: WEB_ENABLED_POLICY,
+    });
+    await user.click(
+      screen.getByRole("button", { name: "Depuis une page web" }),
+    );
+    await user.type(
+      screen.getByLabelText("Adresse de la page web"),
+      "  https://example.org/histoire  ",
+    );
+    expect(onCreateFromWebRequest).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("button", { name: "Récupérer la page" }));
+    expect(onCreateFromWebRequest).toHaveBeenCalledExactlyOnceWith(
+      "https://example.org/histoire",
+    );
+    expect(onClose).toHaveBeenCalledOnce();
     expect(onClose.mock.invocationCallOrder[0]).toBeLessThan(
       onCreateFromWebRequest.mock.invocationCallOrder[0],
     );
     expect(createStory).not.toHaveBeenCalled();
   });
 
-  it("disables the web entry while a sibling import/creation flow is busy (cross-flow exclusivity)", async () => {
+  it("refuses whitespace-only web addresses for both button and Enter submission", async () => {
     const user = userEvent.setup();
     const onCreateFromWebRequest = vi.fn();
     const { onClose } = renderDialog({
-      onCreateFromRssRequest: vi.fn(),
+      initialStep: "choice",
       onCreateFromWebRequest,
-      isCreateFromWebUnavailable: true,
       contentSourcePolicy: WEB_ENABLED_POLICY,
     });
-    const webButton = screen.getByRole("button", {
-      name: "Démarrer depuis une page web",
-    });
-    expect(webButton).toHaveAttribute("aria-disabled", "true");
-    await user.click(webButton);
+    await user.click(
+      screen.getByRole("button", { name: "Depuis une page web" }),
+    );
+    await user.type(
+      screen.getByLabelText("Adresse de la page web"),
+      "   {Enter}",
+    );
+    await user.click(screen.getByRole("button", { name: "Récupérer la page" }));
     expect(onCreateFromWebRequest).not.toHaveBeenCalled();
     expect(onClose).not.toHaveBeenCalled();
   });
 
-  it("renders the web entry disabled with the Rust reason when the policy does not enable it", () => {
+  it.each(["busy", "policy"] as const)(
+    "refuses web submission when %s changes after the address step opened",
+    async (gate) => {
+      const user = userEvent.setup();
+      const onCreateFromWebRequest = vi.fn();
+      const onClose = vi.fn();
+      const props = {
+        open: true,
+        onClose,
+        onCreated: vi.fn(),
+        onCreateFromWebRequest,
+        contentSourcePolicy: WEB_ENABLED_POLICY,
+      };
+      const { rerender } = render(<CreateStoryDialog {...props} />);
+      await user.click(
+        screen.getByRole("button", { name: "Depuis une page web" }),
+      );
+      await user.type(
+        screen.getByLabelText("Adresse de la page web"),
+        "https://example.org/histoire",
+      );
+      rerender(
+        <CreateStoryDialog
+          {...props}
+          isCreateFromWebUnavailable={gate === "busy"}
+          contentSourcePolicy={gate === "policy" ? null : WEB_ENABLED_POLICY}
+        />,
+      );
+      await user.keyboard("{Enter}");
+      const fetch = screen.getByRole("button", { name: "Récupérer la page" });
+      expect(fetch).toHaveAttribute("aria-disabled", "true");
+      await user.click(fetch);
+      expect(onCreateFromWebRequest).not.toHaveBeenCalled();
+      expect(onClose).not.toHaveBeenCalled();
+    },
+  );
+
+  it("shows the Rust refusal reason on a web choice disabled by policy", () => {
     renderDialog({
-      onCreateFromRssRequest: vi.fn(),
+      initialStep: "choice",
       onCreateFromWebRequest: vi.fn(),
       contentSourcePolicy: {
         sources: [
-          {
-            kind: "rss",
-            label: "Flux RSS",
-            activation: "enabled",
-            activationMarker: "Activée par la distribution officielle",
-          },
           {
             kind: "web",
             label: "Page web",
@@ -769,32 +796,40 @@ describe("<CreateStoryDialog />", () => {
         ],
       },
     });
-    const webButton = screen.getByRole("button", {
-      name: "Démarrer depuis une page web",
-    });
-    expect(webButton).toHaveAttribute("aria-disabled", "true");
-    const describedBy = webButton.getAttribute("aria-describedby");
-    expect(describedBy).toBeTruthy();
-    const reason = document.getElementById(describedBy as string);
-    expect(reason).toHaveTextContent(
+    const web = screen.getByRole("button", { name: "Depuis une page web" });
+    expect(web).toHaveAttribute("aria-disabled", "true");
+    expect(web).toHaveAccessibleDescription(
       "Source indisponible: non activée dans la distribution officielle",
     );
   });
 
-  it("renders the sources section from the web handler alone, with the RSS entry fail-closed", () => {
-    renderDialog({
-      onCreateFromWebRequest: vi.fn(),
-      contentSourcePolicy: WEB_ENABLED_POLICY,
+  it("keeps Retour and duplicate submission inactive until the title creation settles", async () => {
+    const user = userEvent.setup();
+    let finish!: (story: { id: string; title: string }) => void;
+    vi.mocked(createStory).mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+    );
+    const { onClose, onCreated } = renderDialog();
+    await user.type(screen.getByLabelText("Titre"), "Mon histoire");
+    await user.click(screen.getByRole("button", { name: "Créer" }));
+    const dialog = screen.getByRole("dialog", {
+      name: "Comment s'appelle ton histoire ?",
     });
+    await user.click(within(dialog).getByRole("button", { name: "Retour" }));
+    fireEvent.keyDown(screen.getByLabelText("Titre"), { key: "Enter" });
+    expect(createStory).toHaveBeenCalledOnce();
     expect(
-      screen.getByRole("button", { name: "Démarrer depuis une page web" }),
-    ).not.toHaveAttribute("aria-disabled");
-    const rssButton = screen.getByRole("button", {
-      name: "Démarrer depuis une source externe (RSS)",
+      screen.getByRole("dialog", { name: "Comment s'appelle ton histoire ?" }),
+    ).toBe(dialog);
+    expect(onClose).not.toHaveBeenCalled();
+    await act(async () => finish({ id: "created", title: "Mon histoire" }));
+    expect(onCreated).toHaveBeenCalledExactlyOnceWith({
+      id: "created",
+      title: "Mon histoire",
     });
-    expect(rssButton).toHaveAttribute("aria-disabled", "true");
-    expect(
-      screen.getByText("Sources externes indisponibles pour l'instant."),
-    ).toBeInTheDocument();
+    expect(onClose).toHaveBeenCalledOnce();
   });
 });
