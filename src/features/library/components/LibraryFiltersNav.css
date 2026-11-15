@@ -57,6 +57,7 @@
   color: var(--color-text-secondary);
   font: 700 14px var(--font-family-ui);
   text-align: left;
+  text-decoration: none;
   cursor: pointer;
   transition: background .15s;
 }

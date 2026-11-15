@@ -39,14 +39,15 @@
   margin-top: var(--space-3);
 }
 
-.library-route__local-section,
-.library-route__device-section {
-  min-width: 0;
-  scroll-margin-top: 24px;
+.library-route__operation-notice {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
 }
 
-.library-route__device-section:empty {
-  display: none;
+.library-route__operation-notice p {
+  margin: 0;
 }
 
 .library-route__nav-footer {

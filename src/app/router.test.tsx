@@ -1,4 +1,5 @@
 import { render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { RouterProvider } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -45,9 +46,9 @@ vi.mock("../ipc/commands/story", () => ({
 // `read_connected_lunii`. Default the mock to `kind: "none"` so the
 // device panel never blocks router-level navigation tests.
 vi.mock("../ipc/commands/device", async () => {
-  const actual = await vi.importActual<
-    typeof import("../ipc/commands/device")
-  >("../ipc/commands/device");
+  const actual = await vi.importActual<typeof import("../ipc/commands/device")>(
+    "../ipc/commands/device",
+  );
   return {
     ...actual,
     readConnectedLunii: () => ({
@@ -108,7 +109,13 @@ describe("router", () => {
         structure: {
           startNodeId: "n1",
           nodes: [
-            { id: "n1", label: "", isStart: true, hasIssue: false, options: [] },
+            {
+              id: "n1",
+              label: "",
+              isStart: true,
+              hasIssue: false,
+              options: [],
+            },
           ],
         },
         node: { id: "n1", text: "", label: "", image: null, audio: null },
@@ -120,7 +127,7 @@ describe("router", () => {
     vi.restoreAllMocks();
   });
 
-  it("matches /library to LibraryRoute with the 3-column semantic layout", async () => {
+  it("matches /library to the local collection screen", async () => {
     const router = createAppRouter(["/library"]);
     render(<RouterProvider router={router} />);
 
@@ -129,6 +136,50 @@ describe("router", () => {
         screen.getByRole("main", { name: "Collection d'histoires" }),
       ).toBeInTheDocument();
     });
+  });
+
+  it("opens /device directly as a separate screen without local cards", async () => {
+    const router = createAppRouter(["/device"]);
+    render(<RouterProvider router={router} />);
+    expect(
+      await screen.findByRole("heading", { level: 1, name: "Sur l'appareil" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("main", { name: "Histoires sur l'appareil" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("heading", { name: "Ma bibliothèque" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Le soleil" }),
+    ).not.toBeInTheDocument();
+    expect(router.state.location.pathname).toBe("/device");
+    expect(router.state.location.hash).toBe("");
+  });
+
+  it("navigates between exclusive screens through the actual route tree", async () => {
+    const user = userEvent.setup();
+    const router = createAppRouter(["/library"]);
+    render(<RouterProvider router={router} />);
+    expect(
+      await screen.findByRole("heading", { level: 1, name: "Ma bibliothèque" }),
+    ).toBeInTheDocument();
+    await user.click(screen.getByRole("link", { name: "Sur l'appareil" }));
+    expect(router.state.location.pathname).toBe("/device");
+    expect(
+      screen.getByRole("heading", { level: 1, name: "Sur l'appareil" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("heading", { level: 1, name: "Ma bibliothèque" }),
+    ).not.toBeInTheDocument();
+    await user.click(screen.getByRole("link", { name: "Ma bibliothèque" }));
+    expect(router.state.location.pathname).toBe("/library");
+    expect(
+      screen.queryByRole("heading", { level: 1, name: "Sur l'appareil" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("heading", { level: 1, name: "Ma bibliothèque" }),
+    ).toBeInTheDocument();
   });
 
   it("matches /story/:storyId/edit to StoryEditRoute and mounts its main landmark", async () => {

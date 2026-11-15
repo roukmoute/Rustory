@@ -1,19 +1,14 @@
 import type React from "react";
+import { NavLink } from "react-router-dom";
 import { Icon } from "../../../shared/ui";
 import "./LibraryFiltersNav.css";
 
 interface LibraryFiltersNavProps {
-  activeSection?: "library" | "device";
-  onLibrary?: () => void;
-  onDevice?: () => void;
   onCatalog?: () => void;
 }
 
 /** Navigation to real collections. Device content stays distinct from local stories. */
 export function LibraryFiltersNav({
-  activeSection = "library",
-  onLibrary,
-  onDevice,
   onCatalog,
 }: LibraryFiltersNavProps): React.JSX.Element {
   return (
@@ -26,24 +21,14 @@ export function LibraryFiltersNav({
       </div>
       <p className="library-filters-nav__tagline">Des histoires à emporter.</p>
       <div className="library-filters-nav__list">
-        <button
-          type="button"
-          className="library-filters-nav__entry"
-          aria-current={activeSection === "library" ? "page" : undefined}
-          onClick={onLibrary}
-        >
+        <NavLink to="/library" className="library-filters-nav__entry">
           <Icon name="grid" />
           Ma bibliothèque
-        </button>
-        <button
-          type="button"
-          className="library-filters-nav__entry"
-          aria-current={activeSection === "device" ? "page" : undefined}
-          onClick={onDevice}
-        >
+        </NavLink>
+        <NavLink to="/device" className="library-filters-nav__entry">
           <Icon name="device" />
           Sur l'appareil
-        </button>
+        </NavLink>
         <button
           type="button"
           className="library-filters-nav__entry"

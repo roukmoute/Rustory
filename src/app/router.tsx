@@ -6,6 +6,7 @@ import {
 } from "react-router-dom";
 
 import { LibraryRoute } from "../routes/library/LibraryRoute";
+import { CollectionScreenRoute } from "../routes/library/CollectionScreenRoute";
 import { SettingsRoute } from "../routes/settings/SettingsRoute";
 import { StoryEditRoute } from "../routes/story-edit/StoryEditRoute";
 import { AppShell } from "./AppShell";
@@ -21,7 +22,20 @@ export const appRoutes: RouteObject[] = [
     element: <AppShell />,
     children: [
       { index: true, element: <Navigate to="/library" replace /> },
-      { path: "library", element: <LibraryRoute /> },
+      {
+        // Keep device jobs and collection state alive between these screens.
+        element: <LibraryRoute />,
+        children: [
+          {
+            path: "library",
+            element: <CollectionScreenRoute screen="library" />,
+          },
+          {
+            path: "device",
+            element: <CollectionScreenRoute screen="device" />,
+          },
+        ],
+      },
       { path: "settings", element: <SettingsRoute /> },
       { path: "story/:storyId/edit", element: <StoryEditRoute /> },
       { path: "*", element: <Navigate to="/library" replace /> },

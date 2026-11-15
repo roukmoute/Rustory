@@ -415,7 +415,9 @@ const route =
     ? "/settings"
     : screen === "editor"
       ? "/story/s1/edit"
-      : "/library";
+      : screen === "device"
+        ? "/device"
+        : "/library";
 history.replaceState(null, "", `${route}?${params.toString()}`);
 document.documentElement.dataset.designPreview = scenario;
 export const previewReady = import("../main");

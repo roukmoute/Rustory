@@ -183,7 +183,8 @@ Avoid:
 
 ## Screen Ownership
 
-- `bibliothèque` is the stable home for selection, transfer visibility, and recovery traces
+- `bibliothèque` (`/library`) is the stable home for local selection, transfer visibility, and recovery traces
+- `Sur l'appareil` (`/device`) is a separate screen for the connected device's inventory and its own selection actions; it is never an anchor below the local library
 - `bibliothèque` is also the landing context of every OS-open intent (`intention d'ouverture`): a file opened through the operating system always resolves into the library's existing artifact-import review — never a new screen, never a new route (see `OS Open Contract`)
 - `bibliothèque` is likewise the landing context of every drop intent (`intention de dépôt`): a file or folder dropped on the window always resolves into the library's existing import / folder-creation review (see `Drop Intent Contract`); the hover overlay that accompanies the drag gesture is APP-LEVEL (mounted by the shell above the routed outlet — the whole window is the drop target, no route owns it)
 - `édition` is a separate context and must not silently replace library state vocabulary
@@ -217,23 +218,35 @@ instead of covering it. The native minimum window size remains unchanged.
 
 ## Library Layout Contract
 
-The library opens on a two-column surface: navigation and the local collection.
-The device decision panel is disclosed on demand, or automatically when a story
-is selected in either collection. In-flight transfers keep the panel open.
+The library and device screens share a two-column shell: navigation and the
+current collection. `/library` shows local stories; `/device` shows the device
+inventory. Only one collection is visible at a time. The decision panel is
+disclosed on demand, or when a story is selected on the current screen.
+In-flight transfers keep their progress visible.
 
 | Zone | Role | ARIA region |
 | --- | --- | --- |
 | Left | Library/device/catalogue navigation, settings, live device summary | `<nav aria-label="Navigation bibliothèque">` |
-| Center | Local collection and distinct device inventory | `<main aria-label="Collection d'histoires">` |
-| Optional right | Existing inspection, send and catalogue actions | `<aside aria-label="Panneau de décision">` |
+| Center | Local collection on `/library`, device inventory on `/device` | `<main aria-label="Collection d'histoires">` or `<main aria-label="Histoires sur l'appareil">` |
+| Optional right | Selection actions for the current screen, operation progress and catalogue | `<aside aria-label="Panneau de décision">` |
 
 - The panel and import surfaces stay mounted when closed: closing a presentation
   must not reset a transfer, import, event listener or selection.
+- Switching between `/library` and `/device` keeps their shared route controller
+  and operation hooks mounted. It preserves both independent selections and
+  their existing pruning rules; browser Back/Forward restores the matching screen.
+- Local edit/delete/send actions belong to `/library`; device inspection/copy/
+  rename/delete actions belong to `/device`. A selection kept on the other screen
+  must not expose unrelated actions. Progress of an active operation stays visible.
 - Selecting a story reveals its actions without stealing keyboard focus. Closing
   the panel returns focus to its disclosure button in the sidebar.
+- Local selection waits 500 ms before revealing the panel, preserving double-click
+  editing. Changing screens cancels that pending reveal; explicit disclosure and
+  device selection remain immediate.
 - The sidebar device summary stays visible even while the panel is closed. Its
   wording reflects the scan result, never unproven write or synchronization status.
-- Device inventory stays separate from local stories, inside the central region.
+- Each screen owns its central collection; sidebar navigation changes the URL,
+  not a scroll anchor. `/device` remains meaningful without a connected device.
 - The library supports cards and list views. This display choice preserves the
   search, sort and selection. Search/empty/error/loading states remain local.
 - Each card has a direct `Reprendre` action and an accessible actions button in
@@ -347,13 +360,11 @@ payload.
 
 ## Device Library Contract
 
-After a device is detected as `supported`, Rustory may read its
-installed-story inventory and show it as a **distinct section in the
-center column**, below the local collection (separated by a rule). The
-device library is never merged into the local collection and is never
-hosted by the right decision panel (which stays "device state + send
-CTA"). This keeps local truth and device truth distinguishable at all
-times.
+After a device is detected as `supported`, Rustory may read its installed-story
+inventory and show it in the center of the separate **`/device` screen**.
+The inventory is never shown below or merged into the local collection, and
+never lives in the right decision panel. This keeps local truth and device
+truth distinguishable at all times.
 
 This contract is FAMILY-NEUTRAL: it lights up for ANY supported profile
 whose `readLibrary` capability is `true` on the support matrix (every
@@ -367,6 +378,8 @@ inventory through the `read_device_library` command. It is orthogonal to
 library. There is no polling of the inventory — device PRESENCE is polled
 by `useConnectedLunii`; the heavier inventory read fires when the
 identifier changes (a different device) and on a manual retry.
+Both hooks remain mounted when switching between `/library` and `/device`, so
+local presence badges, transfer checks and completed-copy refreshes stay current.
 
 Scope: listing + recognition. Each entry shows its recognized `title` when a
 local index covers the pack (composed Rust-side — see
@@ -379,7 +392,7 @@ but never editable here; that selection is separate from the local
 
 | Internal State | Center-column rendering | Notes |
 | --- | --- | --- |
-| idle | nothing | No readable device (none / unsupported / not read-authorized). |
+| idle | `/device` keeps its heading and displays the current detection state | An absent device reads `Aucun appareil connecté`, with a connection/retry gesture. Scanning, unsupported and unreadable states retain their own explanation; none is presented as an empty inventory. |
 | loading | `ProgressIndicator` + `Lecture de la bibliothèque de l'appareil…` | "État non encore chargé" — must never read as "aucune histoire". |
 | ready (n > 0) | list of entries + count | Each entry: the recognized `title` (or `Histoire non reconnue`) + `Identifiant: <shortId>` + a provenance chip when recognized. |
 | ready (n = 0) | `Aucune histoire sur l'appareil` | Distinct from the loading state. Its hint is family-neutral: `L'appareil connecté ne contient aucune histoire lisible.` |
@@ -470,8 +483,9 @@ anything (the import flow is a later story).
 | Non-color signal | A selected device card renders a colored border, a visible `✓` prefix in the DOM and `aria-pressed="true"` — the selection survives grayscale / color-blindness, exactly like a local `Story Card`. |
 | Interaction | A selectable device card is a `role="button" aria-pressed={selected}` focus stop. Click (or `Space` / `Enter` on the focused card) toggles its selection. There is no double-click / open: a device story is not editable. |
 
-The inspector lives in the right column ABOVE the `Lunii Decision Panel`
-and renders only when a device story is selected:
+The inspector lives in the right column of `/device` and renders only when a
+device story is selected. Switching to `/library` preserves the device selection
+but shows the local-selection actions instead:
 
 | Inspector element | Content |
 | --- | --- |
@@ -485,9 +499,9 @@ and renders only when a device story is selected:
 | Copy affordance | A `Copier dans ma bibliothèque` button (device → local library), ACTIVE when `importStory === true && contentPresent && !alreadyImported` and the device is readable (see `Device Story Import Contract`). Otherwise it stays soft-disabled with a standardized, capability-aware reason picked fail-closed in this priority order: (1) `story.alreadyImported` ⇒ `Copie indisponible: déjà dans ta bibliothèque` (the most useful fact — no copy is needed); (2) `importStory !== true` or operations matrix absent ⇒ `Copie indisponible: profil non supporté` (fail-closed default, V3 included); (3) `!story.contentPresent` ⇒ `Copie indisponible: contenu incomplet sur l'appareil`. The internal capability flag stays `importStory`; only the user-facing verb is `Copier` (Importer / Exporter are reserved for file artifacts). |
 | Next gesture on a profile refusal | When the copy is refused for an unsupported profile (the V3 case: inspectable but not importable), the inspector shows a discreet `Consulter le profil de support` affordance (`Button variant="quiet"`, `aria-label="Consulter le profil de support officiel"`) wired to the same `openSupportProfile` action as the detection panel — so a refusal carries a next gesture, never an opaque grayed-out CTA. The affordance is shown ONLY for the profile refusal: not for `déjà dans ta bibliothèque` (a copy is simply not needed) nor `contenu incomplet` (the honest note already tells the user to check the device), and it is hidden entirely in listing/inspection-only contexts where the route wires no handler. |
 
-The inspector is the only place the right column reflects a device story; it
-must never merge with the panel's local-selection layer, and the panel
-itself stays "device state + send CTA".
+The inspector must never merge with the panel's local-selection layer. Device
+selection actions belong to `/device`; local selection and send actions belong
+to `/library`. Existing operation progress remains consultable across both.
 
 ## Device Story Import Contract
 
@@ -609,7 +623,7 @@ The comparison block lives **inside** the decision panel, in a
 lets the async `loading`→`ready` verdict be announced to screen readers (the
 `error` case additionally carries `role="alert"`). It never competes with the
 center-column collection as the main work surface, and it never hosts the
-device library (which stays a distinct center-column section).
+device library (which belongs to the separate `/device` screen).
 
 Each "no comparison" cause renders a **distinct, actionable** hint — the panel
 never collapses them into one generic line. The route owns the cause (the hook
@@ -624,7 +638,7 @@ cannot tell a selection gap from a missing device apart):
 | ready — new | The selected story's pack is NOT on the device (no `pack_uuid`, or `pack_uuid` absent from the inventory) | `Nouvelle sur l'appareil` chip + `Cette histoire serait ajoutée à l'appareil.` + the unchanged-count line |
 | ready — replace | The selected story's pack IS on the device (`pack_uuid` present in the inventory) | `Déjà présente sur l'appareil` chip + `Déjà présente sur l'appareil — un envoi la remplacerait.` + the unchanged-count line |
 | device changed during comparison | A readable device WAS detected, but the authoritative re-read no longer resolves to it (unplugged / swapped, or the `ready` payload's identifiers don't match the request) | Recoverable `role="alert"` — `L'appareil a changé pendant la comparaison.` + next gesture + a `Réessayer` CTA. NOT the "branche une Lunii" hint, which would contradict the just-detected device. |
-| error | The preview read failed (FS error, timeout, local store unavailable, selected story vanished) | In-context message (cause + impact + next gesture), `role="alert"` + `Réessayer`, **never a toast**. The local library and the device section stay intact. |
+| error | The preview read failed (FS error, timeout, local store unavailable, selected story vanished) | In-context message (cause + impact + next gesture), `role="alert"` + `Réessayer`, **never a toast**. The local library and the device inventory stay intact. |
 
 The unchanged-count line states what stays untouched:
 `Aucune autre histoire de l'appareil ne sera modifiée.` (0),
@@ -1262,13 +1276,20 @@ a send REPLACES it) stays the authority on what a send would do.
 | Path | Route | Purpose |
 | --- | --- | --- |
 | `/` | redirect to `/library` | Default entry point. |
-| `/library` | `LibraryRoute` | Library with optional decision panel (see `Library Layout Contract`). |
+| `/library` | Shared `LibraryRoute` controller, local screen | Local stories with their selection actions and optional decision panel. |
+| `/device` | Shared `LibraryRoute` controller, device screen | Connected-device inventory and its own selection actions; explicit detection state when no inventory can be read. |
 | `/story/:storyId/edit` | `StoryEditRoute` | Resume a `brouillon local` for a library-owned story. No device call, no mutation at this stage. |
 | `/settings` | `SettingsRoute` | Read-only `Profil de support` screen (see `Support Profile Screen Contract`). Standalone single-column view; zero network, zero mutation. |
 | `*` | redirect to `/library` | Unknown paths bounce back to the library. |
 
 Rules:
 
+- `/library` and `/device` are children of one persistent route controller.
+  Sidebar navigation pushes history entries; Back/Forward changes both the
+  visible collection and active navigation entry. The URL owns that choice.
+- Switching these screens preserves local selection/search/sort and device
+  selection without restarting transfers/imports. Device disconnect and fresh
+  inventories still prune invalid selections; hidden selection actions stay hidden.
 - Returning to `/library` from `/story/:storyId/edit` preserves shell continuity (selection, filters) through the Zustand store — the URL does not carry that state.
 - New routes land here only when a real dominant-context switch appears. The `settings` context is wired by the `Profil de support` screen — a real dominant-context switch, read-only by contract.
 - The library left column carries the permanent navigation entry to `/settings` (below the filters block, no business state — see `Support Profile Screen Contract`); the column's `<nav>` label is the generalized `Navigation bibliothèque`.

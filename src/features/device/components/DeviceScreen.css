@@ -1,0 +1,135 @@
+.device-screen {
+  display: flex;
+  flex-direction: column;
+  gap: 28px;
+  min-width: 0;
+}
+
+.device-screen__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 16px;
+}
+
+.device-screen__heading { min-width: 0; }
+
+.device-screen__eyebrow {
+  margin: 0 0 8px;
+  color: var(--color-text-secondary);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: .03em;
+}
+
+.device-screen__title {
+  margin: 0;
+  color: var(--color-text-primary);
+  font: 600 clamp(28px, 2.8vw, 38px) / 1.15 var(--font-family-display);
+  letter-spacing: -.5px;
+}
+
+.device-screen__header > .ds-button { font-size: 13px; }
+
+.device-screen__status {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 24px;
+  padding: 48px 28px;
+  border: 1px dashed var(--color-border-strong);
+  border-radius: 24px;
+  background: #fffefa;
+  text-align: center;
+}
+
+.device-screen__illustration {
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+  width: 124px;
+  height: 112px;
+  border-radius: 44% 56% 48% 52%;
+  background: #cfe9f8;
+  color: #23314a;
+}
+
+.device-screen__illustration > svg {
+  width: 60px;
+  height: 60px;
+  stroke-width: 1.4;
+  transform: rotate(-7deg);
+}
+
+.device-screen__status-content {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  max-width: 560px;
+  min-width: 0;
+}
+
+.device-screen__status-title {
+  margin: 0;
+  font-family: var(--font-family-display);
+  font-size: 24px;
+  font-weight: 500;
+  line-height: 1.3;
+  color: var(--color-text-primary);
+}
+
+.device-screen__hint {
+  margin: 0;
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-body);
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
+.device-screen__status-content > .ds-progress {
+  width: min(100%, 320px);
+  text-align: left;
+}
+
+.device-screen__status--compact {
+  flex-direction: row;
+  align-items: center;
+  gap: 16px;
+  padding: 20px;
+  border-style: solid;
+  text-align: left;
+}
+
+.device-screen__status--compact .device-screen__illustration {
+  width: 48px;
+  height: 48px;
+  border-radius: 14px;
+}
+
+.device-screen__status--compact .device-screen__illustration > svg {
+  width: 26px;
+  height: 26px;
+  transform: none;
+}
+
+.device-screen__status--compact .device-screen__status-content {
+  align-items: flex-start;
+  max-width: none;
+}
+
+/* The existing inventory is now the page content, not a section appended
+ * below the local library. Its selection/focus behavior stays unchanged. */
+.device-screen > .device-story-collection {
+  margin-top: 0;
+  padding-top: 0;
+  border-top: 0;
+}
+
+@media (max-width: 720px) {
+  .device-screen { gap: 20px; }
+  .device-screen__status { padding: 28px 20px; }
+  .device-screen__status--compact { align-items: flex-start; padding: 16px; }
+}

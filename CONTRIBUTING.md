@@ -43,7 +43,9 @@ utilise des données de démonstration en mémoire et n'est pas incluse dans
 la compilation de production.
 
 Variantes disponibles : `?scenario=empty`, `?scenario=connected`,
-`?screen=editor` et `?screen=settings`. Pour recommencer après un rechargement,
+`?screen=device`, `?screen=editor` et `?screen=settings`. Pour voir l'inventaire
+de démonstration de l'appareil, combiner `?screen=device&scenario=connected` ;
+`?screen=device` montre l'écran sans appareil. Pour recommencer après un rechargement,
 revenir à l'URL `design-preview.html` : les routes normales nécessitent le
 backend Tauri. Les opérations non simulées échouent explicitement ; cet aperçu
 ne remplace pas les tests sur appareil.

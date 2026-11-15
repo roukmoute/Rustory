@@ -45,6 +45,8 @@ export interface StoryCollectionProps {
   /** Disables the import CTA while an analysis / import is in flight, so a
    *  second pick cannot start a concurrent flow. */
   isImportBusy?: boolean;
+  view?: "grid" | "list";
+  onViewChange?: (view: "grid" | "list") => void;
 }
 
 type CollectionState =
@@ -78,11 +80,15 @@ export function StoryCollection({
   onCreateStoryRequest,
   onImportArtifactRequest,
   isImportBusy = false,
+  view: controlledView,
+  onViewChange,
 }: StoryCollectionProps): React.JSX.Element {
   const titleId = useId();
   const searchId = useId();
   const sortId = useId();
-  const [view, setView] = useState<"grid" | "list">("grid");
+  const [localView, setLocalView] = useState<"grid" | "list">("grid");
+  const view = controlledView ?? localView;
+  const setView = onViewChange ?? setLocalView;
   const createDisabledId = useId();
 
   const visible = useMemo(

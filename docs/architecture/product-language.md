@@ -524,9 +524,15 @@ flow's defensive rendering, but only the RSS flow ever emits it.
 
 ### Library navigation and visual presentation
 
-- `Ma bibliothèque` is the friendly heading/navigation label for the existing local library.
-- `Sur l'appareil` leads to the distinct device inventory. It never filters local
-  stories or claims a transfer took place.
+- `Ma bibliothèque` names the local-library screen at `/library`.
+- `Sur l'appareil` opens the separate device-inventory screen at `/device`.
+  These navigation entries change routes, not scroll positions or local filters.
+  Neither entry claims a transfer took place.
+- Selection actions belong to the current screen: local editing and sending in
+  `Ma bibliothèque`, device inspection and copying in `Sur l'appareil`.
+  Switching screens preserves their independent selections.
+- `Aucun appareil connecté` describes an absent device on `/device`, not an empty
+  inventory. `Aucune histoire sur l'appareil` requires a successful inventory read.
 - `Aide et réglages` opens the existing settings and support-profile route.
 - `Afficher le panneau de l'appareil` / `Fermer le panneau de l'appareil` disclose
   existing controls without discarding selection or a running operation.

@@ -7,6 +7,7 @@ export interface LibraryLayoutProps {
   center: React.ReactNode;
   rightPanel: React.ReactNode;
   panelOpen?: boolean;
+  mainLabel?: string;
 }
 
 /** Two-column library with an optional, permanently mounted decision panel.
@@ -16,16 +17,16 @@ export function LibraryLayout({
   center,
   rightPanel,
   panelOpen = true,
+  mainLabel = "Collection d'histoires",
 }: LibraryLayoutProps): React.JSX.Element {
   return (
-    <div className={`library-layout${panelOpen ? " library-layout--details" : ""}`}>
+    <div
+      className={`library-layout${panelOpen ? " library-layout--details" : ""}`}
+    >
       <nav className="library-layout__nav" aria-label="Navigation bibliothèque">
         {leftNav}
       </nav>
-      <main
-        className="library-layout__main"
-        aria-label="Collection d'histoires"
-      >
+      <main className="library-layout__main" aria-label={mainLabel}>
         {center}
       </main>
       <aside
