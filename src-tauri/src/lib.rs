@@ -597,6 +597,8 @@ pub fn run() {
             commands::import_export::fetch_web_podcast_preview,
             commands::presentation::generate_story_announcements,
             commands::library::get_library_overview,
+            commands::onboarding::get_onboarding_preferences,
+            commands::onboarding::update_onboarding_preferences,
             commands::catalog::get_official_catalog_status,
             commands::story::get_story_detail,
             commands::catalog::import_official_catalog,

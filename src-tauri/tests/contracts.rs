@@ -1,4 +1,7 @@
 // Contract tests root — see `tests/integration.rs` for the same pattern.
+#[path = "contracts/onboarding.rs"]
+mod onboarding;
+
 #[path = "contracts/import_export.rs"]
 mod import_export;
 

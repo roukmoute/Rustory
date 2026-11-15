@@ -8,6 +8,7 @@ pub mod device_send;
 pub mod device_title;
 pub mod import_export;
 pub mod library;
+pub mod onboarding;
 pub mod presentation;
 pub mod settings;
 pub mod story;
@@ -37,6 +38,7 @@ pub use import_export::{
     DROP_MULTIPLE_ITEMS_MESSAGE, OS_OPEN_MULTIPLE_FILES_MESSAGE,
 };
 pub use library::{LibraryOverviewDto, SendBlockerDto, StoryCardDto};
+pub use onboarding::{OnboardingPreferencesDto, UpdateOnboardingPreferencesInputDto};
 pub use presentation::{
     AnnouncementDto, AnnouncementSourceDto, AnnouncementStatusDto, AnnouncementTargetDto,
     AnnouncementVoiceDto, AnnouncementVoicesDto, AttachRecordedAnnouncementInputDto,

@@ -5,6 +5,8 @@
 //! first available French voice, never to a guess persisted on the user's
 //! behalf.
 
+pub mod onboarding;
+
 use rusqlite::OptionalExtension;
 
 use crate::application::story::now_iso_ms;
