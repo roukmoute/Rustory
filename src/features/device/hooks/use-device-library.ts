@@ -37,9 +37,11 @@ export interface UseDeviceLibrary {
  * content mirror" must not become continuity state.
  */
 const cache = new Map<string, DeviceStoryDto[]>();
+const invalidationListeners = new Set<() => void>();
 
 export function invalidateDeviceLibraryCache(): void {
   cache.clear();
+  for (const listener of invalidationListeners) listener();
 }
 
 /** True for the Rust `device_changed` refusal of a library read (the
@@ -64,7 +66,8 @@ function isDeviceChangedError(error: AppError): boolean {
  * - StrictMode-safe active-call guard so a superseded response cannot
  *   overwrite a fresher state; cancel() on unmount clears the timer.
  * - NO polling: device PRESENCE is polled by `useConnectedLunii`; the
- *   (heavier) inventory read happens on identifier change + manual refresh.
+ *   (heavier) inventory read happens on identifier change, manual refresh
+ *   or an explicit cache invalidation after a catalog change.
  */
 export function useDeviceLibrary(
   deviceIdentifier: string | null,
@@ -161,6 +164,10 @@ export function useDeviceLibrary(
 
   useEffect(() => {
     mountedRef.current = true;
+    const onInvalidate = () => {
+      if (deviceIdentifier) load(deviceIdentifier);
+    };
+    invalidationListeners.add(onInvalidate);
     if (deviceIdentifier) {
       load(deviceIdentifier);
     } else {
@@ -175,6 +182,7 @@ export function useDeviceLibrary(
       setIsRefreshing(false);
     }
     return () => {
+      invalidationListeners.delete(onInvalidate);
       mountedRef.current = false;
       if (cancelRef.current) {
         cancelRef.current();

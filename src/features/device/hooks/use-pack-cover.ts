@@ -10,11 +10,15 @@ import { readPackCover } from "../../../ipc/commands/device-catalog";
  * resolves once).
  */
 const coverCache = new Map<string, string | null>();
+const invalidationListeners = new Set<() => void>();
+let cacheGeneration = 0;
 
 /** Drop the cached covers — call after a catalog refresh/import so the new
  *  covers (or their absence) are re-resolved. */
 export function invalidatePackCoverCache(): void {
+  cacheGeneration += 1;
   coverCache.clear();
+  for (const listener of invalidationListeners) listener();
 }
 
 /**
@@ -37,23 +41,33 @@ export function usePackCover(
       setUrl(null);
       return;
     }
-    if (coverCache.has(packUuid)) {
-      setUrl(coverCache.get(packUuid) ?? null);
-      return;
-    }
     let active = true;
-    readPackCover(packUuid)
-      .then((dto) => {
-        const resolved = dto?.dataUrl ?? null;
-        coverCache.set(packUuid, resolved);
-        if (active) setUrl(resolved);
-      })
-      .catch(() => {
-        // Decorative: a failed cover read just shows no cover.
-        if (active) setUrl(null);
-      });
+    const load = () => {
+      if (coverCache.has(packUuid)) {
+        setUrl(coverCache.get(packUuid) ?? null);
+        return;
+      }
+      const generation = cacheGeneration;
+      setUrl(null);
+      readPackCover(packUuid)
+        .then((dto) => {
+          // A pre-invalidation read must never restore an obsolete cover,
+          // even if its consumer has since unmounted.
+          if (generation !== cacheGeneration) return;
+          const resolved = dto?.dataUrl ?? null;
+          coverCache.set(packUuid, resolved);
+          if (active) setUrl(resolved);
+        })
+        .catch(() => {
+          // Decorative: a failed current read just shows no cover.
+          if (active && generation === cacheGeneration) setUrl(null);
+        });
+    };
+    invalidationListeners.add(load);
+    load();
     return () => {
       active = false;
+      invalidationListeners.delete(load);
     };
   }, [packUuid, hasCover]);
 

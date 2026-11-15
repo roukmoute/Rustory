@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { act, renderHook, waitFor } from "@testing-library/react";
+import { act, cleanup, renderHook, waitFor } from "@testing-library/react";
 
 vi.mock("../../../ipc/commands/device-library", async () => {
   const actual = await vi.importActual<
@@ -44,11 +44,13 @@ describe("useDeviceLibrary", () => {
   });
 
   afterEach(() => {
+    cleanup();
     invalidateDeviceLibraryCache();
   });
 
   it("stays idle and issues no IPC when there is no readable device", () => {
     const { result } = renderHook(() => useDeviceLibrary(null));
+    act(() => invalidateDeviceLibraryCache());
     expect(result.current.state.kind).toBe("idle");
     expect(readDeviceLibrary).not.toHaveBeenCalled();
   });
@@ -251,6 +253,8 @@ describe("useDeviceLibrary", () => {
     const { unmount } = renderHook(() => useDeviceLibrary(ID_A));
     unmount();
     expect(cancel).toHaveBeenCalled();
+    invalidateDeviceLibraryCache();
+    expect(readDeviceLibrary).toHaveBeenCalledTimes(1);
   });
 
   it("ignores a stale response from a superseded read", async () => {
@@ -297,6 +301,7 @@ describe("useDeviceLibrary", () => {
     const second = renderHook(() => useDeviceLibrary(ID_A));
     expect(second.result.current.state.kind).toBe("ready");
     expect(second.result.current.isRefreshing).toBe(true);
+    await waitFor(() => expect(second.result.current.isRefreshing).toBe(false));
   });
 
   it("invalidateDeviceLibraryCache clears the SWR snapshot", async () => {
@@ -311,5 +316,64 @@ describe("useDeviceLibrary", () => {
 
     const second = renderHook(() => useDeviceLibrary(ID_A));
     expect(second.result.current.state.kind).toBe("loading");
+    await waitFor(() => expect(second.result.current.state.kind).toBe("ready"));
+  });
+
+  it("re-reads mounted consumers when the catalog invalidates the inventory cache", async () => {
+    vi.mocked(readDeviceLibrary).mockReturnValue(
+      mockHandle(Promise.resolve(readable("0000ABCD"))) as never,
+    );
+    const first = renderHook(() => useDeviceLibrary(ID_A));
+    const second = renderHook(() => useDeviceLibrary(ID_A));
+    await waitFor(() => {
+      expect(first.result.current.state.kind).toBe("ready");
+      expect(second.result.current.state.kind).toBe("ready");
+    });
+    vi.mocked(readDeviceLibrary).mockReturnValue(
+      mockHandle(Promise.resolve(readable("0000BEEF"))) as never,
+    );
+
+    act(() => invalidateDeviceLibraryCache());
+
+    await waitFor(() => {
+      for (const hook of [first, second]) {
+        expect(hook.result.current.state).toMatchObject({
+          kind: "ready",
+          stories: [{ shortId: "0000BEEF" }],
+        });
+      }
+    });
+    expect(readDeviceLibrary).toHaveBeenCalledTimes(4);
+  });
+
+  it("prevents a pre-invalidation response from replacing the new inventory or its cache", async () => {
+    let resolveOld!: (value: ReturnType<typeof readable>) => void;
+    const oldRead = mockHandle(new Promise<ReturnType<typeof readable>>((resolve) => {
+      resolveOld = resolve;
+    }));
+    vi.mocked(readDeviceLibrary)
+      .mockReturnValueOnce(oldRead as never)
+      .mockReturnValueOnce(mockHandle(Promise.resolve(readable("0000BEEF"))) as never)
+      .mockReturnValue(mockHandle(new Promise(() => {})) as never);
+    const first = renderHook(() => useDeviceLibrary(ID_A));
+
+    act(() => invalidateDeviceLibraryCache());
+    expect(oldRead.cancel).toHaveBeenCalledOnce();
+    await waitFor(() => expect(first.result.current.state).toMatchObject({
+      kind: "ready",
+      stories: [{ shortId: "0000BEEF" }],
+    }));
+    await act(async () => resolveOld(readable("0000ABCD")));
+    expect(first.result.current.state).toMatchObject({
+      kind: "ready",
+      stories: [{ shortId: "0000BEEF" }],
+    });
+
+    first.unmount();
+    const second = renderHook(() => useDeviceLibrary(ID_A));
+    expect(second.result.current.state).toMatchObject({
+      kind: "ready",
+      stories: [{ shortId: "0000BEEF" }],
+    });
   });
 });
