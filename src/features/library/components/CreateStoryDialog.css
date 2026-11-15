@@ -206,3 +206,45 @@
   .create-story-dialog__choices,
   .create-story-dialog__sources { gap: 8px; }
 }
+
+/* The guided creation follows the two-step choice from the welcome journey.
+ * The classic surface remains unchanged for existing embedded callers. */
+.ds-dialog:has(.create-story-dialog--guided) {
+  width: min(440px, calc(100vw - 32px));
+  padding: 54px 28px 28px;
+  border-radius: 24px;
+}
+
+.ds-dialog:has(.create-story-dialog--guided) .ds-dialog__title {
+  margin-bottom: 20px;
+  font-size: 25px;
+  font-weight: 600;
+  line-height: 1.2;
+}
+
+.create-story-dialog__step {
+  position: absolute;
+  top: 26px;
+  left: 28px;
+  margin: 0;
+  color: var(--color-text-secondary);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.create-story-dialog__guided-choices { display: grid; gap: 12px; }
+.create-story-dialog__guided-choices > .ds-button { flex-direction: column; align-items: flex-start; gap: 4px; padding: 14px 16px; border-radius: 18px; text-align: left; background: #fff; box-shadow: none; }
+.create-story-dialog__guided-choices > .ds-button > strong { font-size: 15px; font-weight: 800; }
+.create-story-dialog__guided-choices > .ds-button > span { font-size: 13px; font-weight: 400; color: var(--color-text-secondary); }
+.create-story-dialog__guided-choices > .create-story-dialog__source-reason { grid-column: auto; grid-row: auto; padding: 0 4px; }
+.create-story-dialog__cancel-choice { align-self: center; margin-top: 2px; color: var(--color-action-primary); text-decoration: underline; text-underline-offset: 3px; }
+
+.create-story-dialog--guided .create-story-dialog__new-story { padding: 0; border: 0; background: transparent; }
+.create-story-dialog--guided .create-story-dialog__description { margin: -10px 0 20px; font-size: 14px; }
+.create-story-dialog--guided .create-story-dialog__new-story .ds-field__input { border-radius: 999px; padding: 11px 16px; }
+.create-story-dialog--guided .create-story-dialog__actions { justify-content: space-between; padding-top: 24px; }
+.create-story-dialog--guided .create-story-dialog__actions > .ds-button--quiet { color: var(--color-action-primary); text-decoration: underline; text-underline-offset: 3px; padding-inline: 6px; }
+.create-story-dialog--guided .create-story-dialog__choices,
+.create-story-dialog--guided .create-story-dialog__sources { grid-template-columns: minmax(0, 1fr); }
+.create-story-dialog__local-note { margin: 4px 0 0; color: var(--color-text-secondary); font-size: 12px; line-height: 1.4; }
+.create-story-dialog__sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }

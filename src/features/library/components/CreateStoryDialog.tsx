@@ -17,9 +17,14 @@ import {
 import "./CreateStoryDialog.css";
 
 export interface CreateStoryDialogProps {
+  /** The library uses the guided choice; classic keeps the compact all-in-one surface. */
+  flow?: "classic" | "guided";
+  initialStep?: "choice" | "title" | "import";
   open: boolean;
   onClose: () => void;
   onCreated: (story: StoryCardDto) => void;
+  onImportArtifactRequest?: () => void;
+  isImportArtifactUnavailable?: boolean;
   /** Start the structured-folder creation path (`Choisir un dossier…`):
    *  closes this dialog and hands over to the folder flow. Optional — when
    *  absent, the secondary entry is not rendered (the interactive path
@@ -86,9 +91,13 @@ const POLICY_FAIL_CLOSED_REASON =
  * re-validates authoritatively before any SQL is executed.
  */
 export function CreateStoryDialog({
+  flow = "classic",
+  initialStep = "choice",
   open,
   onClose,
   onCreated,
+  onImportArtifactRequest,
+  isImportArtifactUnavailable = false,
   onCreateFromFolderRequest,
   isCreateFromFolderUnavailable = false,
   onCreateFromArchiveRequest,
@@ -108,8 +117,12 @@ export function CreateStoryDialog({
   const serverErrorId = useId();
   const progressId = useId();
   const sourcesId = useId();
+  const localNoteId = useId();
+  const webChoiceReasonId = useId();
   const fieldRef = useRef<HTMLInputElement | null>(null);
+  const contentRef = useRef<HTMLDivElement | null>(null);
 
+  const [step, setStep] = useState(initialStep);
   const [title, setTitle] = useState<string>("");
   const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
   const [serverError, setServerError] = useState<AppError | null>(null);
@@ -120,6 +133,19 @@ export function CreateStoryDialog({
     [normalized],
   );
   const charCount = useMemo(() => Array.from(normalized).length, [normalized]);
+  const guided = flow === "guided";
+  const webPolicy = contentSourcePolicy?.sources.find((source) => source.kind === "web");
+  const webAvailable = webPolicy?.activation === "enabled" && Boolean(onCreateFromWebRequest);
+
+  useEffect(() => {
+    setStep(initialStep);
+  }, [open, initialStep]);
+
+  useEffect(() => {
+    if (!open || !guided) return;
+    if (step === "title") fieldRef.current?.focus();
+    else contentRef.current?.querySelector<HTMLButtonElement>("button")?.focus();
+  }, [open, guided, step]);
 
   // Reset the typing state whenever the dialog transitions from open→closed
   // so a subsequent re-open starts from a clean slate without clobbering
@@ -143,6 +169,7 @@ export function CreateStoryDialog({
   const describedBy = [
     descriptionId,
     counterId,
+    guided && step === "title" ? localNoteId : null,
     issue !== null ? reasonId : null,
     serverError !== null ? serverErrorId : null,
     isSubmitting ? progressId : null,
@@ -243,21 +270,61 @@ export function CreateStoryDialog({
     onCreateFromWebRequest?.();
   };
 
+  const handleImportArtifact = (): void => {
+    if (isSubmitting || isImportArtifactUnavailable) return;
+    onClose();
+    onImportArtifactRequest?.();
+  };
+
+  const dialogTitle = !guided ? "Créer une histoire"
+    : step === "choice" ? "Que veux-tu faire ?"
+      : step === "title" ? "Comment s'appelle ton histoire ?"
+        : "Comment veux-tu importer ?";
+
   return (
     <Dialog
       open={open}
       onClose={handleCancel}
-      title="Créer une histoire"
-      ariaDescribedBy={descriptionId}
+      title={dialogTitle}
+      ariaDescribedBy={!guided || step === "title" ? descriptionId : undefined}
     >
-      <div className="create-story-dialog">
+      <div ref={contentRef} className={`create-story-dialog${guided ? " create-story-dialog--guided" : ""}`}>
+        {guided && <p className="create-story-dialog__step">Étape {step === "choice" ? "1" : "2"} sur 2</p>}
+        {guided && step === "choice" && (
+          <>
+            <div className="create-story-dialog__guided-choices">
+              <Button variant="secondary" aria-label="Écrire une histoire" onClick={() => setStep("title")}>
+                <strong>Écrire une histoire</strong>
+                <span>Partir d'une page blanche</span>
+              </Button>
+              <Button variant="secondary" aria-label="Importer" onClick={() => setStep("import")}>
+                <strong>Importer</strong>
+                <span>Fichier, dossier ou lien</span>
+              </Button>
+              <Button
+                variant="secondary"
+                aria-label="Depuis une page web"
+                aria-describedby={webChoiceReasonId}
+                aria-disabled={!webAvailable || isSubmitting || isCreateFromWebUnavailable || undefined}
+                onClick={handleCreateFromWeb}
+              >
+                <strong>Depuis une page web</strong>
+                <span>Coller l'adresse d'une page</span>
+              </Button>
+              <p id={webChoiceReasonId} className={webAvailable ? "create-story-dialog__sr-only" : "create-story-dialog__source-reason"}>
+                {webAvailable ? webPolicy?.activationMarker : webPolicy?.reason ?? POLICY_FAIL_CLOSED_REASON}
+              </p>
+            </div>
+            <Button variant="quiet" className="create-story-dialog__cancel-choice" onClick={handleCancel}>Annuler</Button>
+          </>
+        )}
+        {(!guided || step === "title") && (
         <div className="create-story-dialog__new-story">
-          <span className="create-story-dialog__illustration" aria-hidden="true">
+          {!guided && <span className="create-story-dialog__illustration" aria-hidden="true">
             <Icon name="wand" />
-          </span>
+          </span>}
           <p id={descriptionId} className="create-story-dialog__description">
-            Donne un titre à ta nouvelle histoire. Rustory crée un brouillon local
-            que tu peux éditer plus tard.
+            {guided ? "Tu pourras la changer plus tard." : "Donne un titre à ta nouvelle histoire. Rustory crée un brouillon local que tu peux éditer plus tard."}
           </p>
           <Field
             id={titleFieldId}
@@ -282,10 +349,11 @@ export function CreateStoryDialog({
               .join(" ")}
             aria-live="polite"
           >
-            {charCount} / {MAX_STORY_TITLE_CHARS} caractères
+            {charCount} / {MAX_STORY_TITLE_CHARS}{guided ? "" : " caractères"}
           </p>
+          {guided && <p id={localNoteId} className="create-story-dialog__local-note">On crée un brouillon sur ton ordinateur. Rien n'est envoyé.</p>}
           {issue !== null && !isSubmitting ? (
-            <p id={reasonId} className="create-story-dialog__reason">
+            <p id={reasonId} className={`create-story-dialog__reason${guided && issue === "empty" ? " create-story-dialog__sr-only" : ""}`}>
               {reasonFor(issue, { charCount })}
             </p>
           ) : null}
@@ -306,15 +374,15 @@ export function CreateStoryDialog({
           ) : null}
           <div className="create-story-dialog__actions">
             <Button
-              variant="secondary"
-              onClick={handleCancel}
+              variant={guided ? "quiet" : "secondary"}
+              onClick={guided ? () => setStep("choice") : handleCancel}
               aria-disabled={isSubmitting || undefined}
             >
-              Annuler
+              {guided ? "Retour" : "Annuler"}
             </Button>
             {canSubmit ? (
               <Button variant="primary" onClick={() => void handleSubmit()}>
-                <Icon name="plus" />
+                {!guided && <Icon name="plus" />}
                 Créer
               </Button>
             ) : (
@@ -325,13 +393,24 @@ export function CreateStoryDialog({
                   issue !== null ? reasonId : isSubmitting ? progressId : undefined
                 }
               >
-                <Icon name="plus" />
+                {!guided && <Icon name="plus" />}
                 Créer
               </Button>
             )}
           </div>
         </div>
+        )}
+        {(!guided || step === "import") && (
         <div className="create-story-dialog__choices">
+          {guided && onImportArtifactRequest && (
+            <div className="create-story-dialog__folder-entry">
+              <span className="create-story-dialog__choice-icon" aria-hidden="true"><Icon name="book" /></span>
+              <p className="create-story-dialog__folder-hint">Une histoire exportée depuis Rustory</p>
+              <Button variant="quiet" onClick={handleImportArtifact} aria-disabled={isSubmitting || isImportArtifactUnavailable || undefined}>
+                Choisir un fichier .rustory…
+              </Button>
+            </div>
+          )}
           {onCreateFromFolderRequest ? (
             <div className="create-story-dialog__folder-entry">
               <span className="create-story-dialog__choice-icon" aria-hidden="true">
@@ -486,6 +565,12 @@ export function CreateStoryDialog({
             </div>
           ) : null}
         </div>
+        )}
+        {guided && step === "import" && (
+          <div className="create-story-dialog__actions">
+            <Button variant="quiet" onClick={() => setStep("choice")}>Retour</Button>
+          </div>
+        )}
       </div>
     </Dialog>
   );
