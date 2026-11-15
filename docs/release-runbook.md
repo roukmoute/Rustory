@@ -84,6 +84,37 @@ Le chemin de livraison courant utilise les secrets déjà provisionnés :
 
 La procédure de build manuel ci-dessus reste VALIDE telle quelle : le build local n'exige aucune clé (les artefacts updater ne sont produits que sous l'overlay de configuration du workflow de release).
 
+Pour l'AppImage Linux, `bundle.linux.appimage.bundleMediaFramework` active
+le plugin GStreamer de linuxdeploy. Le runner installe explicitement
+`gstreamer1.0-plugins-base`, `gstreamer1.0-plugins-good` et `gstreamer1.0-libav`
+pour embarquer les éléments de lecture et les décodeurs des formats audio
+acceptés (WAV, OGG, MP3, M4A). Un build manuel doit fournir les mêmes paquets,
+ainsi que `glib-networking`, `gstreamer1.0-tools` et `patchelf`.
+Contrôler l'AppImage produite : `libgstapp-1.0.so.0` seule ne suffit pas,
+le plugin `usr/lib/gstreamer-1.0/libgstapp.so` et le scanner GStreamer doivent
+être présents et les éléments `appsink` et `appsrc` chargeables depuis le bundle.
+Voir la [documentation AppImage de Tauri](https://v2.tauri.app/distribute/appimage/#multimedia-support-via-gstreamer).
+Au démarrage de l'AppImage, avant GTK, Rustory limite également la recherche
+des modules GIO au répertoire embarqué contenant `libgiognutls.so`. Ce réglage
+préserve TLS et empêche de mélanger la GLib du bundle avec les modules GVFS
+d'une distribution plus récente. Vérifier sur l'artefact final que les modules
+GIO et GStreamer chargés proviennent du bundle ; la compilation et les tests
+unitaires seuls ne couvrent pas ce contrôle de distribution.
+
+Le job Linux exécute deux contrôles sur l'AppImage signée avant de pouvoir
+réussir : `bash tools/check-appimage-media.sh <AppImage>` remplace seulement
+le binaire d'une extraction jetable par une sonde, puis utilise le vrai
+`AppRun` pour charger les plugins embarqués et décoder un WAV avec un cache
+GStreamer neuf puis réutilisé. `python3 tools/check-appimage-startup.py
+<AppImage>` lance ensuite le vrai Rustory et WebKit sur un écran virtuel,
+un bus de session privé et un profil temporaire ; il refuse les erreurs de
+chargement et les modules GIO provenant de l'hôte. Ces contrôles demandent
+`libgstreamer1.0-dev`, un compilateur C, `pkg-config`, Python 3, `xvfb`, `xauth`
+et `dbus-x11`. En CI, `APPIMAGE_EXTRACT_AND_RUN=1` évite de dépendre de FUSE.
+Avant promotion, répéter le contrôle de démarrage sur Debian 13 avec
+l'AppImage finale, sans cette variable, pour vérifier le lancement normal
+de l'artefact construit sur Ubuntu 24.04.
+
 ## Local persistence footprint
 
 La persistance locale du brouillon utilisateur repose sur SQLite embarqué (via `rusqlite` compilé en `bundled`). Le fichier `rustory.sqlite` est créé et lu dans le répertoire `app_data_dir` résolu par Tauri v2, spécifique à chaque plateforme. Les migrations SQL vivent dans [`src-tauri/migrations/`](../src-tauri/migrations/) et sont appliquées à chaque démarrage, en mode idempotent via une table `schema_migrations`.

@@ -57,6 +57,7 @@
     ],
     "linux": {
       "appimage": {
+        "bundleMediaFramework": true,
         "files": {
           "/usr/share/mime/packages/fr.roukmoute.rustory.xml": "bundle/linux/rustory-mime.xml"
         }

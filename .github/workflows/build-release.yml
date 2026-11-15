@@ -243,7 +243,9 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      # Tauri v2 Linux build deps — mirror verify.yml exactly.
+      # Tauri v2 build deps plus the runtime plugins copied into the AppImage.
+      # Keep media packages explicit: --no-install-recommends must not leave
+      # appsink or audio decoders dependent on the runner's preinstalled set.
       - name: Install Tauri Linux build deps
         if: matrix.platform == 'ubuntu-24.04'
         run: |
@@ -258,7 +260,17 @@ jobs:
             libayatana-appindicator3-dev \
             libxdo-dev \
             libssl-dev \
-            build-essential
+            libgstreamer1.0-dev \
+            build-essential \
+            glib-networking \
+            gstreamer1.0-plugins-base \
+            gstreamer1.0-plugins-good \
+            gstreamer1.0-libav \
+            gstreamer1.0-tools \
+            patchelf \
+            xvfb \
+            xauth \
+            dbus-x11
 
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -313,3 +325,16 @@ jobs:
           prerelease: false
           includeUpdaterJson: true
           args: --config src-tauri/updater-overlay.json
+
+      - name: Verify packaged Linux runtime
+        if: matrix.platform == 'ubuntu-24.04'
+        shell: bash
+        run: |
+          shopt -s nullglob
+          appimages=(src-tauri/target/release/bundle/appimage/*.AppImage)
+          if [ "${#appimages[@]}" -ne 1 ]; then
+            echo "Expected exactly one Linux AppImage, found ${#appimages[@]}" >&2
+            exit 1
+          fi
+          bash tools/check-appimage-media.sh "${appimages[0]}"
+          APPIMAGE_EXTRACT_AND_RUN=1 python3 tools/check-appimage-startup.py "${appimages[0]}"
