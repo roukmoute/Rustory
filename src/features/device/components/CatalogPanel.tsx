@@ -45,14 +45,12 @@ export function CatalogPanel({ catalog }: CatalogPanelProps): React.JSX.Element 
 
   const statusText =
     state.kind === "loading"
-      ? "Lecture du catalogue local…"
+      ? "Lecture du catalogue…"
       : state.kind === "error"
-        ? "Catalogue local illisible."
+        ? "Le catalogue n'a pas pu être lu."
         : state.count === 0
-          ? "Aucun titre officiel en cache."
-          : `${state.count} titre${state.count > 1 ? "s" : ""} officiel${
-              state.count > 1 ? "s" : ""
-            } en cache.`;
+          ? "Le catalogue est vide."
+          : `${state.count} titre${state.count > 1 ? "s" : ""} dans le catalogue.`;
 
   return (
     <SurfacePanel
@@ -80,8 +78,8 @@ export function CatalogPanel({ catalog }: CatalogPanelProps): React.JSX.Element 
       </div>
 
       <p className="catalog-panel__note">
-        Hors-ligne par défaut : Rustory ne contacte aucun serveur sans une
-        action de ta part.
+        La récupération utilise Internet. Le catalogue reste ensuite disponible
+        hors ligne.
       </p>
 
       <div className="catalog-panel__actions">

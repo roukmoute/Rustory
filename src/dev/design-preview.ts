@@ -22,7 +22,9 @@ import {
 import {
   isSupportProfile,
   isUpdateApplyPlan,
+  isUpdateApplyState,
   isUpdateAvailability,
+  type UpdateApplyState,
 } from "../shared/ipc-contracts/settings";
 import {
   isAnnouncementVoicesDto,
@@ -214,21 +216,56 @@ const voices = {
     voiceName: "Voix neuronale française (Siwis)",
   },
 };
-const updateAvailability = {
-  status: "checkNotRun",
-  currentVersion: version,
-  headline: "La vérification de version n'est pas exécutée pour cette copie.",
-  notice:
-    "Cette copie de Rustory ne provient pas d'un canal de distribution officiel : aucune vérification réseau n'est effectuée.",
-};
-const updatePlan = {
-  mode: "manual",
-  reason: "development_build",
-  headline:
-    "La mise à jour intégrée n'est pas disponible pour un build de développement.",
-  guidance:
-    "Reconstruis Rustory depuis les sources pour obtenir la dernière version.",
-};
+const updateScenario = scenario === "update-running" || scenario === "update-ready";
+// The preview proposes the next minor (0.25.0 for 0.24.0), never a downgrade
+// when the development version advances. No update is actually downloaded.
+const [currentMajor, currentMinor] = version.split(".");
+const previewLatestVersion = `${currentMajor}.${Number(currentMinor) + 1}.0`;
+const updateAvailability = updateScenario
+  ? {
+      status: "updateAvailable",
+      currentVersion: version,
+      latestVersion: previewLatestVersion,
+      headline: `Nouvelle version disponible : ${previewLatestVersion}.`,
+      notice: `Ta version actuelle est ${version}. Récupère la nouvelle version depuis la page officielle des versions : github.com/roukmoute/Rustory/releases.`,
+    }
+  : {
+      status: "checkNotRun",
+      currentVersion: version,
+      headline: "La vérification de version n'est pas exécutée pour cette copie.",
+      notice:
+        "Cette copie de Rustory ne provient pas d'un canal de distribution officiel : aucune vérification réseau n'est effectuée.",
+    };
+const updatePlan = updateScenario
+  ? {
+      mode: "integrated",
+      headline: "Cette copie peut installer les mises à jour de Rustory.",
+      guidance: "Le téléchargement vérifie l'authenticité de la mise à jour avant de l'installer.",
+    }
+  : {
+      mode: "manual",
+      reason: "development_build",
+      headline:
+        "La mise à jour intégrée n'est pas disponible pour un build de développement.",
+      guidance:
+        "Reconstruis Rustory depuis les sources pour obtenir la dernière version.",
+    };
+const updateState: UpdateApplyState = scenario === "update-running"
+  ? {
+      status: "running",
+      jobId: "preview-update-job",
+      phase: "downloading",
+      percent: 42,
+      headline: "Téléchargement de la mise à jour en cours…",
+      notice: "Tu peux continuer à utiliser Rustory pendant cette opération.",
+    }
+  : scenario === "update-ready"
+    ? {
+        status: "readyToRestart",
+        headline: "La mise à jour de Rustory est prête.",
+        notice: "Redémarre Rustory pour terminer l'installation. Ton travail local reste en place.",
+      }
+    : { status: "idle" };
 
 function assertFixture(valid: boolean, name: string): void {
   if (!valid) throw new Error(`Invalid design-preview fixture: ${name}`);
@@ -241,6 +278,7 @@ assertFixture(isSupportProfile(officialProfile()), "support profile");
 assertFixture(isContentSourcePolicy(officialPolicy()), "source policy");
 assertFixture(isUpdateAvailability(updateAvailability), "update availability");
 assertFixture(isUpdateApplyPlan(updatePlan), "update plan");
+assertFixture(isUpdateApplyState(updateState), "update state");
 for (const story of stories) {
   assertFixture(isStoryDetailDto(detailFor(story.id)), story.id);
   assertFixture(
@@ -304,7 +342,7 @@ mockIPC(
       case "read_update_apply_plan":
         return updatePlan;
       case "read_update_apply_state":
-        return { status: "idle" };
+        return structuredClone(updateState);
       case "read_announcement_voices":
         return structuredClone(voices);
       case "set_announcement_voice": {

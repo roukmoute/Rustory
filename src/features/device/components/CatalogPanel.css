@@ -1,103 +1,88 @@
-/* Official-catalog management within Aide et réglages. */
+/* Catalogue maintenance: one compact card within Aide et réglages. */
 .catalog-panel {
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 18px;
   min-width: 0;
-  padding: 28px;
-  background: var(--color-surface-raised);
+  padding: 24px;
   border-radius: 24px;
+  background: var(--color-surface-raised);
 }
 
 .catalog-panel__title {
   display: flex;
   align-items: center;
-  gap: 10px;
-  font-family: var(--font-family-display);
+  gap: 12px;
   margin: 0;
-  font-size: 20px;
-  font-weight: 500;
   color: var(--color-text-primary);
-  line-height: var(--line-height-tight);
+  font-family: var(--font-family-display, var(--font-family-ui));
+  font-size: 1.4rem;
+  font-weight: 500;
+  line-height: 1.25;
 }
 
-.catalog-panel__status {
-  margin: 0;
-  font-size: var(--font-size-meta);
-  color: var(--color-text-secondary);
-  line-height: var(--line-height-normal);
+.catalog-panel__title > svg {
+  box-sizing: content-box;
+  flex-shrink: 0;
+  width: 22px;
+  height: 22px;
+  padding: 11px;
+  border-radius: 14px;
+  background: var(--color-surface-warning);
+  color: #79540b;
 }
 
 .catalog-panel__description {
   margin: 0;
   color: var(--color-text-secondary);
   font-size: var(--font-size-body);
-  line-height: var(--line-height-normal);
+  line-height: 1.6;
 }
 
-.catalog-panel__status-text {
-  margin: 0;
+.catalog-panel__status {
+  padding: 16px;
+  border-radius: 16px;
+  background: var(--color-surface-base);
+  color: var(--color-text-primary);
+  font-size: var(--font-size-label);
+  line-height: 1.5;
 }
+
+.catalog-panel__status-text { margin: 0; font-weight: 800; }
 
 .catalog-panel__note {
   margin: 0;
-  font-size: var(--font-size-meta);
   color: var(--color-text-muted);
-  line-height: var(--line-height-normal);
+  font-size: var(--font-size-meta);
+  line-height: 1.6;
 }
 
 .catalog-panel__actions {
   display: flex;
-  flex-wrap: wrap;
-  gap: var(--space-2);
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
 }
+
+.catalog-panel__actions > .ds-button--quiet { padding-inline: 0; }
 
 .catalog-panel__error {
   display: flex;
   flex-direction: column;
   align-items: flex-start;
-  gap: var(--space-2);
+  gap: 8px;
+  padding: 16px;
+  border-radius: 16px;
+  background: var(--color-surface-warning);
 }
 
 .catalog-panel__error-text {
   margin: 0;
-  font-size: var(--font-size-meta);
   color: var(--color-text-secondary);
-  line-height: var(--line-height-normal);
-}
-
-.catalog-panel__title > svg {
-  color: #9c7130;
-  flex-shrink: 0;
-}
-
-.catalog-panel__status-text {
-  font-weight: 800;
-  color: var(--color-text-primary);
-}
-
-.catalog-panel__note {
-  font-size: 12px;
+  font-size: var(--font-size-label);
   line-height: 1.6;
 }
 
-.catalog-panel__actions {
-  flex-direction: row;
-  align-items: flex-start;
-  gap: 8px;
-}
-
-.catalog-panel__actions > button {
-  width: auto;
-}
-
-.catalog-panel__error {
-  padding: 12px;
-  border-radius: 12px;
-  background: #fff3d4;
-}
-
-@media (max-width: 720px) {
+@media (max-width: 760px) {
   .catalog-panel { padding: 20px; }
-  .catalog-panel__actions > button { width: 100%; }
 }

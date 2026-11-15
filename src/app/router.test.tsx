@@ -289,7 +289,7 @@ describe("router", () => {
     expect(
       screen.getByRole("region", { name: "Catalogue officiel" }),
     ).toBeInTheDocument();
-    await screen.findByText("17 titres officiels en cache.");
+    await screen.findByText("17 titres dans le catalogue.");
     expect(catalogStatusMock).toHaveBeenCalledOnce();
     expect(catalogRefreshMock).not.toHaveBeenCalled();
     expect(catalogImportMock).not.toHaveBeenCalled();

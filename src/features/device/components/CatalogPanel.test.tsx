@@ -20,23 +20,26 @@ function makeCatalog(
 }
 
 describe("<CatalogPanel />", () => {
-  it("states the offline-first guardrail explicitly", () => {
-    render(<CatalogPanel catalog={makeCatalog()} />);
+  it("explains the network action without starting it on mount", () => {
+    const catalog = makeCatalog();
+    render(<CatalogPanel catalog={catalog} />);
     expect(
-      screen.getByText(/ne contacte aucun serveur sans une action de ta part/i),
+      screen.getByText(/La récupération utilise Internet/),
     ).toBeInTheDocument();
+    expect(catalog.refresh).not.toHaveBeenCalled();
+    expect(catalog.importFile).not.toHaveBeenCalled();
   });
 
   it("shows the cached count and pluralizes it", () => {
     render(
       <CatalogPanel catalog={makeCatalog({ state: { kind: "ready", count: 1200 } })} />,
     );
-    expect(screen.getByText(/1200 titres officiels en cache/i)).toBeInTheDocument();
+    expect(screen.getByText(/1200 titres dans le catalogue/i)).toBeInTheDocument();
   });
 
   it("shows the empty-cache state distinctly", () => {
     render(<CatalogPanel catalog={makeCatalog({ state: { kind: "ready", count: 0 } })} />);
-    expect(screen.getByText(/aucun titre officiel en cache/i)).toBeInTheDocument();
+    expect(screen.getByText(/le catalogue est vide/i)).toBeInTheDocument();
   });
 
   it("triggers the network refresh on click", async () => {

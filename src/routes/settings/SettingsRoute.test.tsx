@@ -1,5 +1,5 @@
 import { StrictMode } from "react";
-import { act, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import {
   RouterProvider,
@@ -13,6 +13,8 @@ const mockReadContentSourcePolicy = vi.fn();
 const mockGetVersion = vi.fn();
 const mockReadUpdateApplyPlan = vi.fn();
 const mockReadUpdateApplyState = vi.fn();
+const mockRefreshUpdateAvailability = vi.fn();
+const mockSubscribeUpdateApplyEvents = vi.fn();
 const mockCatalogStatus = vi.fn();
 const mockCatalogRefresh = vi.fn();
 const mockCatalogImport = vi.fn();
@@ -66,8 +68,13 @@ vi.mock("../../ipc/commands/settings", async () => {
     readSupportProfile: () => mockReadSupportProfile(),
     readUpdateApplyPlan: () => mockReadUpdateApplyPlan(),
     readUpdateApplyState: () => mockReadUpdateApplyState(),
+    refreshUpdateAvailability: () => mockRefreshUpdateAvailability(),
   };
 });
+
+vi.mock("../../ipc/events/update-apply-events", () => ({
+  subscribeUpdateApplyEvents: (...args: unknown[]) => mockSubscribeUpdateApplyEvents(...args),
+}));
 
 vi.mock("../../ipc/commands/import-export", async () => {
   const actual = await vi.importActual<
@@ -115,6 +122,7 @@ vi.mock("../../ipc/commands/presentation", () => ({
 import { SettingsRoute } from "./SettingsRoute";
 import { useUpdateApplyShell } from "../../shell/state/update-apply-shell-store";
 import { useUpdateShell } from "../../shell/state/update-shell-store";
+import type { UpdateApplyState, UpdateAvailability } from "../../shared/ipc-contracts/settings";
 
 /** Compact builder of the official profile payload (byte-for-byte
  *  literals are guarded by the contract tests; the route tests only
@@ -287,6 +295,42 @@ function officialPolicy() {
 }
 
 const LIBRARY_MARKER = "library-stub";
+const SUPPORT_DETAILS = "Compatibilité et informations";
+const UPDATE_DETAILS = "Version et mises à jour";
+
+function settingsDetails(name: string) {
+  const summary = screen.getByText(name).closest("summary");
+  expect(summary).not.toBeNull();
+  const details = summary!.closest("details") as HTMLDetailsElement;
+  expect(details).not.toBeNull();
+  return { summary: summary!, details };
+}
+
+async function openSettingsDetails(name: string) {
+  const { summary, details } = settingsDetails(name);
+  if (!details.open) await userEvent.click(summary);
+  expect(details).toHaveAttribute("open");
+  return details;
+}
+
+function updateAvailableVerdict(): UpdateAvailability {
+  return {
+    status: "updateAvailable",
+    headline: "Nouvelle version disponible : 9.9.9.",
+    notice: "Ta version actuelle est 0.1.0. Récupère la nouvelle version depuis la page officielle des versions : github.com/roukmoute/Rustory/releases.",
+    currentVersion: "0.1.0",
+    latestVersion: "9.9.9",
+  };
+}
+
+const RUNNING_UPDATE: UpdateApplyState = {
+  status: "running",
+  jobId: "update-job-1",
+  phase: "downloading",
+  percent: 24,
+  headline: "Téléchargement de la mise à jour en cours…",
+  notice: "Tu peux continuer à utiliser Rustory pendant cette opération.",
+};
 
 function renderSettings(options: { strict?: boolean } = {}) {
   const routes: RouteObject[] = [
@@ -324,6 +368,18 @@ describe("<SettingsRoute />", () => {
     });
     mockReadUpdateApplyState.mockReset();
     mockReadUpdateApplyState.mockResolvedValue({ status: "idle" });
+    mockRefreshUpdateAvailability.mockReset();
+    mockRefreshUpdateAvailability.mockResolvedValue({
+      status: "upToDate",
+      headline: "Aucune version plus récente n'est publiée.",
+      notice: "Aucune action n'est nécessaire.",
+      currentVersion: "0.1.0",
+    });
+    mockSubscribeUpdateApplyEvents.mockReset();
+    mockSubscribeUpdateApplyEvents.mockImplementation(() => ({
+      ready: Promise.resolve(),
+      unsubscribe: vi.fn(),
+    }));
     useUpdateShell.setState({ availability: null });
     useUpdateApplyShell.setState({
       plan: null,
@@ -333,7 +389,7 @@ describe("<SettingsRoute />", () => {
     });
   });
 
-  it("renders the catalogue before the existing settings sections without fetching or importing automatically", async () => {
+  it("shows voices, catalogue and help while keeping informational sections folded by default", async () => {
     renderSettings();
     expect(
       screen.getByRole("main", { name: "Aide et réglages" }),
@@ -342,18 +398,22 @@ describe("<SettingsRoute />", () => {
       screen.getByRole("heading", { level: 1, name: "Aide et réglages" }),
     ).toBeInTheDocument();
     await waitFor(() => {
-      expect(screen.getByText("Version 0.1.0")).toBeInTheDocument();
+      expect(screen.getByText("Version 0.1.0")).toBeVisible();
     });
     await waitFor(() => {
       expect(screen.getByText("Origine v1")).toBeInTheDocument();
     });
+    expect(settingsDetails(SUPPORT_DETAILS).details).not.toHaveAttribute("open");
+    expect(settingsDetails(UPDATE_DETAILS).details).not.toHaveAttribute("open");
+    expect(screen.getByText("Origine v1")).not.toBeVisible();
+    expect(screen.getByRole("heading", { name: "Voix des annonces" })).toBeVisible();
     const catalog = screen.getByRole("region", { name: "Catalogue officiel" });
     expect(
-      await within(catalog).findByText("17 titres officiels en cache."),
+      await within(catalog).findByText("17 titres dans le catalogue."),
     ).toBeInTheDocument();
     expect(
       catalog.compareDocumentPosition(
-        screen.getByRole("heading", { name: "Découvrir Rustory" }),
+        screen.getByRole("button", { name: "Revoir l'accueil" }),
       ) & Node.DOCUMENT_POSITION_FOLLOWING,
     ).toBeTruthy();
     expect(mockCatalogStatus).toHaveBeenCalledOnce();
@@ -361,7 +421,10 @@ describe("<SettingsRoute />", () => {
     expect(mockCatalogImport).not.toHaveBeenCalled();
     expect(mockInvalidatePackCoverCache).not.toHaveBeenCalled();
     expect(mockInvalidateDeviceLibraryCache).not.toHaveBeenCalled();
-    expect(screen.getByText("Gen1")).toBeInTheDocument();
+    expect(mockRefreshUpdateAvailability).not.toHaveBeenCalled();
+    await openSettingsDetails(SUPPORT_DETAILS);
+    expect(screen.getByRole("region", { name: "Profil de support" })).toBeVisible();
+    expect(screen.getByText("Gen1")).toBeVisible();
     expect(screen.getByText("Dossier structuré")).toBeInTheDocument();
     expect(screen.getByText("Paquet Linux (.deb / .rpm)")).toBeInTheDocument();
     expect(screen.getByText("Flux RSS")).toBeInTheDocument();
@@ -389,7 +452,7 @@ describe("<SettingsRoute />", () => {
       const catalog = screen.getByRole("region", {
         name: "Catalogue officiel",
       });
-      await within(catalog).findByText("17 titres officiels en cache.");
+      await within(catalog).findByText("17 titres dans le catalogue.");
       const back = screen.getByRole("button", {
         name: "Retour à la bibliothèque",
       });
@@ -417,7 +480,7 @@ describe("<SettingsRoute />", () => {
         ),
       );
       expect(
-        within(catalog).getByText("23 titres officiels en cache."),
+        within(catalog).getByText("23 titres dans le catalogue."),
       ).toBeInTheDocument();
       expect(mockInvalidatePackCoverCache).toHaveBeenCalledOnce();
       expect(mockInvalidateDeviceLibraryCache).toHaveBeenCalledOnce();
@@ -432,7 +495,7 @@ describe("<SettingsRoute />", () => {
     const user = userEvent.setup();
     renderSettings();
     const catalog = screen.getByRole("region", { name: "Catalogue officiel" });
-    await within(catalog).findByText("17 titres officiels en cache.");
+    await within(catalog).findByText("17 titres dans le catalogue.");
     await user.click(
       within(catalog).getByRole("button", {
         name: "Importer depuis un fichier",
@@ -441,7 +504,7 @@ describe("<SettingsRoute />", () => {
     expect(mockCatalogImport).toHaveBeenCalledOnce();
     expect(mockCatalogRefresh).not.toHaveBeenCalled();
     expect(
-      within(catalog).getByText("17 titres officiels en cache."),
+      within(catalog).getByText("17 titres dans le catalogue."),
     ).toBeInTheDocument();
     expect(mockInvalidatePackCoverCache).not.toHaveBeenCalled();
     expect(mockInvalidateDeviceLibraryCache).not.toHaveBeenCalled();
@@ -460,7 +523,7 @@ describe("<SettingsRoute />", () => {
     });
     renderSettings();
     const catalog = screen.getByRole("region", { name: "Catalogue officiel" });
-    await within(catalog).findByText("17 titres officiels en cache.");
+    await within(catalog).findByText("17 titres dans le catalogue.");
     await user.click(
       within(catalog).getByRole("button", {
         name: "Récupérer / mettre à jour",
@@ -470,14 +533,15 @@ describe("<SettingsRoute />", () => {
       "Le catalogue officiel est indisponible.",
     );
     expect(
-      within(catalog).getByText("17 titres officiels en cache."),
+      within(catalog).getByText("17 titres dans le catalogue."),
     ).toBeInTheDocument();
     expect(mockInvalidatePackCoverCache).not.toHaveBeenCalled();
     expect(mockInvalidateDeviceLibraryCache).not.toHaveBeenCalled();
     expect(
       screen.getByRole("button", { name: "Retour à la bibliothèque" }),
     ).toBeEnabled();
-    expect(screen.getByText("Origine v1")).toBeInTheDocument();
+    await openSettingsDetails(SUPPORT_DETAILS);
+    expect(screen.getByText("Origine v1")).toBeVisible();
   });
 
   it.each(["pending", "failed"] as const)(
@@ -492,7 +556,8 @@ describe("<SettingsRoute />", () => {
         );
       const router = renderSettings();
       await screen.findByText("Origine v1");
-      expect(screen.getByText("Flux RSS")).toBeInTheDocument();
+      await openSettingsDetails(SUPPORT_DETAILS);
+      expect(screen.getByText("Flux RSS")).toBeVisible();
       expect(
         screen.getByRole("heading", { name: "Voix des annonces" }),
       ).toBeInTheDocument();
@@ -502,8 +567,8 @@ describe("<SettingsRoute />", () => {
       expect(
         within(catalog).getByText(
           catalogState === "pending"
-            ? "Lecture du catalogue local…"
-            : "Catalogue local illisible.",
+            ? "Lecture du catalogue…"
+            : "Le catalogue n'a pas pu être lu.",
         ),
       ).toBeInTheDocument();
       expect(mockCatalogRefresh).not.toHaveBeenCalled();
@@ -578,11 +643,11 @@ describe("<SettingsRoute />", () => {
       expect(screen.getByTestId(LIBRARY_MARKER)).toBeInTheDocument();
     });
     // The Retour REPLACED the /settings entry: back skips the profile.
-    await router.navigate(-1);
+    await act(async () => router.navigate(-1));
     await waitFor(() => {
       expect(screen.getByTestId(LIBRARY_MARKER)).toBeInTheDocument();
     });
-    await router.navigate(-1);
+    await act(async () => router.navigate(-1));
     await waitFor(() => {
       expect(screen.getByTestId("elsewhere-stub")).toBeInTheDocument();
     });
@@ -592,10 +657,14 @@ describe("<SettingsRoute />", () => {
   it("fails closed per section when the profile read rejects: sources stay served", async () => {
     mockReadSupportProfile.mockRejectedValue(new Error("drift"));
     renderSettings();
+    expect(await screen.findByText("Certaines informations ne sont pas disponibles.")).toBeVisible();
+    expect(settingsDetails(SUPPORT_DETAILS).details).not.toHaveAttribute("open");
+    await openSettingsDetails(SUPPORT_DETAILS);
+    const profile = screen.getByRole("region", { name: "Profil de support" });
     await waitFor(() => {
-      expect(screen.getAllByRole("status")).toHaveLength(3);
+      expect(within(profile).getAllByRole("status")).toHaveLength(3);
     });
-    for (const status of screen.getAllByRole("status")) {
+    for (const status of within(profile).getAllByRole("status")) {
       expect(status).toHaveTextContent(
         "Le profil de support n'a pas pu être lu.",
       );
@@ -613,8 +682,12 @@ describe("<SettingsRoute />", () => {
   it("fails closed per section when the policy read rejects: the profile sections stay served", async () => {
     mockReadContentSourcePolicy.mockRejectedValue(new Error("drift"));
     renderSettings();
+    expect(await screen.findByText("Certaines informations ne sont pas disponibles.")).toBeVisible();
+    expect(settingsDetails(SUPPORT_DETAILS).details).not.toHaveAttribute("open");
+    await openSettingsDetails(SUPPORT_DETAILS);
+    const profile = screen.getByRole("region", { name: "Profil de support" });
     await waitFor(() => {
-      expect(screen.getByRole("status")).toHaveTextContent(
+      expect(within(profile).getByRole("status")).toHaveTextContent(
         "Les sources de contenu n'ont pas pu être lues.",
       );
     });
@@ -630,7 +703,8 @@ describe("<SettingsRoute />", () => {
     await waitFor(() => {
       expect(screen.getByText("Origine v1")).toBeInTheDocument();
     });
-    expect(screen.queryByText(/^Version /)).not.toBeInTheDocument();
+    expect(screen.queryByText(/^Version \d/)).not.toBeInTheDocument();
+    expect(settingsDetails(UPDATE_DETAILS).summary).toBeVisible();
   });
 
   it("renders correctly under StrictMode (mount token pins the reads to the live mount)", async () => {
@@ -639,14 +713,10 @@ describe("<SettingsRoute />", () => {
       expect(screen.getByText("Origine v1")).toBeInTheDocument();
     });
     expect(screen.getByText("Version 0.1.0")).toBeInTheDocument();
-    expect(
-      screen.getAllByRole("heading", { level: 2 }).map((h) => h.textContent),
-    ).toEqual([
-      "Catalogue officiel",
-      "Découvrir Rustory",
-      "Voix des annonces",
-      "Profil de support",
-    ]);
+    expect(screen.getByRole("heading", { name: "Voix des annonces" })).toBeVisible();
+    expect(screen.getByRole("heading", { name: "Catalogue officiel" })).toBeVisible();
+    expect(settingsDetails(SUPPORT_DETAILS).details).not.toHaveAttribute("open");
+    await openSettingsDetails(SUPPORT_DETAILS);
     const profile = screen.getByRole("region", { name: "Profil de support" });
     expect(
       within(profile)
@@ -661,7 +731,139 @@ describe("<SettingsRoute />", () => {
     ]);
   });
 
-  it("renders the update status line UNDER the version line when a verdict exists", async () => {
+  it("keeps the support profile mounted while folding without re-reading its data", async () => {
+    const user = userEvent.setup();
+    renderSettings();
+    const cohort = await screen.findByText("Origine v1");
+    expect(cohort).not.toBeVisible();
+    await openSettingsDetails(SUPPORT_DETAILS);
+    const profile = screen.getByRole("region", { name: "Profil de support" });
+    const { summary, details } = settingsDetails(SUPPORT_DETAILS);
+    expect(profile).toBeVisible();
+
+    await user.click(summary);
+    expect(details).not.toHaveAttribute("open");
+    expect(profile).toBeInTheDocument();
+    expect(profile).not.toBeVisible();
+    await user.click(summary);
+    expect(screen.getByRole("region", { name: "Profil de support" })).toBe(profile);
+    expect(screen.getByText("Origine v1")).toBe(cohort);
+    expect(cohort).toBeVisible();
+    expect(mockReadSupportProfile).toHaveBeenCalledOnce();
+    expect(mockReadContentSourcePolicy).toHaveBeenCalledOnce();
+    expect(mockGetVersion).toHaveBeenCalledOnce();
+    expect(mockCatalogStatus).toHaveBeenCalledOnce();
+    expect(mockCatalogRefresh).not.toHaveBeenCalled();
+    expect(mockCatalogImport).not.toHaveBeenCalled();
+  });
+
+  it("preserves an in-flight version check while folded and opens on the available result", async () => {
+    const user = userEvent.setup();
+    let resolveCheck!: (value: UpdateAvailability) => void;
+    mockRefreshUpdateAvailability.mockImplementation(() => new Promise((resolve) => {
+      resolveCheck = resolve;
+    }));
+    renderSettings();
+    await screen.findByText("Version 0.1.0");
+    await openSettingsDetails(UPDATE_DETAILS);
+    const { summary, details } = settingsDetails(UPDATE_DETAILS);
+    const check = screen.getByRole("button", { name: "Rechercher une mise à jour maintenant" });
+    await user.click(check);
+    expect(check).toHaveAttribute("aria-busy", "true");
+    expect(check).toHaveTextContent("Recherche en cours…");
+
+    await user.click(summary);
+    expect(details).not.toHaveAttribute("open");
+    expect(check).toBeInTheDocument();
+    expect(check).not.toBeVisible();
+    await user.click(summary);
+    expect(screen.getByRole("button", { name: "Rechercher une mise à jour maintenant" })).toBe(check);
+    expect(check).toHaveAttribute("aria-busy", "true");
+    expect(mockRefreshUpdateAvailability).toHaveBeenCalledOnce();
+    await user.click(summary);
+
+    await act(async () => resolveCheck(updateAvailableVerdict()));
+    expect(details).toHaveAttribute("open");
+    expect(screen.getByText("Nouvelle version disponible : 9.9.9.")).toBeVisible();
+    expect(check).not.toHaveAttribute("aria-busy");
+    expect(mockRefreshUpdateAvailability).toHaveBeenCalledOnce();
+    expect(mockReadSupportProfile).toHaveBeenCalledOnce();
+    expect(mockReadContentSourcePolicy).toHaveBeenCalledOnce();
+  });
+
+  it.each<UpdateApplyState>([
+    RUNNING_UPDATE,
+    {
+      status: "readyToRestart",
+      headline: "La mise à jour de Rustory est prête.",
+      notice: "Redémarre Rustory pour terminer l'installation. Ton travail local reste en place.",
+    },
+    {
+      status: "failed",
+      stage: "download",
+      headline: "Le téléchargement de la mise à jour n'a pas abouti.",
+      notice: "Rustory reste sur sa version actuelle. Vérifie ta connexion, puis réessaie.",
+    },
+  ])("reopens a folded updates section when the apply state becomes $status", async (state) => {
+    const user = userEvent.setup();
+    useUpdateShell.setState({ availability: updateAvailableVerdict() });
+    renderSettings();
+    await screen.findByRole("button", { name: "Télécharger et installer la mise à jour de Rustory" });
+    const { summary, details } = settingsDetails(UPDATE_DETAILS);
+    await user.click(summary);
+    expect(details).not.toHaveAttribute("open");
+
+    act(() => useUpdateApplyShell.setState({ state }));
+
+    expect(details).toHaveAttribute("open");
+    expect(screen.getByText(state.headline!)).toBeVisible();
+    if (state.status === "running") {
+      expect(screen.getByRole("progressbar", { name: state.headline })).toHaveAttribute("aria-valuenow", "24");
+    } else if (state.status === "readyToRestart") {
+      expect(screen.getByRole("button", { name: "Redémarrer Rustory pour terminer la mise à jour" })).toBeVisible();
+    } else {
+      expect(screen.getByRole("button", { name: "Réessayer la mise à jour" })).toBeVisible();
+    }
+    expect(mockReadUpdateApplyPlan).toHaveBeenCalledOnce();
+    expect(mockReadUpdateApplyState).toHaveBeenCalledOnce();
+  });
+
+  it("keeps a running update visible and its live subscription intact when folding is attempted", async () => {
+    useUpdateShell.setState({ availability: updateAvailableVerdict() });
+    mockReadUpdateApplyState.mockResolvedValue(RUNNING_UPDATE);
+    renderSettings();
+    const progress = await screen.findByRole("progressbar", { name: RUNNING_UPDATE.headline });
+    await waitFor(() => expect(mockReadUpdateApplyState).toHaveBeenCalledTimes(2));
+    expect(mockSubscribeUpdateApplyEvents).toHaveBeenCalledOnce();
+    const subscription = mockSubscribeUpdateApplyEvents.mock.calls[0][0];
+    const unsubscribe = mockSubscribeUpdateApplyEvents.mock.results[0].value.unsubscribe;
+    const { summary, details } = settingsDetails(UPDATE_DETAILS);
+
+    expect(summary).toHaveAttribute("aria-disabled", "true");
+    // Happy DOM toggles details before React's delegated MouseEvent handler.
+    // Verify cancellation with a bubbling click without that premature native action.
+    const click = new Event("click", { bubbles: true, cancelable: true });
+    fireEvent(summary, click);
+    expect(click.defaultPrevented).toBe(true);
+    expect(details).toHaveAttribute("open");
+    expect(progress).toBeInTheDocument();
+    expect(progress).toBeVisible();
+    act(() => subscription.onProgress({
+      jobId: "update-job-1",
+      phase: "downloading",
+      percent: 68,
+      sequence: 1,
+    }));
+    expect(progress).toHaveAttribute("aria-valuenow", "68");
+    expect(screen.getByRole("progressbar", { name: RUNNING_UPDATE.headline })).toBe(progress);
+    expect(progress).toBeVisible();
+    expect(unsubscribe).not.toHaveBeenCalled();
+    expect(mockSubscribeUpdateApplyEvents).toHaveBeenCalledOnce();
+    expect(mockReadUpdateApplyPlan).toHaveBeenCalledOnce();
+    expect(mockReadUpdateApplyState).toHaveBeenCalledTimes(2);
+  });
+
+  it("automatically opens updates and shows the verdict below the actual installed version", async () => {
     useUpdateShell.setState({
       availability: {
         status: "updateAvailable",
@@ -680,11 +882,10 @@ describe("<SettingsRoute />", () => {
       .getByText("Nouvelle version disponible : 9.9.9.")
       .closest("[role='status']");
     expect(statusLine).not.toBeNull();
-    // The status line lives in the SAME heading block, under the
-    // untouched `Version {version}` line — never an ambiguity about the
-    // installed version.
-    const heading = screen.getByText("Version 0.1.0").parentElement;
-    expect(heading).toContainElement(statusLine as HTMLElement);
+    const updates = settingsDetails(UPDATE_DETAILS).details;
+    expect(updates).toHaveAttribute("open");
+    expect(updates).toContainElement(statusLine as HTMLElement);
+    expect(statusLine).toBeVisible();
     expect(
       screen
         .getByText("Version 0.1.0")
@@ -701,6 +902,7 @@ describe("<SettingsRoute />", () => {
     expect(
       document.querySelector(".update-status-line"),
     ).not.toBeInTheDocument();
+    expect(settingsDetails(UPDATE_DETAILS).details).not.toHaveAttribute("open");
   });
 
   it("renders the update-apply zone UNDER the status line on a positive verdict", async () => {
@@ -769,6 +971,9 @@ describe("<SettingsRoute />", () => {
         screen.getByText("Aucune version plus récente n'est publiée."),
       ).toBeInTheDocument();
     });
+    expect(settingsDetails(UPDATE_DETAILS).details).not.toHaveAttribute("open");
+    await openSettingsDetails(UPDATE_DETAILS);
+    expect(screen.getByText("Aucune version plus récente n'est publiée.")).toBeVisible();
     expect(document.querySelector(".update-apply-zone")).toBeNull();
     expect(mockReadUpdateApplyPlan).not.toHaveBeenCalled();
   });
@@ -794,6 +999,9 @@ describe("<SettingsRoute />", () => {
     });
     const line = document.querySelector(".update-status-line");
     expect(line).not.toBeNull();
+    expect(settingsDetails(UPDATE_DETAILS).details).not.toHaveAttribute("open");
+    await openSettingsDetails(UPDATE_DETAILS);
+    expect(line).toBeVisible();
     expect(line?.querySelector(".ds-chip")).toBeNull();
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });

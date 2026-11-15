@@ -21,6 +21,8 @@ import { readSupportProfile } from "../../ipc/commands/settings";
 import type { ContentSourcePolicy } from "../../shared/ipc-contracts/import-export";
 import type { SupportProfile } from "../../shared/ipc-contracts/settings";
 import { Button, Icon } from "../../shared/ui";
+import { useUpdateShell } from "../../shell/state/update-shell-store";
+import { useUpdateApplyShell } from "../../shell/state/update-apply-shell-store";
 
 import "./SettingsRoute.css";
 
@@ -47,6 +49,24 @@ export function SettingsRoute(): React.JSX.Element {
     },
   });
   const isCatalogBusy = officialCatalog.action !== "idle";
+  const updateStatus = useUpdateShell((state) => state.availability?.status);
+  const applyStatus = useUpdateApplyShell((state) => state.state?.status);
+  const updatesRef = useRef<HTMLDetailsElement>(null);
+  const updateRunning = applyStatus === "running";
+
+  // Keep every update component mounted when the disclosure is folded.
+  // Each new actionable state opens it again, without moving keyboard focus.
+  useEffect(() => {
+    if (
+      updatesRef.current &&
+      (updateStatus === "updateAvailable" ||
+        applyStatus === "running" ||
+        applyStatus === "readyToRestart" ||
+        applyStatus === "failed")
+    ) {
+      updatesRef.current.open = true;
+    }
+  }, [updateStatus, applyStatus]);
   const [profileRead, setProfileRead] = useState<SectionRead<SupportProfile>>({
     kind: "loading",
   });
@@ -108,6 +128,18 @@ export function SettingsRoute(): React.JSX.Element {
 
   const isLoading =
     profileRead.kind === "loading" || policyRead.kind === "loading";
+  const supportUnavailable =
+    profileRead.kind === "unavailable" || policyRead.kind === "unavailable";
+  const updateNotice =
+    applyStatus === "running"
+      ? "Mise à jour en cours…"
+      : applyStatus === "readyToRestart"
+        ? "Redémarrage disponible"
+        : applyStatus === "failed"
+          ? "Mise à jour à réessayer"
+          : updateStatus === "updateAvailable"
+            ? "Nouvelle version disponible"
+            : null;
 
   return (
     <main
@@ -117,30 +149,11 @@ export function SettingsRoute(): React.JSX.Element {
     >
       <header className="settings-route__header">
         <div className="settings-route__heading">
-          <h1 className="settings-route__title">
-            <span className="settings-route__emblem" aria-hidden="true">
-              <Icon name="settings" />
-            </span>
-            Aide et réglages
-          </h1>
-          {version !== null && (
-            <p className="settings-route__version">Version {version}</p>
-          )}
-          {/* The launch's update-availability verdict, UNDER the
-              installed-version line (which never moves): renders when a
-              verdict exists, NOTHING before (`Update Availability
-              Contract`). */}
-          <UpdateStatusLine />
-          {/* On-demand re-check: the launch check is once-per-launch and
-              silent, so this lets the user look for a newer version now,
-              without relaunching. Its result flows into the shared store,
-              so the status line above (and the library banner) update. */}
-          <UpdateCheckButton />
-          {/* The update-apply gesture zone, UNDER the status line:
-              exists IFF the verdict is `updateAvailable` (`Update Apply
-              Contract`) — the line above and the `Version {version}`
-              line never move. */}
-          <UpdateApplyZone />
+          <p className="settings-route__eyebrow">À ta façon</p>
+          <h1 className="settings-route__title">Aide et réglages</h1>
+          <p className="settings-route__intro">
+            Les voix, les histoires et un coup de main quand tu en as besoin.
+          </p>
         </div>
         <Button
           variant="secondary"
@@ -157,15 +170,18 @@ export function SettingsRoute(): React.JSX.Element {
           Retour à la bibliothèque
         </Button>
       </header>
-      <CatalogPanel catalog={officialCatalog} />
-      {/* The announcement voice: its own read (`read_announcement_voices`),
-          its own calm unavailable state — independent of the profile reads. */}
+      <div className="settings-route__preferences">
+        <AnnouncementVoiceSettings />
+        <CatalogPanel catalog={officialCatalog} />
+      </div>
       <section className="settings-route__welcome">
-        <h2>Découvrir Rustory</h2>
-        <p>
-          Retrouve le choix des voix et la découverte des histoires de ton
-          appareil.
-        </p>
+        <span className="settings-route__help-icon" aria-hidden="true">
+          <Icon name="wand" />
+        </span>
+        <div>
+          <h2>Besoin d'un coup de main ?</h2>
+          <p>Retrouve les premiers pas pour utiliser Rustory et ta Lunii.</p>
+        </div>
         <Button
           variant="secondary"
           disabled={isCatalogBusy}
@@ -174,13 +190,66 @@ export function SettingsRoute(): React.JSX.Element {
           Revoir l'accueil
         </Button>
       </section>
-      <AnnouncementVoiceSettings />
-      <section aria-labelledby="support-profile-title">
-        <h2 id="support-profile-title" className="settings-route__section-title">
-          Profil de support
-        </h2>
-        <SupportProfileView profileRead={profileRead} policyRead={policyRead} />
-      </section>
+      <details className="settings-route__disclosure" ref={updatesRef}>
+        <summary
+          aria-disabled={updateRunning || undefined}
+          onClick={(event) => {
+            // A running download always keeps its progress in view.
+            if (updateRunning) event.preventDefault();
+          }}
+        >
+          <span className="settings-route__disclosure-icon" aria-hidden="true">
+            <Icon name="download" />
+          </span>
+          <span className="settings-route__summary-copy">
+            <span className="settings-route__summary-title">
+              Version et mises à jour
+            </span>
+            {version !== null && (
+              <span className="settings-route__version">Version {version}</span>
+            )}
+          </span>
+          {updateNotice !== null && (
+            <span className="settings-route__update-notice">{updateNotice}</span>
+          )}
+          <Icon name="chevron-down" className="settings-route__chevron" />
+        </summary>
+        <div className="settings-route__update-content">
+          <UpdateStatusLine />
+          <UpdateCheckButton />
+          <UpdateApplyZone />
+        </div>
+      </details>
+      <details className="settings-route__disclosure">
+        <summary>
+          <span className="settings-route__disclosure-icon" aria-hidden="true">
+            <Icon name="device" />
+          </span>
+          <span className="settings-route__summary-copy">
+            <span className="settings-route__summary-title">
+              Compatibilité et informations
+            </span>
+            <span className="settings-route__summary-description">
+              Appareils, formats de fichiers et sources de contenu.
+            </span>
+            {supportUnavailable && (
+              <span className="settings-route__support-notice" role="status">
+                Certaines informations ne sont pas disponibles.
+              </span>
+            )}
+          </span>
+          <Icon name="chevron-down" className="settings-route__chevron" />
+        </summary>
+        <section
+          className="settings-route__support-content"
+          aria-labelledby="support-profile-title"
+        >
+          <h2 id="support-profile-title" className="settings-route__section-title">
+            Profil de support
+          </h2>
+          <SupportProfileView profileRead={profileRead} policyRead={policyRead} />
+        </section>
+      </details>
     </main>
   );
 }
