@@ -218,21 +218,35 @@ instead of covering it. The native minimum window size remains unchanged.
 
 ## Library Layout Contract
 
-The library and device screens share a two-column shell: navigation and the
-current collection. `/library` shows local stories; `/device` shows the device
+The first-use route `/welcome` uses a standalone card without the sidebar:
+voice choice, live device detection, then inventory discovery and optional copy.
+The welcome-completed and recovery-prompt-dismissed preferences are stored in
+Rust's app settings; an empty library never substitutes for these preferences.
+An inventory read has indeterminate progress. Copy progress uses real processed
+story counts, preserves failures, and never invents byte percentages or an ETA.
+Absent and unsupported devices remain distinct from a successfully read empty
+inventory. A V3 inventory never enables a copy forbidden by its support profile.
+
+`/drafts` is a third collection screen, limited to stories created here. Its
+selection, search and view are independent of `/library`; pruning still uses the
+complete authoritative overview. Opening and returning from an editor retains
+that collection context. The main library continues to contain all local stories.
+
+The library, drafts and device screens share a two-column shell: navigation and the
+current collection. `/library` shows all local stories; `/drafts` shows stories created here; `/device` shows the device
 inventory. Only one collection is visible at a time. The decision panel is
 disclosed on demand, or when a story is selected on the current screen.
 In-flight transfers keep their progress visible.
 
 | Zone | Role | ARIA region |
 | --- | --- | --- |
-| Left | Library/device/catalogue navigation, settings, live device summary | `<nav aria-label="Navigation bibliothèque">` |
+| Left | Library/drafts/device navigation, settings, live device summary | `<nav aria-label="Navigation bibliothèque">` |
 | Center | Local collection on `/library`, device inventory on `/device` | `<main aria-label="Collection d'histoires">` or `<main aria-label="Histoires sur l'appareil">` |
 | Optional right | Selection actions for the current screen, operation progress and catalogue | `<aside aria-label="Panneau de décision">` |
 
 - The panel and import surfaces stay mounted when closed: closing a presentation
   must not reset a transfer, import, event listener or selection.
-- Switching between `/library` and `/device` keeps their shared route controller
+- Switching between `/library`, `/drafts` and `/device` keeps their shared route controller
   and operation hooks mounted. It preserves both independent selections and
   their existing pruning rules; browser Back/Forward restores the matching screen.
 - Local edit/delete/send actions belong to `/library`; device inspection/copy/
@@ -253,6 +267,14 @@ In-flight transfers keep their progress visible.
   addition to the existing click, Ctrl/Cmd+click, double-click and keyboard behavior.
 - Missing cover art uses a decorative illustration, never a fake content preview.
 - Unimplemented filter placeholders are removed from navigation.
+- Device search matches its real titles and identifiers without changing device
+  order. Reordering arrows are hidden while filtering to avoid confusing visual
+  positions with actual wheel order. Grid/list presentation is independent of
+  the two local collections.
+- Creation uses a choice screen then a title or import-source screen. The title
+  validation, distribution policy and busy guards remain authoritative; changing
+  presentation never enables a blocked source. Empty-library actions open the
+  relevant title/import step directly.
 
 ## Device Detection Contract
 

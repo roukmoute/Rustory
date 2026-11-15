@@ -525,6 +525,18 @@ flow's defensive rendering, but only the RSS flow ever emits it.
 ### Library navigation and visual presentation
 
 - `Ma bibliothèque` names the local-library screen at `/library`.
+- `Mes brouillons` opens `/drafts`: the editable stories created here, excluding
+  file imports and device copies. It does not mean "never sent" and does not
+  refer to the recovery journal. `Continuer à écrire` opens their editor.
+- `Bienvenue sur Rustory` names the first-use screen at `/welcome`, available
+  again from settings. `Qui présente les histoires ?` introduces real installed
+  announcement voices. `Continuer sans Lunii` keeps the local library usable.
+- `Récupérer mes histoires` copies eligible device stories into the local library;
+  nothing is deleted on the device. This action is unavailable when the detected
+  profile does not authorize copying. `Pas maintenant` dismisses the suggestion.
+- `Par quoi veux-tu commencer ?` introduces the empty library's catalogue,
+  import and writing choices. The catalogue contains titles and covers, not
+  downloadable audio stories.
 - `Sur l'appareil` opens the separate device-inventory screen at `/device`.
   These navigation entries change routes, not scroll positions or local filters.
   Neither entry claims a transfer took place.

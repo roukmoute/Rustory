@@ -38,6 +38,10 @@ if (!import.meta.env.DEV) {
 const params = new URLSearchParams(location.search);
 const scenario = params.get("scenario") ?? "offline";
 const screen = params.get("screen") ?? "library";
+let onboardingPreferences = {
+  welcomeCompleted: screen !== "welcome",
+  deviceRecoveryPromptDismissed: screen !== "welcome",
+};
 document.title = "Rustory — aperçu — données de démonstration";
 const timestamp = "2026-11-15T10:00:00.000Z";
 const deviceIdentifier = "0123456789abcdef0123456789abcdef";
@@ -260,6 +264,15 @@ mockIPC(
     const args = (payload ?? {}) as Record<string, unknown>;
     const input = (args.input ?? {}) as Record<string, unknown>;
     switch (command) {
+      case "get_onboarding_preferences":
+        return structuredClone(onboardingPreferences);
+      case "update_onboarding_preferences":
+        onboardingPreferences = {
+          welcomeCompleted: input.welcomeCompleted === true,
+          deviceRecoveryPromptDismissed:
+            input.deviceRecoveryPromptDismissed === true,
+        };
+        return structuredClone(onboardingPreferences);
       case "get_library_overview":
         return structuredClone({ stories });
       case "read_connected_lunii":
@@ -411,13 +424,19 @@ mockIPC(
 );
 
 const route =
-  screen === "settings"
-    ? "/settings"
-    : screen === "editor"
-      ? "/story/s1/edit"
-      : screen === "device"
-        ? "/device"
-        : "/library";
+  screen === "welcome"
+    ? "/welcome"
+    : screen === "discovery"
+      ? "/welcome/device"
+      : screen === "drafts"
+        ? "/drafts"
+        : screen === "settings"
+          ? "/settings"
+          : screen === "editor"
+            ? "/story/s1/edit"
+            : screen === "device"
+              ? "/device"
+              : "/library";
 history.replaceState(null, "", `${route}?${params.toString()}`);
 document.documentElement.dataset.designPreview = scenario;
 export const previewReady = import("../main");
