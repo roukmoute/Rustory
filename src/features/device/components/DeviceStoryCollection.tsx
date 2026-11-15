@@ -1,8 +1,15 @@
 import type React from "react";
-import { useLayoutEffect, useRef } from "react";
+import { useId, useLayoutEffect, useRef, useState } from "react";
 
 import { LibraryErrorBanner } from "../../library/components/LibraryErrorBanner";
-import { Button, Icon, ProgressIndicator, StateChip, SurfacePanel } from "../../../shared/ui";
+import {
+  Button,
+  Field,
+  Icon,
+  ProgressIndicator,
+  StateChip,
+  SurfacePanel,
+} from "../../../shared/ui";
 import type { AppError } from "../../../shared/errors/app-error";
 import type { DeviceStoryDto } from "../../../shared/ipc-contracts/device-library";
 import type { DeviceLibraryState } from "../hooks/use-device-library";
@@ -23,6 +30,13 @@ const EMPTY_UUIDS: ReadonlySet<string> = new Set();
 
 export interface DeviceStoryCollectionProps {
   state: DeviceLibraryState;
+  /** The enclosing device screen already supplies the page heading. */
+  hideHeading?: boolean;
+  /** Controlled by the persistent route to retain the display on return. */
+  query?: string;
+  onQueryChange?: (query: string) => void;
+  view?: "grid" | "list";
+  onViewChange?: (view: "grid" | "list") => void;
   /** True while a re-read runs on top of an already-displayed snapshot. */
   isRefreshing: boolean;
   /** Human label of the connected device (e.g. "Lunii V3"), shown in the
@@ -56,8 +70,8 @@ export interface DeviceStoryCollectionProps {
  * decision panel. The section heading + provenance chip keep "appareil"
  * vs "bibliothèque locale" readable at all times (AC1).
  *
- * Each entry is an opaque, "non reconnue" pack identity (the device stores
- * no title; Rustory consults no catalog in the MVP). When `onSelectStory`
+ * Titles and covers come from the authoritative inventory and local cache;
+ * genuinely unknown entries keep their opaque identity. When `onSelectStory`
  * is wired, each entry becomes selectable: a plain click selects exactly one
  * (single inspection), Ctrl/Cmd+click toggles it into a multi-selection for a
  * bulk action (see ui-states.md#Device Story Inspection Contract). The whole
@@ -72,6 +86,11 @@ export interface DeviceStoryCollectionProps {
  */
 export function DeviceStoryCollection({
   state,
+  hideHeading = false,
+  query: controlledQuery,
+  onQueryChange,
+  view: controlledView,
+  onViewChange,
   isRefreshing,
   deviceLabel,
   selectedUuids = EMPTY_UUIDS,
@@ -82,6 +101,14 @@ export function DeviceStoryCollection({
   moveError = null,
   onDismissMoveError,
 }: DeviceStoryCollectionProps): React.JSX.Element | null {
+  const searchId = useId();
+  const [localQuery, setLocalQuery] = useState("");
+  const [localView, setLocalView] = useState<"grid" | "list">("grid");
+  const query = controlledQuery ?? localQuery;
+  const setQuery = onQueryChange ?? setLocalQuery;
+  const view = controlledView ?? localView;
+  const setView = onViewChange ?? setLocalView;
+  const sectionRef = useRef<HTMLElement>(null);
   const headingRef = useRef<HTMLHeadingElement>(null);
   const focusedCardRef = useRef<HTMLElement | null>(null);
 
@@ -93,9 +120,9 @@ export function DeviceStoryCollection({
   // here; an intentional move to another element clears it (see handleListBlur).
   useLayoutEffect(() => {
     const node = focusedCardRef.current;
-    if (node && !document.contains(node) && headingRef.current) {
+    if (node && !document.contains(node)) {
       focusedCardRef.current = null;
-      headingRef.current.focus();
+      (headingRef.current ?? sectionRef.current)?.focus();
     }
   });
 
@@ -118,6 +145,20 @@ export function DeviceStoryCollection({
   const heading = deviceLabel
     ? `Histoires sur l'appareil — ${deviceLabel}`
     : "Histoires sur l'appareil";
+  const normalizedQuery = normalizeSearch(query.trim());
+  const hasSearch = normalizedQuery.length > 0;
+  // Filtering only: the device's physical wheel order remains authoritative.
+  const shownEntries =
+    state.kind === "ready"
+      ? state.stories
+          .map((story, index) => ({ story, index }))
+          .filter(
+            ({ story }) =>
+              !hasSearch ||
+              normalizeSearch(story.title ?? "").includes(normalizedQuery) ||
+              normalizeSearch(story.shortId).includes(normalizedQuery),
+          )
+      : [];
 
   // The wheel order is the order of the VISIBLE entries only: hidden entries
   // live in another device file and never move here.
@@ -130,17 +171,58 @@ export function DeviceStoryCollection({
     <section
       className="device-story-collection"
       aria-label="Bibliothèque de l'appareil"
+      ref={sectionRef}
+      tabIndex={-1}
     >
       <header className="device-story-collection__header">
-        <h2
-          className="device-story-collection__title"
-          ref={headingRef}
-          tabIndex={-1}
-        >
-          <Icon name="device" />
-          {heading}
-        </h2>
-        <StateChip tone="info" label="Sur l'appareil" />
+        {!hideHeading && (
+          <div className="device-story-collection__heading-row">
+            <h2
+              className="device-story-collection__title"
+              ref={headingRef}
+              tabIndex={-1}
+            >
+              <Icon name="device" />
+              {heading}
+            </h2>
+            <StateChip tone="info" label="Sur l'appareil" />
+          </div>
+        )}
+        <div className="device-story-collection__controls">
+          <div className="device-story-collection__search">
+            <Icon name="search" />
+            <Field
+              id={searchId}
+              label="Rechercher une histoire sur l'appareil"
+              type="search"
+              value={query}
+              onChange={setQuery}
+              placeholder="Chercher un titre ou un identifiant…"
+            />
+          </div>
+          <div
+            className="device-story-collection__view"
+            role="group"
+            aria-label="Affichage"
+          >
+            <button
+              type="button"
+              aria-label="Affichage en cartes"
+              aria-pressed={view === "grid"}
+              onClick={() => setView("grid")}
+            >
+              <Icon name="grid" />
+            </button>
+            <button
+              type="button"
+              aria-label="Affichage en liste"
+              aria-pressed={view === "list"}
+              onClick={() => setView("list")}
+            >
+              <Icon name="list" />
+            </button>
+          </div>
+        </div>
         {moveError !== null && (
           <div className="device-story-collection__move-error" role="alert">
             <span>
@@ -196,79 +278,107 @@ export function DeviceStoryCollection({
         <>
           <p
             className="device-story-collection__counter"
-            role="status"
-            aria-live="polite"
+            role={shownEntries.length > 0 ? "status" : undefined}
+            aria-live={shownEntries.length > 0 ? "polite" : undefined}
           >
             {isRefreshing
               ? "Actualisation…"
-              : countLabel(state.stories.length, selectedUuids.size)}
+              : countLabel(
+                  state.stories.length,
+                  shownEntries.length,
+                  selectedUuids.size,
+                )}
           </p>
           {onSelectStory !== undefined ? (
-            <p className="device-story-collection__selection-hint">
-              Clique une histoire pour l'inspecter.{" "}
-              <kbd className="device-story-collection__kbd">Ctrl</kbd>
-              <span aria-hidden="true">+</span>clic (ou{" "}
-              <kbd className="device-story-collection__kbd">Cmd</kbd>
-              <span aria-hidden="true">+</span>clic sur macOS) pour en
-              sélectionner plusieurs et les importer en une fois.
-            </p>
+            <details className="device-story-collection__selection-help">
+              <summary>Sélectionner plusieurs histoires</summary>
+              <p className="device-story-collection__selection-hint">
+                Clique une histoire pour l'inspecter.{" "}
+                <kbd className="device-story-collection__kbd">Ctrl</kbd>
+                <span aria-hidden="true">+</span>clic (ou{" "}
+                <kbd className="device-story-collection__kbd">Cmd</kbd>
+                <span aria-hidden="true">+</span>clic sur macOS) pour en
+                sélectionner plusieurs et les importer en une fois.
+              </p>
+            </details>
           ) : null}
-          <ul
-            className="device-story-collection__list"
-            onFocus={handleListFocus}
-            onBlur={handleListBlur}
-          >
-            {state.stories.map((story, index) => {
-              const visibleIndex = visibleUuids.indexOf(story.uuid);
-              const canMove = onMoveStory !== undefined && visibleIndex !== -1;
-              // Frozen from the click until the device has been re-read: a
-              // second move computed on a stale order would be misleading.
-              const moving = movingUuid !== null || isRefreshing;
-              // Arrow names must stay unique per entry for assistive tech:
-              // an unrecognized pack is named by its short identifier.
-              const displayTitle =
-                story.title ?? `Histoire non reconnue, identifiant ${story.shortId}`;
-              return (
-                <li
-                  key={`${story.uuid}::${index}`}
-                  className="device-story-collection__item"
-                >
-                  <DeviceStoryCard
-                    story={story}
-                    isSelected={
-                      onSelectStory !== undefined &&
-                      selectedUuids.has(story.uuid)
-                    }
-                    selectionSize={selectedUuids.size}
-                    onSelect={onSelectStory}
-                  />
-                  {canMove && (
-                    <div
-                      className="device-story-collection__move"
-                      aria-label={`Ordre sur l'appareil — ${displayTitle}`}
-                    >
-                      <Button
-                        variant="quiet"
-                        onClick={() => onMoveStory(story.uuid, -1)}
-                        disabled={moving || visibleIndex === 0}
-                        aria-label={`Monter — ${displayTitle}`}
+          {shownEntries.length === 0 ? (
+            <section className="device-story-collection__empty" role="status">
+              <h3 className="device-story-collection__empty-title">
+                Aucun résultat
+              </h3>
+              <p className="device-story-collection__empty-hint">
+                Aucune histoire sur l'appareil ne correspond à ta recherche.
+              </p>
+              <Button variant="secondary" onClick={() => setQuery("")}>
+                Effacer la recherche
+              </Button>
+            </section>
+          ) : (
+            <ul
+              className={`device-story-collection__list${view === "list" ? " device-story-collection__list--rows" : ""}`}
+              onFocus={handleListFocus}
+              onBlur={handleListBlur}
+            >
+              {shownEntries.map(({ story, index }) => {
+                const visibleIndex = visibleUuids.indexOf(story.uuid);
+                // Filtered neighbors are not adjacent on the physical device.
+                const canMove =
+                  !hasSearch &&
+                  onMoveStory !== undefined &&
+                  visibleIndex !== -1;
+                // Frozen from the click until the device has been re-read: a
+                // second move computed on a stale order would be misleading.
+                const moving = movingUuid !== null || isRefreshing;
+                // Arrow names must stay unique per entry for assistive tech:
+                // an unrecognized pack is named by its short identifier.
+                const displayTitle =
+                  story.title ??
+                  `Histoire non reconnue, identifiant ${story.shortId}`;
+                return (
+                  <li
+                    key={`${story.uuid}::${index}`}
+                    className="device-story-collection__item"
+                  >
+                    <DeviceStoryCard
+                      story={story}
+                      isSelected={
+                        onSelectStory !== undefined &&
+                        selectedUuids.has(story.uuid)
+                      }
+                      selectionSize={selectedUuids.size}
+                      onSelect={onSelectStory}
+                    />
+                    {canMove && (
+                      <div
+                        className="device-story-collection__move"
+                        aria-label={`Ordre sur l'appareil — ${displayTitle}`}
                       >
-                        ▲
-                      </Button>
-                      <Button
-                        variant="quiet"
-                        onClick={() => onMoveStory(story.uuid, 1)}
-                        disabled={moving || visibleIndex === visibleUuids.length - 1}
-                        aria-label={`Descendre — ${displayTitle}`}
-                      >
-                        ▼
-                      </Button>
-                    </div>
-                  )}
-                </li>
-              );
-            })}
-          </ul>
+                        <Button
+                          variant="quiet"
+                          onClick={() => onMoveStory(story.uuid, -1)}
+                          disabled={moving || visibleIndex === 0}
+                          aria-label={`Monter — ${displayTitle}`}
+                        >
+                          ▲
+                        </Button>
+                        <Button
+                          variant="quiet"
+                          onClick={() => onMoveStory(story.uuid, 1)}
+                          disabled={
+                            moving || visibleIndex === visibleUuids.length - 1
+                          }
+                          aria-label={`Descendre — ${displayTitle}`}
+                        >
+                          ▼
+                        </Button>
+                      </div>
+                    )}
+                  </li>
+                );
+              })}
+            </ul>
+          )}
         </>
       ) : null}
     </section>
@@ -458,8 +568,21 @@ function DeviceStoryCard({
   );
 }
 
-function countLabel(count: number, selectedCount: number): string {
-  const base = `${count} histoire${count > 1 ? "s" : ""} sur l'appareil`;
+function normalizeSearch(value: string): string {
+  return value
+    .normalize("NFD")
+    .replace(/\p{Diacritic}/gu, "")
+    .toLowerCase();
+}
+
+function countLabel(
+  count: number,
+  shownCount: number,
+  selectedCount: number,
+): string {
+  const countText =
+    shownCount === count ? `${count}` : `${shownCount} sur ${count}`;
+  const base = `${countText} histoire${count > 1 ? "s" : ""} sur l'appareil`;
   if (selectedCount === 0) return base;
   const selectedClause =
     selectedCount === 1

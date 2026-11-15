@@ -32,7 +32,11 @@ function makeStory(overrides: Partial<DeviceStoryDto> = {}): DeviceStoryDto {
 
 function renderState(
   state: DeviceLibraryState,
-  extra: { isRefreshing?: boolean; deviceLabel?: string; onRetry?: () => void } = {},
+  extra: {
+    isRefreshing?: boolean;
+    deviceLabel?: string;
+    onRetry?: () => void;
+  } = {},
 ) {
   return render(
     <DeviceStoryCollection
@@ -85,12 +89,14 @@ describe("<DeviceStoryCollection />", () => {
         name: /histoires sur l'appareil — lunii v3/i,
       }),
     ).toBeInTheDocument();
-    expect(within(region).getAllByText(/sur l'appareil/i).length).toBeGreaterThan(0);
+    expect(
+      within(region).getAllByText(/sur l'appareil/i).length,
+    ).toBeGreaterThan(0);
 
     // Unrecognized packs keep the opaque "non reconnue" label + identifier.
-    expect(
-      within(region).getAllByText(/histoire non reconnue/i),
-    ).toHaveLength(3);
+    expect(within(region).getAllByText(/histoire non reconnue/i)).toHaveLength(
+      3,
+    );
     expect(within(region).getByText("0000ABCD")).toBeInTheDocument();
     expect(within(region).getByText("0000BEEF")).toBeInTheDocument();
 
@@ -128,7 +134,9 @@ describe("<DeviceStoryCollection />", () => {
     // Real titles surface; the unknown one stays "non reconnue".
     expect(within(region).getByText("Suzanne et Gaston")).toBeInTheDocument();
     expect(within(region).getByText("Mon histoire")).toBeInTheDocument();
-    expect(within(region).getAllByText(/histoire non reconnue/i)).toHaveLength(1);
+    expect(within(region).getAllByText(/histoire non reconnue/i)).toHaveLength(
+      1,
+    );
     // Provenance is shown honestly and distinctly — official vs saisi.
     expect(within(region).getByText("Titre officiel")).toBeInTheDocument();
     expect(within(region).getByText("Titre saisi")).toBeInTheDocument();
@@ -203,7 +211,9 @@ describe("<DeviceStoryCollection />", () => {
       { deviceLabel: "FLAM" },
     );
     expect(
-      screen.getByText(/l'appareil connecté ne contient aucune histoire lisible\./i),
+      screen.getByText(
+        /l'appareil connecté ne contient aucune histoire lisible\./i,
+      ),
     ).toBeInTheDocument();
     expect(screen.queryByText(/la lunii connectée/i)).toBeNull();
   });
@@ -271,7 +281,9 @@ describe("<DeviceStoryCollection />", () => {
   it("entries stay static (no button role) when no selection handler is wired", () => {
     renderState(readyTwo);
     // Listing-only mode preserves the pre-inspection behavior.
-    expect(screen.queryByRole("button")).not.toBeInTheDocument();
+    for (const card of screen.getAllByRole("article")) {
+      expect(within(card).queryByRole("button")).not.toBeInTheDocument();
+    }
     expect(screen.getByText("0000ABCD")).toBeInTheDocument();
   });
 
@@ -597,21 +609,237 @@ describe("<DeviceStoryCollection />", () => {
   });
 });
 
+describe("<DeviceStoryCollection /> — search and display", () => {
+  const inventory: DeviceLibraryState = {
+    kind: "ready",
+    deviceIdentifier: "0123456789abcdef0123456789abcdef",
+    stories: [
+      makeStory({
+        uuid: "u-last",
+        shortId: "0000F00D",
+        title: "Zoé et les étoiles",
+        titleSource: "user",
+      }),
+      makeStory({
+        uuid: "u-first",
+        shortId: "0000BEEF",
+        title: "À la mer",
+        titleSource: "official",
+        alreadyImported: true,
+      }),
+      makeStory({
+        uuid: "u-hidden",
+        shortId: "0000ABCD",
+        hidden: true,
+        contentPresent: false,
+      }),
+    ],
+  };
+
+  it("searches real titles and short identifiers without changing the device order", () => {
+    render(
+      <DeviceStoryCollection
+        state={inventory}
+        isRefreshing={false}
+        onRetry={() => {}}
+      />,
+    );
+    const titles = () =>
+      screen
+        .getAllByRole("heading", { level: 3 })
+        .map((element) => element.textContent);
+    expect(titles()).toEqual([
+      "Zoé et les étoiles",
+      "À la mer",
+      "Histoire non reconnue",
+    ]);
+    expect(screen.queryByRole("combobox")).not.toBeInTheDocument();
+    const search = screen.getByRole("searchbox", {
+      name: "Rechercher une histoire sur l'appareil",
+    });
+    fireEvent.change(search, { target: { value: " ZOE " } });
+    expect(titles()).toEqual(["Zoé et les étoiles"]);
+    expect(
+      screen.getByText("1 sur 3 histoires sur l'appareil"),
+    ).toBeInTheDocument();
+    fireEvent.change(search, { target: { value: "abcd" } });
+    expect(titles()).toEqual(["Histoire non reconnue"]);
+    expect(screen.getByText("Masquée")).toBeInTheDocument();
+    expect(screen.getByText("Contenu incomplet")).toBeInTheDocument();
+  });
+
+  it("keeps selections across an empty search and restores the complete inventory on reset", () => {
+    const onSelectStory = vi.fn();
+    render(
+      <DeviceStoryCollection
+        state={inventory}
+        isRefreshing={false}
+        onRetry={() => {}}
+        selectedUuids={new Set(["u-first"])}
+        onSelectStory={onSelectStory}
+      />,
+    );
+    fireEvent.change(screen.getByRole("searchbox"), {
+      target: { value: "introuvable" },
+    });
+    expect(
+      screen.getByRole("heading", { name: "Aucun résultat" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText("Aucune histoire sur l'appareil"),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByText("0 sur 3 histoires sur l'appareil — 1 sélectionnée"),
+    ).toBeInTheDocument();
+    fireEvent.click(
+      screen.getByRole("button", { name: "Effacer la recherche" }),
+    );
+    expect(screen.getAllByRole("listitem")).toHaveLength(3);
+    expect(
+      screen.getByRole("button", { name: /À la mer, titre officiel/ }),
+    ).toHaveAttribute("aria-pressed", "true");
+    expect(onSelectStory).not.toHaveBeenCalled();
+  });
+
+  it("hides physical reordering during a search, including a search matching every title", () => {
+    render(
+      <DeviceStoryCollection
+        state={inventory}
+        isRefreshing={false}
+        onRetry={() => {}}
+        onMoveStory={vi.fn()}
+      />,
+    );
+    expect(screen.getAllByRole("button", { name: /^Monter —/ })).toHaveLength(
+      2,
+    );
+    const search = screen.getByRole("searchbox");
+    fireEvent.change(search, { target: { value: "e" } });
+    expect(
+      screen.queryByRole("button", { name: /^Monter —/ }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /^Descendre —/ }),
+    ).not.toBeInTheDocument();
+    fireEvent.change(search, { target: { value: "  " } });
+    expect(
+      screen.getByRole("button", { name: "Monter — Zoé et les étoiles" }),
+    ).toBeDisabled();
+    expect(
+      screen.getByRole("button", { name: "Descendre — À la mer" }),
+    ).toBeDisabled();
+  });
+
+  it("switches to rows with the same factual flags, order and keyboard selection", () => {
+    const onSelectStory = vi.fn();
+    render(
+      <DeviceStoryCollection
+        state={inventory}
+        isRefreshing={false}
+        onRetry={() => {}}
+        selectedUuids={new Set(["u-first"])}
+        onSelectStory={onSelectStory}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Affichage en liste" }));
+    expect(
+      screen.getByRole("button", { name: "Affichage en liste" }),
+    ).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByRole("list")).toHaveClass(
+      "device-story-collection__list--rows",
+    );
+    const card = screen.getByRole("button", {
+      name: /À la mer, titre officiel/,
+    });
+    expect(card).toHaveAttribute("aria-pressed", "true");
+    expect(within(card).getByText("Dans ta bibliothèque")).toBeInTheDocument();
+    fireEvent.keyDown(card, { key: " " });
+    expect(onSelectStory).toHaveBeenCalledWith("u-first", "toggle");
+    fireEvent.click(
+      screen.getByRole("button", { name: "Affichage en cartes" }),
+    );
+    expect(screen.getByRole("list")).not.toHaveClass(
+      "device-story-collection__list--rows",
+    );
+  });
+
+  it("delegates controlled query and view to the persistent route", () => {
+    const onQueryChange = vi.fn();
+    const onViewChange = vi.fn();
+    const collectionProps = {
+      state: inventory,
+      isRefreshing: false,
+      onRetry: vi.fn(),
+      query: "beef",
+      onQueryChange,
+      view: "list" as const,
+      onViewChange,
+    };
+    const { unmount } = render(<DeviceStoryCollection {...collectionProps} />);
+    expect(screen.getAllByRole("listitem")).toHaveLength(1);
+    expect(screen.getByRole("list")).toHaveClass(
+      "device-story-collection__list--rows",
+    );
+    fireEvent.change(screen.getByRole("searchbox"), {
+      target: { value: "zoe" },
+    });
+    fireEvent.click(
+      screen.getByRole("button", { name: "Affichage en cartes" }),
+    );
+    expect(onQueryChange).toHaveBeenCalledWith("zoe");
+    expect(onViewChange).toHaveBeenCalledWith("grid");
+    unmount();
+    render(<DeviceStoryCollection {...collectionProps} />);
+    expect(screen.getByRole("searchbox")).toHaveValue("beef");
+    expect(
+      screen.getByRole("button", { name: "Affichage en liste" }),
+    ).toHaveAttribute("aria-pressed", "true");
+  });
+
+  it("rescues focus to the named collection when its heading is omitted", () => {
+    const props = {
+      state: inventory,
+      isRefreshing: false,
+      onRetry: vi.fn(),
+      onSelectStory: vi.fn(),
+      hideHeading: true,
+    };
+    const { rerender } = render(<DeviceStoryCollection {...props} />);
+    screen.getByRole("button", { name: /Zoé et les étoiles/ }).focus();
+    rerender(<DeviceStoryCollection {...props} query="beef" />);
+    expect(
+      screen.queryByRole("heading", { name: /Histoires sur l'appareil/ }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("region", { name: "Bibliothèque de l'appareil" }),
+    ).toHaveFocus();
+  });
+});
+
 describe("<DeviceStoryCollection /> — order on the device", () => {
   const readyThree = {
     kind: "ready" as const,
     deviceIdentifier: "0123456789abcdef0123456789abcdef",
     stories: [
       makeStory({ uuid: "u1", shortId: "0000ABCD", title: "Premier" }),
-      makeStory({ uuid: "u2", shortId: "0000BEEF", hidden: true, title: "Caché" }),
+      makeStory({
+        uuid: "u2",
+        shortId: "0000BEEF",
+        hidden: true,
+        title: "Caché",
+      }),
       makeStory({ uuid: "u3", shortId: "0000F00D", title: "Dernier" }),
     ],
   };
 
   it("offers no arrows at all when the device cannot be reordered", () => {
     renderState(readyThree);
-    expect(screen.queryByRole("button", { name: /^monter/i })).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: /^descendre/i })).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /^monter/i }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /^descendre/i }),
+    ).not.toBeInTheDocument();
   });
 
   it("moves visible stories one step with named arrows, never a hidden one", async () => {
@@ -625,13 +853,23 @@ describe("<DeviceStoryCollection /> — order on the device", () => {
       />,
     );
     // The hidden entry lives in another file: no arrows for it.
-    expect(screen.queryByRole("button", { name: /caché/i })).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /caché/i }),
+    ).not.toBeInTheDocument();
     // Edges are disabled: the first cannot go up, the last cannot go down.
-    expect(screen.getByRole("button", { name: "Monter — Premier" })).toBeDisabled();
-    expect(screen.getByRole("button", { name: "Descendre — Dernier" })).toBeDisabled();
+    expect(
+      screen.getByRole("button", { name: "Monter — Premier" }),
+    ).toBeDisabled();
+    expect(
+      screen.getByRole("button", { name: "Descendre — Dernier" }),
+    ).toBeDisabled();
 
-    await userEvent.click(screen.getByRole("button", { name: "Descendre — Premier" }));
-    await userEvent.click(screen.getByRole("button", { name: "Monter — Dernier" }));
+    await userEvent.click(
+      screen.getByRole("button", { name: "Descendre — Premier" }),
+    );
+    await userEvent.click(
+      screen.getByRole("button", { name: "Monter — Dernier" }),
+    );
     expect(onMoveStory.mock.calls).toEqual([
       ["u1", 1],
       ["u3", -1],
@@ -676,8 +914,10 @@ describe("<DeviceStoryCollection /> — order on the device", () => {
         onMoveStory={() => {}}
         moveError={{
           code: "DEVICE_WRITE_FAILED",
-          message: "Réorganisation impossible: la liste des histoires de l'appareil a changé entre-temps.",
-          userAction: "Relance la lecture de l'appareil, puis déplace à nouveau l'histoire.",
+          message:
+            "Réorganisation impossible: la liste des histoires de l'appareil a changé entre-temps.",
+          userAction:
+            "Relance la lecture de l'appareil, puis déplace à nouveau l'histoire.",
           details: null,
         }}
         onDismissMoveError={onDismissMoveError}
@@ -686,8 +926,12 @@ describe("<DeviceStoryCollection /> — order on the device", () => {
     const alert = screen.getByRole("alert");
     expect(alert).toHaveTextContent(/a changé entre-temps/);
     expect(alert).toHaveTextContent(/relance la lecture de l'appareil/i);
-    expect(screen.getByRole("button", { name: "Descendre — Premier" })).toBeEnabled();
-    await userEvent.click(within(alert).getByRole("button", { name: /fermer/i }));
+    expect(
+      screen.getByRole("button", { name: "Descendre — Premier" }),
+    ).toBeEnabled();
+    await userEvent.click(
+      within(alert).getByRole("button", { name: /fermer/i }),
+    );
     expect(onDismissMoveError).toHaveBeenCalledTimes(1);
   });
 });

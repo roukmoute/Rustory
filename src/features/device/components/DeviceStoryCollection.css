@@ -9,9 +9,102 @@
 
 .device-story-collection__header {
   display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.device-story-collection__heading-row {
+  display: flex;
   align-items: center;
   gap: 12px;
   flex-wrap: wrap;
+}
+
+.device-story-collection__controls {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.device-story-collection__search {
+  position: relative;
+  flex: 1;
+  min-width: 120px;
+}
+
+.device-story-collection__search > svg {
+  position: absolute;
+  left: 17px;
+  top: 50%;
+  transform: translateY(-50%);
+  color: var(--color-text-secondary);
+  pointer-events: none;
+}
+
+.device-story-collection__search .ds-field__label {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.device-story-collection__search .ds-field__input {
+  min-height: 48px;
+  padding-left: 48px;
+  border-radius: 999px;
+}
+
+.device-story-collection__view {
+  display: flex;
+  flex-shrink: 0;
+  padding: 4px;
+  border: 1px solid var(--color-border-subtle);
+  border-radius: 999px;
+  background: #fffefa;
+}
+
+.device-story-collection__view button {
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+}
+
+.device-story-collection__view button[aria-pressed="true"] {
+  background: var(--color-surface-selected);
+  color: var(--color-action-primary);
+}
+
+.device-story-collection:focus-visible,
+.device-story-collection__view button:focus-visible {
+  outline: 3px solid var(--color-action-primary);
+  outline-offset: 3px;
+}
+
+.device-story-collection__selection-help {
+  align-self: flex-start;
+  margin-top: -8px;
+  color: var(--color-text-secondary);
+  font-size: 11px;
+}
+
+.device-story-collection__selection-help summary {
+  cursor: pointer;
+  text-decoration: underline dotted;
+  text-underline-offset: 3px;
+}
+
+.device-story-collection__selection-help p {
+  max-width: 560px;
+  margin-top: 8px;
 }
 
 .device-story-collection__title {
@@ -137,7 +230,9 @@
 
 .device-story-card__focusable[role="button"] {
   cursor: pointer;
-  transition: border-color 150ms ease, background-color 150ms ease;
+  transition:
+    border-color 150ms ease,
+    background-color 150ms ease;
 }
 
 .device-story-card__focusable[role="button"]:hover {
@@ -274,4 +369,82 @@
   border-radius: 12px;
   background: #fff1d0;
   color: var(--color-text-primary);
+}
+
+.device-story-collection__list--rows {
+  grid-template-columns: minmax(0, 1fr);
+  gap: 12px;
+}
+
+.device-story-collection__list--rows .device-story-collection__item {
+  flex-direction: row;
+  align-items: center;
+}
+
+.device-story-collection__list--rows .device-story-card__focusable {
+  display: grid;
+  grid-template-columns: 76px minmax(0, 1fr);
+  align-items: center;
+  gap: 5px 16px;
+  padding: 12px;
+}
+
+.device-story-collection__list--rows .device-story-card__artwork {
+  grid-column: 1;
+  grid-row: 1 / span 3;
+  width: 76px;
+}
+
+.device-story-collection__list--rows .device-story-card__placeholder > svg {
+  width: 36px;
+  height: 36px;
+}
+
+.device-story-collection__list--rows .device-story-card__title,
+.device-story-collection__list--rows .device-story-card__id,
+.device-story-collection__list--rows .device-story-card__flags {
+  grid-column: 2;
+  margin: 0;
+}
+
+.device-story-collection__list--rows .device-story-card__device-mark {
+  right: 4px;
+  bottom: 4px;
+  padding: 3px;
+  border-radius: 5px;
+}
+
+.device-story-collection__list--rows .device-story-card__marker {
+  top: 5px;
+  left: 5px;
+  right: auto;
+  width: 22px;
+  height: 22px;
+}
+
+.device-story-collection__list--rows .device-story-collection__move {
+  flex-direction: column;
+  flex-shrink: 0;
+}
+
+@media (max-width: 540px) {
+  .device-story-collection__controls {
+    flex-wrap: wrap;
+  }
+  .device-story-collection__search {
+    flex-basis: 100%;
+  }
+  .device-story-collection__list--rows .device-story-card__focusable {
+    grid-template-columns: 56px minmax(0, 1fr);
+    gap: 5px 10px;
+  }
+  .device-story-collection__list--rows .device-story-card__artwork {
+    width: 56px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .device-story-card__focusable[role="button"] {
+    transition: none;
+  }
 }

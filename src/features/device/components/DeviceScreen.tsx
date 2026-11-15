@@ -82,7 +82,9 @@ export function DeviceScreen({
           <p className="device-screen__eyebrow">
             {deviceLabel ?? "Les histoires de ton appareil"}
           </p>
-          <h1 id={titleId} className="device-screen__title">Sur l'appareil</h1>
+          <h1 id={titleId} className="device-screen__title">
+            Sur l'appareil
+          </h1>
         </div>
         <Button
           variant="secondary"
@@ -107,7 +109,10 @@ export function DeviceScreen({
           </span>
           <div className="device-screen__status-content">
             {scanning ? (
-              <ProgressIndicator mode="indeterminate" label="Détection en cours…" />
+              <ProgressIndicator
+                mode="indeterminate"
+                label="Détection en cours…"
+              />
             ) : (
               <>
                 <h2 className="device-screen__status-title">
@@ -130,6 +135,7 @@ export function DeviceScreen({
 
       <DeviceStoryCollection
         {...collectionProps}
+        hideHeading
         deviceLabel={collectionProps.deviceLabel ?? deviceLabel}
       />
     </section>
