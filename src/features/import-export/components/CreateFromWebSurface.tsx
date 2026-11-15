@@ -1,5 +1,5 @@
 import type React from "react";
-import { useEffect, useId, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 
 import {
   Button,
@@ -18,6 +18,10 @@ export interface CreateFromWebSurfaceProps {
   /** The surface renders NOTHING while closed. Opened by the creation
    *  dialog's web entry; `Abandonner` / `Fermer` close it. */
   open: boolean;
+  /** Address handed over by the creation wizard, copied only when this
+   *  surface opens. Later prop/status changes never overwrite corrections.
+   *  The caller clears its own initial address when closing the flow. */
+  initialUrl?: string;
   status: WebCreationStatus;
   /** Fetch the page at the typed address (`Récupérer la page`) — also
    *  the `Réessayer` action after a motivated failure. */
@@ -47,6 +51,7 @@ export interface CreateFromWebSurfaceProps {
  */
 export function CreateFromWebSurface({
   open,
+  initialUrl = "",
   status,
   onFetch,
   onAccept,
@@ -54,16 +59,23 @@ export function CreateFromWebSurface({
   onDismiss,
 }: CreateFromWebSurfaceProps): React.JSX.Element | null {
   const addressFieldId = useId();
-  const [pageUrl, setPageUrl] = useState<string>("");
+  const [pageUrl, setPageUrl] = useState<string>(() =>
+    open ? initialUrl : "",
+  );
+  const wasOpenRef = useRef(false);
 
-  // A closed surface forgets the typed address: a full page URL can
-  // carry a private token in its query string — it must never resurface
-  // (nor be re-fetchable by mistake) on the next opening.
+  // Seed once per real opening, including a mount already fetching after
+  // the wizard handover. A rerender must preserve edits and retry input.
+  // Closing forgets the typed address: a full URL may carry a private token
+  // and must not resurface on a later opening without a new handover.
   useEffect(() => {
     if (!open) {
       setPageUrl("");
+    } else if (!wasOpenRef.current) {
+      setPageUrl(initialUrl);
     }
-  }, [open]);
+    wasOpenRef.current = open;
+  }, [open, initialUrl]);
 
   if (!open) return null;
 
@@ -122,8 +134,8 @@ export function CreateFromWebSurface({
       {showAddressForm ? (
         <>
           <p className="create-from-web__posture">
-            Utilise uniquement des contenus dont tu as les droits : tes
-            contenus personnels ou des contenus libres.
+            Utilise uniquement des contenus dont tu as les droits : tes contenus
+            personnels ou des contenus libres.
           </p>
           <Field
             id={addressFieldId}
@@ -202,9 +214,7 @@ export function CreateFromWebSurface({
             tone="success"
             label="Histoire créée dans ta bibliothèque"
           />
-          <p className="create-from-web__success-title">
-            {status.story.title}
-          </p>
+          <p className="create-from-web__success-title">{status.story.title}</p>
           <Button variant="quiet" onClick={onDismiss}>
             Fermer
           </Button>
@@ -225,10 +235,7 @@ export function CreateFromWebSurface({
             </p>
           ) : null}
           <div className="create-from-web__actions">
-            <Button
-              variant="secondary"
-              onClick={() => onFetch(pageUrl.trim())}
-            >
+            <Button variant="secondary" onClick={() => onFetch(pageUrl.trim())}>
               Réessayer
             </Button>
             <Button variant="quiet" onClick={onDismiss}>
@@ -289,22 +296,15 @@ function ReviewPreview({
 
       <ul className="create-from-web__items">
         {items.map((item, index) => (
-          <li
-            key={`${index}-${item.title}`}
-            className="create-from-web__item"
-          >
-            <span className="create-from-web__item-title">
-              {item.title}
-            </span>
+          <li key={`${index}-${item.title}`} className="create-from-web__item">
+            <span className="create-from-web__item-title">{item.title}</span>
             {item.summary.length > 0 ? (
               <span className="create-from-web__item-summary">
                 {item.summary}
               </span>
             ) : null}
             <span className="create-from-web__item-media">
-              <span className="create-from-web__item-audio">
-                Média audio
-              </span>
+              <span className="create-from-web__item-audio">Média audio</span>
               {item.imageUrl !== null ? (
                 <span className="create-from-web__item-image">Image</span>
               ) : null}

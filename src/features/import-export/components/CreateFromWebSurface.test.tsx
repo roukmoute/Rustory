@@ -1,5 +1,6 @@
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { StrictMode } from "react";
 import { describe, expect, it, vi } from "vitest";
 
 import { CreateFromWebSurface } from "./CreateFromWebSurface";
@@ -72,9 +73,7 @@ describe("CreateFromWebSurface", () => {
         "Utilise uniquement des contenus dont tu as les droits : tes contenus personnels ou des contenus libres.",
       ),
     ).toBeInTheDocument();
-    expect(
-      screen.getByLabelText("Adresse de la page web"),
-    ).toBeInTheDocument();
+    expect(screen.getByLabelText("Adresse de la page web")).toBeInTheDocument();
     expect(
       screen.getByRole("button", { name: "Récupérer la page" }),
     ).toBeInTheDocument();
@@ -93,9 +92,148 @@ describe("CreateFromWebSurface", () => {
         onDismiss={vi.fn()}
       />,
     );
-    await user.type(screen.getByLabelText("Adresse de la page web"), ` ${WEB_URL} `);
+    await user.type(
+      screen.getByLabelText("Adresse de la page web"),
+      ` ${WEB_URL} `,
+    );
     await user.click(screen.getByRole("button", { name: "Récupérer la page" }));
     expect(onFetch).toHaveBeenCalledWith(WEB_URL);
+  });
+
+  it("keeps the wizard address through fetching and enables acceptance of that reviewed page", async () => {
+    const user = userEvent.setup();
+    const handlers = noopHandlers();
+    const { rerender } = render(
+      <CreateFromWebSurface
+        open={false}
+        status={{ kind: "idle" }}
+        {...handlers}
+      />,
+    );
+    rerender(
+      <CreateFromWebSurface
+        open
+        initialUrl={WEB_URL}
+        status={{ kind: "fetching" }}
+        {...handlers}
+      />,
+    );
+    expect(screen.getByLabelText("Adresse de la page web")).toHaveValue(
+      WEB_URL,
+    );
+    expect(handlers.onFetch).not.toHaveBeenCalled();
+
+    rerender(
+      <CreateFromWebSurface
+        open
+        initialUrl={WEB_URL}
+        status={REVIEW}
+        {...handlers}
+      />,
+    );
+    const accept = screen.getByRole("button", { name: "Créer l'histoire" });
+    expect(accept).not.toHaveAttribute("aria-disabled");
+    await user.click(accept);
+    expect(handlers.onAccept).toHaveBeenCalledOnce();
+  });
+
+  it("preserves the handed-over URL after a failure and never overwrites corrections on rerender", async () => {
+    const user = userEvent.setup();
+    const handlers = noopHandlers();
+    const failed: WebCreationStatus = {
+      kind: "failed",
+      error: {
+        code: "RSS_SOURCE_UNREACHABLE",
+        message: "La page est injoignable.",
+        userAction: null,
+        details: null,
+      },
+    };
+    const { rerender } = render(
+      <StrictMode>
+        <CreateFromWebSurface
+          open
+          initialUrl={WEB_URL}
+          status={{ kind: "fetching" }}
+          {...handlers}
+        />
+      </StrictMode>,
+    );
+    rerender(
+      <StrictMode>
+        <CreateFromWebSurface
+          open
+          initialUrl={WEB_URL}
+          status={failed}
+          {...handlers}
+        />
+      </StrictMode>,
+    );
+    const field = screen.getByLabelText("Adresse de la page web");
+    expect(field).toHaveValue(WEB_URL);
+
+    const correctedUrl = "https://example.com/corrected-page";
+    await user.clear(field);
+    await user.type(field, correctedUrl);
+    rerender(
+      <StrictMode>
+        <CreateFromWebSurface
+          open
+          initialUrl="https://example.com/late-prop"
+          status={failed}
+          {...handlers}
+        />
+      </StrictMode>,
+    );
+    expect(field).toHaveValue(correctedUrl);
+    await user.click(screen.getByRole("button", { name: "Réessayer" }));
+    expect(handlers.onFetch).toHaveBeenCalledExactlyOnceWith(correctedUrl);
+  });
+
+  it("forgets a closed address and only seeds the next opening with its new handover", () => {
+    const handlers = noopHandlers();
+    const { rerender, container } = render(
+      <CreateFromWebSurface
+        open
+        initialUrl="https://example.com/page?token=private"
+        status={{ kind: "idle" }}
+        {...handlers}
+      />,
+    );
+    rerender(
+      <CreateFromWebSurface
+        open={false}
+        status={{ kind: "idle" }}
+        {...handlers}
+      />,
+    );
+    expect(container).toBeEmptyDOMElement();
+    rerender(
+      <CreateFromWebSurface open status={{ kind: "idle" }} {...handlers} />,
+    );
+    expect(screen.getByLabelText("Adresse de la page web")).toHaveValue("");
+
+    rerender(
+      <CreateFromWebSurface
+        open={false}
+        initialUrl={WEB_URL}
+        status={{ kind: "idle" }}
+        {...handlers}
+      />,
+    );
+    expect(container).toBeEmptyDOMElement();
+    rerender(
+      <CreateFromWebSurface
+        open
+        initialUrl={WEB_URL}
+        status={{ kind: "idle" }}
+        {...handlers}
+      />,
+    );
+    expect(screen.getByLabelText("Adresse de la page web")).toHaveValue(
+      WEB_URL,
+    );
+    expect(handlers.onFetch).not.toHaveBeenCalled();
   });
 
   it("shows the motivated reason in an alert for a malformed URL (S4)", () => {
@@ -125,14 +263,9 @@ describe("CreateFromWebSurface", () => {
     // The address field STAYS on a transport failure (the gesture is
     // "correct the address, then retry" — in-context); the form's own
     // fetch CTA yields to the alert's Réessayer.
-    expect(
-      screen.getByLabelText("Adresse de la page web"),
-    ).toBeInTheDocument();
+    expect(screen.getByLabelText("Adresse de la page web")).toBeInTheDocument();
     const buttons = screen.getAllByRole("button");
-    expect(buttons.map((b) => b.textContent)).toEqual([
-      "Réessayer",
-      "Fermer",
-    ]);
+    expect(buttons.map((b) => b.textContent)).toEqual(["Réessayer", "Fermer"]);
   });
 
   it("shows the motivated reason in an alert for an unreachable page (S5)", () => {
@@ -213,9 +346,7 @@ describe("CreateFromWebSurface", () => {
   it("refuses the accept while the typed address diverges from the reviewed one", async () => {
     const handlers = noopHandlers();
     const user = userEvent.setup();
-    render(
-      <CreateFromWebSurface open status={REVIEW} {...handlers} />,
-    );
+    render(<CreateFromWebSurface open status={REVIEW} {...handlers} />);
     // The reviewed webUrl is WEB_URL but the visible field is empty →
     // diverged: the accept CTA is refused even with a selection.
     const accept = screen.getByRole("button", { name: "Créer l'histoire" });
@@ -242,9 +373,7 @@ describe("CreateFromWebSurface", () => {
       />,
     );
     const alert = screen.getByRole("alert");
-    expect(alert).toHaveTextContent(
-      "La page a changé depuis la récupération.",
-    );
+    expect(alert).toHaveTextContent("La page a changé depuis la récupération.");
     expect(alert).toHaveTextContent("Relance la récupération de la page.");
     expect(
       screen.queryByRole("button", { name: "Créer l'histoire" }),
@@ -294,8 +423,6 @@ describe("CreateFromWebSurface", () => {
     expect(
       screen.getByText("Sélection pour partir à l'aventure"),
     ).toBeInTheDocument();
-    expect(
-      screen.getByRole("button", { name: "Fermer" }),
-    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Fermer" })).toBeInTheDocument();
   });
 });
