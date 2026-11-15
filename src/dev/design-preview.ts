@@ -1,6 +1,7 @@
 /** Development-only browser entry. All stories are fictional and every
  * mutation lives in memory until reload. Production uses index.html only. */
 import { mockIPC, mockWindows } from "@tauri-apps/api/mocks";
+import { version } from "../../package.json";
 import {
   isLibraryOverviewDto,
   type StoryCardDto,
@@ -211,7 +212,7 @@ const voices = {
 };
 const updateAvailability = {
   status: "checkNotRun",
-  currentVersion: "0.18.0",
+  currentVersion: version,
   headline: "La vérification de version n'est pas exécutée pour cette copie.",
   notice:
     "Cette copie de Rustory ne provient pas d'un canal de distribution officiel : aucune vérification réseau n'est effectuée.",
@@ -284,7 +285,7 @@ mockIPC(
       case "read_support_profile":
         return officialProfile();
       case "plugin:app|version":
-        return "0.18.0";
+        return version;
       case "read_update_availability":
         return updateAvailability;
       case "read_update_apply_plan":
