@@ -9,14 +9,20 @@ import {
 } from "../../../ipc/commands/presentation";
 import { toAppError } from "../../../shared/errors/app-error";
 import type { AnnouncementVoicesDto } from "../../../shared/ipc-contracts/presentation";
-import { Button, Icon, ProgressIndicator, StateChip, SurfacePanel } from "../../../shared/ui";
+import {
+  Button,
+  Icon,
+  ProgressIndicator,
+  StateChip,
+  SurfacePanel,
+} from "../../../shared/ui";
 
 import "./AnnouncementVoiceSettings.css";
 
 // Frozen frontend copies (product-language: `Voix des annonces`).
 const SECTION_TITLE = "Voix des annonces";
 const SECTION_LEAD =
-  "La voix qui annonce les histoires et les épisodes sur la Lunii quand une histoire est présentée au choix. Par défaut, une voix française installée sur cet ordinateur.";
+  "Cette voix annonce les titres quand on choisit une histoire.";
 const NO_VOICE_NOTE =
   "Aucune voix française n'est disponible sur cet ordinateur. Installe une voix française dans les réglages du système, ou télécharge la voix neuronale ci-dessous.";
 const LOADING_LABEL = "Lecture des voix…";
@@ -25,7 +31,7 @@ const PREVIEW_LABEL = "Écouter";
 const PREVIEWING_LABEL = "Lecture…";
 const EMBEDDED_TITLE = "Voix neuronale embarquée";
 const EMBEDDED_LEAD =
-  "Une voix française de bonne qualité, identique sur tous les ordinateurs. Téléchargée une fois, utilisée hors ligne ensuite.";
+  "Une voix française à télécharger une fois, puis utilisable hors ligne.";
 const INSTALL_LABEL = "Télécharger la voix neuronale";
 const INSTALLING_LABEL = "Téléchargement de la voix neuronale…";
 const INSTALLED_NOTE = "Voix neuronale installée.";
@@ -116,18 +122,62 @@ export function AnnouncementVoiceSettings({
     } catch (err) {
       const error = toAppError(err);
       setNote(
-        error.userAction ? `${error.message} ${error.userAction}` : error.message,
+        error.userAction
+          ? `${error.message} ${error.userAction}`
+          : error.message,
       );
     } finally {
       setInstallProgress(null);
     }
   };
 
+  const selectedVoice =
+    read.kind === "loaded"
+      ? read.data.voices.find((voice) => voice.id === read.data.selectedVoiceId)
+      : undefined;
+  // The list stays mounted inside the disclosure: folding it never restarts
+  // a read or interrupts a selection, preview or embedded-voice download.
+  const voiceList =
+    read.kind === "loaded" ? (
+      <ul className="announcement-voices__list" aria-label="Voix disponibles">
+        {read.data.voices.map((voice) => {
+          const selected = voice.id === read.data.selectedVoiceId;
+          return (
+            <li key={voice.id} className="announcement-voices__item">
+              <label className="announcement-voices__choice">
+                <input
+                  type="radio"
+                  name="announcement-voice"
+                  value={voice.id}
+                  checked={selected}
+                  onChange={() => void select(voice.id)}
+                />
+                <span className="announcement-voices__name">{voice.name}</span>
+                <span className="announcement-voices__meta">
+                  {voice.language}
+                  {voice.engine === "embedded" ? " · neuronale" : " · système"}
+                </span>
+              </label>
+              <Button
+                variant="quiet"
+                onClick={() => void preview(voice.id)}
+                aria-label={`${PREVIEW_LABEL} — ${voice.name}`}
+                disabled={previewing !== null}
+              >
+                <Icon name="headphones" />
+                {previewing === voice.id ? PREVIEWING_LABEL : PREVIEW_LABEL}
+              </Button>
+            </li>
+          );
+        })}
+      </ul>
+    ) : null;
+
   return (
     <SurfacePanel
       as="section"
       elevation={1}
-      className={`announcement-voices${isWelcome ? " announcement-voices--welcome" : ""}`}
+      className={`announcement-voices${isWelcome ? " announcement-voices--welcome" : " announcement-voices--settings"}`}
       ariaLabelledBy="announcement-voices-title"
     >
       <h2 id="announcement-voices-title" className="announcement-voices__title">
@@ -135,7 +185,9 @@ export function AnnouncementVoiceSettings({
         {isWelcome ? "Qui présente les histoires ?" : SECTION_TITLE}
       </h2>
       <p className="announcement-voices__lead">
-        {isWelcome ? "Cette voix annonce les titres quand on choisit une histoire." : SECTION_LEAD}
+        {isWelcome
+          ? "Cette voix annonce les titres quand on choisit une histoire."
+          : SECTION_LEAD}
       </p>
 
       {read.kind === "loading" && (
@@ -154,39 +206,45 @@ export function AnnouncementVoiceSettings({
             <p className="announcement-voices__state" role="status">
               {NO_VOICE_NOTE}
             </p>
+          ) : isWelcome ? (
+            voiceList
           ) : (
-            <ul className="announcement-voices__list" aria-label="Voix disponibles">
-              {read.data.voices.map((voice) => {
-                const selected = voice.id === read.data.selectedVoiceId;
-                return (
-                  <li key={voice.id} className="announcement-voices__item">
-                    <label className="announcement-voices__choice">
-                      <input
-                        type="radio"
-                        name="announcement-voice"
-                        value={voice.id}
-                        checked={selected}
-                        onChange={() => void select(voice.id)}
-                      />
-                      <span className="announcement-voices__name">{voice.name}</span>
-                      <span className="announcement-voices__meta">
-                        {voice.language}
-                        {voice.engine === "embedded" ? " · neuronale" : " · système"}
-                      </span>
-                    </label>
-                    <Button
-                      variant="quiet"
-                      onClick={() => void preview(voice.id)}
-                      aria-label={`${PREVIEW_LABEL} — ${voice.name}`}
-                      disabled={previewing !== null}
-                    >
-                      <Icon name="headphones" />
-                      {previewing === voice.id ? PREVIEWING_LABEL : PREVIEW_LABEL}
-                    </Button>
-                  </li>
-                );
-              })}
-            </ul>
+            <>
+              <div
+                className="announcement-voices__current"
+                role="group"
+                aria-label="Voix utilisée"
+              >
+                <div className="announcement-voices__current-name">
+                  <span className="announcement-voices__current-label">
+                    Voix utilisée
+                  </span>
+                  <strong>
+                    {selectedVoice?.name ?? "Aucune voix sélectionnée."}
+                  </strong>
+                </div>
+                {selectedVoice && (
+                  <Button
+                    variant="quiet"
+                    onClick={() => void preview(selectedVoice.id)}
+                    aria-label={`${PREVIEW_LABEL} — ${selectedVoice.name}`}
+                    disabled={previewing !== null}
+                  >
+                    <Icon name="headphones" />
+                    {previewing === selectedVoice.id
+                      ? PREVIEWING_LABEL
+                      : PREVIEW_LABEL}
+                  </Button>
+                )}
+              </div>
+              <details className="announcement-voices__choices">
+                <summary>
+                  Changer de voix
+                  <Icon name="chevron-down" size={16} />
+                </summary>
+                {voiceList}
+              </details>
+            </>
           )}
 
           <div className="announcement-voices__embedded">
@@ -194,7 +252,9 @@ export function AnnouncementVoiceSettings({
               {isWelcome ? "Voix de qualité supérieure" : EMBEDDED_TITLE}
             </h3>
             <p className="announcement-voices__lead">
-              {isWelcome ? "Même rendu sur tous les ordinateurs, utilisable hors ligne." : EMBEDDED_LEAD}
+              {isWelcome
+                ? "Même rendu sur tous les ordinateurs, utilisable hors ligne."
+                : EMBEDDED_LEAD}
             </p>
             {read.data.embedded.state === "unsupported" && (
               <StateChip tone="neutral" label={UNSUPPORTED_NOTE} />
@@ -207,7 +267,9 @@ export function AnnouncementVoiceSettings({
               (installProgress !== null ||
               read.data.embedded.state === "installing" ? (
                 <ProgressIndicator
-                  mode={installProgress === null ? "indeterminate" : "determinate"}
+                  mode={
+                    installProgress === null ? "indeterminate" : "determinate"
+                  }
                   label={INSTALLING_LABEL}
                   value={installProgress ?? undefined}
                 />
