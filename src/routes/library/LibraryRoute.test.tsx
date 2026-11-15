@@ -3249,9 +3249,11 @@ describe("<LibraryRoute />", () => {
       });
     const router = renderLibrary({ initialScreen: "welcome/device" });
     await screen.findByRole("heading", { name: "4 histoires trouvées sur ta Lunii" });
-    await user.click(screen.getByRole("button", { name: "Récupérer mes histoires" }));
+    const recoverButton = screen.getByRole("button", { name: "Récupérer mes histoires" });
+    await waitFor(() => expect(recoverButton).not.toHaveAttribute("aria-disabled", "true"));
+    await user.click(recoverButton);
     await waitFor(() => expect(router.state.location.pathname).toBe("/library"));
-    expect(screen.getByRole("progressbar", {
+    expect(await screen.findByRole("progressbar", {
       name: "0 sur 2 histoires traitées",
     })).toHaveAttribute("aria-valuenow", "0");
     expect(mockImport).toHaveBeenCalledTimes(1);
