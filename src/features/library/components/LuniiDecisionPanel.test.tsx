@@ -2,10 +2,125 @@ import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
-import { LuniiDecisionPanel, type TransferView } from "./LuniiDecisionPanel";
+import {
+  LuniiDecisionPanel,
+  TransferStatus,
+  type TransferView,
+} from "./LuniiDecisionPanel";
 
 describe("<LuniiDecisionPanel />", () => {
   const noop = () => {};
+
+  it("locks edit, send and delete during another operation while keeping device reads available", async () => {
+    const user = userEvent.setup();
+    const onEdit = vi.fn();
+    const onSend = vi.fn();
+    const onDeleteSelected = vi.fn();
+    const onRefreshDevice = vi.fn();
+    render(
+      <LuniiDecisionPanel
+        selectedCount={1}
+        transfer={{ kind: "ready" }}
+        actionsDisabled
+        onEdit={onEdit}
+        onSend={onSend}
+        onDeleteSelected={onDeleteSelected}
+        onRefreshDevice={onRefreshDevice}
+      />,
+    );
+    for (const name of ["Éditer", "Envoyer vers la Lunii", "Supprimer"]) {
+      const button = screen.getByRole("button", { name });
+      expect(button).toHaveAttribute("aria-disabled", "true");
+      expect(button).toHaveAccessibleDescription("Opération en cours…");
+      await user.click(button);
+    }
+    expect(onEdit).not.toHaveBeenCalled();
+    expect(onSend).not.toHaveBeenCalled();
+    expect(onDeleteSelected).not.toHaveBeenCalled();
+    expect(screen.getAllByText("Opération en cours…")).toHaveLength(1);
+    await user.click(
+      screen.getByRole("button", {
+        name: "Réessayer la détection de l'appareil",
+      }),
+    );
+    expect(onRefreshDevice).toHaveBeenCalledOnce();
+  });
+
+  it("also locks an already-open destructive confirmation when an operation starts", async () => {
+    const user = userEvent.setup();
+    const onDeleteSelected = vi.fn();
+    const props = { selectedCount: 1, onEdit: noop, onDeleteSelected };
+    const { rerender } = render(<LuniiDecisionPanel {...props} />);
+    await user.click(screen.getByRole("button", { name: "Supprimer" }));
+    rerender(<LuniiDecisionPanel {...props} actionsDisabled />);
+    const confirm = screen.getByRole("button", {
+      name: "Confirmer la suppression",
+    });
+    expect(confirm).toHaveAttribute("aria-disabled", "true");
+    await user.click(confirm);
+    expect(onDeleteSelected).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("button", { name: "Annuler" }));
+    expect(
+      screen.queryByRole("button", { name: "Confirmer la suppression" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it.each(["partial", "retryable", "incomplete", "error"] as const)(
+    "locks %s recovery without replacing the error or blocking its dismissal",
+    async (kind) => {
+      const user = userEvent.setup();
+      const onRetryTransfer = vi.fn();
+      const onDismissTransfer = vi.fn();
+      const view: TransferView =
+        kind === "error"
+          ? {
+              kind,
+              error: {
+                code: "UNKNOWN",
+                message: "Échec réel.",
+                userAction: "Réessaie.",
+                details: null,
+              },
+            }
+          : { kind, message: "Échec réel.", userAction: "Réessaie." };
+      render(
+        <TransferStatus
+          view={view}
+          actionsDisabled
+          onRetryTransfer={onRetryTransfer}
+          onDismissTransfer={onDismissTransfer}
+        />,
+      );
+      const retry = screen.getByRole("button", {
+        name:
+          kind === "error" ? "Réessayer le transfert" : "Relancer le transfert",
+      });
+      expect(retry).toHaveAccessibleDescription("Opération en cours…");
+      expect(retry).toHaveAttribute("aria-disabled", "true");
+      await user.click(retry);
+      expect(onRetryTransfer).not.toHaveBeenCalled();
+      expect(screen.getByRole("alert")).toHaveTextContent("Échec réel.");
+      if (kind !== "error") {
+        await user.click(
+          screen.getByRole("button", { name: "Abandonner le transfert" }),
+        );
+        expect(onDismissTransfer).toHaveBeenCalledOnce();
+      }
+    },
+  );
+
+  it("keeps the actual transfer phase and progress when actions are locked", () => {
+    render(
+      <TransferStatus
+        view={{ kind: "transferring", progress: 0.42, phase: "transfer" }}
+        actionsDisabled
+      />,
+    );
+    expect(
+      screen.getByRole("progressbar", { name: /Envoi en cours… 42/ }),
+    ).toHaveAttribute("aria-valuenow", "42");
+    expect(screen.queryByText("Opération en cours…")).not.toBeInTheDocument();
+  });
 
   const checksumBlocker = {
     axis: "structure" as const,
@@ -151,7 +266,9 @@ describe("<LuniiDecisionPanel />", () => {
           onEdit={noop}
         />,
       );
-      expect(screen.getByText(/^appareil reconnu — lunii$/i)).toBeInTheDocument();
+      expect(
+        screen.getByText(/^appareil reconnu — lunii$/i),
+      ).toBeInTheDocument();
       expect(screen.queryByText(/appareil reconnu — lunii v3/i)).toBeNull();
     });
 
@@ -459,7 +576,8 @@ describe("<LuniiDecisionPanel />", () => {
               {
                 axis: "deviceProfile",
                 cause: "metadataUnsupported",
-                message: "Le profil de l'appareil connecté n'est pas pris en charge.",
+                message:
+                  "Le profil de l'appareil connecté n'est pas pris en charge.",
                 userAction:
                   "Consulte le profil de support pour voir les appareils compatibles.",
               },
@@ -497,7 +615,8 @@ describe("<LuniiDecisionPanel />", () => {
               {
                 axis: "deviceProfile",
                 cause: "metadataUnsupported",
-                message: "Le profil de l'appareil connecté n'est pas pris en charge.",
+                message:
+                  "Le profil de l'appareil connecté n'est pas pris en charge.",
                 userAction:
                   "Consulte le profil de support pour voir les appareils compatibles.",
               },
@@ -555,7 +674,9 @@ describe("<LuniiDecisionPanel />", () => {
     );
     // The chip and the reason both contain the phrase, so the assertion
     // accepts multiple matches and only requires at least one.
-    expect(screen.getAllByText(/profil non supporté/i).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/profil non supporté/i).length).toBeGreaterThan(
+      0,
+    );
     expect(
       screen.getByText(/format métadonnées v99 non géré/i),
     ).toBeInTheDocument();
@@ -592,7 +713,9 @@ describe("<LuniiDecisionPanel />", () => {
         onRefreshDevice={onRefreshDevice}
       />,
     );
-    expect(screen.getAllByText(/détection en cours/i).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/détection en cours/i).length).toBeGreaterThan(
+      0,
+    );
     expect(
       screen.queryByRole("button", { name: /réessayer la détection/i }),
     ).toBeNull();
@@ -649,10 +772,17 @@ describe("<LuniiDecisionPanel />", () => {
     // Every other transfer state keeps the send affordance non-active: either a
     // disabled CTA (unavailable) or no enabled send button at all (job/terminal).
     const nonReady: TransferView[] = [
-      { kind: "unavailable", reason: "Envoi indisponible: profil non supporté" },
+      {
+        kind: "unavailable",
+        reason: "Envoi indisponible: profil non supporté",
+      },
       { kind: "transferring", progress: null, phase: null },
       { kind: "verifying" },
-      { kind: "verified", changed: "« Mon histoire » est sur la Lunii.", unchanged: "m" },
+      {
+        kind: "verified",
+        changed: "« Mon histoire » est sur la Lunii.",
+        unchanged: "m",
+      },
       { kind: "partial", message: "m", userAction: "a" },
       { kind: "retryable", message: "m", userAction: "a" },
       {
@@ -711,7 +841,9 @@ describe("<LuniiDecisionPanel />", () => {
       );
       // The device-state region must always carry a non-empty text
       // label that conveys the state in words (UX-DR32).
-      const region = screen.getByRole("region", { name: /état de l'appareil/i });
+      const region = screen.getByRole("region", {
+        name: /état de l'appareil/i,
+      });
       expect(region.textContent ?? "").not.toEqual("");
       unmount();
     }
@@ -833,7 +965,9 @@ describe("<LuniiDecisionPanel />", () => {
   });
 
   it("renders a distinct sober hint per no-comparison reason", () => {
-    const cases: Array<["no-selection" | "multi-selection" | "no-device", RegExp]> = [
+    const cases: Array<
+      ["no-selection" | "multi-selection" | "no-device", RegExp]
+    > = [
       ["no-selection", /sélectionne une histoire locale pour comparer/i],
       ["multi-selection", /sélectionne une seule histoire locale/i],
       ["no-device", /branche une lunii lisible/i],
@@ -851,9 +985,7 @@ describe("<LuniiDecisionPanel />", () => {
       });
       expect(region).toHaveTextContent(expected);
       // The three reasons must not collapse into the same wording.
-      const others = cases
-        .filter(([r]) => r !== reason)
-        .map(([, rx]) => rx);
+      const others = cases.filter(([r]) => r !== reason).map(([, rx]) => rx);
       for (const otherRx of others) {
         expect(region).not.toHaveTextContent(otherRx);
       }
@@ -985,7 +1117,9 @@ describe("<LuniiDecisionPanel />", () => {
     // No polite status region carries the critical comparison error.
     screen
       .queryAllByRole("status")
-      .forEach((s) => expect(s).not.toHaveTextContent(/comparaison indisponible/i));
+      .forEach((s) =>
+        expect(s).not.toHaveTextContent(/comparaison indisponible/i),
+      );
   });
 
   it("keeps the send CTA disabled even when the comparison is ready (AC2)", () => {
@@ -1040,7 +1174,9 @@ describe("<LuniiDecisionPanel />", () => {
     const region = screen.getByRole("region", {
       name: /validation avant envoi/i,
     });
-    expect(region).toHaveTextContent(/vérifier la compatibilité avant l'envoi/i);
+    expect(region).toHaveTextContent(
+      /vérifier la compatibilité avant l'envoi/i,
+    );
   });
 
   it("renders a progressbar while the validation loads", () => {
@@ -1471,7 +1607,9 @@ describe("<LuniiDecisionPanel /> — transfer", () => {
     // No polite status region carries the critical failure (never a toast).
     screen
       .queryAllByRole("status")
-      .forEach((s) => expect(s).not.toHaveTextContent(/le transfert a été interrompu/i));
+      .forEach((s) =>
+        expect(s).not.toHaveTextContent(/le transfert a été interrompu/i),
+      );
     await userEvent.click(
       screen.getByRole("button", { name: /relancer le transfert/i }),
     );
@@ -1694,15 +1832,17 @@ describe("<LuniiDecisionPanel /> — transfer", () => {
 
   it("does not render the transfer section when the prop is omitted", () => {
     render(<LuniiDecisionPanel deviceState="idle" onEdit={noop} />);
-    expect(
-      screen.queryByRole("region", { name: /^transfert$/i }),
-    ).toBeNull();
+    expect(screen.queryByRole("region", { name: /^transfert$/i })).toBeNull();
   });
 
   describe("deletion of the selection", () => {
     it("renders Supprimer disabled with the canonical reason when nothing is selected", () => {
       render(
-        <LuniiDecisionPanel selectedCount={0} onEdit={noop} onDeleteSelected={noop} />,
+        <LuniiDecisionPanel
+          selectedCount={0}
+          onEdit={noop}
+          onDeleteSelected={noop}
+        />,
       );
       const cta = screen.getByRole("button", { name: /^supprimer$/i });
       expect(cta).toHaveAttribute("aria-disabled", "true");

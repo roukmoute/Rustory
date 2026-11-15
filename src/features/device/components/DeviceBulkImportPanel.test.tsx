@@ -52,6 +52,52 @@ function renderPanel(overrides?: {
 }
 
 describe("<DeviceBulkImportPanel />", () => {
+  it("blocks starting a batch during another operation without changing its facts", async () => {
+    const user = userEvent.setup();
+    const onImport = vi.fn();
+    const onClearSelection = vi.fn();
+    render(
+      <DeviceBulkImportPanel
+        stories={[makeStory()]}
+        canImport
+        status={IDLE}
+        actionsDisabled
+        onImport={onImport}
+        onClearSelection={onClearSelection}
+        onDismissStatus={vi.fn()}
+      />,
+    );
+    const button = screen.getByRole("button", { name: "Importer l'histoire" });
+    expect(button).toHaveAttribute("aria-disabled", "true");
+    expect(button).toHaveAccessibleDescription("Opération en cours…");
+    expect(screen.getByText("1 importable")).toBeInTheDocument();
+    expect(screen.queryByRole("progressbar")).not.toBeInTheDocument();
+    await user.click(button);
+    expect(onImport).not.toHaveBeenCalled();
+    await user.click(
+      screen.getByRole("button", { name: "Effacer la sélection" }),
+    );
+    expect(onClearSelection).toHaveBeenCalledOnce();
+  });
+
+  it("keeps real batch progress without adding a second busy label", () => {
+    render(
+      <DeviceBulkImportPanel
+        stories={[makeStory()]}
+        canImport
+        actionsDisabled
+        status={{ kind: "running", total: 2, done: 1, succeeded: 1, failed: 0 }}
+        onImport={vi.fn()}
+        onClearSelection={vi.fn()}
+        onDismissStatus={vi.fn()}
+      />,
+    );
+    expect(
+      screen.getByRole("progressbar", { name: "Import en cours… 1 / 2" }),
+    ).toHaveAttribute("aria-valuenow", "50");
+    expect(screen.queryByText("Opération en cours…")).not.toBeInTheDocument();
+  });
+
   it("names how many are selected", () => {
     renderPanel();
     expect(
@@ -70,7 +116,9 @@ describe("<DeviceBulkImportPanel />", () => {
     });
     // Triage counts add up: 1 importable, 1 already there, 1 incomplete.
     expect(screen.getByText(/1 importable/i)).toBeInTheDocument();
-    expect(screen.getByText(/1 déjà dans ta bibliothèque/i)).toBeInTheDocument();
+    expect(
+      screen.getByText(/1 déjà dans ta bibliothèque/i),
+    ).toBeInTheDocument();
     expect(screen.getByText(/1 au contenu incomplet/i)).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: /importer/i }));

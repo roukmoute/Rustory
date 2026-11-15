@@ -39,7 +39,10 @@ export type LuniiDeviceState =
 /** Why no comparison can be shown — each maps to a distinct, actionable
  *  hint so the user knows exactly what to do next (select a story, narrow to
  *  one, or plug a readable Lunii). */
-export type NoComparisonReason = "no-selection" | "multi-selection" | "no-device";
+export type NoComparisonReason =
+  | "no-selection"
+  | "multi-selection"
+  | "no-device";
 
 export type TransferComparisonView =
   | { kind: "none"; reason: NoComparisonReason }
@@ -89,7 +92,62 @@ export type TransferView =
   | { kind: "incomplete"; message: string; userAction: string }
   | { kind: "error"; error: AppError };
 
+export interface TransferStatusProps {
+  actionsDisabled?: boolean;
+  /** Reuse the containing details surface's visible busy explanation. */
+  actionsDisabledReasonId?: string;
+  view: TransferView;
+  deviceFamily?: SupportedFamilyDto;
+  onSend?: () => void;
+  onRetryTransfer?: () => void;
+  onDismissTransfer?: () => void;
+}
+
+/** The operation owner can keep this status mounted independently of the
+ * current selection. The same renderer serves both that surface and details. */
+export function TransferStatus({
+  actionsDisabled = false,
+  actionsDisabledReasonId,
+  view,
+  deviceFamily,
+  onSend,
+  onRetryTransfer,
+  onDismissTransfer,
+}: TransferStatusProps): React.JSX.Element {
+  const reasonId = useId();
+  const ownBusyReasonId = useId();
+  const busyReasonId = actionsDisabledReasonId ?? ownBusyReasonId;
+  const hasMutationAction =
+    view.kind === "ready" ||
+    (onRetryTransfer !== undefined &&
+      ["partial", "retryable", "incomplete", "error"].includes(view.kind));
+  return (
+    <section
+      className="lunii-panel__transfer"
+      aria-label="Transfert"
+      aria-live="polite"
+    >
+      {actionsDisabled && hasMutationAction && !actionsDisabledReasonId && (
+        <p id={busyReasonId} className="lunii-panel__reason">
+          Opération en cours…
+        </p>
+      )}
+      {renderTransfer(
+        view,
+        reasonId,
+        deviceFamily,
+        onSend,
+        onRetryTransfer,
+        onDismissTransfer,
+        actionsDisabled,
+        busyReasonId,
+      )}
+    </section>
+  );
+}
+
 export interface LuniiDecisionPanelProps {
+  actionsDisabled?: boolean;
   /** Authoritative device state derived from `useConnectedLunii`. */
   deviceState?: LuniiDeviceState;
   /** Friendly label shown when `deviceState === "idle"` (e.g.
@@ -188,6 +246,7 @@ export interface LuniiDecisionPanelProps {
  * `onRefreshDevice`.
  */
 export function LuniiDecisionPanel({
+  actionsDisabled = false,
   deviceState = "absent",
   deviceLabel,
   deviceReason,
@@ -236,7 +295,7 @@ export function LuniiDecisionPanel({
   const titleId = useId();
   const deviceReasonId = useId();
   const editReasonId = useId();
-  const transferReasonId = useId();
+  const busyReasonId = useId();
 
   const deviceChipLabel = formatDeviceChipLabel(
     deviceState,
@@ -265,7 +324,8 @@ export function LuniiDecisionPanel({
   }, [selectedCount]);
 
   const sendDisabledReason =
-    deviceReason ?? formatSendReason(deviceState, hasAnyCapability, deviceFamily);
+    deviceReason ??
+    formatSendReason(deviceState, hasAnyCapability, deviceFamily);
 
   const isScanning = deviceState === "scanning";
 
@@ -282,11 +342,24 @@ export function LuniiDecisionPanel({
         </span>
         Panneau de décision
       </h2>
+      {actionsDisabled && (
+        <p id={busyReasonId} className="lunii-panel__reason">
+          Opération en cours…
+        </p>
+      )}
 
-      <section className="lunii-panel__selection" aria-label="Sélection courante">
+      <section
+        className="lunii-panel__selection"
+        aria-label="Sélection courante"
+      >
         <StateChip tone={selectionChipTone} label={selectionChipLabel} />
         {editIsActive ? (
-          <Button variant="secondary" onClick={onEdit}>
+          <Button
+            variant="secondary"
+            onClick={onEdit}
+            aria-disabled={actionsDisabled || undefined}
+            aria-describedby={actionsDisabled ? busyReasonId : undefined}
+          >
             <Icon name="edit" />
             Éditer
           </Button>
@@ -319,7 +392,12 @@ export function LuniiDecisionPanel({
             </p>
           </>
         ) : !isConfirmingDelete ? (
-          <Button variant="quiet" onClick={() => setIsConfirmingDelete(true)}>
+          <Button
+            variant="quiet"
+            onClick={() => setIsConfirmingDelete(true)}
+            aria-disabled={actionsDisabled || undefined}
+            aria-describedby={actionsDisabled ? busyReasonId : undefined}
+          >
             Supprimer
           </Button>
         ) : (
@@ -332,7 +410,12 @@ export function LuniiDecisionPanel({
                 Suppression…
               </Button>
             ) : (
-              <Button variant="primary" onClick={onDeleteSelected}>
+              <Button
+                variant="primary"
+                onClick={onDeleteSelected}
+                aria-disabled={actionsDisabled || undefined}
+                aria-describedby={actionsDisabled ? busyReasonId : undefined}
+              >
                 Confirmer la suppression
               </Button>
             )}
@@ -372,20 +455,15 @@ export function LuniiDecisionPanel({
       )}
 
       {transfer && (
-        <section
-          className="lunii-panel__transfer"
-          aria-label="Transfert"
-          aria-live="polite"
-        >
-          {renderTransfer(
-            transfer,
-            transferReasonId,
-            deviceFamily,
-            onSend,
-            onRetryTransfer,
-            onDismissTransfer,
-          )}
-        </section>
+        <TransferStatus
+          actionsDisabled={actionsDisabled}
+          actionsDisabledReasonId={actionsDisabled ? busyReasonId : undefined}
+          view={transfer}
+          deviceFamily={deviceFamily}
+          onSend={onSend}
+          onRetryTransfer={onRetryTransfer}
+          onDismissTransfer={onDismissTransfer}
+        />
       )}
 
       <section className="lunii-panel__device" aria-label="État de l'appareil">
@@ -432,9 +510,7 @@ export function LuniiDecisionPanel({
           // The route owns the send CTA (in the Transfert region). The device
           // region keeps surfacing the DEVICE detail reason (unsupported /
           // ambiguous / error) so the user still sees why the Lunii is not ready.
-          deviceReason && (
-            <p className="lunii-panel__reason">{deviceReason}</p>
-          )
+          deviceReason && <p className="lunii-panel__reason">{deviceReason}</p>
         )}
         {onRefreshDevice && !isScanning && (
           <Button
@@ -570,6 +646,8 @@ function renderTransfer(
   onSend?: () => void,
   onRetryTransfer?: () => void,
   onDismissTransfer?: () => void,
+  actionsDisabled = false,
+  busyReasonId?: string,
 ): React.JSX.Element {
   switch (view.kind) {
     case "unavailable":
@@ -590,7 +668,15 @@ function renderTransfer(
       // No confirmation modal (AC1) — the context is unambiguous. Only a Lunii
       // can be write-authorized in this phase, so `ready` always renders the
       // Lunii label — the family-correct helper keeps that true by derivation.
-      return <Button onClick={onSend}>{formatSendCtaLabel(deviceFamily)}</Button>;
+      return (
+        <Button
+          onClick={onSend}
+          aria-disabled={actionsDisabled || undefined}
+          aria-describedby={actionsDisabled ? busyReasonId : undefined}
+        >
+          {formatSendCtaLabel(deviceFamily)}
+        </Button>
+      );
     case "transferring": {
       // Honest progress (AC1): a SINGLE bar whose label NAMES the real phase
       // (device check vs write) and, when a reliable fraction is known, carries
@@ -611,8 +697,7 @@ function renderTransfer(
         view.progress != null
           ? Math.min(99, Math.round(view.progress * 100))
           : null;
-      const label =
-        percent != null ? `${phaseLabel} ${percent} %` : phaseLabel;
+      const label = percent != null ? `${phaseLabel} ${percent} %` : phaseLabel;
       return percent != null ? (
         <ProgressIndicator mode="determinate" label={label} value={percent} />
       ) : (
@@ -680,7 +765,12 @@ function renderTransfer(
           <StateChip tone="warning" label="état partiel" />
           <p>{view.message}</p>
           <p className="lunii-panel__reason">{view.userAction}</p>
-          {renderTransferRecovery(onRetryTransfer, onDismissTransfer)}
+          {renderTransferRecovery(
+            onRetryTransfer,
+            onDismissTransfer,
+            actionsDisabled,
+            busyReasonId,
+          )}
         </div>
       );
     case "retryable":
@@ -693,7 +783,12 @@ function renderTransfer(
           <StateChip tone="error" label="échec récupérable" />
           <p>{view.message}</p>
           <p className="lunii-panel__reason">{view.userAction}</p>
-          {renderTransferRecovery(onRetryTransfer, onDismissTransfer)}
+          {renderTransferRecovery(
+            onRetryTransfer,
+            onDismissTransfer,
+            actionsDisabled,
+            busyReasonId,
+          )}
         </div>
       );
     case "incomplete":
@@ -708,7 +803,12 @@ function renderTransfer(
           <StateChip tone="warning" label="transfert incomplet" />
           <p>{view.message}</p>
           <p className="lunii-panel__reason">{view.userAction}</p>
-          {renderTransferRecovery(onRetryTransfer, onDismissTransfer)}
+          {renderTransferRecovery(
+            onRetryTransfer,
+            onDismissTransfer,
+            actionsDisabled,
+            busyReasonId,
+          )}
         </div>
       );
     case "error":
@@ -722,6 +822,8 @@ function renderTransfer(
               variant="quiet"
               onClick={onRetryTransfer}
               aria-label="Réessayer le transfert"
+              aria-disabled={actionsDisabled || undefined}
+              aria-describedby={actionsDisabled ? busyReasonId : undefined}
             >
               Réessayer
             </Button>
@@ -737,6 +839,8 @@ function renderTransfer(
 function renderTransferRecovery(
   onRetryTransfer?: () => void,
   onDismissTransfer?: () => void,
+  actionsDisabled = false,
+  busyReasonId?: string,
 ): React.JSX.Element {
   return (
     <>
@@ -745,6 +849,8 @@ function renderTransferRecovery(
           variant="quiet"
           onClick={onRetryTransfer}
           aria-label="Relancer le transfert"
+          aria-disabled={actionsDisabled || undefined}
+          aria-describedby={actionsDisabled ? busyReasonId : undefined}
         >
           Relancer
         </Button>
@@ -789,7 +895,10 @@ function renderVerdict(
           {canonical.length > 0 &&
             renderBlockerGroup("Validité Rustory", canonical)}
           {device.length > 0 &&
-            renderBlockerGroup(formatDeviceCompatibilityHeading(deviceFamily), device)}
+            renderBlockerGroup(
+              formatDeviceCompatibilityHeading(deviceFamily),
+              device,
+            )}
         </>
       )}
     </>
@@ -850,7 +959,8 @@ function formatNoComparisonHint(
 }
 
 function formatUnchanged(count: number): string {
-  if (count <= 0) return "Aucune autre histoire de l'appareil ne sera modifiée.";
+  if (count <= 0)
+    return "Aucune autre histoire de l'appareil ne sera modifiée.";
   if (count === 1) return "1 autre histoire de l'appareil restera inchangée.";
   return `${count} autres histoires de l'appareil resteront inchangées.`;
 }

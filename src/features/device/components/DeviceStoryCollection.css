@@ -246,8 +246,9 @@
 
 .device-story-card__focusable--selected,
 .device-story-card__focusable--selected[role="button"]:hover {
-  border-color: #1f7a55;
-  background: #e3f3ea;
+  border-color: #39cf8f;
+  box-shadow: inset 0 0 0 2px #39cf8f;
+  background: #fff2c1;
 }
 
 .device-story-card__marker {

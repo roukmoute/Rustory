@@ -3,7 +3,13 @@ import { useEffect, useId, useMemo, useState } from "react";
 
 import type { SupportedOperationsDto } from "../../../shared/ipc-contracts/device";
 import type { DeviceStoryDto } from "../../../shared/ipc-contracts/device-library";
-import { Button, Field, Icon, StateChip, SurfacePanel } from "../../../shared/ui";
+import {
+  Button,
+  Field,
+  Icon,
+  StateChip,
+  SurfacePanel,
+} from "../../../shared/ui";
 import {
   MAX_STORY_TITLE_CHARS,
   normalizeStoryTitle,
@@ -13,6 +19,7 @@ import {
 } from "../../library/validation/story-title";
 
 import { DeviceImportStatusSurface } from "./DeviceImportStatusSurface";
+import { getDeviceStoryCopyAvailability } from "../device-story-copy";
 import type { DeviceStoryDeleteStatus } from "../hooks/use-device-story-delete";
 import type { DeviceStoryImportStatus } from "../hooks/use-device-story-import";
 import type { SetDeviceStoryTitleStatus } from "../hooks/use-device-story-title";
@@ -26,6 +33,8 @@ const IDLE_TITLE_STATUS: SetDeviceStoryTitleStatus = { kind: "idle" };
 const IDLE_DELETE_STATUS: DeviceStoryDeleteStatus = { kind: "idle" };
 
 export interface DeviceStoryInspectorProps {
+  /** Another device operation may block mutations without changing this story's status. */
+  actionsDisabled?: boolean;
   /** The device story currently selected for inspection, or null when none
    *  is. When null the inspector renders nothing. */
   story: DeviceStoryDto | null;
@@ -91,6 +100,7 @@ export interface DeviceStoryInspectorProps {
  * alert failure with retry) — never a toast, never a modal.
  */
 export function DeviceStoryInspector({
+  actionsDisabled = false,
   story,
   supportedOperations,
   importState,
@@ -110,6 +120,7 @@ export function DeviceStoryInspector({
   const nameFieldId = useId();
   const nameReasonId = useId();
   const nameErrorId = useId();
+  const busyReasonId = useId();
 
   // Naming editor state (hooks must precede the early return). The draft is
   // reset whenever the inspected pack changes so one story's draft never
@@ -145,23 +156,17 @@ export function DeviceStoryInspector({
   }
 
   const status = importState ?? IDLE_IMPORT_STATUS;
-  const isImporting = status.kind === "importing";
-  // A just-succeeded copy keeps the CTA soft-disabled until the device
-  // re-read lands `alreadyImported=true`: in that window the snapshot
-  // still says `alreadyImported=false` and `inFlightRef` is already
-  // cleared, so a re-click would relaunch the copy and Rust would turn
-  // the success surface into an `already_imported` alert.
-  const isImported = status.kind === "imported";
-  const canImport =
-    supportedOperations?.importStory === true &&
-    story.contentPresent &&
-    !story.alreadyImported &&
-    onImport !== undefined;
-  const isSoftDisabled = !canImport || isImporting || isImported;
-  const refusalKind = canImport
-    ? null
-    : copyRefusalKind(supportedOperations, story);
-  const copyReason = refusalKind ? formatCopyReason(refusalKind) : null;
+  const {
+    enabled,
+    refusalKind,
+    reason: copyReason,
+    isImporting,
+  } = getDeviceStoryCopyAvailability({
+    story,
+    supportedOperations,
+    hasImportHandler: onImport !== undefined,
+    status,
+  });
   // The support-profile consultation only helps a PROFILE refusal (the V3
   // case: inspectable but not importable, or matrix absent → fail-closed).
   // `déjà dans ta bibliothèque` needs no copy, and `contenu incomplet`
@@ -185,7 +190,7 @@ export function DeviceStoryInspector({
   const hasBlockingFacts = !story.contentPresent || story.alreadyImported;
 
   const handleImportClick = (): void => {
-    if (isSoftDisabled) return;
+    if (!enabled || actionsDisabled) return;
     onImport?.(story);
   };
 
@@ -199,7 +204,7 @@ export function DeviceStoryInspector({
     supportedOperations?.deleteStory === true && onDelete !== undefined;
 
   const handleDeleteClick = (): void => {
-    if (!canDelete || isDeleting) return;
+    if (!canDelete || isDeleting || actionsDisabled) return;
     onDelete?.(story);
   };
 
@@ -220,9 +225,10 @@ export function DeviceStoryInspector({
   const nameError = nameStatus.kind === "failed" ? nameStatus.error : null;
   const namingOffered =
     onSetTitle !== undefined && (!recognized || story.titleSource === "user");
-  const canSaveName = nameIssue === null && !isSavingName;
+  const canSaveName = nameIssue === null && !isSavingName && !actionsDisabled;
 
   const handleStartNaming = (): void => {
+    if (actionsDisabled) return;
     // Clear any stale failure from a previous attempt on (re)open.
     if (nameError) onDismissTitleError?.();
     setNameDraft(story.title ?? "");
@@ -244,12 +250,15 @@ export function DeviceStoryInspector({
   };
 
   const handleSaveName = async (): Promise<void> => {
-    if (!onSetTitle || isSavingName) return;
+    if (!onSetTitle || isSavingName || actionsDisabled) return;
     // Don't submit a locally-invalid title: the inline reason is already
     // shown, and the client wrapper would otherwise reject a blank/oversize
     // value as an opaque UNKNOWN instead of the canonical reason.
     if (nameIssue !== null) return;
-    const committed = await onSetTitle(story.uuid, normalizeStoryTitle(nameDraft));
+    const committed = await onSetTitle(
+      story.uuid,
+      normalizeStoryTitle(nameDraft),
+    );
     if (committed) {
       setIsEditingName(false);
       setNameDraft("");
@@ -276,6 +285,11 @@ export function DeviceStoryInspector({
         <Icon name="book" />
         Histoire sélectionnée
       </h2>
+      {actionsDisabled && (
+        <p id={busyReasonId} className="device-inspector__reason">
+          Opération en cours…
+        </p>
+      )}
 
       <div className="device-inspector__provenance">
         <StateChip tone="info" label="Sur l'appareil" />
@@ -318,12 +332,13 @@ export function DeviceStoryInspector({
                 onChange={handleNameChange}
                 placeholder="Le soleil couchant…"
                 autoFocus
-                disabled={isSavingName}
+                disabled={isSavingName || actionsDisabled}
                 onKeyDown={handleNameKeyDown}
                 aria-describedby={
                   [
                     nameIssue !== null ? nameReasonId : null,
                     nameError !== null ? nameErrorId : null,
+                    actionsDisabled ? busyReasonId : null,
                   ]
                     .filter(Boolean)
                     .join(" ") || undefined
@@ -360,7 +375,11 @@ export function DeviceStoryInspector({
                   aria-disabled={!canSaveName || undefined}
                   aria-busy={isSavingName || undefined}
                   aria-describedby={
-                    nameIssue !== null ? nameReasonId : undefined
+                    actionsDisabled
+                      ? busyReasonId
+                      : nameIssue !== null
+                        ? nameReasonId
+                        : undefined
                   }
                   onClick={() => void handleSaveName()}
                 >
@@ -369,7 +388,12 @@ export function DeviceStoryInspector({
               </div>
             </>
           ) : (
-            <Button variant="secondary" onClick={handleStartNaming}>
+            <Button
+              variant="secondary"
+              onClick={handleStartNaming}
+              aria-disabled={actionsDisabled || undefined}
+              aria-describedby={actionsDisabled ? busyReasonId : undefined}
+            >
               {recognized ? "Renommer cette histoire" : "Nommer cette histoire"}
             </Button>
           )}
@@ -457,9 +481,11 @@ export function DeviceStoryInspector({
       ) : null}
 
       <Button
-        aria-disabled={isSoftDisabled || undefined}
+        aria-disabled={actionsDisabled || !enabled || undefined}
         aria-busy={isImporting || undefined}
-        aria-describedby={copyReason ? copyReasonId : undefined}
+        aria-describedby={
+          actionsDisabled ? busyReasonId : copyReason ? copyReasonId : undefined
+        }
         onClick={handleImportClick}
       >
         Copier dans ma bibliothèque
@@ -481,6 +507,8 @@ export function DeviceStoryInspector({
 
       <DeviceImportStatusSurface
         status={status}
+        actionsDisabled={actionsDisabled}
+        actionsDisabledReasonId={actionsDisabled ? busyReasonId : undefined}
         onRetry={() => onRetryImport?.()}
         onDismiss={() => onDismissImportStatus?.()}
         onConsultSupportProfile={onConsultSupportProfile}
@@ -491,7 +519,8 @@ export function DeviceStoryInspector({
           <Button
             variant="destructive"
             aria-busy={isDeleting || undefined}
-            aria-disabled={isDeleting || undefined}
+            aria-disabled={isDeleting || actionsDisabled || undefined}
+            aria-describedby={actionsDisabled ? busyReasonId : undefined}
             onClick={handleDeleteClick}
           >
             Supprimer de l'appareil
@@ -542,58 +571,4 @@ export function DeviceStoryInspector({
       ) : null}
     </SurfacePanel>
   );
-}
-
-/**
- * Discriminant of WHY a copy is refused, picked fail-closed in the
- * priority order locked by ui-states.md#Device Story Inspection Contract:
- * 1. a local copy already exists — the most useful fact: no copy needed;
- * 2. the profile does not POSITIVELY allow the copy (ops absent or
- *    `importStory !== true`, V3 included) — the GENUINE profile refusal;
- * 3. the payload folder is missing on the device;
- * 4. the profile DOES allow the copy but the route wired no `onImport`
- *    (listing / inspection-only context) — fail-closed, surfaced with the
- *    same `profil non supporté` copy, but NOT a real profile refusal.
- *
- * Kept separate from the user-facing label so the support-profile
- * affordance branches on the GENUINE refusal (`unsupportedProfile`)
- * only — never on `handlerUnavailable`, where the profile is fine and a
- * support consultation would be misleading.
- */
-type CopyRefusalKind =
-  | "alreadyImported"
-  | "unsupportedProfile"
-  | "incompleteContent"
-  | "handlerUnavailable";
-
-function copyRefusalKind(
-  ops: SupportedOperationsDto | undefined,
-  story: DeviceStoryDto,
-): CopyRefusalKind {
-  if (story.alreadyImported) {
-    return "alreadyImported";
-  }
-  if (ops?.importStory !== true) {
-    return "unsupportedProfile";
-  }
-  if (!story.contentPresent) {
-    return "incompleteContent";
-  }
-  return "handlerUnavailable";
-}
-
-/** Canonical, closed-set disabled reason copy (never invented at the call
- *  site — see ui-states.md#Disabled Actions and Reasons). The
- *  `handlerUnavailable` fallback keeps the fail-closed `profil non
- *  supporté` wording (the route's gate is simply not engaged). */
-function formatCopyReason(kind: CopyRefusalKind): string {
-  switch (kind) {
-    case "alreadyImported":
-      return "Copie indisponible: déjà dans ta bibliothèque";
-    case "incompleteContent":
-      return "Copie indisponible: contenu incomplet sur l'appareil";
-    case "unsupportedProfile":
-    case "handlerUnavailable":
-      return "Copie indisponible: profil non supporté";
-  }
 }

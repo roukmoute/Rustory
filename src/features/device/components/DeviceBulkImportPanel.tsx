@@ -1,13 +1,20 @@
 import type React from "react";
 import { useId } from "react";
 
-import { Button, Icon, ProgressIndicator, StateChip, SurfacePanel } from "../../../shared/ui";
+import {
+  Button,
+  Icon,
+  ProgressIndicator,
+  StateChip,
+  SurfacePanel,
+} from "../../../shared/ui";
 import type { DeviceStoryDto } from "../../../shared/ipc-contracts/device-library";
 import type { DeviceBulkImportStatus } from "../hooks/use-device-bulk-import";
 
 import "./DeviceBulkImportPanel.css";
 
 export interface DeviceBulkImportPanelProps {
+  actionsDisabled?: boolean;
   /** The device stories currently multi-selected (2 or more). */
   stories: DeviceStoryDto[];
   /** Whether the connected device's profile positively allows importing —
@@ -37,6 +44,7 @@ export interface DeviceBulkImportPanelProps {
  * dropped, so the tally always adds up for the user.
  */
 export function DeviceBulkImportPanel({
+  actionsDisabled = false,
   stories,
   canImport,
   status,
@@ -46,6 +54,7 @@ export function DeviceBulkImportPanel({
   onConsultSupportProfile,
 }: DeviceBulkImportPanelProps): React.JSX.Element {
   const titleId = useId();
+  const busyReasonId = useId();
 
   const importable = canImport
     ? stories.filter((s) => s.contentPresent && !s.alreadyImported)
@@ -57,7 +66,7 @@ export function DeviceBulkImportPanel({
   const total = stories.length;
 
   const handleImport = (): void => {
-    if (importable.length === 0 || running) return;
+    if (importable.length === 0 || running || actionsDisabled) return;
     onImport(importable.map((s) => s.uuid));
   };
 
@@ -156,10 +165,17 @@ export function DeviceBulkImportPanel({
 
       {!running && status.kind !== "done" ? (
         <div className="device-bulk__actions">
+          {actionsDisabled && (
+            <p id={busyReasonId} className="device-bulk__note">
+              Opération en cours…
+            </p>
+          )}
           <Button
             variant="primary"
             onClick={handleImport}
             disabled={importable.length === 0}
+            aria-disabled={actionsDisabled || undefined}
+            aria-describedby={actionsDisabled ? busyReasonId : undefined}
           >
             {importable.length > 1
               ? `Importer les ${importable.length} histoires`

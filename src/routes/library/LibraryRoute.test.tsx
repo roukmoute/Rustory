@@ -314,7 +314,10 @@ import type { ConnectedDeviceDto } from "../../shared/ipc-contracts/device";
 import type { OnboardingPreferences } from "../../shared/ipc-contracts/onboarding";
 import type { SendBlocker } from "../../shared/ipc-contracts/library";
 import { useDropShell } from "../../shell/state/drop-shell-store";
-import { useDraftsShell, useLibraryShell } from "../../shell/state/library-shell-store";
+import {
+  useDraftsShell,
+  useLibraryShell,
+} from "../../shell/state/library-shell-store";
 import { useOsOpenShell } from "../../shell/state/os-open-shell-store";
 import { useUpdateShell } from "../../shell/state/update-shell-store";
 import { CollectionScreenRoute } from "./CollectionScreenRoute";
@@ -332,19 +335,32 @@ const STORY_EDIT_MARKER_TITLE = "Edit stub for";
 function renderLibrary(
   options: {
     strict?: boolean;
-    collapsed?: boolean;
-    initialScreen?: "library" | "device" | "drafts" | "welcome" | "welcome/device";
+    initialScreen?:
+      | "library"
+      | "device"
+      | "drafts"
+      | "welcome"
+      | "welcome/device";
   } = {},
 ) {
   const routes: RouteObject[] = [
     {
       element: <LibraryRoute />,
       children: [
-        { path: "/library", element: <CollectionScreenRoute screen="library" /> },
+        {
+          path: "/library",
+          element: <CollectionScreenRoute screen="library" />,
+        },
         { path: "/device", element: <CollectionScreenRoute screen="device" /> },
         { path: "/drafts", element: <CollectionScreenRoute screen="drafts" /> },
-        { path: "/welcome", element: <CollectionScreenRoute screen="welcome" /> },
-        { path: "/welcome/device", element: <CollectionScreenRoute screen="discovery" /> },
+        {
+          path: "/welcome",
+          element: <CollectionScreenRoute screen="welcome" />,
+        },
+        {
+          path: "/welcome/device",
+          element: <CollectionScreenRoute screen="discovery" />,
+        },
       ],
     },
     {
@@ -362,17 +378,28 @@ function renderLibrary(
   });
   const tree = <RouterProvider router={router} />;
   render(options.strict ? <StrictMode>{tree}</StrictMode> : tree);
-  // Most scenarios exercise device/transfer actions. Open their real disclosure
-  // explicitly; dedicated tests below cover the initial collapsed layout.
-  if (!options.collapsed && !options.initialScreen?.startsWith("welcome")) {
-    const trigger = screen.getByRole("button", {
-      name: "Afficher le panneau de l'appareil",
-    });
-    if (trigger.getAttribute("aria-expanded") === "false") {
-      fireEvent.click(trigger);
-    }
-  }
   return router;
+}
+
+function openDetails() {
+  const existing = screen.queryByRole("dialog", {
+    name: "Détails de la sélection",
+  });
+  if (existing) return existing;
+  fireEvent.click(
+    screen.getByRole("button", { name: "Détails de l'appareil" }),
+  );
+  return screen.getByRole("dialog", { name: "Détails de la sélection" });
+}
+
+function closeDetails() {
+  const details = screen.queryByRole("dialog", {
+    name: "Détails de la sélection",
+  });
+  if (details)
+    fireEvent.click(
+      within(details).getByRole("button", { name: "Fermer les détails" }),
+    );
 }
 
 /** Follow the guided dialog from either the toolbar choice or an empty-card
@@ -381,22 +408,27 @@ async function selectCreationStep(
   user: Pick<ReturnType<typeof userEvent.setup>, "click">,
   step: "title" | "import",
 ) {
-  const target = step === "title"
-    ? "Comment s'appelle ton histoire ?"
-    : "Comment veux-tu importer ?";
+  const target =
+    step === "title"
+      ? "Comment s'appelle ton histoire ?"
+      : "Comment veux-tu importer ?";
   let dialog = screen.getByRole("dialog");
   if (within(dialog).queryByRole("heading", { name: target })) return dialog;
   if (!within(dialog).queryByRole("button", { name: "Écrire une histoire" })) {
     await user.click(within(dialog).getByRole("button", { name: "Retour" }));
     dialog = screen.getByRole("dialog", { name: "Que veux-tu faire ?" });
   }
-  await user.click(within(dialog).getByRole("button", {
-    name: step === "title" ? "Écrire une histoire" : "Importer",
-  }));
+  await user.click(
+    within(dialog).getByRole("button", {
+      name: step === "title" ? "Écrire une histoire" : "Importer",
+    }),
+  );
   return screen.findByRole("dialog", { name: target });
 }
 
-async function cancelCreation(user: Pick<ReturnType<typeof userEvent.setup>, "click">) {
+async function cancelCreation(
+  user: Pick<ReturnType<typeof userEvent.setup>, "click">,
+) {
   let dialog = screen.getByRole("dialog");
   if (!within(dialog).queryByRole("button", { name: "Annuler" })) {
     await user.click(within(dialog).getByRole("button", { name: "Retour" }));
@@ -552,104 +584,125 @@ describe("<LibraryRoute />", () => {
     useUpdateShell.setState({ availability: null });
   });
 
-  it("marks a local selection immediately but waits 500 ms before resizing the collection", async () => {
-    mockGet.mockResolvedValue({ stories: [{ id: "s1", title: "Le jardin des étoiles" }] });
-    renderLibrary({ collapsed: true });
-    const story = await screen.findByRole("button", { name: "Le jardin des étoiles" });
-    expect(screen.queryByRole("complementary", { name: "Panneau de décision" })).not.toBeInTheDocument();
-    vi.useFakeTimers();
-    try {
-      fireEvent.click(story);
-      expect(story).toHaveAttribute("aria-pressed", "true");
-      act(() => vi.advanceTimersByTime(499));
-      expect(screen.queryByRole("complementary", { name: "Panneau de décision" })).not.toBeInTheDocument();
-      act(() => vi.advanceTimersByTime(1));
-      expect(screen.getByRole("complementary", { name: "Panneau de décision" })).toBeInTheDocument();
-      fireEvent.click(screen.getByRole("button", { name: "Fermer le panneau de l'appareil" }));
-      expect(screen.getByRole("button", { name: "Afficher le panneau de l'appareil" })).toHaveFocus();
-      expect(story).toHaveAttribute("aria-pressed", "true");
-    } finally {
-      vi.useRealTimers();
-    }
+  it("shows local selection actions immediately without opening details or replacing the collection", async () => {
+    mockGet.mockResolvedValue({
+      stories: [{ id: "s1", title: "Le jardin des étoiles" }],
+    });
+    renderLibrary();
+    const story = await screen.findByRole("button", {
+      name: "Le jardin des étoiles",
+    });
+    const main = screen.getByRole("main", { name: "Collection d'histoires" });
+    expect(
+      screen.queryByRole("region", { name: "Actions pour la sélection" }),
+    ).not.toBeInTheDocument();
+
+    fireEvent.click(story);
+
+    expect(story).toHaveAttribute("aria-pressed", "true");
+    const actions = screen.getByRole("region", {
+      name: "Actions pour la sélection",
+    });
+    expect(
+      within(actions).getByRole("button", { name: "Ajouter à la Lunii" }),
+    ).toBeInTheDocument();
+    expect(
+      within(actions).getByRole("button", { name: "Détails" }),
+    ).toBeInTheDocument();
+    expect(
+      within(main).getByRole("button", { name: "Le jardin des étoiles" }),
+    ).toBe(story);
+    expect(screen.queryByRole("complementary")).not.toBeInTheDocument();
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });
 
-  it("cancels a pending reveal on deselection and restarts it for a different local story", async () => {
-    mockGet.mockResolvedValue({ stories: [{ id: "s1", title: "Le jardin" }, { id: "s2", title: "La lune" }] });
+  it("clears selection from the bottom bar while preserving the collection and its query", async () => {
+    const user = userEvent.setup();
+    mockGet.mockResolvedValue({
+      stories: [
+        { id: "s1", title: "Le jardin" },
+        { id: "s2", title: "La lune" },
+      ],
+    });
     mockDevice.mockResolvedValue({ kind: "none" });
-    renderLibrary({ collapsed: true });
+    renderLibrary();
     const first = await screen.findByRole("button", { name: "Le jardin" });
-    const second = screen.getByRole("button", { name: "La lune" });
-    vi.useFakeTimers();
-    try {
-      fireEvent.click(first);
-      act(() => vi.advanceTimersByTime(250));
-      fireEvent.click(first);
-      act(() => vi.advanceTimersByTime(500));
-      expect(first).toHaveAttribute("aria-pressed", "false");
-      expect(screen.queryByRole("complementary", { name: "Panneau de décision" })).not.toBeInTheDocument();
-      fireEvent.click(first);
-      act(() => vi.advanceTimersByTime(250));
-      fireEvent.click(second);
-      act(() => vi.advanceTimersByTime(250));
-      expect(screen.queryByRole("complementary", { name: "Panneau de décision" })).not.toBeInTheDocument();
-      act(() => vi.advanceTimersByTime(250));
-      expect(screen.getByRole("complementary", { name: "Panneau de décision" })).toBeInTheDocument();
-    } finally {
-      cleanup();
-      vi.useRealTimers();
-    }
+    fireEvent.click(first);
+    fireEvent.click(first);
+    expect(first).toHaveAttribute("aria-pressed", "false");
+    expect(
+      screen.queryByRole("region", { name: "Actions pour la sélection" }),
+    ).not.toBeInTheDocument();
+    fireEvent.click(first);
+    await user.type(screen.getByRole("searchbox"), "jardin");
+    fireEvent.click(
+      screen.getByRole("button", { name: "Effacer la sélection" }),
+    );
+
+    expect(first).toHaveAttribute("aria-pressed", "false");
+    expect(screen.getByRole("searchbox")).toHaveValue("jardin");
+    expect(screen.getByRole("button", { name: "Le jardin" })).toBe(first);
+    expect(
+      screen.queryByRole("button", { name: "La lune" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("region", { name: "Actions pour la sélection" }),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });
 
-  it("cancels the pending reveal when a double-click opens the editor", async () => {
+  it("opens the editor on double-click without opening selection details", async () => {
     mockGet.mockResolvedValue({ stories: [{ id: "s1", title: "Le jardin" }] });
     mockDevice.mockResolvedValue({ kind: "none" });
-    const router = renderLibrary({ collapsed: true });
+    const router = renderLibrary();
     const story = await screen.findByRole("button", { name: "Le jardin" });
-    vi.useFakeTimers();
-    try {
-      const before = vi.getTimerCount();
-      fireEvent.click(story);
-      expect(vi.getTimerCount()).toBe(before + 1);
-      act(() => vi.advanceTimersByTime(100));
-      expect(screen.queryByRole("complementary", { name: "Panneau de décision" })).not.toBeInTheDocument();
-      fireEvent.doubleClick(story);
-      expect(router.state.location.pathname).toBe("/story/s1/edit");
-      expect(screen.getByTestId("story-edit-stub")).toBeInTheDocument();
-      expect(vi.getTimerCount()).toBe(before);
-    } finally {
-      cleanup();
-      vi.useRealTimers();
-    }
+    fireEvent.click(story);
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    fireEvent.doubleClick(story);
+    expect(router.state.location.pathname).toBe("/story/s1/edit");
+    expect(screen.getByTestId("story-edit-stub")).toBeInTheDocument();
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });
 
-  it("does not reopen a manually closed panel when the selection delay expires", async () => {
+  it("opens details explicitly and preserves the selection and collection when they close", async () => {
     mockGet.mockResolvedValue({ stories: [{ id: "s1", title: "Le jardin" }] });
     mockDevice.mockResolvedValue({ kind: "none" });
-    renderLibrary({ collapsed: true });
+    renderLibrary();
     const story = await screen.findByRole("button", { name: "Le jardin" });
-    vi.useFakeTimers();
-    try {
-      fireEvent.click(story);
-      const disclosure = screen.getByRole("button", { name: "Afficher le panneau de l'appareil" });
-      fireEvent.click(disclosure);
-      expect(screen.getByRole("complementary", { name: "Panneau de décision" })).toBeInTheDocument();
-      fireEvent.click(disclosure);
-      act(() => vi.advanceTimersByTime(500));
-      expect(screen.queryByRole("complementary", { name: "Panneau de décision" })).not.toBeInTheDocument();
-    } finally {
-      cleanup();
-      vi.useRealTimers();
-    }
+    fireEvent.click(story);
+    const actions = screen.getByRole("region", {
+      name: "Actions pour la sélection",
+    });
+    fireEvent.click(within(actions).getByRole("button", { name: "Détails" }));
+    expect(
+      screen.getByRole("dialog", { name: "Détails de la sélection" }),
+    ).toBeInTheDocument();
+    closeDetails();
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(screen.queryByRole("complementary")).not.toBeInTheDocument();
+    expect(story).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByRole("button", { name: "Le jardin" })).toBe(story);
+    expect(
+      screen.getByRole("region", { name: "Actions pour la sélection" }),
+    ).toBe(actions);
   });
 
   it("opens the device actions on request even with an empty offline library", async () => {
     mockGet.mockResolvedValue({ stories: [] });
     mockDevice.mockResolvedValue({ kind: "none" });
-    renderLibrary({ collapsed: true });
-    await screen.findByRole("heading", { name: "Par quoi veux-tu commencer ?" });
-    fireEvent.click(screen.getByRole("button", { name: "Afficher le panneau de l'appareil" }));
-    expect(screen.getByRole("complementary", { name: "Panneau de décision" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Réessayer la détection de l'appareil" })).toBeInTheDocument();
+    renderLibrary();
+    await screen.findByRole("heading", {
+      name: "Par quoi veux-tu commencer ?",
+    });
+    expect(
+      screen.queryByRole("region", { name: "Actions pour la sélection" }),
+    ).not.toBeInTheDocument();
+    const details = openDetails();
+    expect(
+      within(details).getByRole("button", {
+        name: "Réessayer la détection de l'appareil",
+      }),
+    ).toBeInTheDocument();
   });
 
   it("shows the loading state before the IPC call resolves", () => {
@@ -802,7 +855,7 @@ describe("<LibraryRoute />", () => {
     expect(alert).toHaveTextContent(/mis trop de temps/i);
   });
 
-  it("renders three columns with semantic regions (nav/main/aside)", async () => {
+  it("renders navigation and collection landmarks without an aside or automatic dialog", async () => {
     mockGet.mockResolvedValueOnce({ stories: [] });
     renderLibrary();
     await screen.findByRole("heading", { name: /par quoi veux-tu commencer/i });
@@ -813,9 +866,8 @@ describe("<LibraryRoute />", () => {
     expect(
       screen.getByRole("main", { name: /collection d'histoires/i }),
     ).toBeInTheDocument();
-    expect(
-      screen.getByRole("complementary", { name: /panneau de décision/i }),
-    ).toBeInTheDocument();
+    expect(screen.queryByRole("complementary")).not.toBeInTheDocument();
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });
 
   it("anchors the empty state in the center column, never in the nav or the panel", async () => {
@@ -847,9 +899,7 @@ describe("<LibraryRoute />", () => {
     renderLibrary();
     await screen.findByRole("heading", { name: /par quoi veux-tu commencer/i });
 
-    const panel = screen.getByRole("complementary", {
-      name: /panneau de décision/i,
-    });
+    const panel = openDetails();
     await waitFor(() =>
       expect(
         within(panel).getAllByText(/aucun appareil connecté/i).length,
@@ -857,7 +907,7 @@ describe("<LibraryRoute />", () => {
     );
   });
 
-  it("preserves the 3-column layout when an error is surfaced — not a bare error screen", async () => {
+  it("preserves navigation and collection when an error is surfaced", async () => {
     mockGet.mockRejectedValueOnce({
       code: "LOCAL_STORAGE_UNAVAILABLE",
       message: "Le stockage local est inaccessible.",
@@ -870,9 +920,8 @@ describe("<LibraryRoute />", () => {
     expect(
       screen.getByRole("navigation", { name: /navigation bibliothèque/i }),
     ).toBeInTheDocument();
-    expect(
-      screen.getByRole("complementary", { name: /panneau de décision/i }),
-    ).toBeInTheDocument();
+    expect(screen.queryByRole("complementary")).not.toBeInTheDocument();
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
     const main = screen.getByRole("main", {
       name: /collection d'histoires/i,
     });
@@ -895,9 +944,7 @@ describe("<LibraryRoute />", () => {
     await user.click(card);
 
     expect(card).toHaveAttribute("aria-pressed", "true");
-    const panel = screen.getByRole("complementary", {
-      name: /panneau de décision/i,
-    });
+    const panel = openDetails();
     expect(
       within(panel).getByText(/^1 histoire sélectionnée$/i),
     ).toBeInTheDocument();
@@ -965,10 +1012,10 @@ describe("<LibraryRoute />", () => {
     mockDeleteStories.mockResolvedValueOnce({ deletedIds: ["s1"] });
     renderLibrary();
 
-    await user.click(await screen.findByRole("button", { name: /à supprimer/i }));
-    const panel = screen.getByRole("complementary", {
-      name: /panneau de décision/i,
-    });
+    await user.click(
+      await screen.findByRole("button", { name: /à supprimer/i }),
+    );
+    const panel = openDetails();
     await user.click(
       within(panel).getByRole("button", { name: /^supprimer$/i }),
     );
@@ -1003,10 +1050,10 @@ describe("<LibraryRoute />", () => {
     });
     renderLibrary();
 
-    await user.click(await screen.findByRole("button", { name: /increvable/i }));
-    const panel = screen.getByRole("complementary", {
-      name: /panneau de décision/i,
-    });
+    await user.click(
+      await screen.findByRole("button", { name: /increvable/i }),
+    );
+    const panel = openDetails();
     await user.click(
       within(panel).getByRole("button", { name: /^supprimer$/i }),
     );
@@ -1014,14 +1061,15 @@ describe("<LibraryRoute />", () => {
       within(panel).getByRole("button", { name: /confirmer la suppression/i }),
     );
 
-    expect(
-      await within(panel).findByRole("alert"),
-    ).toHaveTextContent(/n'a pas pu supprimer la sélection/i);
+    expect(await within(panel).findByRole("alert")).toHaveTextContent(
+      /n'a pas pu supprimer la sélection/i,
+    );
     // All-or-nothing: the card is still there, still selected — the user
     // can retry the same confirmed intent.
-    expect(
-      screen.getByRole("button", { name: /increvable/i }),
-    ).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByRole("button", { name: /increvable/i })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
   });
 
   it("creates a story from a structured archive: dialog entry → review → accept → fresh card", async () => {
@@ -1065,9 +1113,7 @@ describe("<LibraryRoute />", () => {
     );
 
     // The review surface renders the archive identity + the summary.
-    expect(
-      await screen.findByText("Le pack du soir.zip"),
-    ).toBeInTheDocument();
+    expect(await screen.findByText("Le pack du soir.zip")).toBeInTheDocument();
     expect(screen.getByText(/médias écartés : fond\.bmp/i)).toBeInTheDocument();
 
     await user.click(
@@ -1185,9 +1231,7 @@ describe("<LibraryRoute />", () => {
     await user.click(screen.getByRole("button", { name: /la lune/i }));
     await user.keyboard("{/Control}");
 
-    const panel = screen.getByRole("complementary", {
-      name: /panneau de décision/i,
-    });
+    const panel = openDetails();
     expect(
       within(panel).getByText(/^2 histoires sélectionnées$/i),
     ).toBeInTheDocument();
@@ -1270,9 +1314,7 @@ describe("<LibraryRoute />", () => {
 
     await user.click(await screen.findByRole("button", { name: /le soleil/i }));
 
-    const panel = screen.getByRole("complementary", {
-      name: /panneau de décision/i,
-    });
+    const panel = openDetails();
     await user.click(within(panel).getByRole("button", { name: /^éditer$/i }));
 
     await waitFor(() =>
@@ -1292,9 +1334,7 @@ describe("<LibraryRoute />", () => {
 
     await screen.findByRole("button", { name: /le soleil/i });
 
-    const panel = screen.getByRole("complementary", {
-      name: /panneau de décision/i,
-    });
+    const panel = openDetails();
     // The chip reflects "0" selection for this render — ghost is filtered.
     const region = within(panel).getByRole("region", {
       name: /sélection courante/i,
@@ -1377,11 +1417,11 @@ describe("<LibraryRoute />", () => {
     const headerCta = screen.getByRole("button", {
       name: /créer une histoire/i,
     });
-    expect(
-      screen.queryByRole("dialog"),
-    ).not.toBeInTheDocument();
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
     await user.click(headerCta);
-    expect(screen.getByRole("dialog", { name: "Que veux-tu faire ?" })).toBeInTheDocument();
+    expect(
+      screen.getByRole("dialog", { name: "Que veux-tu faire ?" }),
+    ).toBeInTheDocument();
     const dialog = await selectCreationStep(user, "title");
     expect(within(dialog).getByLabelText(/^titre$/i)).toBeInTheDocument();
   });
@@ -1413,9 +1453,7 @@ describe("<LibraryRoute />", () => {
     // No second native dialog may open: the folder analysis is never
     // started and the creation dialog stays where the user left it.
     expect(mockAnalyzeFolder).not.toHaveBeenCalled();
-    expect(
-      screen.getByRole("dialog"),
-    ).toBeInTheDocument();
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
   });
 
   it("keeps the collection's import CTA inert while an RSS fetch is in flight (cross-flow exclusivity)", async () => {
@@ -1482,9 +1520,7 @@ describe("<LibraryRoute />", () => {
       screen.getByLabelText("Adresse de la page web"),
       WEB_PAGE_URL,
     );
-    await user.click(
-      screen.getByRole("button", { name: "Récupérer la page" }),
-    );
+    await user.click(screen.getByRole("button", { name: "Récupérer la page" }));
     expect(mockFetchWebPreview).toHaveBeenCalledTimes(1);
 
     const importButton = screen.getByRole("button", {
@@ -1557,25 +1593,19 @@ describe("<LibraryRoute />", () => {
         name: "Démarrer depuis une page web",
       }),
     );
-    expect(
-      screen.getByLabelText("Adresse de la page web"),
-    ).toBeInTheDocument();
+    expect(screen.getByLabelText("Adresse de la page web")).toBeInTheDocument();
     await user.type(
       screen.getByLabelText("Adresse de la page web"),
       WEB_PAGE_URL,
     );
-    await user.click(
-      screen.getByRole("button", { name: "Récupérer la page" }),
-    );
+    await user.click(screen.getByRole("button", { name: "Récupérer la page" }));
     expect(mockFetchWebPreview).toHaveBeenCalledWith(WEB_PAGE_URL);
     // The review lists every previewed episode, in page order.
     expect(await screen.findByText("Épisode 1")).toBeInTheDocument();
     expect(screen.getByText("Épisode 2")).toBeInTheDocument();
     // The single CTA commits the FULL page at its reviewed checksum —
     // never a single-episode selection.
-    await user.click(
-      screen.getByRole("button", { name: "Créer l'histoire" }),
-    );
+    await user.click(screen.getByRole("button", { name: "Créer l'histoire" }));
     expect(mockAcceptWebCreation).toHaveBeenCalledWith(
       WEB_PAGE_URL,
       WEB_PREVIEW_FIXTURE.pageChecksum,
@@ -1606,9 +1636,7 @@ describe("<LibraryRoute />", () => {
         name: "Démarrer depuis une page web",
       }),
     );
-    expect(
-      screen.getByLabelText("Adresse de la page web"),
-    ).toBeInTheDocument();
+    expect(screen.getByLabelText("Adresse de la page web")).toBeInTheDocument();
 
     // Re-open the creation dialog: every secondary entry is inert while
     // the web surface is open — two review surfaces must never stack.
@@ -1924,9 +1952,7 @@ describe("<LibraryRoute />", () => {
     // The dialog closes and the in-context report surfaces (no navigation,
     // no toast) with the unique accept CTA.
     await waitFor(() =>
-      expect(
-        screen.queryByRole("dialog"),
-      ).not.toBeInTheDocument(),
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
     );
     const surface = await screen.findByRole("region", {
       name: "Création depuis un dossier",
@@ -2000,9 +2026,7 @@ describe("<LibraryRoute />", () => {
     mockGet.mockResolvedValueOnce({ stories: [] });
     mockDevice.mockResolvedValueOnce({ kind: "none" });
     renderLibrary();
-    const panel = screen.getByRole("complementary", {
-      name: /panneau de décision/i,
-    });
+    const panel = openDetails();
     await waitFor(() =>
       expect(
         within(panel).getAllByText(/aucun appareil connecté/i).length,
@@ -2029,9 +2053,7 @@ describe("<LibraryRoute />", () => {
       },
     });
     renderLibrary();
-    const panel = screen.getByRole("complementary", {
-      name: /panneau de décision/i,
-    });
+    const panel = openDetails();
     await waitFor(() =>
       expect(
         within(panel).getByText(/appareil prêt — lunii origine/i),
@@ -2047,9 +2069,7 @@ describe("<LibraryRoute />", () => {
       firmwareHint: "metadata_v99",
     });
     renderLibrary();
-    const panel = screen.getByRole("complementary", {
-      name: /panneau de décision/i,
-    });
+    const panel = openDetails();
     await waitFor(() =>
       expect(
         within(panel).getByText(/format métadonnées v99 non géré/i),
@@ -2065,7 +2085,9 @@ describe("<LibraryRoute />", () => {
     });
     const user = userEvent.setup();
     await user.click(
-      within(nav).getByRole("button", { name: "Aide et réglages — Profil de support" }),
+      within(nav).getByRole("button", {
+        name: "Aide et réglages — Profil de support",
+      }),
     );
     await waitFor(() => {
       expect(screen.getByTestId("settings-stub")).toBeInTheDocument();
@@ -2112,11 +2134,14 @@ describe("<LibraryRoute />", () => {
         name: "Consulter les détails de la mise à jour",
       }),
     ).toBeInTheDocument();
-    const banner = within(main).getByText("Nouvelle version disponible : 9.9.9.")
+    const banner = within(main)
+      .getByText("Nouvelle version disponible : 9.9.9.")
       .closest(".update-availability-signal");
     expect(banner).not.toBeNull();
     // The prominent banner shows the full notice, not just the headline chip.
-    expect(within(main).getByText(/Récupère la nouvelle version/)).toBeInTheDocument();
+    expect(
+      within(main).getByText(/Récupère la nouvelle version/),
+    ).toBeInTheDocument();
     // It is NOT an alarm-toned alert — a calm info banner.
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
     // And it is no longer in the navigation column.
@@ -2160,9 +2185,7 @@ describe("<LibraryRoute />", () => {
       firmwareHint: "metadata_v99",
     });
     renderLibrary();
-    const panel = screen.getByRole("complementary", {
-      name: /panneau de décision/i,
-    });
+    const panel = openDetails();
     const user = userEvent.setup();
     await waitFor(() =>
       expect(
@@ -2190,9 +2213,7 @@ describe("<LibraryRoute />", () => {
       details: { source: "fs_read", kind: "permission_denied" },
     });
     renderLibrary();
-    const panel = screen.getByRole("complementary", {
-      name: /panneau de décision/i,
-    });
+    const panel = openDetails();
     await waitFor(() =>
       expect(
         within(panel).getByText(/détection indisponible/i),
@@ -2214,9 +2235,7 @@ describe("<LibraryRoute />", () => {
     // The library card must render even when the device probe failed.
     await screen.findByRole("button", { name: /le soleil/i });
     // And the panel surfaces the device error state in parallel.
-    const panel = screen.getByRole("complementary", {
-      name: /panneau de décision/i,
-    });
+    const panel = openDetails();
     expect(
       within(panel).getByText(/détection indisponible/i),
     ).toBeInTheDocument();
@@ -2232,9 +2251,7 @@ describe("<LibraryRoute />", () => {
     mockDevice.mockResolvedValueOnce({ kind: "none" });
     renderLibrary();
     await screen.findByRole("alert");
-    const panel = screen.getByRole("complementary", {
-      name: /panneau de décision/i,
-    });
+    const panel = openDetails();
     await waitFor(() =>
       expect(
         within(panel).getAllByText(/aucun appareil connecté/i).length,
@@ -2262,9 +2279,7 @@ describe("<LibraryRoute />", () => {
       },
     });
     renderLibrary();
-    const panel = screen.getByRole("complementary", {
-      name: /panneau de décision/i,
-    });
+    const panel = openDetails();
     await waitFor(() =>
       expect(
         within(panel).getAllByText(/aucun appareil connecté/i).length,
@@ -2288,9 +2303,7 @@ describe("<LibraryRoute />", () => {
     mockGet.mockResolvedValueOnce({ stories: [] });
     mockDevice.mockResolvedValueOnce({ kind: "ambiguous", candidateCount: 2 });
     renderLibrary();
-    const panel = screen.getByRole("complementary", {
-      name: /panneau de décision/i,
-    });
+    const panel = openDetails();
     await waitFor(() =>
       expect(
         within(panel).getAllByText(/profil ambigu/i).length,
@@ -2354,7 +2367,9 @@ describe("<LibraryRoute />", () => {
       screen.queryByRole("button", { name: /le soleil/i }),
     ).not.toBeInTheDocument();
 
-    const main = screen.getByRole("main", { name: /histoires sur l'appareil/i });
+    const main = screen.getByRole("main", {
+      name: /histoires sur l'appareil/i,
+    });
     const deviceRegion = await within(main).findByRole("region", {
       name: /bibliothèque de l'appareil/i,
     });
@@ -2407,7 +2422,9 @@ describe("<LibraryRoute />", () => {
     renderLibrary({ initialScreen: "device" });
 
     // The device-library section lights up exactly like a Lunii one.
-    const main = screen.getByRole("main", { name: /histoires sur l'appareil/i });
+    const main = screen.getByRole("main", {
+      name: /histoires sur l'appareil/i,
+    });
     // The enclosing screen names the detected family beside its inventory.
     expect(await within(main).findByText("FLAM")).toBeInTheDocument();
     const deviceRegion = await within(main).findByRole("region", {
@@ -2428,7 +2445,11 @@ describe("<LibraryRoute />", () => {
     mockDeviceLibrary.mockResolvedValue({
       ...readableTwo,
       stories: [
-        { ...readableTwo.stories[0], alreadyImported: true, localStoryId: "s1" },
+        {
+          ...readableTwo.stories[0],
+          alreadyImported: true,
+          localStoryId: "s1",
+        },
         readableTwo.stories[1],
       ],
     });
@@ -2437,9 +2458,13 @@ describe("<LibraryRoute />", () => {
       name: /collection d'histoires/i,
     });
     expect(
-      await within(main).findByRole("button", { name: "Le soleil, Sur la Lunii" }),
+      await within(main).findByRole("button", {
+        name: "Le soleil, Sur la Lunii",
+      }),
     ).toBeInTheDocument();
-    expect(within(main).getByRole("button", { name: "La lune" })).toBeInTheDocument();
+    expect(
+      within(main).getByRole("button", { name: "La lune" }),
+    ).toBeInTheDocument();
     expect(within(main).getAllByText("Sur la Lunii")).toHaveLength(1);
 
     // A FLAM names the stamp after the family-neutral device.
@@ -2475,7 +2500,9 @@ describe("<LibraryRoute />", () => {
       name: /collection d'histoires/i,
     });
     expect(
-      await within(main2).findByRole("button", { name: "La lune, Sur l'appareil" }),
+      await within(main2).findByRole("button", {
+        name: "La lune, Sur l'appareil",
+      }),
     ).toBeInTheDocument();
   });
 
@@ -2500,7 +2527,9 @@ describe("<LibraryRoute />", () => {
       screen.queryByRole("button", { name: /le soleil/i }),
     ).not.toBeInTheDocument();
     // The device-library failure is surfaced on its own screen.
-    const main = screen.getByRole("main", { name: /histoires sur l'appareil/i });
+    const main = screen.getByRole("main", {
+      name: /histoires sur l'appareil/i,
+    });
     const alert = await within(main).findByRole("alert");
     expect(alert).toHaveTextContent(/bibliothèque de l'appareil indisponible/i);
     expect(
@@ -2544,7 +2573,9 @@ describe("<LibraryRoute />", () => {
   it.each(["library", "device"] as const)(
     "opens /%s directly with only the matching collection and navigation entry active",
     async (initialScreen) => {
-      mockGet.mockResolvedValue({ stories: [{ id: "s1", title: "Le soleil" }] });
+      mockGet.mockResolvedValue({
+        stories: [{ id: "s1", title: "Le soleil" }],
+      });
       mockDevice.mockResolvedValue(supportedV3);
       mockDeviceLibrary.mockResolvedValue(readableTwo);
       const router = renderLibrary({ initialScreen });
@@ -2612,7 +2643,9 @@ describe("<LibraryRoute />", () => {
       screen.getByRole("combobox", { name: "Trier par" }),
       "titre-desc",
     );
-    await user.click(screen.getByRole("button", { name: "Affichage en liste" }));
+    await user.click(
+      screen.getByRole("button", { name: "Affichage en liste" }),
+    );
     await user.click(screen.getByRole("link", { name: "Sur l'appareil" }));
     await user.click(
       await screen.findByRole("button", { name: /identifiant 0000abcd/i }),
@@ -2642,7 +2675,8 @@ describe("<LibraryRoute />", () => {
       screen.queryByRole("button", { name: "La lune" }),
     ).not.toBeInTheDocument();
     expect(
-      screen.getAllByRole("button", { name: /^Le soleil du / })
+      screen
+        .getAllByRole("button", { name: /^Le soleil du / })
         .map((card) => card.getAttribute("aria-label")),
     ).toEqual(["Le soleil du soir", "Le soleil du matin"]);
     expect(
@@ -2657,7 +2691,9 @@ describe("<LibraryRoute />", () => {
       screen.getByRole("button", { name: /identifiant 0000abcd/i }),
     ).toHaveAttribute("aria-pressed", "true");
     expect(
-      screen.getByRole("region", { name: /histoire sélectionnée/i }),
+      within(openDetails()).getByRole("region", {
+        name: /histoire sélectionnée/i,
+      }),
     ).toHaveTextContent("0000ABCD");
     expect(
       screen.queryByRole("button", { name: /^éditer$/i }),
@@ -2665,94 +2701,121 @@ describe("<LibraryRoute />", () => {
     expect(mockGet).toHaveBeenCalledTimes(1);
   });
 
-  it("cancels the delayed local panel reveal when navigating to the device screen", async () => {
+  it("preserves local selection across screens without opening details automatically", async () => {
     mockGet.mockResolvedValue({ stories: [{ id: "s1", title: "Le jardin" }] });
     mockDevice.mockResolvedValue({ kind: "none" });
-    const router = renderLibrary({ collapsed: true });
+    const router = renderLibrary();
     const story = await screen.findByRole("button", { name: "Le jardin" });
-    vi.useFakeTimers();
-    try {
-      const before = vi.getTimerCount();
-      fireEvent.click(story);
-      expect(vi.getTimerCount()).toBe(before + 1);
-      act(() => vi.advanceTimersByTime(250));
-      fireEvent.click(screen.getByRole("link", { name: "Sur l'appareil" }));
-      expect(router.state.location.pathname).toBe("/device");
-      expect(vi.getTimerCount()).toBe(before);
-      act(() => vi.advanceTimersByTime(500));
-      fireEvent.click(screen.getByRole("link", { name: "Ma bibliothèque" }));
-      expect(router.state.location.pathname).toBe("/library");
-      expect(
-        screen.getByRole("button", { name: "Le jardin" }),
-      ).toHaveAttribute("aria-pressed", "true");
-      expect(
-        screen.queryByRole("complementary", { name: "Panneau de décision" }),
-      ).not.toBeInTheDocument();
-    } finally {
-      cleanup();
-      vi.useRealTimers();
-    }
+    fireEvent.click(story);
+    expect(
+      screen.getByRole("region", { name: "Actions pour la sélection" }),
+    ).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("link", { name: "Sur l'appareil" }));
+    expect(router.state.location.pathname).toBe("/device");
+    expect(
+      screen.queryByRole("region", { name: "Actions pour la sélection" }),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("link", { name: "Ma bibliothèque" }));
+    expect(router.state.location.pathname).toBe("/library");
+    expect(screen.getByRole("button", { name: "Le jardin" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    expect(
+      screen.getByRole("region", { name: "Actions pour la sélection" }),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(screen.queryByRole("complementary")).not.toBeInTheDocument();
   });
 
   it("keeps draft and library searches, selections, sorts and views independent", async () => {
     const user = userEvent.setup();
-    mockGet.mockResolvedValue({ stories: [
-      { id: "draft", title: "Le soleil à écrire" },
-      { id: "other-draft", title: "La lune à écrire" },
-      { id: "imported", title: "Histoire importée", importState: "resolved" },
-      { id: "device-copy", title: "Histoire copiée", transferable: true },
-    ] });
+    mockGet.mockResolvedValue({
+      stories: [
+        { id: "draft", title: "Le soleil à écrire" },
+        { id: "other-draft", title: "La lune à écrire" },
+        { id: "imported", title: "Histoire importée", importState: "resolved" },
+        { id: "device-copy", title: "Histoire copiée", transferable: true },
+      ],
+    });
     const router = renderLibrary();
-    await user.click(await screen.findByRole("button", { name: "Histoire importée" }));
+    await user.click(
+      await screen.findByRole("button", { name: "Histoire importée" }),
+    );
     await user.type(screen.getByRole("searchbox"), "importée");
     await user.selectOptions(screen.getByRole("combobox"), "titre-desc");
-    await user.click(screen.getByRole("button", { name: "Affichage en liste" }));
+    await user.click(
+      screen.getByRole("button", { name: "Affichage en liste" }),
+    );
     await user.click(screen.getByRole("link", { name: "Mes brouillons" }));
 
     expect(router.state.location.pathname).toBe("/drafts");
     expect(screen.getByRole("searchbox")).toHaveValue("");
     expect(screen.getByRole("combobox")).toHaveValue("titre-asc");
-    expect(screen.getByRole("button", { name: "Affichage en cartes" })).toHaveAttribute("aria-pressed", "true");
-    expect(screen.queryByRole("button", { name: "Histoire importée" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Histoire copiée" })).not.toBeInTheDocument();
-    expect(screen.getByText("2 brouillons · enregistrés sur cet ordinateur")).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "Le soleil à écrire" }));
+    expect(
+      screen.getByRole("button", { name: "Affichage en cartes" }),
+    ).toHaveAttribute("aria-pressed", "true");
+    expect(
+      screen.queryByRole("button", { name: "Histoire importée" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Histoire copiée" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByText("2 brouillons · enregistrés sur cet ordinateur"),
+    ).toBeInTheDocument();
+    await user.click(
+      screen.getByRole("button", { name: "Le soleil à écrire" }),
+    );
     await user.type(screen.getByRole("searchbox"), "soleil");
     await user.click(screen.getByRole("link", { name: "Ma bibliothèque" }));
 
     expect(screen.getByRole("searchbox")).toHaveValue("importée");
     expect(screen.getByRole("combobox")).toHaveValue("titre-desc");
-    expect(screen.getByRole("button", { name: "Affichage en liste" })).toHaveAttribute("aria-pressed", "true");
-    expect(screen.getByRole("button", { name: "Histoire importée" })).toHaveAttribute("aria-pressed", "true");
-    expect(useLibraryShell.getState().selectedStoryIds).toEqual(new Set(["imported"]));
-    expect(useDraftsShell.getState().selectedStoryIds).toEqual(new Set(["draft"]));
+    expect(
+      screen.getByRole("button", { name: "Affichage en liste" }),
+    ).toHaveAttribute("aria-pressed", "true");
+    expect(
+      screen.getByRole("button", { name: "Histoire importée" }),
+    ).toHaveAttribute("aria-pressed", "true");
+    expect(useLibraryShell.getState().selectedStoryIds).toEqual(
+      new Set(["imported"]),
+    );
+    expect(useDraftsShell.getState().selectedStoryIds).toEqual(
+      new Set(["draft"]),
+    );
 
     await user.click(screen.getByRole("link", { name: "Mes brouillons" }));
     expect(screen.getByRole("searchbox")).toHaveValue("soleil");
-    expect(screen.getByRole("button", { name: "Le soleil à écrire" })).toHaveAttribute("aria-pressed", "true");
-    await user.click(screen.getByRole("button", { name: "Continuer à écrire" }));
+    expect(
+      screen.getByRole("button", { name: "Le soleil à écrire" }),
+    ).toHaveAttribute("aria-pressed", "true");
+    await user.click(
+      screen.getByRole("button", { name: "Continuer à écrire" }),
+    );
     expect(router.state.location.pathname).toBe("/story/draft/edit");
     expect(router.state.location.state).toEqual({ collection: "/drafts" });
   });
 
-  it("reveals device-story actions immediately without waiting for the local-selection delay", async () => {
+  it("shows device-story actions immediately without opening the inspector", async () => {
     mockGet.mockResolvedValue({ stories: [] });
     mockDevice.mockResolvedValue(supportedV3);
     mockDeviceLibrary.mockResolvedValue(readableTwo);
-    renderLibrary({ collapsed: true, initialScreen: "device" });
-    const card = await screen.findByRole("button", { name: /identifiant 0000abcd/i });
-    vi.useFakeTimers();
-    try {
-      fireEvent.click(card);
-      expect(screen.getByRole("complementary", { name: "Panneau de décision" })).toBeInTheDocument();
-      expect(card).toHaveAttribute("aria-pressed", "true");
-    } finally {
-      cleanup();
-      vi.useRealTimers();
-    }
+    renderLibrary({ initialScreen: "device" });
+    const card = await screen.findByRole("button", {
+      name: /identifiant 0000abcd/i,
+    });
+    fireEvent.click(card);
+    expect(
+      screen.getByRole("region", { name: "Actions pour la sélection" }),
+    ).toBeInTheDocument();
+    expect(card).toHaveAttribute("aria-pressed", "true");
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(screen.queryByRole("complementary")).not.toBeInTheDocument();
   });
 
-  it("selecting a device story opens the right-column inspector with its identity + provenance (AC1)", async () => {
+  it("opens the selected device story identity and provenance in explicit details (AC1)", async () => {
     const user = userEvent.setup();
     mockGet.mockResolvedValueOnce({
       stories: [{ id: "s1", title: "Le soleil" }],
@@ -2774,10 +2837,7 @@ describe("<LibraryRoute />", () => {
 
     await user.click(card);
 
-    const panel = screen.getByRole("complementary", {
-      name: /panneau de décision/i,
-    });
-    const inspector = within(panel).getByRole("region", {
+    const inspector = within(openDetails()).getByRole("region", {
       name: /histoire sélectionnée/i,
     });
     expect(within(inspector).getByText("0000ABCD")).toBeInTheDocument();
@@ -2804,19 +2864,18 @@ describe("<LibraryRoute />", () => {
         name: /identifiant 0000abcd/i,
       }),
     );
-    const panel = screen.getByRole("complementary", {
-      name: /panneau de décision/i,
-    });
+    const panel = openDetails();
     expect(
       within(
         within(panel).getByRole("region", { name: /histoire sélectionnée/i }),
       ).getByText("0000ABCD"),
     ).toBeInTheDocument();
 
+    closeDetails();
     await user.click(
       within(main).getByRole("button", { name: /identifiant 0000beef/i }),
     );
-    const inspector = within(panel).getByRole("region", {
+    const inspector = within(openDetails()).getByRole("region", {
       name: /histoire sélectionnée/i,
     });
     expect(within(inspector).getByText("0000BEEF")).toBeInTheDocument();
@@ -2834,16 +2893,18 @@ describe("<LibraryRoute />", () => {
 
     // Select a LOCAL story first.
     await user.click(await screen.findByRole("button", { name: /le soleil/i }));
-    const panel = screen.getByRole("complementary", {
-      name: /panneau de décision/i,
-    });
+    const panel = openDetails();
     expect(
       within(panel).getByText(/^1 histoire sélectionnée$/i),
     ).toBeInTheDocument();
 
     // The two selections coexist in state, each with actions on its own screen.
+    closeDetails();
     await user.click(screen.getByRole("link", { name: "Sur l'appareil" }));
-    const main = screen.getByRole("main", { name: /histoires sur l'appareil/i });
+    const main = screen.getByRole("main", {
+      name: /histoires sur l'appareil/i,
+    });
+    closeDetails();
     await user.click(
       within(main).getByRole("button", { name: /identifiant 0000abcd/i }),
     );
@@ -2853,26 +2914,33 @@ describe("<LibraryRoute />", () => {
       screen.queryByRole("button", { name: /^éditer$/i }),
     ).not.toBeInTheDocument();
     expect(
-      screen.getByRole("region", { name: /histoire sélectionnée/i }),
+      within(openDetails()).getByRole("region", {
+        name: /histoire sélectionnée/i,
+      }),
     ).toBeInTheDocument();
 
+    closeDetails();
     await user.click(screen.getByRole("link", { name: "Ma bibliothèque" }));
     expect(
-      screen.getByText(/^1 histoire sélectionnée$/i),
+      within(openDetails()).getByText(/^1 histoire sélectionnée$/i),
     ).toBeInTheDocument();
-    expect(
-      screen.getByRole("button", { name: /le soleil/i }),
-    ).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByRole("button", { name: /le soleil/i })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
     expect(
       screen.queryByRole("region", { name: /histoire sélectionnée/i }),
     ).not.toBeInTheDocument();
 
+    closeDetails();
     await user.click(screen.getByRole("link", { name: "Sur l'appareil" }));
     expect(
       screen.getByRole("button", { name: /identifiant 0000abcd/i }),
     ).toHaveAttribute("aria-pressed", "true");
     expect(
-      screen.getByRole("region", { name: /histoire sélectionnée/i }),
+      within(openDetails()).getByRole("region", {
+        name: /histoire sélectionnée/i,
+      }),
     ).toHaveTextContent("0000ABCD");
   });
 
@@ -2892,14 +2960,19 @@ describe("<LibraryRoute />", () => {
       }),
     );
     expect(
-      screen.getByRole("region", { name: /histoire sélectionnée/i }),
+      within(openDetails()).getByRole("region", {
+        name: /histoire sélectionnée/i,
+      }),
     ).toBeInTheDocument();
 
+    closeDetails();
     await user.click(
       within(main).getByRole("button", { name: /identifiant 0000abcd/i }),
     );
     expect(
-      screen.queryByRole("region", { name: /histoire sélectionnée/i }),
+      within(openDetails()).queryByRole("region", {
+        name: /histoire sélectionnée/i,
+      }),
     ).not.toBeInTheDocument();
   });
 
@@ -2929,9 +3002,7 @@ describe("<LibraryRoute />", () => {
     expect(
       within(main).queryByRole("button", { name: /identifiant 0000abcd/i }),
     ).toBeNull();
-    const panel = screen.getByRole("complementary", {
-      name: /panneau de décision/i,
-    });
+    const panel = openDetails();
     expect(
       within(panel).queryByRole("region", { name: /histoire sélectionnée/i }),
     ).toBeNull();
@@ -2954,18 +3025,18 @@ describe("<LibraryRoute />", () => {
         name: /identifiant 0000abcd/i,
       }),
     );
-    const panel = screen.getByRole("complementary", {
-      name: /panneau de décision/i,
-    });
+    let panel = openDetails();
     expect(
       within(panel).getByRole("region", { name: /histoire sélectionnée/i }),
     ).toBeInTheDocument();
 
     // The next detection finds no device → the inspection must clear, never
     // dangle on a device that is gone.
+    closeDetails();
     await user.click(
       screen.getByRole("button", { name: /réessayer la détection/i }),
     );
+    panel = openDetails();
     await waitFor(() =>
       expect(
         within(panel).queryByRole("region", {
@@ -3015,7 +3086,7 @@ describe("<LibraryRoute />", () => {
         name: /identifiant 0000abcd/i,
       }),
     );
-    const inspector = screen.getByRole("region", {
+    const inspector = within(openDetails()).getByRole("region", {
       name: /histoire sélectionnée/i,
     });
     const cta = within(inspector).getByRole("button", {
@@ -3030,6 +3101,65 @@ describe("<LibraryRoute />", () => {
     await user.click(cta);
     expect(mockImport).not.toHaveBeenCalled();
   });
+
+  it.each([
+    {
+      caseName: "already copied",
+      alreadyImported: true,
+      contentPresent: false,
+      canImport: false,
+      reason: "Copie indisponible: déjà dans ta bibliothèque",
+    },
+    {
+      caseName: "unsupported profile",
+      alreadyImported: false,
+      contentPresent: false,
+      canImport: false,
+      reason: "Copie indisponible: profil non supporté",
+    },
+    {
+      caseName: "incomplete content",
+      alreadyImported: false,
+      contentPresent: false,
+      canImport: true,
+      reason: "Copie indisponible: contenu incomplet sur l'appareil",
+    },
+  ])(
+    "keeps the singleton copy refusal consistent between the action bar and details: $caseName",
+    async ({ alreadyImported, contentPresent, canImport, reason }) => {
+      const user = userEvent.setup();
+      mockGet.mockResolvedValue({ stories: [] });
+      mockDevice.mockResolvedValue(canImport ? supportedOrigine : supportedV3);
+      mockDeviceLibrary.mockResolvedValue({
+        ...readableTwo,
+        stories: [
+          { ...readableTwo.stories[0], alreadyImported, contentPresent },
+        ],
+      });
+      renderLibrary({ initialScreen: "device" });
+      await user.click(
+        await screen.findByRole("button", { name: /identifiant 0000abcd/i }),
+      );
+      const actions = screen.getByRole("region", {
+        name: "Actions pour la sélection",
+      });
+      const copy = within(actions).getByRole("button", {
+        name: "Copier dans ma bibliothèque",
+      });
+      expect(copy).toHaveAttribute("aria-disabled", "true");
+      expect(within(actions).getByText(reason)).toBeInTheDocument();
+      await user.click(copy);
+      expect(mockImport).not.toHaveBeenCalled();
+
+      const details = openDetails();
+      expect(within(details).getByText(reason)).toBeInTheDocument();
+      expect(
+        within(details).getByRole("button", {
+          name: "Copier dans ma bibliothèque",
+        }),
+      ).toHaveAttribute("aria-disabled", "true");
+    },
+  );
 
   it("multi-selects device stories and bulk-imports the whole selection (AC #4)", async () => {
     const user = userEvent.setup();
@@ -3049,18 +3179,21 @@ describe("<LibraryRoute />", () => {
       }),
     );
     expect(
-      screen.getByRole("region", { name: /histoire sélectionnée/i }),
+      within(openDetails()).getByRole("region", {
+        name: /histoire sélectionnée/i,
+      }),
     ).toBeInTheDocument();
 
     // Ctrl+click a second card → multi-selection; the bulk surface replaces
     // the single inspector.
     await user.keyboard("{Control>}");
+    closeDetails();
     await user.click(
       within(main).getByRole("button", { name: /identifiant 0000beef/i }),
     );
     await user.keyboard("{/Control}");
 
-    const bulk = screen.getByRole("region", {
+    const bulk = within(openDetails()).getByRole("region", {
       name: /2 histoires sélectionnées/i,
     });
     expect(
@@ -3096,22 +3229,31 @@ describe("<LibraryRoute />", () => {
     mockDevice.mockResolvedValue(supportedOrigine);
     mockDeviceLibrary.mockResolvedValue(readableTwo);
     mockImport
-      .mockImplementationOnce(() => new Promise((resolve) => {
-        finishFirstCopy = resolve;
-      }))
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            finishFirstCopy = resolve;
+          }),
+      )
       .mockResolvedValueOnce(importOutcome);
     const router = renderLibrary({ initialScreen: "device" });
-    await user.click(await screen.findByRole("button", {
-      name: /identifiant 0000abcd/i,
-    }));
+    await user.click(
+      await screen.findByRole("button", {
+        name: /identifiant 0000abcd/i,
+      }),
+    );
     await user.keyboard("{Control>}");
-    await user.click(screen.getByRole("button", {
-      name: /identifiant 0000beef/i,
-    }));
+    await user.click(
+      screen.getByRole("button", {
+        name: /identifiant 0000beef/i,
+      }),
+    );
     await user.keyboard("{/Control}");
-    await user.click(screen.getByRole("button", {
-      name: /importer les 2 histoires/i,
-    }));
+    await user.click(
+      screen.getByRole("button", {
+        name: "Copier 2 histoires",
+      }),
+    );
     await waitFor(() => expect(mockImport).toHaveBeenCalledTimes(1));
 
     const discover = screen.getByRole("button", {
@@ -3124,7 +3266,9 @@ describe("<LibraryRoute />", () => {
     expect(mockImport).toHaveBeenCalledTimes(1);
 
     // A direct route change must preserve the same gate as the banner.
-    await act(async () => { await router.navigate("/welcome/device"); });
+    await act(async () => {
+      await router.navigate("/welcome/device");
+    });
     const recover = await screen.findByRole("button", {
       name: "Récupérer mes histoires",
     });
@@ -3132,7 +3276,9 @@ describe("<LibraryRoute />", () => {
     await user.click(recover);
     expect(mockUpdateOnboardingPreferences).not.toHaveBeenCalled();
     expect(mockImport).toHaveBeenCalledTimes(1);
-    await act(async () => { await router.navigate("/device"); });
+    await act(async () => {
+      await router.navigate("/device");
+    });
 
     await act(async () => finishFirstCopy(importOutcome));
     await waitFor(() => expect(mockImport).toHaveBeenCalledTimes(2));
@@ -3157,14 +3303,28 @@ describe("<LibraryRoute />", () => {
     mockDeviceLibrary.mockResolvedValue(readableTwo);
     const router = renderLibrary({ initialScreen: "welcome/device" });
 
-    await screen.findByRole("heading", { name: "2 histoires trouvées sur ta Lunii" });
-    expect(screen.getByText(/la copie des histoires de cet appareil n'est pas disponible/i)).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Récupérer mes histoires" })).not.toBeInTheDocument();
+    await screen.findByRole("heading", {
+      name: "2 histoires trouvées sur ta Lunii",
+    });
+    expect(
+      screen.getByText(
+        /la copie des histoires de cet appareil n'est pas disponible/i,
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Récupérer mes histoires" }),
+    ).not.toBeInTheDocument();
     expect(mockImport).not.toHaveBeenCalled();
-    const continueButton = screen.getByRole("button", { name: "Continuer vers ma bibliothèque" });
-    await waitFor(() => expect(continueButton).not.toHaveAttribute("aria-disabled", "true"));
+    const continueButton = screen.getByRole("button", {
+      name: "Continuer vers ma bibliothèque",
+    });
+    await waitFor(() =>
+      expect(continueButton).not.toHaveAttribute("aria-disabled", "true"),
+    );
     await user.click(continueButton);
-    await waitFor(() => expect(router.state.location.pathname).toBe("/library"));
+    await waitFor(() =>
+      expect(router.state.location.pathname).toBe("/library"),
+    );
     expect(mockImport).not.toHaveBeenCalled();
   });
 
@@ -3176,19 +3336,22 @@ describe("<LibraryRoute />", () => {
     };
     let acknowledgeSave!: () => void;
     mockGetOnboardingPreferences.mockImplementation(async () => preferences);
-    mockUpdateOnboardingPreferences.mockImplementation((input: OnboardingPreferences) =>
-      new Promise((resolve) => {
-        acknowledgeSave = () => {
-          preferences = input;
-          resolve(input);
-        };
-      }),
+    mockUpdateOnboardingPreferences.mockImplementation(
+      (input: OnboardingPreferences) =>
+        new Promise((resolve) => {
+          acknowledgeSave = () => {
+            preferences = input;
+            resolve(input);
+          };
+        }),
     );
     mockGet.mockResolvedValue({ stories: [] });
     mockDevice.mockResolvedValue(supportedOrigine);
     mockDeviceLibrary.mockResolvedValue(readableTwo);
     const router = renderLibrary({ initialScreen: "welcome/device" });
-    await screen.findByRole("heading", { name: "2 histoires trouvées sur ta Lunii" });
+    await screen.findByRole("heading", {
+      name: "2 histoires trouvées sur ta Lunii",
+    });
     await user.click(screen.getByRole("button", { name: "Pas maintenant" }));
     expect(mockUpdateOnboardingPreferences).toHaveBeenCalledWith({
       welcomeCompleted: true,
@@ -3196,14 +3359,22 @@ describe("<LibraryRoute />", () => {
     });
     expect(router.state.location.pathname).toBe("/welcome/device");
     await act(async () => acknowledgeSave());
-    await waitFor(() => expect(router.state.location.pathname).toBe("/library"));
+    await waitFor(() =>
+      expect(router.state.location.pathname).toBe("/library"),
+    );
     expect(mockImport).not.toHaveBeenCalled();
 
     cleanup();
     renderLibrary();
-    await screen.findByRole("heading", { name: "Par quoi veux-tu commencer ?" });
-    await waitFor(() => expect(mockGetOnboardingPreferences).toHaveBeenCalledTimes(2));
-    expect(screen.queryByRole("button", { name: "Découvrir mes histoires" })).not.toBeInTheDocument();
+    await screen.findByRole("heading", {
+      name: "Par quoi veux-tu commencer ?",
+    });
+    await waitFor(() =>
+      expect(mockGetOnboardingPreferences).toHaveBeenCalledTimes(2),
+    );
+    expect(
+      screen.queryByRole("button", { name: "Découvrir mes histoires" }),
+    ).not.toBeInTheDocument();
     expect(mockImport).not.toHaveBeenCalled();
   });
 
@@ -3219,9 +3390,13 @@ describe("<LibraryRoute />", () => {
       details: null,
     });
     const router = renderLibrary({ initialScreen: "welcome/device" });
-    await screen.findByRole("heading", { name: "2 histoires trouvées sur ta Lunii" });
+    await screen.findByRole("heading", {
+      name: "2 histoires trouvées sur ta Lunii",
+    });
     await user.click(screen.getByRole("button", { name: "Pas maintenant" }));
-    expect(await screen.findByRole("alert")).toHaveTextContent("Préférences non enregistrées.");
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Préférences non enregistrées.",
+    );
     expect(router.state.location.pathname).toBe("/welcome/device");
     expect(mockImport).not.toHaveBeenCalled();
   });
@@ -3235,12 +3410,25 @@ describe("<LibraryRoute />", () => {
       ...readableTwo,
       stories: [
         ...readableTwo.stories,
-        { ...readableTwo.stories[0], uuid: "already-local", alreadyImported: true },
-        { ...readableTwo.stories[1], uuid: "missing-content", contentPresent: false },
+        {
+          ...readableTwo.stories[0],
+          uuid: "already-local",
+          alreadyImported: true,
+        },
+        {
+          ...readableTwo.stories[1],
+          uuid: "missing-content",
+          contentPresent: false,
+        },
       ],
     });
     mockImport
-      .mockImplementationOnce(() => new Promise((resolve) => { finishFirstCopy = resolve; }))
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            finishFirstCopy = resolve;
+          }),
+      )
       .mockRejectedValueOnce({
         code: "IMPORT_FAILED",
         message: "La deuxième histoire n'a pas pu être copiée.",
@@ -3248,37 +3436,61 @@ describe("<LibraryRoute />", () => {
         details: null,
       });
     const router = renderLibrary({ initialScreen: "welcome/device" });
-    await screen.findByRole("heading", { name: "4 histoires trouvées sur ta Lunii" });
-    const recoverButton = screen.getByRole("button", { name: "Récupérer mes histoires" });
-    await waitFor(() => expect(recoverButton).not.toHaveAttribute("aria-disabled", "true"));
+    await screen.findByRole("heading", {
+      name: "4 histoires trouvées sur ta Lunii",
+    });
+    const recoverButton = screen.getByRole("button", {
+      name: "Récupérer mes histoires",
+    });
+    await waitFor(() =>
+      expect(recoverButton).not.toHaveAttribute("aria-disabled", "true"),
+    );
     await user.click(recoverButton);
-    await waitFor(() => expect(router.state.location.pathname).toBe("/library"));
-    expect(await screen.findByRole("progressbar", {
-      name: "0 sur 2 histoires traitées",
-    })).toHaveAttribute("aria-valuenow", "0");
+    await waitFor(() =>
+      expect(router.state.location.pathname).toBe("/library"),
+    );
+    expect(
+      await screen.findByRole("progressbar", {
+        name: "0 sur 2 histoires traitées",
+      }),
+    ).toHaveAttribute("aria-valuenow", "0");
     expect(mockImport).toHaveBeenCalledTimes(1);
     expect(screen.queryByText(/histoires copiées/i)).not.toBeInTheDocument();
 
-    mockGet.mockResolvedValue({ stories: [{
-      id: "local-1", title: "Histoire de ma Lunii (0000ABCD)", transferable: true,
-    }] });
+    mockGet.mockResolvedValue({
+      stories: [
+        {
+          id: "local-1",
+          title: "Histoire de ma Lunii (0000ABCD)",
+          transferable: true,
+        },
+      ],
+    });
     await act(async () => finishFirstCopy(importOutcome));
-    expect(await screen.findByText("1 histoire copiée · 1 copie en échec.")).toBeInTheDocument();
-    expect(screen.getByRole("alert")).toHaveTextContent("La deuxième histoire n'a pas pu être copiée.");
+    expect(
+      await screen.findByText("1 histoire copiée · 1 copie en échec."),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "La deuxième histoire n'a pas pu être copiée.",
+    );
     expect(screen.queryByRole("progressbar")).not.toBeInTheDocument();
     expect(mockImport.mock.calls).toEqual([
       [{ deviceIdentifier: supportedOrigine.deviceIdentifier, packUuid: "u1" }],
       [{ deviceIdentifier: supportedOrigine.deviceIdentifier, packUuid: "u2" }],
     ]);
-    expect(await screen.findByRole("button", {
-      name: "Histoire de ma Lunii (0000ABCD)",
-    })).toBeInTheDocument();
+    expect(
+      await screen.findByRole("button", {
+        name: "Histoire de ma Lunii (0000ABCD)",
+      }),
+    ).toBeInTheDocument();
     expect(mockGet.mock.calls.length).toBeGreaterThan(1);
     expect(mockDeviceLibrary.mock.calls.length).toBeGreaterThan(1);
     await user.click(screen.getByRole("link", { name: "Mes brouillons" }));
-    expect(screen.queryByRole("button", {
-      name: "Histoire de ma Lunii (0000ABCD)",
-    })).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", {
+        name: "Histoire de ma Lunii (0000ABCD)",
+      }),
+    ).not.toBeInTheDocument();
   });
 
   it("deletes a device story after confirmation and re-reads the inventory (AC #5)", async () => {
@@ -3313,7 +3525,7 @@ describe("<LibraryRoute />", () => {
         name: /^histoire non reconnue, identifiant 0000abcd/i,
       }),
     );
-    const inspector = screen.getByRole("region", {
+    const inspector = within(openDetails()).getByRole("region", {
       name: /histoire sélectionnée/i,
     });
 
@@ -3324,7 +3536,9 @@ describe("<LibraryRoute />", () => {
         name: /supprimer de l'appareil/i,
       }),
     );
-    const dialog = await screen.findByRole("dialog");
+    const dialog = await screen.findByRole("dialog", {
+      name: "Supprimer de l'appareil ?",
+    });
     expect(dialog).toHaveTextContent(/retirée de l'appareil/i);
     await user.click(
       within(dialog).getByRole("button", { name: /supprimer de l'appareil/i }),
@@ -3345,6 +3559,72 @@ describe("<LibraryRoute />", () => {
         }),
       ).not.toBeInTheDocument(),
     );
+  });
+
+  it("keeps a failed device deletion visible in the collection after clearing selection without opening details", async () => {
+    const user = userEvent.setup();
+    let rejectDelete!: (error: unknown) => void;
+    mockGet.mockResolvedValue({ stories: [] });
+    mockDevice.mockResolvedValue({
+      ...supportedV3,
+      supportedOperations: {
+        ...supportedV3.supportedOperations,
+        deleteStory: true,
+      },
+    });
+    mockDeviceLibrary.mockResolvedValue(readableTwo);
+    mockDeleteDevice.mockImplementation(
+      () =>
+        new Promise((_, reject) => {
+          rejectDelete = reject;
+        }),
+    );
+    renderLibrary({ initialScreen: "device" });
+    const card = await screen.findByRole("button", {
+      name: /identifiant 0000abcd/i,
+    });
+    await user.click(card);
+    await user.click(
+      screen.getByRole("button", { name: "Supprimer de l'appareil" }),
+    );
+    const confirmation = screen.getByRole("dialog", {
+      name: "Supprimer de l'appareil ?",
+    });
+    await user.click(
+      within(confirmation).getByRole("button", {
+        name: "Supprimer de l'appareil",
+      }),
+    );
+    await waitFor(() => expect(mockDeleteDevice).toHaveBeenCalledTimes(1));
+    await user.click(
+      screen.getByRole("button", { name: "Effacer la sélection" }),
+    );
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("region", { name: "Actions pour la sélection" }),
+    ).not.toBeInTheDocument();
+
+    await act(async () =>
+      rejectDelete({
+        code: "DEVICE_DELETE_FAILED",
+        message: "La suppression de l'histoire sur l'appareil a échoué.",
+        userAction: "Vérifie la connexion puis réessaie.",
+        details: null,
+      }),
+    );
+    const main = screen.getByRole("main", { name: "Histoires sur l'appareil" });
+    expect(within(main).getByRole("alert")).toHaveTextContent(
+      "La suppression de l'histoire sur l'appareil a échoué.",
+    );
+    expect(card).toHaveAttribute("aria-pressed", "false");
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    await user.click(
+      within(main).getByRole("button", {
+        name: "Fermer l'erreur de suppression",
+      }),
+    );
+    expect(within(main).queryByRole("alert")).not.toBeInTheDocument();
+    expect(mockDeleteDevice).toHaveBeenCalledTimes(1);
   });
 
   it("moves a device story with the arrows, writes the new order and re-reads the inventory", async () => {
@@ -3504,9 +3784,7 @@ describe("<LibraryRoute />", () => {
     // Select the local story, then use the ONE "Envoyer vers la Lunii" CTA —
     // no separate panel, no file picker.
     await user.click(await screen.findByRole("button", { name: /le soleil/i }));
-    const panel = screen.getByRole("complementary", {
-      name: /panneau de décision/i,
-    });
+    const panel = openDetails();
     const send = within(panel).getByRole("button", {
       name: /envoyer vers la lunii/i,
     });
@@ -3534,7 +3812,9 @@ describe("<LibraryRoute />", () => {
       expect(mockDeviceLibrary.mock.calls.length).toBeGreaterThan(readsBefore),
     );
     const main = screen.getByRole("main", { name: /collection d'histoires/i });
-    await within(main).findByRole("button", { name: "Le soleil, Sur la Lunii" });
+    await within(main).findByRole("button", {
+      name: "Le soleil, Sur la Lunii",
+    });
     expect(
       within(panel).getByText("Pack envoyé sur l'appareil."),
     ).toBeInTheDocument();
@@ -3587,9 +3867,7 @@ describe("<LibraryRoute />", () => {
     renderLibrary();
 
     await user.click(await screen.findByRole("button", { name: /le soleil/i }));
-    const panel = screen.getByRole("complementary", {
-      name: /panneau de décision/i,
-    });
+    const panel = openDetails();
     // ONE CTA, disabled with the card's own reason — never a second entry
     // point.
     const send = within(panel).getByRole("button", {
@@ -3618,7 +3896,9 @@ describe("<LibraryRoute />", () => {
     expect(reason("devicePack")).toBe(
       "Envoi indisponible: histoire copiée depuis une Lunii, non convertible pour ce modèle",
     );
-    expect(reason("empty")).toBe("Envoi indisponible: l'histoire n'a aucun épisode");
+    expect(reason("empty")).toBe(
+      "Envoi indisponible: l'histoire n'a aucun épisode",
+    );
     expect(reason("missingAnnouncements")).toBe(
       "Envoi indisponible: génère d'abord les annonces du menu depuis l'histoire",
     );
@@ -3629,7 +3909,9 @@ describe("<LibraryRoute />", () => {
       "Envoi indisponible: cette histoire ne peut pas être préparée pour l'appareil",
     );
     // A sendable card is ready — whatever stale blocker the caller passes.
-    expect(mapArchiveSendToTransferView(idle, "s1", 1, true, undefined)).toEqual({
+    expect(
+      mapArchiveSendToTransferView(idle, "s1", 1, true, undefined),
+    ).toEqual({
       kind: "ready",
     });
   });
@@ -3659,7 +3941,7 @@ describe("<LibraryRoute />", () => {
         name: /identifiant 0000abcd/i,
       }),
     );
-    const inspector = screen.getByRole("region", {
+    const inspector = within(openDetails()).getByRole("region", {
       name: /histoire sélectionnée/i,
     });
     const overviewCallsBefore = mockGet.mock.calls.length;
@@ -3744,7 +4026,7 @@ describe("<LibraryRoute />", () => {
         name: /identifiant 0000abcd/i,
       }),
     );
-    const inspector = screen.getByRole("region", {
+    const inspector = within(openDetails()).getByRole("region", {
       name: /histoire sélectionnée/i,
     });
     await user.click(
@@ -3752,22 +4034,27 @@ describe("<LibraryRoute />", () => {
         name: /copier dans ma bibliothèque/i,
       }),
     );
+    openDetails();
     expect(
       await screen.findAllByText("Histoire copiée dans ta bibliothèque"),
     ).toHaveLength(2);
 
     // Select pack B: ITS status is idle — A's success must not follow.
+    closeDetails();
     await user.click(
       within(main).getByRole("button", { name: /identifiant 0000beef/i }),
     );
+    openDetails();
     expect(
       screen.queryByText("Histoire copiée dans ta bibliothèque"),
     ).not.toBeInTheDocument();
 
     // Re-select pack A: its status surfaces again (still held by the hook).
+    closeDetails();
     await user.click(
       within(main).getByRole("button", { name: /identifiant 0000abcd/i }),
     );
+    openDetails();
     expect(
       screen.getAllByText("Histoire copiée dans ta bibliothèque"),
     ).toHaveLength(2);
@@ -3798,18 +4085,23 @@ describe("<LibraryRoute />", () => {
     );
     await user.click(
       within(
-        screen.getByRole("region", { name: /histoire sélectionnée/i }),
+        within(openDetails()).getByRole("region", {
+          name: /histoire sélectionnée/i,
+        }),
       ).getByRole("button", { name: /copier dans ma bibliothèque/i }),
     );
 
     // While A is still copying, select B and click its (active) CTA: the
     // hook swallows the re-entrant trigger and the target stays on A.
+    closeDetails();
     await user.click(
       within(main).getByRole("button", { name: /identifiant 0000beef/i }),
     );
     await user.click(
       within(
-        screen.getByRole("region", { name: /histoire sélectionnée/i }),
+        within(openDetails()).getByRole("region", {
+          name: /histoire sélectionnée/i,
+        }),
       ).getByRole("button", { name: /copier dans ma bibliothèque/i }),
     );
     expect(mockImport).toHaveBeenCalledTimes(1);
@@ -3819,14 +4111,17 @@ describe("<LibraryRoute />", () => {
     await act(async () => {
       resolveA(importOutcome);
     });
+    openDetails();
     expect(
       screen.queryByText("Histoire copiée dans ta bibliothèque"),
     ).not.toBeInTheDocument();
 
     // Re-select A: its success is the one that surfaces.
+    closeDetails();
     await user.click(
       within(main).getByRole("button", { name: /identifiant 0000abcd/i }),
     );
+    openDetails();
     expect(
       await screen.findAllByText("Histoire copiée dans ta bibliothèque"),
     ).toHaveLength(2);
@@ -3853,7 +4148,7 @@ describe("<LibraryRoute />", () => {
         name: /identifiant 0000abcd/i,
       }),
     );
-    const inspector = screen.getByRole("region", {
+    const inspector = within(openDetails()).getByRole("region", {
       name: /histoire sélectionnée/i,
     });
     await user.click(
@@ -3878,6 +4173,7 @@ describe("<LibraryRoute />", () => {
     expect(
       screen.queryByRole("button", { name: /le soleil/i }),
     ).not.toBeInTheDocument();
+    closeDetails();
     await user.click(screen.getByRole("link", { name: "Ma bibliothèque" }));
     expect(
       screen.getByRole("button", { name: /le soleil/i }),
@@ -3908,7 +4204,7 @@ describe("<LibraryRoute />", () => {
         name: /identifiant 0000abcd/i,
       }),
     );
-    let inspector = screen.getByRole("region", {
+    let inspector = within(openDetails()).getByRole("region", {
       name: /histoire sélectionnée/i,
     });
     await user.click(
@@ -3921,16 +4217,20 @@ describe("<LibraryRoute />", () => {
     );
 
     // Select pack B: its status is idle — A's failure must NOT follow it.
+    closeDetails();
     await user.click(
       within(main).getByRole("button", { name: /identifiant 0000beef/i }),
     );
-    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(within(openDetails()).queryByRole("alert")).not.toBeInTheDocument();
 
     // Re-select pack A: its failure surfaces again (held, attached to the pack).
+    closeDetails();
     await user.click(
       within(main).getByRole("button", { name: /identifiant 0000abcd/i }),
     );
-    inspector = screen.getByRole("region", { name: /histoire sélectionnée/i });
+    inspector = within(openDetails()).getByRole("region", {
+      name: /histoire sélectionnée/i,
+    });
     expect(within(inspector).getByRole("alert")).toHaveTextContent(
       "Copie impossible",
     );
@@ -3952,7 +4252,7 @@ describe("<LibraryRoute />", () => {
         name: /identifiant 0000abcd/i,
       }),
     );
-    let inspector = screen.getByRole("region", {
+    let inspector = within(openDetails()).getByRole("region", {
       name: /histoire sélectionnée/i,
     });
     await user.click(
@@ -3963,13 +4263,17 @@ describe("<LibraryRoute />", () => {
     await within(inspector).findByRole("alert");
 
     // A→B→A: the alert survives the round-trip (a selection change never wipes it).
+    closeDetails();
     await user.click(
       within(main).getByRole("button", { name: /identifiant 0000beef/i }),
     );
+    closeDetails();
     await user.click(
       within(main).getByRole("button", { name: /identifiant 0000abcd/i }),
     );
-    inspector = screen.getByRole("region", { name: /histoire sélectionnée/i });
+    inspector = within(openDetails()).getByRole("region", {
+      name: /histoire sélectionnée/i,
+    });
     expect(within(inspector).getByRole("alert")).toBeInTheDocument();
 
     // The explicit Fermer DOES dismiss it…
@@ -3979,13 +4283,15 @@ describe("<LibraryRoute />", () => {
     expect(within(inspector).queryByRole("alert")).not.toBeInTheDocument();
 
     // …and it stays gone after another A→B→A (now genuinely idle).
+    closeDetails();
     await user.click(
       within(main).getByRole("button", { name: /identifiant 0000beef/i }),
     );
+    closeDetails();
     await user.click(
       within(main).getByRole("button", { name: /identifiant 0000abcd/i }),
     );
-    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(within(openDetails()).queryByRole("alert")).not.toBeInTheDocument();
   });
 
   it("never surfaces a copy failure in a toast — only an in-context alert (AC3 / UX-DR15)", async () => {
@@ -4004,7 +4310,7 @@ describe("<LibraryRoute />", () => {
         name: /identifiant 0000abcd/i,
       }),
     );
-    const inspector = screen.getByRole("region", {
+    const inspector = within(openDetails()).getByRole("region", {
       name: /histoire sélectionnée/i,
     });
     await user.click(
@@ -4035,7 +4341,7 @@ describe("<LibraryRoute />", () => {
         name: /identifiant 0000abcd/i,
       }),
     );
-    const inspector = screen.getByRole("region", {
+    const inspector = within(openDetails()).getByRole("region", {
       name: /histoire sélectionnée/i,
     });
     // The copy is gated off for V3 with the canonical reason…
@@ -4071,9 +4377,7 @@ describe("<LibraryRoute />", () => {
     renderLibrary();
 
     // No comparison before a single local story is selected.
-    const panel = screen.getByRole("complementary", {
-      name: /panneau de décision/i,
-    });
+    const panel = openDetails();
     const comparison = within(panel).getByRole("region", {
       name: /comparaison avant envoi/i,
     });
@@ -4105,9 +4409,9 @@ describe("<LibraryRoute />", () => {
 
     await user.click(await screen.findByRole("button", { name: /le soleil/i }));
 
-    const comparison = within(
-      screen.getByRole("complementary", { name: /panneau de décision/i }),
-    ).getByRole("region", { name: /comparaison avant envoi/i });
+    const comparison = within(openDetails()).getByRole("region", {
+      name: /comparaison avant envoi/i,
+    });
     await waitFor(() =>
       expect(comparison).toHaveTextContent(/déjà présente sur l'appareil/i),
     );
@@ -4127,9 +4431,7 @@ describe("<LibraryRoute />", () => {
     renderLibrary();
 
     await user.click(await screen.findByRole("button", { name: /le soleil/i }));
-    const panel = screen.getByRole("complementary", {
-      name: /panneau de décision/i,
-    });
+    const panel = openDetails();
     await waitFor(() =>
       expect(
         within(panel).getByRole("region", { name: /comparaison avant envoi/i }),
@@ -4154,10 +4456,8 @@ describe("<LibraryRoute />", () => {
     mockTransferPreview.mockResolvedValue(readyNew);
     renderLibrary();
 
-    const panel = screen.getByRole("complementary", {
-      name: /panneau de décision/i,
-    });
-    const comparison = within(panel).getByRole("region", {
+    const panel = openDetails();
+    let comparison = within(panel).getByRole("region", {
       name: /comparaison avant envoi/i,
     });
     // 0 selections → sober hint, never a verdict.
@@ -4165,10 +4465,14 @@ describe("<LibraryRoute />", () => {
 
     // Select two → still no verdict (multi-transfer is out of scope), with a
     // distinct "narrow to one" hint.
+    closeDetails();
     await user.click(await screen.findByRole("button", { name: /le soleil/i }));
     await user.keyboard("{Control>}");
     await user.click(screen.getByRole("button", { name: /la lune/i }));
     await user.keyboard("{/Control}");
+    comparison = within(openDetails()).getByRole("region", {
+      name: /comparaison avant envoi/i,
+    });
 
     expect(comparison).toHaveTextContent(
       /sélectionne une seule histoire locale/i,
@@ -4198,9 +4502,9 @@ describe("<LibraryRoute />", () => {
     renderLibrary();
 
     await user.click(await screen.findByRole("button", { name: /le soleil/i }));
-    const comparison = within(
-      screen.getByRole("complementary", { name: /panneau de décision/i }),
-    ).getByRole("region", { name: /comparaison avant envoi/i });
+    const comparison = within(openDetails()).getByRole("region", {
+      name: /comparaison avant envoi/i,
+    });
     expect(comparison).toHaveTextContent(/branche une lunii lisible/i);
     // The preview must not have fired without a readable device.
     expect(mockTransferPreview).not.toHaveBeenCalled();
@@ -4228,9 +4532,7 @@ describe("<LibraryRoute />", () => {
 
     // The comparison failure is in-context (role="alert" inside the panel),
     // never a toast.
-    const panel = screen.getByRole("complementary", {
-      name: /panneau de décision/i,
-    });
+    const panel = openDetails();
     const comparison = within(panel).getByRole("region", {
       name: /comparaison avant envoi/i,
     });
@@ -4259,9 +4561,9 @@ describe("<LibraryRoute />", () => {
     renderLibrary();
 
     await user.click(await screen.findByRole("button", { name: /le soleil/i }));
-    const comparison = within(
-      screen.getByRole("complementary", { name: /panneau de décision/i }),
-    ).getByRole("region", { name: /comparaison avant envoi/i });
+    const comparison = within(openDetails()).getByRole("region", {
+      name: /comparaison avant envoi/i,
+    });
 
     const alert = await within(comparison).findByRole("alert");
     expect(alert).toHaveTextContent(
@@ -4303,9 +4605,7 @@ describe("<LibraryRoute />", () => {
     mockStoryValidation.mockResolvedValue(blockedValidation);
     renderLibrary();
 
-    const panel = screen.getByRole("complementary", {
-      name: /panneau de décision/i,
-    });
+    const panel = openDetails();
     const validation = within(panel).getByRole("region", {
       name: /validation avant envoi/i,
     });
@@ -4338,9 +4638,7 @@ describe("<LibraryRoute />", () => {
     renderLibrary();
 
     await user.click(await screen.findByRole("button", { name: /le soleil/i }));
-    const panel = screen.getByRole("complementary", {
-      name: /panneau de décision/i,
-    });
+    const panel = openDetails();
     await waitFor(() =>
       expect(
         within(panel).getByRole("region", { name: /validation avant envoi/i }),
@@ -4364,19 +4662,21 @@ describe("<LibraryRoute />", () => {
     mockStoryValidation.mockResolvedValue(blockedValidation);
     renderLibrary();
 
-    const panel = screen.getByRole("complementary", {
-      name: /panneau de décision/i,
-    });
-    const validation = within(panel).getByRole("region", {
+    const panel = openDetails();
+    let validation = within(panel).getByRole("region", {
       name: /validation avant envoi/i,
     });
     expect(validation).toHaveTextContent(/vérifier la compatibilité/i);
 
     // Two selected → still sober (multi-transfer is out of scope), no verdict.
+    closeDetails();
     await user.click(await screen.findByRole("button", { name: /le soleil/i }));
     await user.keyboard("{Control>}");
     await user.click(screen.getByRole("button", { name: /la lune/i }));
     await user.keyboard("{/Control}");
+    validation = within(openDetails()).getByRole("region", {
+      name: /validation avant envoi/i,
+    });
 
     expect(validation).toHaveTextContent(/vérifier la compatibilité/i);
     expect(validation).not.toHaveTextContent(/bloquée/i);
@@ -4402,9 +4702,9 @@ describe("<LibraryRoute />", () => {
     renderLibrary();
 
     await user.click(await screen.findByRole("button", { name: /le soleil/i }));
-    const validation = within(
-      screen.getByRole("complementary", { name: /panneau de décision/i }),
-    ).getByRole("region", { name: /validation avant envoi/i });
+    const validation = within(openDetails()).getByRole("region", {
+      name: /validation avant envoi/i,
+    });
     expect(validation).toHaveTextContent(/vérifier la compatibilité/i);
     expect(mockStoryValidation).not.toHaveBeenCalled();
   });
@@ -4424,9 +4724,9 @@ describe("<LibraryRoute />", () => {
     renderLibrary();
 
     await user.click(await screen.findByRole("button", { name: /le soleil/i }));
-    const validation = within(
-      screen.getByRole("complementary", { name: /panneau de décision/i }),
-    ).getByRole("region", { name: /validation avant envoi/i });
+    const validation = within(openDetails()).getByRole("region", {
+      name: /validation avant envoi/i,
+    });
 
     const alert = await within(validation).findByRole("alert");
     expect(alert).toHaveTextContent(
@@ -4445,7 +4745,6 @@ describe("<LibraryRoute />", () => {
     verdict: "presumedTransferable" as const,
     blockers: [],
   };
-
 
   // --- Pure mapper unit tests (mapStoryValidationToView) ---
 
@@ -4643,19 +4942,19 @@ describe("<LibraryRoute />", () => {
     renderLibrary();
 
     await user.click(await screen.findByRole("button", { name: /le soleil/i }));
-    const panel = screen.getByRole("complementary", {
-      name: /panneau de décision/i,
+    const actions = screen.getByRole("region", {
+      name: "Actions pour la sélection",
     });
 
     // There is NO Préparer CTA anymore — preparation is folded into Envoyer.
     expect(
-      within(panel).queryByRole("button", { name: /^préparer$/i }),
+      within(actions).queryByRole("button", { name: /^préparer$/i }),
     ).toBeNull();
 
     // The single send CTA is directly active; clicking it starts the
     // transfer (which prepares internally) — no modal, no prior step.
-    const send = within(panel).getByRole("button", {
-      name: /envoyer vers la lunii/i,
+    const send = within(actions).getByRole("button", {
+      name: "Ajouter à la Lunii",
     });
     await waitFor(() =>
       expect(send).not.toHaveAttribute("aria-disabled", "true"),
@@ -4667,6 +4966,84 @@ describe("<LibraryRoute />", () => {
     });
     expect(screen.queryByRole("dialog")).toBeNull();
   });
+
+  it.each(["verified", "error"] as const)(
+    "dismisses the %s native transfer report independently of selection",
+    async (terminal) => {
+      const user = userEvent.setup();
+      mockGet.mockResolvedValue({
+        stories: [{ id: "s1", title: "Le soleil", transferable: true }],
+      });
+      mockDevice.mockResolvedValue(writableOrigine);
+      mockStoryValidation.mockResolvedValue(presumedTransferableValidation);
+      renderLibrary();
+      await user.click(
+        await screen.findByRole("button", { name: "Le soleil" }),
+      );
+      const send = screen.getByRole("button", { name: "Ajouter à la Lunii" });
+      await waitFor(() =>
+        expect(send).not.toHaveAttribute("aria-disabled", "true"),
+      );
+      if (terminal === "verified") {
+        mockReadTransfer.mockResolvedValue({
+          kind: "verified",
+          story: { id: "s1", title: "Le soleil" },
+          deviceIdentifier: writableOrigine.deviceIdentifier,
+          summary: {
+            changed: "« Le soleil » est maintenant sur la Lunii.",
+            unchanged: "Les autres histoires sont inchangées.",
+          },
+        });
+      } else {
+        mockStartTransfer.mockRejectedValue({
+          code: "TRANSFER_FAILED",
+          message: "Le transfert n'a pas pu démarrer.",
+          userAction: "Vérifie la connexion puis réessaie.",
+          details: null,
+        });
+      }
+      await user.click(send);
+      await screen.findByText("Résultat du transfert disponible");
+      await user.click(
+        screen.getByRole("button", { name: "Effacer la sélection" }),
+      );
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+      await user.click(
+        screen.getByRole("button", { name: "Voir le transfert" }),
+      );
+      const report = screen.getByRole("dialog", {
+        name: "Détails du transfert",
+      });
+      expect(report).toHaveTextContent(
+        terminal === "verified"
+          ? "« Le soleil » est maintenant sur la Lunii."
+          : "Le transfert n'a pas pu démarrer.",
+      );
+      await user.click(
+        within(report).getByRole("button", {
+          name: "Fermer le compte rendu de transfert",
+        }),
+      );
+      await waitFor(() =>
+        expect(mockDiscardTransferOutcome).toHaveBeenCalledWith({
+          storyId: "s1",
+        }),
+      );
+      expect(
+        screen.queryByText("Résultat du transfert disponible"),
+      ).not.toBeInTheDocument();
+      expect(
+        within(report).getByText("Aucun transfert en cours."),
+      ).toBeInTheDocument();
+      await user.click(
+        within(report).getByRole("button", { name: "Fermer les détails" }),
+      );
+      expect(
+        screen.getByRole("button", { name: /^Le soleil/ }),
+      ).toHaveAttribute("aria-pressed", "false");
+      expect(mockStartTransfer).toHaveBeenCalledTimes(1);
+    },
+  );
 
   // --- Durable transfer memory: re-hydration / relaunch / abandon ---
 
@@ -4689,9 +5066,7 @@ describe("<LibraryRoute />", () => {
     renderLibrary();
 
     await user.click(await screen.findByRole("button", { name: /le soleil/i }));
-    const panel = screen.getByRole("complementary", {
-      name: /panneau de décision/i,
-    });
+    const panel = openDetails();
 
     // The remembered terminal is re-offered in-context, exactly as if the
     // `job:failed` had just fired — surviving a restart / re-visit.
@@ -4722,9 +5097,7 @@ describe("<LibraryRoute />", () => {
     renderLibrary();
 
     await user.click(await screen.findByRole("button", { name: /le soleil/i }));
-    const panel = screen.getByRole("complementary", {
-      name: /panneau de décision/i,
-    });
+    const panel = openDetails();
     const relancer = await within(panel).findByRole("button", {
       name: "Relancer le transfert",
     });
@@ -4755,9 +5128,7 @@ describe("<LibraryRoute />", () => {
     renderLibrary();
 
     await user.click(await screen.findByRole("button", { name: /le soleil/i }));
-    const panel = screen.getByRole("complementary", {
-      name: /panneau de décision/i,
-    });
+    const panel = openDetails();
     const abandon = await within(panel).findByRole("button", {
       name: "Abandonner le transfert",
     });
@@ -4790,9 +5161,7 @@ describe("<LibraryRoute />", () => {
     renderLibrary();
 
     await user.click(await screen.findByRole("button", { name: /le soleil/i }));
-    const panel = screen.getByRole("complementary", {
-      name: /panneau de décision/i,
-    });
+    const panel = openDetails();
     await waitFor(() =>
       expect(mockReadTransferOutcome).toHaveBeenCalledWith({ storyId: "s1" }),
     );
@@ -4822,9 +5191,7 @@ describe("<LibraryRoute />", () => {
     renderLibrary();
 
     await user.click(await screen.findByRole("button", { name: /le soleil/i }));
-    const panel = screen.getByRole("complementary", {
-      name: /panneau de décision/i,
-    });
+    const panel = openDetails();
     await waitFor(() =>
       expect(
         within(panel).getByText(/transférée et vérifiée/i),
@@ -4846,9 +5213,7 @@ describe("<LibraryRoute />", () => {
     renderLibrary();
 
     await user.click(await screen.findByRole("button", { name: /le soleil/i }));
-    const panel = screen.getByRole("complementary", {
-      name: /panneau de décision/i,
-    });
+    const panel = openDetails();
     await waitFor(() =>
       expect(
         within(panel).getByText(/l'appareil connecté a changé/i),
@@ -4879,9 +5244,7 @@ describe("<LibraryRoute />", () => {
     renderLibrary();
 
     await user.click(await screen.findByRole("button", { name: /le soleil/i }));
-    const panel = screen.getByRole("complementary", {
-      name: /panneau de décision/i,
-    });
+    const panel = openDetails();
     // No Préparer CTA exists anymore.
     expect(
       within(panel).queryByRole("button", { name: /^préparer$/i }),
@@ -4890,9 +5253,7 @@ describe("<LibraryRoute />", () => {
     const send = within(panel).getByRole("button", {
       name: /envoyer vers la lunii/i,
     });
-    await waitFor(() =>
-      expect(send).toHaveAttribute("aria-disabled", "true"),
-    );
+    await waitFor(() => expect(send).toHaveAttribute("aria-disabled", "true"));
     expect(
       document.getElementById(send.getAttribute("aria-describedby") as string),
     ).toHaveTextContent(/histoire native non transférable/i);
@@ -4909,9 +5270,7 @@ describe("<LibraryRoute />", () => {
     renderLibrary();
 
     await user.click(await screen.findByRole("button", { name: /le soleil/i }));
-    const panel = screen.getByRole("complementary", {
-      name: /panneau de décision/i,
-    });
+    const panel = openDetails();
     await waitFor(() => {
       const send = within(panel).getByRole("button", {
         name: /envoyer vers la lunii/i,
@@ -4941,9 +5300,7 @@ describe("<LibraryRoute />", () => {
     renderLibrary();
 
     await user.click(await screen.findByRole("button", { name: /le soleil/i }));
-    const panel = screen.getByRole("complementary", {
-      name: /panneau de décision/i,
-    });
+    const panel = openDetails();
     const send = within(panel).getByRole("button", {
       name: /envoyer vers la lunii/i,
     });
@@ -4985,16 +5342,18 @@ describe("<LibraryRoute />", () => {
     mockStoryValidation.mockResolvedValue(presumedTransferableValidation);
     const router = renderLibrary();
     await user.click(await screen.findByRole("button", { name: "Le soleil" }));
-    const send = screen.getByRole("button", { name: /envoyer vers la lunii/i });
+    const send = screen.getByRole("button", { name: "Ajouter à la Lunii" });
     await waitFor(() =>
       expect(send).not.toHaveAttribute("aria-disabled", "true"),
     );
     await user.click(send);
-    await waitFor(() => expect(mockSubscribeJobEvents).toHaveBeenCalledTimes(1));
+    await waitFor(() =>
+      expect(mockSubscribeJobEvents).toHaveBeenCalledTimes(1),
+    );
 
     await user.click(screen.getByRole("link", { name: "Sur l'appareil" }));
     expect(router.state.location.pathname).toBe("/device");
-    expect(screen.getByText("Transfert en cours")).toBeInTheDocument();
+    expect(screen.getByRole("progressbar")).toBeInTheDocument();
     expect(
       screen.queryByRole("button", { name: "Le soleil" }),
     ).not.toBeInTheDocument();
@@ -5011,14 +5370,20 @@ describe("<LibraryRoute />", () => {
       });
     });
     await user.click(screen.getByRole("button", { name: "Voir le transfert" }));
-    expect(router.state.location.pathname).toBe("/library");
+    expect(router.state.location.pathname).toBe("/device");
     expect(
-      within(screen.getByRole("region", { name: /^transfert$/i }))
-        .getByRole("progressbar"),
+      screen.getByRole("dialog", { name: "Détails du transfert" }),
+    ).toBeInTheDocument();
+    expect(
+      within(
+        screen.getByRole("dialog", { name: "Détails du transfert" }),
+      ).getByRole("progressbar"),
     ).toBeInTheDocument();
     expect(unsubscribe).not.toHaveBeenCalled();
 
-    await user.click(screen.getByRole("link", { name: "Sur l'appareil" }));
+    await user.click(
+      screen.getByRole("button", { name: "Fermer les détails" }),
+    );
     mockReadTransfer.mockResolvedValue({
       kind: "verified",
       story: { id: "s1", title: "Le soleil" },
@@ -5038,7 +5403,7 @@ describe("<LibraryRoute />", () => {
     });
     await waitFor(() => expect(unsubscribe).toHaveBeenCalledTimes(1));
     expect(router.state.location.pathname).toBe("/device");
-    expect(screen.queryByText("Transfert en cours")).not.toBeInTheDocument();
+    expect(screen.queryByRole("progressbar")).not.toBeInTheDocument();
     expect(
       screen.getByText("Résultat du transfert disponible"),
     ).toBeInTheDocument();
@@ -5046,9 +5411,14 @@ describe("<LibraryRoute />", () => {
     expect(
       screen.getByRole("region", { name: /^transfert$/i }),
     ).toHaveTextContent("« Le soleil » est maintenant sur la Lunii.");
-    expect(
-      screen.getByRole("button", { name: /^Le soleil/ }),
-    ).toHaveAttribute("aria-pressed", "true");
+    await user.click(
+      screen.getByRole("button", { name: "Fermer les détails" }),
+    );
+    await user.click(screen.getByRole("link", { name: "Ma bibliothèque" }));
+    expect(screen.getByRole("button", { name: /^Le soleil/ })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
     expect(mockStartTransfer).toHaveBeenCalledTimes(1);
     expect(mockSubscribeJobEvents).toHaveBeenCalledTimes(1);
   });
@@ -5071,9 +5441,7 @@ describe("<LibraryRoute />", () => {
     renderLibrary();
 
     await user.click(await screen.findByRole("button", { name: /le soleil/i }));
-    const panel = screen.getByRole("complementary", {
-      name: /panneau de décision/i,
-    });
+    const panel = openDetails();
     const send = within(panel).getByRole("button", {
       name: /envoyer vers la lunii/i,
     });
@@ -5131,14 +5499,7 @@ describe("<LibraryRoute />", () => {
     ] as const;
     for (const [deviceState, reason] of cases) {
       expect(
-        mapTransferView(
-          { kind: "idle" },
-          STORY_A,
-          1,
-          deviceState,
-          false,
-          true,
-        ),
+        mapTransferView({ kind: "idle" }, STORY_A, 1, deviceState, false, true),
       ).toEqual({ kind: "unavailable", reason });
     }
   });
@@ -5271,9 +5632,7 @@ describe("<LibraryRoute />", () => {
       mapTransferView(failedA, STORY_B, 1, "idle", true, true).kind,
     ).not.toBe("retryable");
     // Re-selecting A restores the full context (alert + Relancer/Abandonner).
-    expect(
-      mapTransferView(failedA, STORY_A, 1, "idle", true, true),
-    ).toEqual({
+    expect(mapTransferView(failedA, STORY_A, 1, "idle", true, true)).toEqual({
       kind: "retryable",
       message: "Le transfert a échoué.",
       userAction: "Relance.",
@@ -5377,9 +5736,12 @@ describe("<LibraryRoute />", () => {
       welcomeCompleted: false,
       deviceRecoveryPromptDismissed: false,
     });
-    mockAnalyzeOsOpen.mockImplementationOnce(() => new Promise((resolve) => {
-      resolveIntent = resolve;
-    }));
+    mockAnalyzeOsOpen.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveIntent = resolve;
+        }),
+    );
     const router = renderLibrary({ initialScreen: "welcome" });
     await screen.findByRole("heading", { name: "Bienvenue sur Rustory" });
     expect(router.state.location.pathname).toBe("/welcome");
@@ -5394,12 +5756,16 @@ describe("<LibraryRoute />", () => {
       name: "Import d'une histoire",
     });
     expect(within(review).getByText("Partiellement exploitable")).toBeVisible();
-    expect(within(review).getByRole("button", {
-      name: "Importer ce qui est reconnu",
-    })).toBeVisible();
-    expect(screen.queryByRole("heading", {
-      name: "Bienvenue sur Rustory",
-    })).not.toBeInTheDocument();
+    expect(
+      within(review).getByRole("button", {
+        name: "Importer ce qui est reconnu",
+      }),
+    ).toBeVisible();
+    expect(
+      screen.queryByRole("heading", {
+        name: "Bienvenue sur Rustory",
+      }),
+    ).not.toBeInTheDocument();
     expect(mockUpdateOnboardingPreferences).not.toHaveBeenCalled();
     expect(mockAnalyzeArtifact).not.toHaveBeenCalled();
     expect(mockAcceptArtifact).not.toHaveBeenCalled();
@@ -5494,13 +5860,11 @@ describe("<LibraryRoute />", () => {
 
     // Present twice by design: the persistent status region (the reliable
     // announcement) + the visual calm-limit block.
-    const occurrences = await screen.findAllByText(
-      OS_OPEN_MULTIPLE_FILES_COPY,
-    );
+    const occurrences = await screen.findAllByText(OS_OPEN_MULTIPLE_FILES_COPY);
     expect(occurrences).toHaveLength(2);
-    expect(
-      occurrences.some((el) => el.getAttribute("role") === "status"),
-    ).toBe(true);
+    expect(occurrences.some((el) => el.getAttribute("role") === "status")).toBe(
+      true,
+    );
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
     // No review opened — nothing was partially processed.
     expect(
@@ -5558,12 +5922,12 @@ describe("<LibraryRoute />", () => {
     await userEvent.click(
       screen.getByRole("button", { name: "Importer une histoire" }),
     );
-    await userEvent.click(screen.getByRole("button", {
-      name: "Choisir un fichier .rustory…",
-    }));
-    expect(
-      screen.getByText("Analyse de l'artefact…"),
-    ).toBeInTheDocument();
+    await userEvent.click(
+      screen.getByRole("button", {
+        name: "Choisir un fichier .rustory…",
+      }),
+    );
+    expect(screen.getByText("Analyse de l'artefact…")).toBeInTheDocument();
 
     act(() => {
       useOsOpenShell.getState().raise();
@@ -5572,18 +5936,16 @@ describe("<LibraryRoute />", () => {
     // Twice by design: the persistent status region + the visual block.
     const occurrences = await screen.findAllByText(OS_OPEN_BUSY_COPY);
     expect(occurrences).toHaveLength(2);
-    expect(
-      occurrences.some((el) => el.getAttribute("role") === "status"),
-    ).toBe(true);
+    expect(occurrences.some((el) => el.getAttribute("role") === "status")).toBe(
+      true,
+    );
     await waitFor(() => {
       expect(mockDiscardOsOpen).toHaveBeenCalledTimes(1);
     });
     // The intent was NOT analyzed (the busy gate consumed it calmly)…
     expect(mockAnalyzeOsOpen).toHaveBeenCalledTimes(1);
     // …and the LIVING flow was never interrupted.
-    expect(
-      screen.getByText("Analyse de l'artefact…"),
-    ).toBeInTheDocument();
+    expect(screen.getByText("Analyse de l'artefact…")).toBeInTheDocument();
   });
 
   it("surfaces an unreadable OS-open file as the failed state; Réessayer replays the SAME intent", async () => {
@@ -5888,7 +6250,9 @@ describe("<LibraryRoute />", () => {
     expect(router.state.location.pathname).toBe("/library");
     const notices = within(main).getAllByText(DROP_MULTIPLE_ITEMS_COPY);
     expect(notices).toHaveLength(2);
-    expect(notices.some((notice) => notice.getAttribute("role") === "status")).toBe(true);
+    expect(
+      notices.some((notice) => notice.getAttribute("role") === "status"),
+    ).toBe(true);
     expect(notices.find((notice) => notice.tagName === "P")).toBeVisible();
     expect(mockUpdateOnboardingPreferences).not.toHaveBeenCalled();
     expect(mockImport).not.toHaveBeenCalled();
@@ -6045,9 +6409,9 @@ describe("<LibraryRoute />", () => {
     // calm-limit block. NOTHING was processed — no review opened.
     const occurrences = await screen.findAllByText(DROP_MULTIPLE_ITEMS_COPY);
     expect(occurrences).toHaveLength(2);
-    expect(
-      occurrences.some((el) => el.getAttribute("role") === "status"),
-    ).toBe(true);
+    expect(occurrences.some((el) => el.getAttribute("role") === "status")).toBe(
+      true,
+    );
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
     expect(
       screen.queryByRole("region", { name: "Import d'une histoire" }),
@@ -6075,9 +6439,11 @@ describe("<LibraryRoute />", () => {
     await userEvent.click(
       screen.getByRole("button", { name: "Importer une histoire" }),
     );
-    await userEvent.click(screen.getByRole("button", {
-      name: "Choisir un fichier .rustory…",
-    }));
+    await userEvent.click(
+      screen.getByRole("button", {
+        name: "Choisir un fichier .rustory…",
+      }),
+    );
     expect(screen.getByText("Analyse de l'artefact…")).toBeInTheDocument();
 
     act(() => {
@@ -6087,9 +6453,9 @@ describe("<LibraryRoute />", () => {
     // Twice by design: the persistent status region + the visual block.
     const occurrences = await screen.findAllByText(DROP_BUSY_COPY);
     expect(occurrences).toHaveLength(2);
-    expect(
-      occurrences.some((el) => el.getAttribute("role") === "status"),
-    ).toBe(true);
+    expect(occurrences.some((el) => el.getAttribute("role") === "status")).toBe(
+      true,
+    );
     await waitFor(() => {
       expect(mockDiscardDrop).toHaveBeenCalledTimes(1);
     });
@@ -6123,9 +6489,7 @@ describe("<LibraryRoute />", () => {
         name: "Démarrer depuis une page web",
       }),
     );
-    expect(
-      screen.getByLabelText("Adresse de la page web"),
-    ).toBeInTheDocument();
+    expect(screen.getByLabelText("Adresse de la page web")).toBeInTheDocument();
 
     act(() => {
       useDropShell.getState().raiseSignal();
@@ -6134,18 +6498,16 @@ describe("<LibraryRoute />", () => {
     // Twice by design: the persistent status region + the visual block.
     const occurrences = await screen.findAllByText(DROP_BUSY_COPY);
     expect(occurrences).toHaveLength(2);
-    expect(
-      occurrences.some((el) => el.getAttribute("role") === "status"),
-    ).toBe(true);
+    expect(occurrences.some((el) => el.getAttribute("role") === "status")).toBe(
+      true,
+    );
     await waitFor(() => {
       expect(mockDiscardDrop).toHaveBeenCalledTimes(1);
     });
     // The intent was NOT analyzed (the busy gate consumed it calmly)…
     expect(mockAnalyzeDrop).toHaveBeenCalledTimes(1);
     // …and the web surface was never interrupted.
-    expect(
-      screen.getByLabelText("Adresse de la page web"),
-    ).toBeInTheDocument();
+    expect(screen.getByLabelText("Adresse de la page web")).toBeInTheDocument();
   });
 
   it("declines a drop while an OS-open read settles (cross-channel gate, drop side)", async () => {
@@ -6235,9 +6597,7 @@ describe("<LibraryRoute />", () => {
         name: "Démarrer depuis une page web",
       }),
     );
-    expect(
-      screen.getByLabelText("Adresse de la page web"),
-    ).toBeInTheDocument();
+    expect(screen.getByLabelText("Adresse de la page web")).toBeInTheDocument();
 
     const pullsSoFar = mockAnalyzeOsOpen.mock.calls.length;
     act(() => {
@@ -6252,9 +6612,7 @@ describe("<LibraryRoute />", () => {
       expect(mockDiscardOsOpen).toHaveBeenCalledTimes(1);
     });
     expect(mockAnalyzeOsOpen).toHaveBeenCalledTimes(pullsSoFar);
-    expect(
-      screen.getByLabelText("Adresse de la page web"),
-    ).toBeInTheDocument();
+    expect(screen.getByLabelText("Adresse de la page web")).toBeInTheDocument();
   });
 
   it("surfaces an unreadable dropped element as the failed state; Réessayer replays the SAME intent", async () => {

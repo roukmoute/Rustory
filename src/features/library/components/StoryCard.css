@@ -18,10 +18,11 @@
   transform: translateY(-2px);
 }
 
-.story-card--selected {
-  border-color: var(--color-action-primary);
-  box-shadow: 0 0 0 2px #1f7a5524;
-  background: #f1f9f3;
+.story-card--selected,
+.story-card--selected:hover {
+  border-color: #39cf8f;
+  box-shadow: 0 0 0 2px #39cf8f;
+  background: #fff2c1;
 }
 
 .story-card__focusable {

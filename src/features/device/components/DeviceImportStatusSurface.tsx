@@ -1,4 +1,5 @@
 import type React from "react";
+import { useId } from "react";
 
 import { Button, ProgressIndicator, StateChip } from "../../../shared/ui";
 import type { DeviceStoryImportStatus } from "../hooks/use-device-story-import";
@@ -6,6 +7,9 @@ import type { DeviceStoryImportStatus } from "../hooks/use-device-story-import";
 import "./DeviceImportStatusSurface.css";
 
 export interface DeviceImportStatusSurfaceProps {
+  actionsDisabled?: boolean;
+  /** Reuse the containing inspector's visible explanation, when present. */
+  actionsDisabledReasonId?: string;
   status: DeviceStoryImportStatus;
   onRetry: () => void;
   onDismiss: () => void;
@@ -32,11 +36,15 @@ export interface DeviceImportStatusSurfaceProps {
  *   and the `Réessayer` button BEFORE `Fermer` in tab order.
  */
 export function DeviceImportStatusSurface({
+  actionsDisabled = false,
+  actionsDisabledReasonId,
   status,
   onRetry,
   onDismiss,
   onConsultSupportProfile,
 }: DeviceImportStatusSurfaceProps): React.JSX.Element {
+  const ownBusyReasonId = useId();
+  const busyReasonId = actionsDisabledReasonId ?? ownBusyReasonId;
   // A profile refusal is not retryable (the live device simply does not
   // allow the copy) — offer the support consultation as the next gesture,
   // never a `Réessayer` that would hit the same wall.
@@ -68,7 +76,10 @@ export function DeviceImportStatusSurface({
 
       {status.kind === "imported" ? (
         <div className="device-import-status__success">
-          <StateChip tone="success" label="Histoire copiée dans ta bibliothèque" />
+          <StateChip
+            tone="success"
+            label="Histoire copiée dans ta bibliothèque"
+          />
           <p className="device-import-status__success-title">
             {status.story.title}
           </p>
@@ -89,6 +100,9 @@ export function DeviceImportStatusSurface({
               {status.error.userAction}
             </p>
           ) : null}
+          {actionsDisabled && !isProfileRefusal && !actionsDisabledReasonId && (
+            <p id={busyReasonId}>Opération en cours…</p>
+          )}
           <div className="device-import-status__actions">
             {isProfileRefusal ? (
               showSupportProfile ? (
@@ -101,7 +115,12 @@ export function DeviceImportStatusSurface({
                 </Button>
               ) : null
             ) : (
-              <Button variant="secondary" onClick={onRetry}>
+              <Button
+                variant="secondary"
+                onClick={onRetry}
+                aria-disabled={actionsDisabled || undefined}
+                aria-describedby={actionsDisabled ? busyReasonId : undefined}
+              >
                 Réessayer
               </Button>
             )}

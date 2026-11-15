@@ -1,4 +1,4 @@
-import { render, screen, within } from "@testing-library/react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
@@ -10,6 +10,7 @@ vi.mock("../hooks/use-pack-cover", () => ({
 import type { AppError } from "../../../shared/errors/app-error";
 import type { DeviceStoryDto } from "../../../shared/ipc-contracts/device-library";
 import { DeviceStoryInspector } from "./DeviceStoryInspector";
+import { DeviceImportStatusSurface } from "./DeviceImportStatusSurface";
 
 const baseStory: DeviceStoryDto = {
   uuid: "0a1b2c3d-4e5f-6071-8293-a4b5c6d7e8f9",
@@ -42,7 +43,8 @@ const importError: AppError = {
 const profileRefusalError: AppError = {
   code: "DEVICE_UNSUPPORTED",
   message: "Opération non autorisée pour ce profil d'appareil.",
-  userAction: "Consulte le profil de support pour comprendre ce qui est permis.",
+  userAction:
+    "Consulte le profil de support pour comprendre ce qui est permis.",
   details: { source: "capability_gate", operation: "import_story" },
 };
 
@@ -53,6 +55,93 @@ function copyButton(): HTMLElement {
 }
 
 describe("<DeviceStoryInspector />", () => {
+  it("also explains a disabled copy retry when the status is shown outside the inspector", async () => {
+    const user = userEvent.setup();
+    const onRetry = vi.fn();
+    const onDismiss = vi.fn();
+    render(
+      <DeviceImportStatusSurface
+        status={{ kind: "failed", error: importError }}
+        actionsDisabled
+        onRetry={onRetry}
+        onDismiss={onDismiss}
+      />,
+    );
+    const retry = screen.getByRole("button", { name: "Réessayer" });
+    expect(retry).toHaveAttribute("aria-disabled", "true");
+    expect(retry).toHaveAccessibleDescription("Opération en cours…");
+    await user.click(retry);
+    expect(onRetry).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("button", { name: "Fermer" }));
+    expect(onDismiss).toHaveBeenCalledOnce();
+  });
+
+  it("locks copy, retry, delete and naming during another operation while keeping results readable", async () => {
+    const user = userEvent.setup();
+    const onImport = vi.fn();
+    const onRetryImport = vi.fn();
+    const onDelete = vi.fn();
+    const onSetTitle = vi.fn();
+    const onDismissImportStatus = vi.fn();
+    render(
+      <DeviceStoryInspector
+        story={baseStory}
+        supportedOperations={{ ...importableOps, deleteStory: true }}
+        actionsDisabled
+        importState={{ kind: "failed", error: importError }}
+        onImport={onImport}
+        onRetryImport={onRetryImport}
+        onDelete={onDelete}
+        onSetTitle={onSetTitle}
+        onDismissImportStatus={onDismissImportStatus}
+      />,
+    );
+    for (const name of [
+      "Copier dans ma bibliothèque",
+      "Réessayer",
+      "Supprimer de l'appareil",
+      "Nommer cette histoire",
+    ]) {
+      const button = screen.getByRole("button", { name });
+      expect(button).toHaveAttribute("aria-disabled", "true");
+      expect(button).toHaveAccessibleDescription("Opération en cours…");
+      await user.click(button);
+    }
+    expect(onImport).not.toHaveBeenCalled();
+    expect(onRetryImport).not.toHaveBeenCalled();
+    expect(onDelete).not.toHaveBeenCalled();
+    expect(onSetTitle).not.toHaveBeenCalled();
+    expect(screen.getByRole("alert")).toHaveTextContent(importError.message);
+    expect(screen.getAllByText("Opération en cours…")).toHaveLength(1);
+    await user.click(screen.getByRole("button", { name: "Fermer" }));
+    expect(onDismissImportStatus).toHaveBeenCalledOnce();
+  });
+
+  it("blocks saving an already-open name editor when an operation starts", async () => {
+    const user = userEvent.setup();
+    const onSetTitle = vi.fn();
+    const props = {
+      story: baseStory,
+      supportedOperations: importableOps,
+      onSetTitle,
+    };
+    const { rerender } = render(<DeviceStoryInspector {...props} />);
+    await user.click(
+      screen.getByRole("button", { name: "Nommer cette histoire" }),
+    );
+    const input = screen.getByRole("textbox", { name: "Titre de l'histoire" });
+    await user.type(input, "Un titre valide");
+    rerender(<DeviceStoryInspector {...props} actionsDisabled />);
+    expect(input).toBeDisabled();
+    const save = screen.getByRole("button", { name: "Enregistrer" });
+    expect(save).toHaveAccessibleDescription("Opération en cours…");
+    await user.click(save);
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(onSetTitle).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("button", { name: "Annuler" }));
+    expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
+  });
+
   it("renders nothing when no story is selected", () => {
     const { container } = render(<DeviceStoryInspector story={null} />);
     expect(container).toBeEmptyDOMElement();
@@ -60,7 +149,10 @@ describe("<DeviceStoryInspector />", () => {
 
   it("shows only verified facts and makes the provenance explicit (AC1)", () => {
     render(
-      <DeviceStoryInspector story={baseStory} supportedOperations={importableOps} />,
+      <DeviceStoryInspector
+        story={baseStory}
+        supportedOperations={importableOps}
+      />,
     );
     const region = screen.getByRole("region", {
       name: /histoire sélectionnée/i,
@@ -98,9 +190,7 @@ describe("<DeviceStoryInspector />", () => {
     const region = screen.getByRole("region", {
       name: /histoire sélectionnée/i,
     });
-    expect(
-      within(region).getByText(/contenu incomplet/i),
-    ).toBeInTheDocument();
+    expect(within(region).getByText(/contenu incomplet/i)).toBeInTheDocument();
     expect(
       within(region).getByText(/dossier de contenu .* introuvable/i),
     ).toBeInTheDocument();
@@ -529,7 +619,9 @@ describe("<DeviceStoryInspector />", () => {
       within(region).getByText(/ce qui bloque la copie/i),
     ).toBeInTheDocument();
     expect(within(region).getByText("Contenu incomplet")).toBeInTheDocument();
-    expect(within(region).queryByText("Contenu présent")).not.toBeInTheDocument();
+    expect(
+      within(region).queryByText("Contenu présent"),
+    ).not.toBeInTheDocument();
   });
 
   it("classifies an already-copied story as blocking under 'Ce qui bloque la copie' (AC2)", () => {
@@ -546,7 +638,9 @@ describe("<DeviceStoryInspector />", () => {
     expect(
       within(region).getByText(/ce qui bloque la copie/i),
     ).toBeInTheDocument();
-    expect(within(region).getByText("Dans ta bibliothèque")).toBeInTheDocument();
+    expect(
+      within(region).getByText("Dans ta bibliothèque"),
+    ).toBeInTheDocument();
   });
 
   it("classifies a hidden story under 'À revoir avant de copier' (AC2)", () => {
@@ -644,7 +738,9 @@ describe("<DeviceStoryInspector />", () => {
       name: /histoire sélectionnée/i,
     });
     expect(within(region).getByText("Titre saisi")).toBeInTheDocument();
-    expect(within(region).queryByText("Titre officiel")).not.toBeInTheDocument();
+    expect(
+      within(region).queryByText("Titre officiel"),
+    ).not.toBeInTheDocument();
   });
 
   it("offers 'Nommer cette histoire' for an unrecognized pack and saves the typed title (AC2)", async () => {
@@ -676,16 +772,13 @@ describe("<DeviceStoryInspector />", () => {
     await user.click(
       screen.getByRole("button", { name: /renommer cette histoire/i }),
     );
-    const input = screen.getByLabelText<HTMLInputElement>(
-      /titre de l'histoire/i,
-    );
+    const input =
+      screen.getByLabelText<HTMLInputElement>(/titre de l'histoire/i);
     expect(input.value).toBe("Ancien nom");
   });
 
   it("does NOT offer naming for an official title (not the user's to overwrite here)", () => {
-    render(
-      <DeviceStoryInspector story={officialStory} onSetTitle={vi.fn()} />,
-    );
+    render(<DeviceStoryInspector story={officialStory} onSetTitle={vi.fn()} />);
     expect(
       screen.queryByRole("button", { name: /nommer cette histoire/i }),
     ).not.toBeInTheDocument();

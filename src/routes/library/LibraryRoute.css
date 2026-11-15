@@ -73,7 +73,7 @@
   cursor: pointer;
 }
 
-.library-route__device-status>span:nth-child(2) {
+.library-route__device-status > span:nth-child(2) {
   min-width: 0;
   flex: 1;
 }
@@ -83,7 +83,7 @@
   font-size: 14px;
 }
 
-.library-route__device-status>svg {
+.library-route__device-status > svg {
   flex-shrink: 0;
 }
 
@@ -129,34 +129,25 @@
   margin-top: 2px;
 }
 
-.library-route__details-heading {
+/* Secondary information opens only on request, without changing collection width. */
+.library-route__details-actions {
   display: flex;
-  align-items: center;
   justify-content: space-between;
-  gap: 8px;
-  color: var(--color-text-secondary);
-  font-size: 12px;
-  font-weight: 800;
+  gap: 12px;
+  margin-bottom: 16px;
 }
 
-.library-route__close {
-  background: transparent;
-  border: 1px solid var(--color-border-subtle);
-  border-radius: 50%;
-  width: 36px;
-  height: 36px;
-  display: grid;
-  place-items: center;
-  cursor: pointer;
-  color: var(--color-text-primary);
-  flex-shrink: 0;
+.library-route__recovery {
+  padding: 22px;
+  margin-bottom: 24px;
+  border-color: var(--color-action-primary);
+  background: #edf7ee;
 }
-
-.library-route__close:disabled {
-  opacity: .45;
-  cursor: default;
+.library-route__recovery h2 {
+  margin: 0 0 12px;
+  font-family: var(--font-family-display);
+  font-size: 22px;
 }
-
-.library-route__recovery { padding: 22px; margin-bottom: 24px; border-color: var(--color-action-primary); background: #edf7ee; }
-.library-route__recovery h2 { margin: 0 0 12px; font-family: var(--font-family-display); font-size: 22px; }
-.library-route__recovery p { line-height: 1.5; }
+.library-route__recovery p {
+  line-height: 1.5;
+}

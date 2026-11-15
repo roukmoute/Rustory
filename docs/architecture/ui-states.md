@@ -212,9 +212,9 @@ Rustory is desktop-only. No `mobile` or `tablet` UI is supported.
 Enforced in `src-tauri/tauri.conf.json` via `app.windows[0].{width, height, minWidth, minHeight}`.
 
 The desktop layout adapts to the available width without changing the business
-flows. At 1024–1200px, navigation and spacing are reduced. Under 980 CSS pixels
-(e.g. browser preview or text zoom), the decision panel follows the collection
-instead of covering it. The native minimum window size remains unchanged.
+flows. At 1024–1200px, navigation and spacing are reduced. At smaller CSS widths (e.g. browser preview or text zoom), the floating action
+bar wraps and reserves its measured height below the collection. There is no
+side panel. The native minimum window size remains unchanged.
 
 ## Library Layout Contract
 
@@ -234,31 +234,39 @@ that collection context. The main library continues to contain all local stories
 
 The library, drafts and device screens share a two-column shell: navigation and the
 current collection. `/library` shows all local stories; `/drafts` shows stories created here; `/device` shows the device
-inventory. Only one collection is visible at a time. The decision panel is
-disclosed on demand, or when a story is selected on the current screen.
-In-flight transfers keep their progress visible.
+inventory. Only one collection is visible at a time. Selecting a story immediately reveals
+its floating bottom action bar without resizing or shifting the cards. There is
+no right panel or drawer at any width. Details and catalogue maintenance open
+only in explicitly requested dialogs. Transfers and copies keep their real
+progress/results visible independently of selection and screen.
 
 | Zone | Role | ARIA region |
 | --- | --- | --- |
 | Left | Library/drafts/device navigation, settings, live device summary | `<nav aria-label="Navigation bibliothèque">` |
 | Center | Local collection on `/library`, device inventory on `/device` | `<main aria-label="Collection d'histoires">` or `<main aria-label="Histoires sur l'appareil">` |
-| Optional right | Selection actions for the current screen, operation progress and catalogue | `<aside aria-label="Panneau de décision">` |
+| Bottom | Count, primary action, details, delete, clear for the current selection | `<section aria-label="Actions pour la sélection">` |
 
-- The panel and import surfaces stay mounted when closed: closing a presentation
-  must not reset a transfer, import, event listener or selection.
+- Controllers and import surfaces stay mounted: closing a dialog must not reset
+  a transfer, import, event listener or selection.
 - Switching between `/library`, `/drafts` and `/device` keeps their shared route controller
   and operation hooks mounted. It preserves both independent selections and
   their existing pruning rules; browser Back/Forward restores the matching screen.
 - Local edit/delete/send actions belong to `/library`; device inspection/copy/
   rename/delete actions belong to `/device`. A selection kept on the other screen
   must not expose unrelated actions. Progress of an active operation stays visible.
-- Selecting a story reveals its actions without stealing keyboard focus. Closing
-  the panel returns focus to its disclosure button in the sidebar.
-- Local selection waits 500 ms before revealing the panel, preserving double-click
-  editing. Changing screens cancels that pending reveal; explicit disclosure and
-  device selection remain immediate.
-- The sidebar device summary stays visible even while the panel is closed. Its
-  wording reflects the scan result, never unproven write or synchronization status.
+- Selecting a story reveals its actions without stealing keyboard focus or
+  starting a delayed layout transition. Double-click editing is unchanged.
+- The bottom bar reserves its measured height so final cards remain reachable;
+  it stays centered in the collection, wraps at narrow widths and never covers
+  navigation. The × only clears selection, never cancels or dismisses a job.
+- The primary local action is `Ajouter à la Lunii` (family-correct for other
+  devices), using the existing send gate. Bulk local send is not implemented;
+  its unavailable reason stays visible. Device copy uses the inspector's exact
+  eligibility rules; bulk copy names the eligible count and excluded stories.
+- Deletion uses explicit confirmation. Multiple local stories can be deleted;
+  device deletion remains single-story. Failed deletion remains visible.
+- The sidebar device summary opens details explicitly. Its wording reflects the
+  scan result, never unproven write or synchronization status.
 - Each screen owns its central collection; sidebar navigation changes the URL,
   not a scroll anchor. `/device` remains meaningful without a connected device.
 - The library supports cards and list views. This display choice preserves the
@@ -275,6 +283,11 @@ In-flight transfers keep their progress visible.
   validation, distribution policy and busy guards remain authoritative; changing
   presentation never enables a blocked source. Empty-library actions open the
   relevant title/import step directly.
+
+Historical contracts below retain their state machines and capability gates.
+References to a "right column" or "decision panel" now mean the explicitly
+opened details dialog; operation progress also has a persistent collection
+notice. They never authorize opening a panel/modal automatically on selection.
 
 ## Device Detection Contract
 
@@ -505,7 +518,7 @@ anything (the import flow is a later story).
 | Non-color signal | A selected device card renders a colored border, a visible `✓` prefix in the DOM and `aria-pressed="true"` — the selection survives grayscale / color-blindness, exactly like a local `Story Card`. |
 | Interaction | A selectable device card is a `role="button" aria-pressed={selected}` focus stop. Click (or `Space` / `Enter` on the focused card) toggles its selection. There is no double-click / open: a device story is not editable. |
 
-The inspector lives in the right column of `/device` and renders only when a
+The inspector lives in the explicitly opened details dialog of `/device` and renders only when a
 device story is selected. Switching to `/library` preserves the device selection
 but shows the local-selection actions instead:
 
@@ -552,7 +565,7 @@ inspector):
 
 Surface rules:
 
-- All import feedback lives in the inspector (right column). Never a
+- Import feedback is available in the inspector and the persistent operation details. Never an automatic
   toast for the failure, never a tunnel modal, never a navigation.
 - No pre-copy confirmation dialog: the copy is non-destructive (the
   device is read-only end to end).
@@ -861,7 +874,7 @@ stamped with a pipeline version.
 
 **Long-running, non-blocking (AC2).** While preparation runs, the **library stays
 usable** (navigation, search, selection, sort): the preparation lives in the
-right-column panel and never becomes the visual center, never a modal, never a
+explicitly opened details dialog and the persistent operation notice; never an automatic modal, never a
 tunnel, never a toast. Progress is **honest**: the current phase is always named;
 a percentage appears ONLY when it is reliable, otherwise the named-phase state
 stands on its own (no fake percentage). At minimum the `preparing` and `preflight`
@@ -1201,7 +1214,7 @@ the surviving outcome so the parent can still `Relancer` (a full fresh cycle) or
 
 ## Official Catalog Contract
 
-The right column hosts a quiet `Catalogue officiel` panel that manages the
+An explicitly opened dialog hosts the `Catalogue officiel` panel that manages the
 local commercial-catalog cache used for title recognition (see
 [device-support-profile.md#Title Recognition & Catalog Policy](./device-support-profile.md)).
 It is global, not device-specific — caching the catalog recognizes packs even

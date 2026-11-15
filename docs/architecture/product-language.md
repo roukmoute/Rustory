@@ -38,7 +38,7 @@ It exists to keep the same product concepts named the same way across:
 | Provenance marker (device) | `Sur l'appareil` | Marks an item as living on the device, distinct from the local library | `remote`, `external`, `cloud` |
 | Hidden device pack | `Masquée` | A device story listed as hidden by the user | `hidden`, `archived` |
 | Incomplete device pack | `Contenu incomplet` | A listed device story whose payload folder is missing/ambiguous | `corrupt`, `broken`, `orphan` |
-| Device story under inspection | `Histoire sélectionnée` | Heading of the right-column inspector for the device story being consulted before import | `selected item`, `current pack` |
+| Device story under inspection | `Histoire sélectionnée` | Heading of the explicitly opened inspector for the device story being consulted before import | `selected item`, `current pack` |
 | Device story provenance note | `Cette histoire vit sur l'appareil, pas encore dans ta bibliothèque locale` | Reminds the user that a consulted device story is not yet a local draft | wording implying it is already imported |
 | Device story provenance note (copy exists) | `Cette histoire vit sur l'appareil et une copie existe déjà dans ta bibliothèque locale` | Variant of the provenance note once a local copy exists (`alreadyImported`) | `pas encore` wording on an already-copied story |
 | Order on the device (arrows) | `Monter — <titre>` / `Descendre — <titre>` | Accessible names of the two per-entry arrows that move a device story one step in the device's own play order (the wheel order); an unrecognized pack is named `Histoire non reconnue, identifiant <shortId>` so every name stays unique. Same verbs as the editor's node reordering, reused verbatim | `Déplacer`, `Trier`, drag-and-drop wording, `Réorganiser` as a CTA |
@@ -546,8 +546,17 @@ flow's defensive rendering, but only the RSS flow ever emits it.
 - `Aucun appareil connecté` describes an absent device on `/device`, not an empty
   inventory. `Aucune histoire sur l'appareil` requires a successful inventory read.
 - `Aide et réglages` opens the existing settings and support-profile route.
-- `Afficher le panneau de l'appareil` / `Fermer le panneau de l'appareil` disclose
-  existing controls without discarding selection or a running operation.
+- Selection opens a floating bottom action bar, never a right panel. Its counter
+  reads `1 sélectionnée` / `N sélectionnées`; `Effacer la sélection` clears only
+  the current collection's selection.
+- `Ajouter à la Lunii` is the compact send action in that bar (`Ajouter à
+  l'appareil` for another family). It calls the same transfer as the detailed
+  `Envoyer vers la Lunii` action, with identical capability and story gates.
+- `Détails` opens `Détails de la sélection` explicitly; `Détails de l'appareil`
+  opens the same dialog from the live device summary. Closing it preserves
+  selection and running operations. Catalogue maintenance has its own dialog.
+- `Voir le transfert` opens the operation's details independently of the current
+  selection; a running or completed operation never disappears on deselection.
 - `Reprendre` opens the existing story editor. It does not imply an unsaved draft.
 - `Affichage en cartes` / `Affichage en liste` change presentation only.
 - `Catalogue officiel` opens the existing catalogue maintenance panel, not a
