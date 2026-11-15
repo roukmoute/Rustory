@@ -259,3 +259,17 @@
 .story-card__actions .ds-button>svg:last-child {
   margin-left: auto;
 }
+
+.story-card--draft .story-card__actions .ds-button {
+  background: var(--color-action-bright);
+  color: var(--color-action-on-bright);
+}
+
+.story-card--draft .story-card__actions .ds-button:hover {
+  background: var(--color-action-bright-hover);
+}
+
+.story-card--draft .story-card__actions .ds-button>svg {
+  flex-shrink: 0;
+  margin-left: 0;
+}

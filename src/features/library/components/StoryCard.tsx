@@ -27,6 +27,8 @@ export type StoryPreparationBadge =
 
 export interface StoryCardProps {
   story: StoryCardDto;
+  /** The drafts collection offers a direct continuation of local writing. */
+  isDraft?: boolean;
   isSelected: boolean;
   /** Total number of selected cards in the collection. Needed so a plain
    *  click on the single selected card can deselect it, while preserving
@@ -57,6 +59,7 @@ export interface StoryCardProps {
  */
 export function StoryCard({
   story,
+  isDraft = false,
   isSelected,
   selectionSize = 0,
   preparationBadge,
@@ -141,7 +144,7 @@ export function StoryCard({
     <SurfacePanel
       elevation={1}
       as="article"
-      className={`story-card${isSelected ? " story-card--selected" : ""}`}
+      className={`story-card${isSelected ? " story-card--selected" : ""}${isDraft ? " story-card--draft" : ""}`}
     >
       <div
         className={className}
@@ -225,8 +228,8 @@ export function StoryCard({
           aria-describedby={titleId}
         >
           <Icon name="edit" size={15} />
-          Reprendre
-          <Icon name="arrow-right" size={15} />
+          {isDraft ? "Continuer à écrire" : "Reprendre"}
+          {!isDraft ? <Icon name="arrow-right" size={15} /> : null}
         </Button>
       </div>
     </SurfacePanel>

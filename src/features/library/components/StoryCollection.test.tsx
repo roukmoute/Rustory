@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useState } from "react";
 import { describe, expect, it, vi } from "vitest";
@@ -16,6 +16,7 @@ const sampleStories = [
 ];
 
 interface HarnessProps {
+  variant?: "library" | "drafts";
   stories?: typeof sampleStories;
   isLoading?: boolean;
   initialQuery?: string;
@@ -25,6 +26,9 @@ interface HarnessProps {
   onOpenStory?: (id: string) => void;
   onCreateStoryRequest?: () => void;
   onImportArtifactRequest?: () => void;
+  onImportRequest?: () => void;
+  onCatalogRequest?: () => void;
+  catalogCount?: number;
   isImportBusy?: boolean;
   onDeviceStoryIds?: ReadonlySet<string>;
   deviceStampLabel?: string;
@@ -39,6 +43,7 @@ function Harness(props: HarnessProps) {
   );
   return (
     <StoryCollection
+      variant={props.variant}
       stories={props.stories ?? sampleStories}
       isLoading={props.isLoading ?? false}
       query={query}
@@ -54,6 +59,9 @@ function Harness(props: HarnessProps) {
       onOpenStory={props.onOpenStory}
       onCreateStoryRequest={props.onCreateStoryRequest}
       onImportArtifactRequest={props.onImportArtifactRequest}
+      onImportRequest={props.onImportRequest}
+      onCatalogRequest={props.onCatalogRequest}
+      catalogCount={props.catalogCount}
       isImportBusy={props.isImportBusy}
       onDeviceStoryIds={props.onDeviceStoryIds}
       deviceStampLabel={props.deviceStampLabel}
@@ -138,9 +146,9 @@ describe("<StoryCollection />", () => {
     render(<Harness stories={[]} />);
 
     expect(
-      screen.getByRole("heading", { name: /ta bibliothèque est vide/i }),
+      screen.getByRole("heading", { name: "Par quoi veux-tu commencer ?" }),
     ).toBeInTheDocument();
-    expect(screen.getByText(/^0 histoire$/)).toBeInTheDocument();
+    expect(screen.getByRole("status")).toHaveTextContent("Ta bibliothèque est vide");
 
     const create = screen.getByRole("button", {
       name: /créer une histoire/i,
@@ -159,7 +167,7 @@ describe("<StoryCollection />", () => {
 
     expect(screen.getByRole("progressbar")).toBeInTheDocument();
     expect(
-      screen.queryByRole("heading", { name: /ta bibliothèque est vide/i }),
+      screen.queryByRole("heading", { name: "Par quoi veux-tu commencer ?" }),
     ).not.toBeInTheDocument();
   });
 
@@ -434,11 +442,11 @@ describe("<StoryCollection />", () => {
       <Harness stories={[]} onCreateStoryRequest={onCreateStoryRequest} />,
     );
 
-    // Two Créer CTAs now: header + empty-state region. Both must dispatch.
+    // The welcome screen has one clear creation entry, in its dedicated card.
     const creates = screen.getAllByRole("button", {
       name: /créer une histoire/i,
     });
-    expect(creates).toHaveLength(2);
+    expect(creates).toHaveLength(1);
     for (const btn of creates) {
       expect(btn).not.toHaveAttribute("aria-disabled", "true");
     }
@@ -446,7 +454,7 @@ describe("<StoryCollection />", () => {
       screen.queryByText(/création d'histoire indisponible/i),
     ).not.toBeInTheDocument();
 
-    await user.click(creates[1]);
+    await user.click(creates[0]);
     expect(onCreateStoryRequest).toHaveBeenCalledTimes(1);
   });
 
@@ -477,5 +485,117 @@ describe("<StoryCollection />", () => {
     expect(
       screen.queryByRole("button", { name: "Importer une histoire" }),
     ).not.toBeInTheDocument();
+  });
+
+  it("offers three real starting actions with the known catalogue metadata count", async () => {
+    const user = userEvent.setup();
+    const onCatalogRequest = vi.fn();
+    const onImportArtifactRequest = vi.fn();
+    const onCreateStoryRequest = vi.fn();
+    render(
+      <Harness
+        stories={[]}
+        onCatalogRequest={onCatalogRequest}
+        catalogCount={42}
+        onImportArtifactRequest={onImportArtifactRequest}
+        onCreateStoryRequest={onCreateStoryRequest}
+      />,
+    );
+
+    expect(screen.getByRole("heading", { level: 1 })).toHaveTextContent(
+      "Par quoi veux-tu commencer ?",
+    );
+    expect(screen.getAllByRole("heading", { level: 2 }).map((heading) => heading.textContent)).toEqual([
+      "Catalogue officiel", "Importer", "Écrire la mienne",
+    ]);
+    expect(screen.getByText("42 titres référencés")).toBeInTheDocument();
+    expect(screen.getByText("Retrouve les titres et les images des histoires officielles.")).toBeInTheDocument();
+    expect(screen.getByText("Ajoute une histoire depuis un fichier .rustory.")).toBeInTheDocument();
+    expect(screen.queryByRole("searchbox")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Voir le catalogue" }));
+    await user.click(screen.getByRole("button", { name: "Importer une histoire" }));
+    await user.click(screen.getByRole("button", { name: "Créer une histoire" }));
+    expect(onCatalogRequest).toHaveBeenCalledTimes(1);
+    expect(onImportArtifactRequest).toHaveBeenCalledTimes(1);
+    expect(onCreateStoryRequest).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not invent a catalogue count or claim that its metadata is playable content", () => {
+    const { rerender } = render(<Harness stories={[]} onCatalogRequest={vi.fn()} />);
+    expect(screen.queryByText(/titres? référencés?/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/587|prêtes? à écouter/i)).not.toBeInTheDocument();
+    rerender(<Harness stories={[]} onCatalogRequest={vi.fn()} catalogCount={0} />);
+    expect(screen.getByText("0 titres référencés")).toBeInTheDocument();
+  });
+
+  it("uses the broader import chooser when supplied and keeps the busy gate on the welcome card", async () => {
+    const user = userEvent.setup();
+    const onImportRequest = vi.fn();
+    const onImportArtifactRequest = vi.fn();
+    const { rerender } = render(
+      <Harness stories={[]} onImportRequest={onImportRequest} onImportArtifactRequest={onImportArtifactRequest} />,
+    );
+    expect(screen.getByText("Depuis un fichier, un dossier ou un lien.")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Importer une histoire" }));
+    expect(onImportRequest).toHaveBeenCalledTimes(1);
+    expect(onImportArtifactRequest).not.toHaveBeenCalled();
+
+    rerender(<Harness stories={[]} onImportRequest={onImportRequest} isImportBusy />);
+    const button = screen.getByRole("button", { name: "Importer une histoire" });
+    expect(button).toBeDisabled();
+    expect(button).toHaveAttribute("aria-busy", "true");
+    await user.click(button);
+    expect(onImportRequest).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows local drafts with a direct writing action and no invented modification dates", async () => {
+    const user = userEvent.setup();
+    const onOpenStory = vi.fn();
+    const onSelectStory = vi.fn();
+    render(<Harness variant="drafts" onOpenStory={onOpenStory} onSelectStory={onSelectStory} />);
+
+    expect(screen.getByRole("heading", { level: 1, name: "Mes brouillons" })).toBeInTheDocument();
+    expect(screen.getByText("Tes histoires créées ici, à retrouver pour continuer à écrire.")).toBeInTheDocument();
+    expect(screen.getByText("3 brouillons · enregistrés sur cet ordinateur")).toBeInTheDocument();
+    expect(screen.queryByText(/modifié|hier|aujourd'hui/i)).not.toBeInTheDocument();
+    const draft = screen.getByRole("button", { name: "Le soleil d'Éloi" }).closest("article");
+    expect(draft).not.toBeNull();
+    await user.click(within(draft!).getByRole("button", { name: "Continuer à écrire" }));
+    expect(onOpenStory).toHaveBeenCalledWith("s1");
+    expect(onSelectStory).not.toHaveBeenCalled();
+  });
+
+  it("keeps drafts searchable and sortable in either view with the selected count visible", async () => {
+    const user = userEvent.setup();
+    render(<Harness variant="drafts" selectedStoryIds={new Set(["s1"])} />);
+    await user.selectOptions(screen.getByRole("combobox", { name: "Trier par" }), "titre-desc");
+    expect(screen.getAllByRole("heading", { level: 3 }).map((heading) => heading.textContent)).toEqual([
+      "Le soleil d'Éloi", "La lune des chats", "Étoile filante",
+    ]);
+    await user.type(screen.getByRole("searchbox", { name: "Rechercher une histoire" }), "soleil");
+    await user.click(screen.getByRole("button", { name: "Affichage en liste" }));
+    expect(screen.getByRole("button", { name: "Affichage en liste" })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByRole("button", { name: "Le soleil d'Éloi" })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByText("1 sur 3 brouillons · enregistrés sur cet ordinateur — 1 sélectionné")).toBeInTheDocument();
+    await user.clear(screen.getByRole("searchbox"));
+    await user.type(screen.getByRole("searchbox"), "aucune correspondance");
+    await user.click(screen.getByRole("button", { name: "Réinitialiser les filtres" }));
+    expect(screen.getByRole("combobox", { name: "Trier par" })).toHaveValue("titre-asc");
+    expect(screen.getAllByRole("button", { name: "Continuer à écrire" })).toHaveLength(3);
+  });
+
+  it("gives empty drafts a creation action without library import or catalogue choices", async () => {
+    const user = userEvent.setup();
+    const onCreateStoryRequest = vi.fn();
+    render(
+      <Harness variant="drafts" stories={[]} onCreateStoryRequest={onCreateStoryRequest} onImportArtifactRequest={vi.fn()} onCatalogRequest={vi.fn()} />,
+    );
+    expect(screen.getByRole("heading", { level: 1, name: "Mes brouillons" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Aucun brouillon pour l'instant" })).toBeInTheDocument();
+    expect(screen.getByText("0 brouillons · enregistrés sur cet ordinateur")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Importer une histoire" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Voir le catalogue" })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Créer une histoire" }));
+    expect(onCreateStoryRequest).toHaveBeenCalledTimes(1);
   });
 });

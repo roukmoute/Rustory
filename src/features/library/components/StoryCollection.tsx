@@ -16,6 +16,8 @@ import {
 import "./StoryCollection.css";
 
 export interface StoryCollectionProps {
+  /** The route owns which stories belong to each collection. */
+  variant?: "library" | "drafts";
   stories: StoryCardDto[];
   isLoading: boolean;
   query: string;
@@ -42,6 +44,12 @@ export interface StoryCollectionProps {
   /** Fires when the user requests to import a local `.rustory` artifact.
    *  When omitted, the "Importer une histoire" CTA is hidden. */
   onImportArtifactRequest?: () => void;
+  /** Optional broader import chooser used by the empty-library card. */
+  onImportRequest?: () => void;
+  /** Opens the existing official catalogue surface. */
+  onCatalogRequest?: () => void;
+  /** Authoritative catalogue metadata count, omitted until known. */
+  catalogCount?: number;
   /** Disables the import CTA while an analysis / import is in flight, so a
    *  second pick cannot start a concurrent flow. */
   isImportBusy?: boolean;
@@ -63,6 +71,7 @@ function isLibrarySortKey(value: string): value is LibrarySortKey {
 }
 
 export function StoryCollection({
+  variant = "library",
   stories,
   isLoading,
   query,
@@ -79,6 +88,9 @@ export function StoryCollection({
   onStoryContextMenu,
   onCreateStoryRequest,
   onImportArtifactRequest,
+  onImportRequest,
+  onCatalogRequest,
+  catalogCount,
   isImportBusy = false,
   view: controlledView,
   onViewChange,
@@ -90,6 +102,8 @@ export function StoryCollection({
   const view = controlledView ?? localView;
   const setView = onViewChange ?? setLocalView;
   const createDisabledId = useId();
+  const catalogDisabledId = useId();
+  const importDisabledId = useId();
 
   const visible = useMemo(
     () => applyLibraryFilters({ stories, query, sort }),
@@ -105,6 +119,9 @@ export function StoryCollection({
         : { kind: "loaded", visible };
 
   const selectedCount = selectedStoryIds.size;
+  const isDrafts = variant === "drafts";
+  const showLibraryWelcome = !isDrafts && state.kind === "loaded-empty";
+  const requestImport = onImportRequest ?? onImportArtifactRequest;
 
   const handleSelect = (id: string, mode: StoryCardSelectionMode): void => {
     onSelectStory?.(id, mode);
@@ -115,97 +132,122 @@ export function StoryCollection({
   };
 
   return (
-    <section className="story-collection" aria-labelledby={titleId}>
+    <section
+      className={`story-collection story-collection--${variant}${showLibraryWelcome ? " story-collection--welcome" : ""}`}
+      aria-labelledby={titleId}
+    >
       <header className="story-collection__header">
         <div className="story-collection__heading-row">
           <div>
-            <p className="story-collection__eyebrow">
-              À lire, à écouter, à imaginer
-            </p>
+            {!isDrafts && !showLibraryWelcome ? (
+              <p className="story-collection__eyebrow">
+                À lire, à écouter, à imaginer
+              </p>
+            ) : null}
             <h1 id={titleId} className="story-collection__title">
-              Ma bibliothèque
+              {isDrafts
+                ? "Mes brouillons"
+                : showLibraryWelcome
+                  ? "Par quoi veux-tu commencer ?"
+                  : "Ma bibliothèque"}
             </h1>
+            {isDrafts ? (
+              <p className="story-collection__description">
+                Tes histoires créées ici, à retrouver pour continuer à écrire.
+              </p>
+            ) : null}
           </div>
-          <div className="story-collection__actions">
-            {onImportArtifactRequest ? (
-              <Button
-                variant="quiet"
-                onClick={onImportArtifactRequest}
-                disabled={isImportBusy}
-                aria-busy={isImportBusy}
+          {state.kind !== "loaded-empty" ? (
+            <div className="story-collection__actions">
+              {!isDrafts && onImportArtifactRequest ? (
+                <Button
+                  variant="quiet"
+                  onClick={onImportArtifactRequest}
+                  disabled={isImportBusy}
+                  aria-busy={isImportBusy}
+                >
+                  <Icon name="upload" size={17} />
+                  Importer une histoire
+                </Button>
+              ) : null}
+              {onCreateStoryRequest ? (
+                <Button
+                  variant={isDrafts ? "secondary" : "primary"}
+                  onClick={onCreateStoryRequest}
+                >
+                  <Icon name="plus" size={18} />
+                  Créer une histoire
+                </Button>
+              ) : null}
+            </div>
+          ) : null}
+        </div>
+        {!showLibraryWelcome ? (
+          <div className="story-collection__controls">
+            <div className="story-collection__search">
+              <Icon name="search" size={20} />
+              <Field
+                id={searchId}
+                label="Rechercher une histoire"
+                type="search"
+                value={query}
+                onChange={onQueryChange}
+                placeholder={isDrafts
+                  ? "Chercher un brouillon…"
+                  : "Chercher une histoire…"}
+              />
+            </div>
+            <div className="story-collection__sort">
+              <label className="story-collection__sr-only" htmlFor={sortId}>
+                Trier par
+              </label>
+              <select
+                id={sortId}
+                className="story-collection__select"
+                value={sort}
+                onChange={(event) => {
+                  const next = event.target.value;
+                  if (isLibrarySortKey(next)) onSortChange(next);
+                }}
               >
-                <Icon name="upload" size={17} />
-                Importer une histoire
-              </Button>
-            ) : null}
-            {onCreateStoryRequest ? (
-              <Button variant="primary" onClick={onCreateStoryRequest}>
-                <Icon name="plus" size={18} />
-                Créer une histoire
-              </Button>
-            ) : null}
-          </div>
-        </div>
-        <div className="story-collection__controls">
-          <div className="story-collection__search">
-            <Icon name="search" size={20} />
-            <Field
-              id={searchId}
-              label="Rechercher une histoire"
-              type="search"
-              value={query}
-              onChange={onQueryChange}
-              placeholder="Chercher une histoire…"
-            />
-          </div>
-          <div className="story-collection__sort">
-            <label className="story-collection__sr-only" htmlFor={sortId}>
-              Trier par
-            </label>
-            <select
-              id={sortId}
-              className="story-collection__select"
-              value={sort}
-              onChange={(event) => {
-                const next = event.target.value;
-                if (isLibrarySortKey(next)) onSortChange(next);
-              }}
+                <option value="titre-asc">Titre (A → Z)</option>
+                <option value="titre-desc">Titre (Z → A)</option>
+              </select>
+            </div>
+            <div
+              className="story-collection__view"
+              role="group"
+              aria-label="Affichage"
             >
-              <option value="titre-asc">Titre (A → Z)</option>
-              <option value="titre-desc">Titre (Z → A)</option>
-            </select>
+              <button
+                type="button"
+                aria-label="Affichage en cartes"
+                aria-pressed={view === "grid"}
+                onClick={() => setView("grid")}
+              >
+                <Icon name="grid" />
+              </button>
+              <button
+                type="button"
+                aria-label="Affichage en liste"
+                aria-pressed={view === "list"}
+                onClick={() => setView("list")}
+              >
+                <Icon name="list" />
+              </button>
+            </div>
           </div>
-          <div
-            className="story-collection__view"
-            role="group"
-            aria-label="Affichage"
-          >
-            <button
-              type="button"
-              aria-label="Affichage en cartes"
-              aria-pressed={view === "grid"}
-              onClick={() => setView("grid")}
-            >
-              <Icon name="grid" />
-            </button>
-            <button
-              type="button"
-              aria-label="Affichage en liste"
-              aria-pressed={view === "list"}
-              onClick={() => setView("list")}
-            >
-              <Icon name="list" />
-            </button>
-          </div>
-        </div>
+        ) : null}
         {/*
          * Counter is read by the empty / filtered-empty / pending regions via
          * their own role=status. Keeping aria-live here would double-announce
          * on every keystroke — rely on the status regions instead.
          */}
-        <p className="story-collection__counter">
-          {countersLabel(stories.length, state, selectedCount)}
-        </p>
+        {!showLibraryWelcome ? (
+          <p className="story-collection__counter">
+            {countersLabel(stories.length, state, selectedCount, variant)}
+          </p>
+        ) : null}
         {state.kind === "loaded" ? (
           <details className="story-collection__selection-help">
             <summary>Sélectionner plusieurs histoires</summary>
@@ -226,12 +268,115 @@ export function StoryCollection({
         >
           <ProgressIndicator
             mode="indeterminate"
-            label="Chargement de la bibliothèque…"
+            label={isDrafts
+              ? "Chargement des brouillons…"
+              : "Chargement de la bibliothèque…"}
           />
         </div>
       ) : null}
 
-      {state.kind === "loaded-empty" ? (
+      {showLibraryWelcome ? (
+        <div className="story-collection__welcome">
+          <p
+            className="story-collection__welcome-intro"
+            role="status"
+            aria-live="polite"
+          >
+            Ta bibliothèque est vide pour l'instant. Choisis comment la remplir.
+          </p>
+          <div className="story-collection__choices">
+            <section className="story-collection__choice">
+              <p className="story-collection__eyebrow">
+                Des histoires à découvrir
+              </p>
+              <h2 className="story-collection__choice-title">
+                Catalogue officiel
+              </h2>
+              <p className="story-collection__choice-description">
+                Retrouve les titres et les images des histoires officielles.
+              </p>
+              {catalogCount !== undefined ? (
+                <p className="story-collection__choice-count">
+                  {`${catalogCount} titre${catalogCount === 1 ? "" : "s"} référencé${catalogCount === 1 ? "" : "s"}`}
+                </p>
+              ) : null}
+              <Button
+                variant="secondary"
+                onClick={onCatalogRequest}
+                aria-disabled={!onCatalogRequest || undefined}
+                aria-describedby={
+                  !onCatalogRequest ? catalogDisabledId : undefined
+                }
+              >
+                Voir le catalogue
+              </Button>
+              {!onCatalogRequest ? (
+                <p
+                  id={catalogDisabledId}
+                  className="story-collection__empty-reason"
+                >
+                  Catalogue indisponible pour l'instant.
+                </p>
+              ) : null}
+            </section>
+            <section className="story-collection__choice">
+              <p className="story-collection__eyebrow">Déjà une histoire ?</p>
+              <h2 className="story-collection__choice-title">Importer</h2>
+              <p className="story-collection__choice-description">
+                {onImportRequest
+                  ? "Depuis un fichier, un dossier ou un lien."
+                  : "Ajoute une histoire depuis un fichier .rustory."}
+              </p>
+              <Button
+                variant="secondary"
+                onClick={requestImport}
+                aria-label="Importer une histoire"
+                disabled={isImportBusy}
+                aria-busy={isImportBusy}
+                aria-disabled={!requestImport || undefined}
+                aria-describedby={!requestImport ? importDisabledId : undefined}
+              >
+                Importer
+              </Button>
+              {!requestImport ? (
+                <p
+                  id={importDisabledId}
+                  className="story-collection__empty-reason"
+                >
+                  Import indisponible pour l'instant.
+                </p>
+              ) : null}
+            </section>
+            <section className="story-collection__choice story-collection__choice--create">
+              <p className="story-collection__eyebrow">Envie de créer ?</p>
+              <h2 className="story-collection__choice-title">Écrire la mienne</h2>
+              <p className="story-collection__choice-description">
+                Un brouillon que tu peux finir plus tard.
+              </p>
+              <Button
+                variant="secondary"
+                onClick={onCreateStoryRequest}
+                aria-disabled={!onCreateStoryRequest || undefined}
+                aria-describedby={
+                  !onCreateStoryRequest ? createDisabledId : undefined
+                }
+              >
+                Créer une histoire
+              </Button>
+              {!onCreateStoryRequest ? (
+                <p
+                  id={createDisabledId}
+                  className="story-collection__empty-reason"
+                >
+                  Création d'histoire indisponible pour l'instant.
+                </p>
+              ) : null}
+            </section>
+          </div>
+        </div>
+      ) : null}
+
+      {isDrafts && state.kind === "loaded-empty" ? (
         <section
           className="story-collection__empty"
           role="status"
@@ -242,13 +387,13 @@ export function StoryCollection({
             <span>✦</span>
           </div>
           <p className="story-collection__eyebrow">
-            La première page de tes aventures
+            Une nouvelle histoire commence ici
           </p>
           <h2 className="story-collection__empty-title">
-            Ta bibliothèque est vide
+            Aucun brouillon pour l'instant
           </h2>
           <p className="story-collection__empty-hint">
-            Crée ta première histoire pour la retrouver ici à chaque ouverture.
+            Commence une histoire et retrouve-la ici pour continuer à écrire.
           </p>
           {onCreateStoryRequest ? (
             <Button variant="primary" onClick={onCreateStoryRequest}>
@@ -294,6 +439,7 @@ export function StoryCollection({
             <li key={story.id} className="story-collection__item">
               <StoryCard
                 story={story}
+                isDraft={isDrafts}
                 isSelected={selectedStoryIds.has(story.id)}
                 selectionSize={selectedCount}
                 preparationBadge={preparationBadges?.get(story.id)}
@@ -318,8 +464,17 @@ function countersLabel(
   total: number,
   state: CollectionState,
   selectedCount: number,
+  variant: "library" | "drafts",
 ): string {
   if (state.kind === "pending") return "Chargement en cours";
+  if (variant === "drafts") {
+    const shown = state.kind === "loaded" ? state.visible.length : 0;
+    const count = shown === total ? `${total}` : `${shown} sur ${total}`;
+    const selected = selectedCount > 0
+      ? ` — ${selectedCount} sélectionné${selectedCount === 1 ? "" : "s"}`
+      : "";
+    return `${count} brouillon${total === 1 ? "" : "s"} · enregistré${total === 1 ? "" : "s"} sur cet ordinateur${selected}`;
+  }
   if (state.kind === "loaded-empty") return "0 histoire";
   const selectedClause =
     selectedCount === 0
