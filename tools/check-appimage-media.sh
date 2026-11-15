@@ -56,8 +56,11 @@ for cache_state in cold warm; do
   echo "Checking AppImage media with a $cache_state registry: $artifact"
   # Do not set GST_PLUGIN_* or LD_LIBRARY_PATH here: only the real AppRun and
   # its shipped hooks may select libraries, plugins and the plugin scanner.
+  # The AppImage runtime normally supplies APPDIR before any hook runs. An
+  # extracted AppRun needs the same value, regardless of the hook ordering.
   if ! timeout 45s env -i \
     PATH=/usr/bin:/bin \
+    APPDIR="$appdir" \
     HOME="$scratch/home" \
     XDG_CONFIG_HOME="$scratch/config" \
     XDG_DATA_HOME="$scratch/data" \
