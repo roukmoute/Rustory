@@ -1,4 +1,4 @@
-import { create } from "zustand";
+import { create, type StateCreator } from "zustand";
 
 import {
   DEFAULT_LIBRARY_SORT,
@@ -30,7 +30,7 @@ export { DEFAULT_LIBRARY_SORT };
  * No persistence: a fresh app launch never restores a stale selection or an
  * invisible filter, per the architecture persistence rule.
  */
-export const useLibraryShell = create<LibraryShellState>((set) => ({
+const createCollectionShell: StateCreator<LibraryShellState> = (set) => ({
   selectedStoryIds: EMPTY_SELECTION,
   query: "",
   sort: DEFAULT_LIBRARY_SORT,
@@ -71,4 +71,7 @@ export const useLibraryShell = create<LibraryShellState>((set) => ({
   setQuery: (query) => set({ query }),
   setSort: (sort) => set({ sort }),
   resetFilters: () => set({ query: "", sort: DEFAULT_LIBRARY_SORT }),
-}));
+});
+
+export const useLibraryShell = create<LibraryShellState>(createCollectionShell);
+export const useDraftsShell = create<LibraryShellState>(createCollectionShell);

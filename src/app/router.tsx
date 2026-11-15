@@ -5,6 +5,7 @@ import {
   createMemoryRouter,
 } from "react-router-dom";
 
+import { LaunchRoute } from "../routes/welcome/LaunchRoute";
 import { LibraryRoute } from "../routes/library/LibraryRoute";
 import { CollectionScreenRoute } from "../routes/library/CollectionScreenRoute";
 import { SettingsRoute } from "../routes/settings/SettingsRoute";
@@ -21,7 +22,7 @@ export const appRoutes: RouteObject[] = [
     path: "/",
     element: <AppShell />,
     children: [
-      { index: true, element: <Navigate to="/library" replace /> },
+      { index: true, element: <LaunchRoute /> },
       {
         // Keep device jobs and collection state alive between these screens.
         element: <LibraryRoute />,
@@ -29,6 +30,18 @@ export const appRoutes: RouteObject[] = [
           {
             path: "library",
             element: <CollectionScreenRoute screen="library" />,
+          },
+          {
+            path: "welcome",
+            element: <CollectionScreenRoute screen="welcome" />,
+          },
+          {
+            path: "welcome/device",
+            element: <CollectionScreenRoute screen="discovery" />,
+          },
+          {
+            path: "drafts",
+            element: <CollectionScreenRoute screen="drafts" />,
           },
           {
             path: "device",

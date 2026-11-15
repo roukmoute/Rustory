@@ -5,6 +5,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const getLibraryOverviewMock = vi.fn();
 const getStoryDetailMock = vi.fn();
+const getOnboardingPreferencesMock = vi.fn();
+
+vi.mock("../ipc/commands/onboarding", () => ({
+  getOnboardingPreferences: () => getOnboardingPreferencesMock(),
+  updateOnboardingPreferences: async (input: unknown) => input,
+}));
 
 vi.mock("../ipc/commands/library", () => ({
   getLibraryOverview: () => ({
@@ -78,6 +84,8 @@ vi.mock("../ipc/commands/import-export", async () => {
   return {
     ...actual,
     readContentSourcePolicy: () => Promise.reject(new Error("not stubbed")),
+    analyzeOsOpenRequest: () => Promise.resolve({ kind: "none" }),
+    analyzeDropRequest: () => Promise.resolve({ kind: "none" }),
   };
 });
 
@@ -86,9 +94,20 @@ vi.mock("@tauri-apps/api/app", () => ({
 }));
 
 import { createAppRouter } from "./router";
+import { invalidateLibraryOverviewCache } from "../features/library/hooks/use-library-overview";
+import { useDraftsShell, useLibraryShell } from "../shell/state/library-shell-store";
 
 describe("router", () => {
   beforeEach(() => {
+    invalidateLibraryOverviewCache();
+    for (const store of [useLibraryShell, useDraftsShell]) {
+      store.setState({ selectedStoryIds: new Set(), query: "", sort: "titre-asc" });
+    }
+    getOnboardingPreferencesMock.mockReset();
+    getOnboardingPreferencesMock.mockResolvedValue({
+      welcomeCompleted: true,
+      deviceRecoveryPromptDismissed: true,
+    });
     getLibraryOverviewMock.mockReset();
     getLibraryOverviewMock.mockResolvedValue({
       stories: [{ id: "abc-123", title: "Le soleil" }],
@@ -236,6 +255,67 @@ describe("router", () => {
         screen.getByRole("main", { name: "Collection d'histoires" }),
       ).toBeInTheDocument();
     });
+    expect(router.state.location.pathname).toBe("/library");
+  });
+
+  it("opens the welcome screen at first launch from persisted incomplete preferences", async () => {
+    getOnboardingPreferencesMock.mockResolvedValue({
+      welcomeCompleted: false,
+      deviceRecoveryPromptDismissed: false,
+    });
+    const router = createAppRouter(["/"]);
+    render(<RouterProvider router={router} />);
+
+    expect(await screen.findByRole("heading", {
+      level: 1, name: "Bienvenue sur Rustory",
+    })).toBeInTheDocument();
+    expect(router.state.location.pathname).toBe("/welcome");
+    expect(screen.queryByRole("main", {
+      name: "Collection d'histoires",
+    })).not.toBeInTheDocument();
+  });
+
+  it("keeps direct draft links direct even before welcome has been completed", async () => {
+    getOnboardingPreferencesMock.mockResolvedValue({
+      welcomeCompleted: false,
+      deviceRecoveryPromptDismissed: false,
+    });
+    getLibraryOverviewMock.mockResolvedValue({ stories: [
+      { id: "native", title: "Mon brouillon" },
+      { id: "native-2", title: "Mon deuxième brouillon", transferable: false },
+      { id: "imported", title: "Histoire importée", importState: "resolved" },
+      { id: "device", title: "Histoire copiée", transferable: true },
+    ] });
+    const router = createAppRouter(["/drafts"]);
+    render(<RouterProvider router={router} />);
+
+    await screen.findByRole("button", { name: "Mon brouillon" });
+    expect(router.state.location.pathname).toBe("/drafts");
+    expect(screen.getByRole("heading", { level: 1, name: "Mes brouillons" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Mon deuxième brouillon" })).toBeInTheDocument();
+    expect(screen.getByText("2 brouillons · enregistrés sur cet ordinateur")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Histoire importée" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Histoire copiée" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Bienvenue sur Rustory" })).not.toBeInTheDocument();
+  });
+
+  it("returns from the editor to the originating drafts collection with its search and selection", async () => {
+    const user = userEvent.setup();
+    const router = createAppRouter(["/drafts"]);
+    render(<RouterProvider router={router} />);
+    await user.click(await screen.findByRole("button", { name: "Le soleil" }));
+    await user.type(screen.getByRole("searchbox"), "soleil");
+    await user.click(screen.getByRole("button", { name: "Continuer à écrire" }));
+
+    await screen.findByRole("main", { name: /éditeur d'histoire/i });
+    expect(router.state.location.state).toEqual({ collection: "/drafts" });
+    await user.click(screen.getByRole("button", { name: /retour à la bibliothèque/i }));
+    await screen.findByRole("heading", { level: 1, name: "Mes brouillons" });
+    expect(router.state.location.pathname).toBe("/drafts");
+    expect(screen.getByRole("searchbox")).toHaveValue("soleil");
+    expect(screen.getByRole("button", { name: "Le soleil" })).toHaveAttribute("aria-pressed", "true");
+    expect(useLibraryShell.getState().selectedStoryIds.size).toBe(0);
+    expect(useLibraryShell.getState().query).toBe("");
   });
 
   it("redirects unknown paths to /library", async () => {

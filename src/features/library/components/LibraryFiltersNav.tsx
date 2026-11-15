@@ -3,14 +3,8 @@ import { NavLink } from "react-router-dom";
 import { Icon } from "../../../shared/ui";
 import "./LibraryFiltersNav.css";
 
-interface LibraryFiltersNavProps {
-  onCatalog?: () => void;
-}
-
-/** Navigation to real collections. Device content stays distinct from local stories. */
-export function LibraryFiltersNav({
-  onCatalog,
-}: LibraryFiltersNavProps): React.JSX.Element {
+/** Navigation to three distinct collections, matching the product's screens. */
+export function LibraryFiltersNav(): React.JSX.Element {
   return (
     <div className="library-filters-nav">
       <div className="library-filters-nav__brand">
@@ -25,18 +19,14 @@ export function LibraryFiltersNav({
           <Icon name="grid" />
           Ma bibliothèque
         </NavLink>
+        <NavLink to="/drafts" className="library-filters-nav__entry">
+          <Icon name="edit" />
+          Mes brouillons
+        </NavLink>
         <NavLink to="/device" className="library-filters-nav__entry">
           <Icon name="device" />
           Sur l'appareil
         </NavLink>
-        <button
-          type="button"
-          className="library-filters-nav__entry"
-          onClick={onCatalog}
-        >
-          <Icon name="book" />
-          Catalogue officiel
-        </button>
       </div>
     </div>
   );

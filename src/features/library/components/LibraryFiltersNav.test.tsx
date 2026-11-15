@@ -1,16 +1,15 @@
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 import { LibraryFiltersNav } from "./LibraryFiltersNav";
 
 describe("<LibraryFiltersNav />", () => {
-  it("uses distinct route links and keeps catalogue access available", async () => {
+  it("uses three distinct route links", async () => {
     const user = userEvent.setup();
-    const onCatalog = vi.fn();
     render(
       <MemoryRouter initialEntries={["/library"]}>
-        <LibraryFiltersNav onCatalog={onCatalog} />
+        <LibraryFiltersNav />
       </MemoryRouter>,
     );
     const library = screen.getByRole("link", { name: "Ma bibliothèque" });
@@ -21,10 +20,11 @@ describe("<LibraryFiltersNav />", () => {
     await user.click(device);
     expect(device).toHaveAttribute("aria-current", "page");
     expect(library).not.toHaveAttribute("aria-current");
-    await user.click(
-      screen.getByRole("button", { name: "Catalogue officiel" }),
-    );
-    expect(onCatalog).toHaveBeenCalledOnce();
+    const drafts = screen.getByRole("link", { name: "Mes brouillons" });
+    expect(drafts).toHaveAttribute("href", "/drafts");
+    await user.click(drafts);
+    expect(drafts).toHaveAttribute("aria-current", "page");
+    expect(device).not.toHaveAttribute("aria-current");
   });
   it("derives the active screen from the initial URL", () => {
     render(

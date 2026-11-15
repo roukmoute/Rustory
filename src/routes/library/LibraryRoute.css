@@ -156,3 +156,7 @@
   opacity: .45;
   cursor: default;
 }
+
+.library-route__recovery { padding: 22px; margin-bottom: 24px; border-color: var(--color-action-primary); background: #edf7ee; }
+.library-route__recovery h2 { margin: 0 0 12px; font-family: var(--font-family-display); font-size: 22px; }
+.library-route__recovery p { line-height: 1.5; }

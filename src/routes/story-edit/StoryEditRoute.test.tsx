@@ -67,6 +67,14 @@ vi.mock("../../ipc/commands/import-export", () => ({
   exportStoryWithSaveDialog: vi.fn(),
 }));
 
+vi.mock("../../ipc/commands/onboarding", () => ({
+  getOnboardingPreferences: async () => ({
+    welcomeCompleted: true,
+    deviceRecoveryPromptDismissed: true,
+  }),
+  updateOnboardingPreferences: async (input: unknown) => input,
+}));
+
 const { invalidateLibraryOverviewCacheMock } = vi.hoisted(() => ({
   invalidateLibraryOverviewCacheMock: vi.fn(),
 }));
@@ -97,6 +105,7 @@ import {
 } from "../../ipc/commands/story";
 import type { StoryDetailDto } from "../../shared/ipc-contracts/story";
 import { LibraryRoute } from "../library/LibraryRoute";
+import { CollectionScreenRoute } from "../library/CollectionScreenRoute";
 import { StoryEditRoute } from "./StoryEditRoute";
 
 const STORY_ID = "abc";
@@ -124,13 +133,19 @@ function buildDetail(overrides: Partial<StoryDetailDto> = {}): StoryDetailDto {
   };
 }
 
-function renderRoute(initialPath: string) {
+function renderRoute(initialPath: string, collection?: string) {
   const router = createMemoryRouter(
     [
-      { path: "/library", element: <LibraryRoute /> },
+      {
+        element: <LibraryRoute />,
+        children: [
+          { path: "/library", element: <CollectionScreenRoute screen="library" /> },
+          { path: "/drafts", element: <CollectionScreenRoute screen="drafts" /> },
+        ],
+      },
       { path: "/story/:storyId/edit", element: <StoryEditRoute /> },
     ],
-    { initialEntries: [initialPath] },
+    { initialEntries: [{ pathname: initialPath, state: { collection } }] },
   );
   render(<RouterProvider router={router} />);
   return router;
@@ -305,6 +320,22 @@ describe("<StoryEditRoute />", () => {
     await waitFor(() =>
       expect(router.state.location.pathname).toBe("/library"),
     );
+  });
+
+  it.each([
+    ["/drafts", "/drafts"],
+    ["/device", "/library"],
+  ])("returns from editor context %s to %s", async (collection, expected) => {
+    const user = userEvent.setup();
+    vi.mocked(getStoryDetail).mockResolvedValue(buildDetail());
+    const router = renderRoute(`/story/${STORY_ID}/edit`, collection);
+    await screen.findByRole("heading", { name: "Le soleil couchant" });
+    await user.click(screen.getByRole("button", { name: /retour à la bibliothèque/i }));
+    await waitFor(() => expect(router.state.location.pathname).toBe(expected));
+    expect(screen.getByRole("heading", {
+      level: 1,
+      name: expected === "/drafts" ? "Mes brouillons" : "Par quoi veux-tu commencer ?",
+    })).toBeInTheDocument();
   });
 
   it("never leaks internal planning jargon in user-facing copy", async () => {

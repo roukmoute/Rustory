@@ -50,6 +50,14 @@ const mockAcceptRssCreation = vi.fn();
 const mockFetchWebPreview = vi.fn();
 const mockAcceptWebCreation = vi.fn();
 const mockReadContentSourcePolicy = vi.fn();
+const mockGetOnboardingPreferences = vi.fn();
+const mockUpdateOnboardingPreferences = vi.fn();
+
+vi.mock("../../ipc/commands/onboarding", () => ({
+  getOnboardingPreferences: () => mockGetOnboardingPreferences(),
+  updateOnboardingPreferences: (input: unknown) =>
+    mockUpdateOnboardingPreferences(input),
+}));
 
 /** The current official content-source policy, exactly as
  *  `read_content_source_policy` serializes it. */
@@ -303,9 +311,10 @@ import { invalidateDeviceLibraryCache } from "../../features/device/hooks/use-de
 import { invalidateLibraryOverviewCache } from "../../features/library/hooks/use-library-overview";
 import type { JobSubscription } from "../../ipc/events/job-events";
 import type { ConnectedDeviceDto } from "../../shared/ipc-contracts/device";
+import type { OnboardingPreferences } from "../../shared/ipc-contracts/onboarding";
 import type { SendBlocker } from "../../shared/ipc-contracts/library";
 import { useDropShell } from "../../shell/state/drop-shell-store";
-import { useLibraryShell } from "../../shell/state/library-shell-store";
+import { useDraftsShell, useLibraryShell } from "../../shell/state/library-shell-store";
 import { useOsOpenShell } from "../../shell/state/os-open-shell-store";
 import { useUpdateShell } from "../../shell/state/update-shell-store";
 import { CollectionScreenRoute } from "./CollectionScreenRoute";
@@ -324,7 +333,7 @@ function renderLibrary(
   options: {
     strict?: boolean;
     collapsed?: boolean;
-    initialScreen?: "library" | "device";
+    initialScreen?: "library" | "device" | "drafts" | "welcome" | "welcome/device";
   } = {},
 ) {
   const routes: RouteObject[] = [
@@ -333,6 +342,9 @@ function renderLibrary(
       children: [
         { path: "/library", element: <CollectionScreenRoute screen="library" /> },
         { path: "/device", element: <CollectionScreenRoute screen="device" /> },
+        { path: "/drafts", element: <CollectionScreenRoute screen="drafts" /> },
+        { path: "/welcome", element: <CollectionScreenRoute screen="welcome" /> },
+        { path: "/welcome/device", element: <CollectionScreenRoute screen="discovery" /> },
       ],
     },
     {
@@ -352,7 +364,7 @@ function renderLibrary(
   render(options.strict ? <StrictMode>{tree}</StrictMode> : tree);
   // Most scenarios exercise device/transfer actions. Open their real disclosure
   // explicitly; dedicated tests below cover the initial collapsed layout.
-  if (!options.collapsed) {
+  if (!options.collapsed && !options.initialScreen?.startsWith("welcome")) {
     const trigger = screen.getByRole("button", {
       name: "Afficher le panneau de l'appareil",
     });
@@ -363,8 +375,45 @@ function renderLibrary(
   return router;
 }
 
+/** Follow the guided dialog from either the toolbar choice or an empty-card
+ * entry. These are navigation gestures only; the IPC-backed actions stay real. */
+async function selectCreationStep(
+  user: Pick<ReturnType<typeof userEvent.setup>, "click">,
+  step: "title" | "import",
+) {
+  const target = step === "title"
+    ? "Comment s'appelle ton histoire ?"
+    : "Comment veux-tu importer ?";
+  let dialog = screen.getByRole("dialog");
+  if (within(dialog).queryByRole("heading", { name: target })) return dialog;
+  if (!within(dialog).queryByRole("button", { name: "Écrire une histoire" })) {
+    await user.click(within(dialog).getByRole("button", { name: "Retour" }));
+    dialog = screen.getByRole("dialog", { name: "Que veux-tu faire ?" });
+  }
+  await user.click(within(dialog).getByRole("button", {
+    name: step === "title" ? "Écrire une histoire" : "Importer",
+  }));
+  return screen.findByRole("dialog", { name: target });
+}
+
+async function cancelCreation(user: Pick<ReturnType<typeof userEvent.setup>, "click">) {
+  let dialog = screen.getByRole("dialog");
+  if (!within(dialog).queryByRole("button", { name: "Annuler" })) {
+    await user.click(within(dialog).getByRole("button", { name: "Retour" }));
+    dialog = screen.getByRole("dialog", { name: "Que veux-tu faire ?" });
+  }
+  await user.click(within(dialog).getByRole("button", { name: "Annuler" }));
+}
+
 describe("<LibraryRoute />", () => {
   beforeEach(() => {
+    mockGetOnboardingPreferences.mockReset();
+    mockGetOnboardingPreferences.mockResolvedValue({
+      welcomeCompleted: true,
+      deviceRecoveryPromptDismissed: true,
+    });
+    mockUpdateOnboardingPreferences.mockReset();
+    mockUpdateOnboardingPreferences.mockImplementation(async (input) => input);
     mockGet.mockReset();
     mockDevice.mockReset();
     // Default: the device probe never resolves so the panel stays in
@@ -493,6 +542,11 @@ describe("<LibraryRoute />", () => {
       query: "",
       sort: "titre-asc",
     });
+    useDraftsShell.setState({
+      selectedStoryIds: new Set(),
+      query: "",
+      sort: "titre-asc",
+    });
     useOsOpenShell.setState({ pendingSignal: false });
     useDropShell.setState({ hoverActive: false, pendingSignal: false });
     useUpdateShell.setState({ availability: null });
@@ -592,7 +646,7 @@ describe("<LibraryRoute />", () => {
     mockGet.mockResolvedValue({ stories: [] });
     mockDevice.mockResolvedValue({ kind: "none" });
     renderLibrary({ collapsed: true });
-    await screen.findByRole("heading", { name: "Ta bibliothèque est vide" });
+    await screen.findByRole("heading", { name: "Par quoi veux-tu commencer ?" });
     fireEvent.click(screen.getByRole("button", { name: "Afficher le panneau de l'appareil" }));
     expect(screen.getByRole("complementary", { name: "Panneau de décision" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Réessayer la détection de l'appareil" })).toBeInTheDocument();
@@ -604,7 +658,7 @@ describe("<LibraryRoute />", () => {
 
     expect(screen.getByRole("progressbar")).toBeInTheDocument();
     expect(
-      screen.queryByRole("heading", { name: /ta bibliothèque est vide/i }),
+      screen.queryByRole("heading", { name: /par quoi veux-tu commencer/i }),
     ).not.toBeInTheDocument();
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
@@ -615,17 +669,16 @@ describe("<LibraryRoute />", () => {
 
     expect(
       await screen.findByRole("heading", {
-        name: /ta bibliothèque est vide/i,
+        name: /par quoi veux-tu commencer/i,
       }),
     ).toBeInTheDocument();
 
-    // Two entry points into the create flow are exposed: the header CTA
-    // and the one inside the empty-state region. Both are keyboard
-    // reachable and neither is disabled when the library is ready.
+    // The welcome card exposes one creation entry, keyboard reachable
+    // and enabled when the library is ready.
     const primaryCtas = screen.getAllByRole("button", {
       name: /créer une histoire/i,
     });
-    expect(primaryCtas).toHaveLength(2);
+    expect(primaryCtas).toHaveLength(1);
     for (const cta of primaryCtas) {
       expect(cta).not.toBeDisabled();
       expect(cta).not.toHaveAttribute("aria-disabled", "true");
@@ -651,7 +704,7 @@ describe("<LibraryRoute />", () => {
     expect(alert).toHaveTextContent("Vérifie les permissions puis relance.");
 
     expect(
-      screen.queryByRole("heading", { name: /ta bibliothèque est vide/i }),
+      screen.queryByRole("heading", { name: /par quoi veux-tu commencer/i }),
     ).not.toBeInTheDocument();
 
     expect(screen.getByRole("button", { name: /réessayer/i })).toBeEnabled();
@@ -678,7 +731,7 @@ describe("<LibraryRoute />", () => {
     );
     expect(alert).toHaveTextContent(/bibliothèque incohérente/i);
     expect(
-      screen.queryByRole("heading", { name: /ta bibliothèque est vide/i }),
+      screen.queryByRole("heading", { name: /par quoi veux-tu commencer/i }),
     ).not.toBeInTheDocument();
   });
 
@@ -699,7 +752,7 @@ describe("<LibraryRoute />", () => {
 
     await waitFor(() =>
       expect(
-        screen.getByRole("heading", { name: /ta bibliothèque est vide/i }),
+        screen.getByRole("heading", { name: /par quoi veux-tu commencer/i }),
       ).toBeInTheDocument(),
     );
 
@@ -718,7 +771,7 @@ describe("<LibraryRoute />", () => {
 
     expect(
       await screen.findByRole("heading", {
-        name: /ta bibliothèque est vide/i,
+        name: /par quoi veux-tu commencer/i,
       }),
     ).toBeInTheDocument();
 
@@ -732,7 +785,7 @@ describe("<LibraryRoute />", () => {
 
     expect(screen.queryByText(/fantôme/i)).not.toBeInTheDocument();
     expect(
-      screen.getByRole("heading", { name: /ta bibliothèque est vide/i }),
+      screen.getByRole("heading", { name: /par quoi veux-tu commencer/i }),
     ).toBeInTheDocument();
   });
 
@@ -752,7 +805,7 @@ describe("<LibraryRoute />", () => {
   it("renders three columns with semantic regions (nav/main/aside)", async () => {
     mockGet.mockResolvedValueOnce({ stories: [] });
     renderLibrary();
-    await screen.findByRole("heading", { name: /ta bibliothèque est vide/i });
+    await screen.findByRole("heading", { name: /par quoi veux-tu commencer/i });
 
     expect(
       screen.getByRole("navigation", { name: /navigation bibliothèque/i }),
@@ -774,7 +827,7 @@ describe("<LibraryRoute />", () => {
     });
     expect(
       await within(main).findByRole("heading", {
-        name: /ta bibliothèque est vide/i,
+        name: /par quoi veux-tu commencer/i,
       }),
     ).toBeInTheDocument();
 
@@ -783,7 +836,7 @@ describe("<LibraryRoute />", () => {
     });
     expect(
       within(nav).queryByRole("heading", {
-        name: /ta bibliothèque est vide/i,
+        name: /par quoi veux-tu commencer/i,
       }),
     ).not.toBeInTheDocument();
   });
@@ -792,7 +845,7 @@ describe("<LibraryRoute />", () => {
     mockGet.mockResolvedValueOnce({ stories: [] });
     mockDevice.mockResolvedValueOnce({ kind: "none" });
     renderLibrary();
-    await screen.findByRole("heading", { name: /ta bibliothèque est vide/i });
+    await screen.findByRole("heading", { name: /par quoi veux-tu commencer/i });
 
     const panel = screen.getByRole("complementary", {
       name: /panneau de décision/i,
@@ -998,12 +1051,13 @@ describe("<LibraryRoute />", () => {
       archivePath: "/home/user/Le pack du soir.zip",
     });
     renderLibrary();
-    await screen.findByRole("heading", { name: /ta bibliothèque est vide/i });
+    await screen.findByRole("heading", { name: /par quoi veux-tu commencer/i });
 
-    // Header CTA + empty-state CTA share the label — the first is the header.
+    // Enter the guided import choices from the empty-library creation card.
     await user.click(
       screen.getAllByRole("button", { name: /^créer une histoire$/i })[0],
     );
+    await selectCreationStep(user, "import");
     await user.click(
       screen.getByRole("button", {
         name: "Choisir une archive de pack (.zip)…",
@@ -1324,12 +1378,11 @@ describe("<LibraryRoute />", () => {
       name: /créer une histoire/i,
     });
     expect(
-      screen.queryByRole("dialog", { name: /créer une histoire/i }),
+      screen.queryByRole("dialog"),
     ).not.toBeInTheDocument();
     await user.click(headerCta);
-    const dialog = await screen.findByRole("dialog", {
-      name: /créer une histoire/i,
-    });
+    expect(screen.getByRole("dialog", { name: "Que veux-tu faire ?" })).toBeInTheDocument();
+    const dialog = await selectCreationStep(user, "title");
     expect(within(dialog).getByLabelText(/^titre$/i)).toBeInTheDocument();
   });
 
@@ -1350,9 +1403,8 @@ describe("<LibraryRoute />", () => {
     await user.click(
       screen.getByRole("button", { name: /créer une histoire/i }),
     );
-    const dialog = await screen.findByRole("dialog", {
-      name: /créer une histoire/i,
-    });
+    await selectCreationStep(user, "import");
+    const dialog = await screen.findByRole("dialog");
     const folderButton = within(dialog).getByRole("button", {
       name: "Choisir un dossier…",
     });
@@ -1362,7 +1414,7 @@ describe("<LibraryRoute />", () => {
     // started and the creation dialog stays where the user left it.
     expect(mockAnalyzeFolder).not.toHaveBeenCalled();
     expect(
-      screen.getByRole("dialog", { name: /créer une histoire/i }),
+      screen.getByRole("dialog"),
     ).toBeInTheDocument();
   });
 
@@ -1380,6 +1432,7 @@ describe("<LibraryRoute />", () => {
     await user.click(
       screen.getByRole("button", { name: /créer une histoire/i }),
     );
+    await selectCreationStep(user, "import");
     await user.click(
       await screen.findByRole("button", {
         name: "Démarrer depuis une source externe (RSS)",
@@ -1418,6 +1471,7 @@ describe("<LibraryRoute />", () => {
     await user.click(
       screen.getByRole("button", { name: /créer une histoire/i }),
     );
+    await selectCreationStep(user, "import");
     await user.click(
       await screen.findByRole("button", {
         name: "Démarrer depuis une page web",
@@ -1454,6 +1508,7 @@ describe("<LibraryRoute />", () => {
     await user.click(
       screen.getByRole("button", { name: /créer une histoire/i }),
     );
+    await selectCreationStep(user, "import");
     await user.click(
       await screen.findByRole("button", {
         name: "Démarrer depuis une source externe (RSS)",
@@ -1466,9 +1521,8 @@ describe("<LibraryRoute />", () => {
     await user.click(
       screen.getByRole("button", { name: /créer une histoire/i }),
     );
-    const dialog = await screen.findByRole("dialog", {
-      name: /créer une histoire/i,
-    });
+    await selectCreationStep(user, "import");
+    const dialog = await screen.findByRole("dialog");
     const folderButton = within(dialog).getByRole("button", {
       name: "Choisir un dossier…",
     });
@@ -1497,6 +1551,7 @@ describe("<LibraryRoute />", () => {
     await user.click(
       screen.getByRole("button", { name: /créer une histoire/i }),
     );
+    await selectCreationStep(user, "import");
     await user.click(
       await screen.findByRole("button", {
         name: "Démarrer depuis une page web",
@@ -1545,6 +1600,7 @@ describe("<LibraryRoute />", () => {
     await user.click(
       screen.getByRole("button", { name: /créer une histoire/i }),
     );
+    await selectCreationStep(user, "import");
     await user.click(
       await screen.findByRole("button", {
         name: "Démarrer depuis une page web",
@@ -1559,9 +1615,8 @@ describe("<LibraryRoute />", () => {
     await user.click(
       screen.getByRole("button", { name: /créer une histoire/i }),
     );
-    const dialog = await screen.findByRole("dialog", {
-      name: /créer une histoire/i,
-    });
+    await selectCreationStep(user, "import");
+    const dialog = await screen.findByRole("dialog");
     const folderButton = within(dialog).getByRole("button", {
       name: "Choisir un dossier…",
     });
@@ -1636,6 +1691,7 @@ describe("<LibraryRoute />", () => {
     await user.click(
       screen.getByRole("button", { name: /créer une histoire/i }),
     );
+    await selectCreationStep(user, "import");
     await user.click(
       await screen.findByRole("button", {
         name: "Démarrer depuis une source externe (RSS)",
@@ -1679,11 +1735,10 @@ describe("<LibraryRoute />", () => {
     await user.click(
       screen.getByRole("button", { name: /créer une histoire/i }),
     );
+    await selectCreationStep(user, "import");
     // One point-in-time read per opening — no cache.
     expect(mockReadContentSourcePolicy).toHaveBeenCalledTimes(1);
-    const dialog = await screen.findByRole("dialog", {
-      name: /créer une histoire/i,
-    });
+    const dialog = await screen.findByRole("dialog");
     // The enabled RSS entry with its label + frozen activation marker.
     const rssButton = within(dialog).getByRole("button", {
       name: "Démarrer depuis une source externe (RSS)",
@@ -1707,10 +1762,11 @@ describe("<LibraryRoute />", () => {
     ).toHaveLength(2);
 
     // Close, reopen: the policy is read ANEW (point-in-time, no cache).
-    await user.click(within(dialog).getByRole("button", { name: "Annuler" }));
+    await cancelCreation(user);
     await user.click(
       screen.getByRole("button", { name: /créer une histoire/i }),
     );
+    await selectCreationStep(user, "import");
     expect(mockReadContentSourcePolicy).toHaveBeenCalledTimes(2);
   });
 
@@ -1735,11 +1791,10 @@ describe("<LibraryRoute />", () => {
     await user.click(
       screen.getByRole("button", { name: /créer une histoire/i }),
     );
-    let dialog = await screen.findByRole("dialog", {
-      name: /créer une histoire/i,
-    });
+    await selectCreationStep(user, "import");
+    let dialog = await screen.findByRole("dialog");
     // Close the first opening while its read is still in flight.
-    await user.click(within(dialog).getByRole("button", { name: "Annuler" }));
+    await cancelCreation(user);
 
     mockReadContentSourcePolicy.mockRejectedValueOnce(
       new Error("lecture en échec"),
@@ -1747,9 +1802,8 @@ describe("<LibraryRoute />", () => {
     await user.click(
       screen.getByRole("button", { name: /créer une histoire/i }),
     );
-    dialog = await screen.findByRole("dialog", {
-      name: /créer une histoire/i,
-    });
+    await selectCreationStep(user, "import");
+    dialog = await screen.findByRole("dialog");
 
     // The STALE first read now resolves with the enabled policy — it
     // belongs to a closed opening and must NOT reactivate the entry.
@@ -1782,9 +1836,8 @@ describe("<LibraryRoute />", () => {
     await user.click(
       screen.getByRole("button", { name: /créer une histoire/i }),
     );
-    const dialog = await screen.findByRole("dialog", {
-      name: /créer une histoire/i,
-    });
+    await selectCreationStep(user, "import");
+    const dialog = await screen.findByRole("dialog");
     // FAIL-CLOSED: the RSS entry renders disabled with the frozen reason —
     // never active-by-default.
     const rssButton = within(dialog).getByRole("button", {
@@ -1801,7 +1854,8 @@ describe("<LibraryRoute />", () => {
       ),
     ).toBeInTheDocument();
     // The primary title path is NEVER blocked by a policy failure.
-    expect(within(dialog).getByLabelText(/^titre$/i)).toBeInTheDocument();
+    const titleDialog = await selectCreationStep(user, "title");
+    expect(within(titleDialog).getByLabelText(/^titre$/i)).toBeInTheDocument();
     expect(
       within(dialog).getByRole("button", { name: /^créer$/i }),
     ).toBeInTheDocument();
@@ -1861,9 +1915,8 @@ describe("<LibraryRoute />", () => {
     await user.click(
       screen.getByRole("button", { name: /créer une histoire/i }),
     );
-    const dialog = await screen.findByRole("dialog", {
-      name: /créer une histoire/i,
-    });
+    await selectCreationStep(user, "import");
+    const dialog = await screen.findByRole("dialog");
     await user.click(
       within(dialog).getByRole("button", { name: "Choisir un dossier…" }),
     );
@@ -1872,7 +1925,7 @@ describe("<LibraryRoute />", () => {
     // no toast) with the unique accept CTA.
     await waitFor(() =>
       expect(
-        screen.queryByRole("dialog", { name: /créer une histoire/i }),
+        screen.queryByRole("dialog"),
       ).not.toBeInTheDocument(),
     );
     const surface = await screen.findByRole("region", {
@@ -1902,7 +1955,7 @@ describe("<LibraryRoute />", () => {
     try {
       renderLibrary();
       await screen.findByRole("heading", {
-        name: /ta bibliothèque est vide/i,
+        name: /par quoi veux-tu commencer/i,
       });
 
       const creates = screen.getAllByRole("button", {
@@ -1910,9 +1963,7 @@ describe("<LibraryRoute />", () => {
       });
       await user.click(creates[0]);
 
-      const dialog = await screen.findByRole("dialog", {
-        name: /créer une histoire/i,
-      });
+      const dialog = await selectCreationStep(user, "title");
       await user.type(
         within(dialog).getByLabelText(/^titre$/i),
         "Mon histoire",
@@ -2355,13 +2406,10 @@ describe("<LibraryRoute />", () => {
     });
     renderLibrary({ initialScreen: "device" });
 
-    // The device screen names the detected family beside its inventory.
-    await screen.findByRole("heading", {
-      name: /histoires sur l'appareil — flam/i,
-    });
-
     // The device-library section lights up exactly like a Lunii one.
     const main = screen.getByRole("main", { name: /histoires sur l'appareil/i });
+    // The enclosing screen names the detected family beside its inventory.
+    expect(await within(main).findByText("FLAM")).toBeInTheDocument();
     const deviceRegion = await within(main).findByRole("region", {
       name: /bibliothèque de l'appareil/i,
     });
@@ -2644,6 +2692,47 @@ describe("<LibraryRoute />", () => {
       cleanup();
       vi.useRealTimers();
     }
+  });
+
+  it("keeps draft and library searches, selections, sorts and views independent", async () => {
+    const user = userEvent.setup();
+    mockGet.mockResolvedValue({ stories: [
+      { id: "draft", title: "Le soleil à écrire" },
+      { id: "other-draft", title: "La lune à écrire" },
+      { id: "imported", title: "Histoire importée", importState: "resolved" },
+      { id: "device-copy", title: "Histoire copiée", transferable: true },
+    ] });
+    const router = renderLibrary();
+    await user.click(await screen.findByRole("button", { name: "Histoire importée" }));
+    await user.type(screen.getByRole("searchbox"), "importée");
+    await user.selectOptions(screen.getByRole("combobox"), "titre-desc");
+    await user.click(screen.getByRole("button", { name: "Affichage en liste" }));
+    await user.click(screen.getByRole("link", { name: "Mes brouillons" }));
+
+    expect(router.state.location.pathname).toBe("/drafts");
+    expect(screen.getByRole("searchbox")).toHaveValue("");
+    expect(screen.getByRole("combobox")).toHaveValue("titre-asc");
+    expect(screen.getByRole("button", { name: "Affichage en cartes" })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.queryByRole("button", { name: "Histoire importée" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Histoire copiée" })).not.toBeInTheDocument();
+    expect(screen.getByText("2 brouillons · enregistrés sur cet ordinateur")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Le soleil à écrire" }));
+    await user.type(screen.getByRole("searchbox"), "soleil");
+    await user.click(screen.getByRole("link", { name: "Ma bibliothèque" }));
+
+    expect(screen.getByRole("searchbox")).toHaveValue("importée");
+    expect(screen.getByRole("combobox")).toHaveValue("titre-desc");
+    expect(screen.getByRole("button", { name: "Affichage en liste" })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByRole("button", { name: "Histoire importée" })).toHaveAttribute("aria-pressed", "true");
+    expect(useLibraryShell.getState().selectedStoryIds).toEqual(new Set(["imported"]));
+    expect(useDraftsShell.getState().selectedStoryIds).toEqual(new Set(["draft"]));
+
+    await user.click(screen.getByRole("link", { name: "Mes brouillons" }));
+    expect(screen.getByRole("searchbox")).toHaveValue("soleil");
+    expect(screen.getByRole("button", { name: "Le soleil à écrire" })).toHaveAttribute("aria-pressed", "true");
+    await user.click(screen.getByRole("button", { name: "Continuer à écrire" }));
+    expect(router.state.location.pathname).toBe("/story/draft/edit");
+    expect(router.state.location.state).toEqual({ collection: "/drafts" });
   });
 
   it("reveals device-story actions immediately without waiting for the local-selection delay", async () => {
@@ -2994,6 +3083,200 @@ describe("<LibraryRoute />", () => {
     });
     // The batch reports its success tally in-context.
     expect(await within(bulk).findByText(/2 importées/i)).toBeInTheDocument();
+  });
+
+  it("keeps discovery unavailable during a bulk copy without starting another batch or saving onboarding choices", async () => {
+    const user = userEvent.setup();
+    let finishFirstCopy!: (value: typeof importOutcome) => void;
+    mockGet.mockResolvedValue({ stories: [] });
+    mockGetOnboardingPreferences.mockResolvedValue({
+      welcomeCompleted: true,
+      deviceRecoveryPromptDismissed: false,
+    });
+    mockDevice.mockResolvedValue(supportedOrigine);
+    mockDeviceLibrary.mockResolvedValue(readableTwo);
+    mockImport
+      .mockImplementationOnce(() => new Promise((resolve) => {
+        finishFirstCopy = resolve;
+      }))
+      .mockResolvedValueOnce(importOutcome);
+    const router = renderLibrary({ initialScreen: "device" });
+    await user.click(await screen.findByRole("button", {
+      name: /identifiant 0000abcd/i,
+    }));
+    await user.keyboard("{Control>}");
+    await user.click(screen.getByRole("button", {
+      name: /identifiant 0000beef/i,
+    }));
+    await user.keyboard("{/Control}");
+    await user.click(screen.getByRole("button", {
+      name: /importer les 2 histoires/i,
+    }));
+    await waitFor(() => expect(mockImport).toHaveBeenCalledTimes(1));
+
+    const discover = screen.getByRole("button", {
+      name: "Découvrir mes histoires",
+    });
+    expect(discover).toBeDisabled();
+    await user.click(discover);
+    expect(router.state.location.pathname).toBe("/device");
+    expect(mockUpdateOnboardingPreferences).not.toHaveBeenCalled();
+    expect(mockImport).toHaveBeenCalledTimes(1);
+
+    // A direct route change must preserve the same gate as the banner.
+    await act(async () => { await router.navigate("/welcome/device"); });
+    const recover = await screen.findByRole("button", {
+      name: "Récupérer mes histoires",
+    });
+    expect(recover).toHaveAttribute("aria-disabled", "true");
+    await user.click(recover);
+    expect(mockUpdateOnboardingPreferences).not.toHaveBeenCalled();
+    expect(mockImport).toHaveBeenCalledTimes(1);
+    await act(async () => { await router.navigate("/device"); });
+
+    await act(async () => finishFirstCopy(importOutcome));
+    await waitFor(() => expect(mockImport).toHaveBeenCalledTimes(2));
+    const availableDiscovery = screen.getByRole("button", {
+      name: "Découvrir mes histoires",
+    });
+    await waitFor(() => expect(availableDiscovery).not.toBeDisabled());
+    expect(mockImport.mock.calls).toEqual([
+      [{ deviceIdentifier: supportedOrigine.deviceIdentifier, packUuid: "u1" }],
+      [{ deviceIdentifier: supportedOrigine.deviceIdentifier, packUuid: "u2" }],
+    ]);
+    await user.click(availableDiscovery);
+    expect(router.state.location.pathname).toBe("/welcome/device");
+    expect(mockImport).toHaveBeenCalledTimes(2);
+    expect(mockUpdateOnboardingPreferences).not.toHaveBeenCalled();
+  });
+
+  it("refuses onboarding recovery on a readable V3 whose profile does not allow copying", async () => {
+    const user = userEvent.setup();
+    mockGet.mockResolvedValue({ stories: [] });
+    mockDevice.mockResolvedValue(supportedV3);
+    mockDeviceLibrary.mockResolvedValue(readableTwo);
+    const router = renderLibrary({ initialScreen: "welcome/device" });
+
+    await screen.findByRole("heading", { name: "2 histoires trouvées sur ta Lunii" });
+    expect(screen.getByText(/la copie des histoires de cet appareil n'est pas disponible/i)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Récupérer mes histoires" })).not.toBeInTheDocument();
+    expect(mockImport).not.toHaveBeenCalled();
+    const continueButton = screen.getByRole("button", { name: "Continuer vers ma bibliothèque" });
+    await waitFor(() => expect(continueButton).not.toHaveAttribute("aria-disabled", "true"));
+    await user.click(continueButton);
+    await waitFor(() => expect(router.state.location.pathname).toBe("/library"));
+    expect(mockImport).not.toHaveBeenCalled();
+  });
+
+  it("persists Pas maintenant before leaving discovery and does not show its prompt again", async () => {
+    const user = userEvent.setup();
+    let preferences: OnboardingPreferences = {
+      welcomeCompleted: true,
+      deviceRecoveryPromptDismissed: false,
+    };
+    let acknowledgeSave!: () => void;
+    mockGetOnboardingPreferences.mockImplementation(async () => preferences);
+    mockUpdateOnboardingPreferences.mockImplementation((input: OnboardingPreferences) =>
+      new Promise((resolve) => {
+        acknowledgeSave = () => {
+          preferences = input;
+          resolve(input);
+        };
+      }),
+    );
+    mockGet.mockResolvedValue({ stories: [] });
+    mockDevice.mockResolvedValue(supportedOrigine);
+    mockDeviceLibrary.mockResolvedValue(readableTwo);
+    const router = renderLibrary({ initialScreen: "welcome/device" });
+    await screen.findByRole("heading", { name: "2 histoires trouvées sur ta Lunii" });
+    await user.click(screen.getByRole("button", { name: "Pas maintenant" }));
+    expect(mockUpdateOnboardingPreferences).toHaveBeenCalledWith({
+      welcomeCompleted: true,
+      deviceRecoveryPromptDismissed: true,
+    });
+    expect(router.state.location.pathname).toBe("/welcome/device");
+    await act(async () => acknowledgeSave());
+    await waitFor(() => expect(router.state.location.pathname).toBe("/library"));
+    expect(mockImport).not.toHaveBeenCalled();
+
+    cleanup();
+    renderLibrary();
+    await screen.findByRole("heading", { name: "Par quoi veux-tu commencer ?" });
+    await waitFor(() => expect(mockGetOnboardingPreferences).toHaveBeenCalledTimes(2));
+    expect(screen.queryByRole("button", { name: "Découvrir mes histoires" })).not.toBeInTheDocument();
+    expect(mockImport).not.toHaveBeenCalled();
+  });
+
+  it("keeps discovery open when saving Pas maintenant fails", async () => {
+    const user = userEvent.setup();
+    mockGet.mockResolvedValue({ stories: [] });
+    mockDevice.mockResolvedValue(supportedOrigine);
+    mockDeviceLibrary.mockResolvedValue(readableTwo);
+    mockUpdateOnboardingPreferences.mockRejectedValue({
+      code: "UNKNOWN",
+      message: "Préférences non enregistrées.",
+      userAction: "Réessaie.",
+      details: null,
+    });
+    const router = renderLibrary({ initialScreen: "welcome/device" });
+    await screen.findByRole("heading", { name: "2 histoires trouvées sur ta Lunii" });
+    await user.click(screen.getByRole("button", { name: "Pas maintenant" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Préférences non enregistrées.");
+    expect(router.state.location.pathname).toBe("/welcome/device");
+    expect(mockImport).not.toHaveBeenCalled();
+  });
+
+  it("reports actual recovery progress and outcomes, copying only missing readable packs on an authorized V1", async () => {
+    const user = userEvent.setup();
+    let finishFirstCopy!: (value: typeof importOutcome) => void;
+    mockGet.mockResolvedValue({ stories: [] });
+    mockDevice.mockResolvedValue(supportedOrigine);
+    mockDeviceLibrary.mockResolvedValue({
+      ...readableTwo,
+      stories: [
+        ...readableTwo.stories,
+        { ...readableTwo.stories[0], uuid: "already-local", alreadyImported: true },
+        { ...readableTwo.stories[1], uuid: "missing-content", contentPresent: false },
+      ],
+    });
+    mockImport
+      .mockImplementationOnce(() => new Promise((resolve) => { finishFirstCopy = resolve; }))
+      .mockRejectedValueOnce({
+        code: "IMPORT_FAILED",
+        message: "La deuxième histoire n'a pas pu être copiée.",
+        userAction: "Réessaie depuis l'appareil.",
+        details: null,
+      });
+    const router = renderLibrary({ initialScreen: "welcome/device" });
+    await screen.findByRole("heading", { name: "4 histoires trouvées sur ta Lunii" });
+    await user.click(screen.getByRole("button", { name: "Récupérer mes histoires" }));
+    await waitFor(() => expect(router.state.location.pathname).toBe("/library"));
+    expect(screen.getByRole("progressbar", {
+      name: "0 sur 2 histoires traitées",
+    })).toHaveAttribute("aria-valuenow", "0");
+    expect(mockImport).toHaveBeenCalledTimes(1);
+    expect(screen.queryByText(/histoires copiées/i)).not.toBeInTheDocument();
+
+    mockGet.mockResolvedValue({ stories: [{
+      id: "local-1", title: "Histoire de ma Lunii (0000ABCD)", transferable: true,
+    }] });
+    await act(async () => finishFirstCopy(importOutcome));
+    expect(await screen.findByText("1 histoire copiée · 1 copie en échec.")).toBeInTheDocument();
+    expect(screen.getByRole("alert")).toHaveTextContent("La deuxième histoire n'a pas pu être copiée.");
+    expect(screen.queryByRole("progressbar")).not.toBeInTheDocument();
+    expect(mockImport.mock.calls).toEqual([
+      [{ deviceIdentifier: supportedOrigine.deviceIdentifier, packUuid: "u1" }],
+      [{ deviceIdentifier: supportedOrigine.deviceIdentifier, packUuid: "u2" }],
+    ]);
+    expect(await screen.findByRole("button", {
+      name: "Histoire de ma Lunii (0000ABCD)",
+    })).toBeInTheDocument();
+    expect(mockGet.mock.calls.length).toBeGreaterThan(1);
+    expect(mockDeviceLibrary.mock.calls.length).toBeGreaterThan(1);
+    await user.click(screen.getByRole("link", { name: "Mes brouillons" }));
+    expect(screen.queryByRole("button", {
+      name: "Histoire de ma Lunii (0000ABCD)",
+    })).not.toBeInTheDocument();
   });
 
   it("deletes a device story after confirmation and re-reads the inventory (AC #5)", async () => {
@@ -5048,7 +5331,7 @@ describe("<LibraryRoute />", () => {
     mockGet.mockResolvedValueOnce({ stories: [] });
     renderLibrary();
 
-    await screen.findByRole("heading", { name: /ta bibliothèque est vide/i });
+    await screen.findByRole("heading", { name: /par quoi veux-tu commencer/i });
     await waitFor(() => {
       expect(mockAnalyzeOsOpen).toHaveBeenCalledTimes(1);
     });
@@ -5084,10 +5367,46 @@ describe("<LibraryRoute />", () => {
     expect(mockAnalyzeArtifact).not.toHaveBeenCalled();
   });
 
+  it("leaves welcome to display an OS-open review without completing onboarding", async () => {
+    let resolveIntent!: (value: typeof OS_OPEN_ANALYZED) => void;
+    mockGet.mockResolvedValue({ stories: [] });
+    mockDevice.mockResolvedValue({ kind: "none" });
+    mockGetOnboardingPreferences.mockResolvedValue({
+      welcomeCompleted: false,
+      deviceRecoveryPromptDismissed: false,
+    });
+    mockAnalyzeOsOpen.mockImplementationOnce(() => new Promise((resolve) => {
+      resolveIntent = resolve;
+    }));
+    const router = renderLibrary({ initialScreen: "welcome" });
+    await screen.findByRole("heading", { name: "Bienvenue sur Rustory" });
+    expect(router.state.location.pathname).toBe("/welcome");
+
+    await act(async () => resolveIntent(OS_OPEN_ANALYZED));
+
+    const main = await screen.findByRole("main", {
+      name: "Collection d'histoires",
+    });
+    expect(router.state.location.pathname).toBe("/library");
+    const review = within(main).getByRole("region", {
+      name: "Import d'une histoire",
+    });
+    expect(within(review).getByText("Partiellement exploitable")).toBeVisible();
+    expect(within(review).getByRole("button", {
+      name: "Importer ce qui est reconnu",
+    })).toBeVisible();
+    expect(screen.queryByRole("heading", {
+      name: "Bienvenue sur Rustory",
+    })).not.toBeInTheDocument();
+    expect(mockUpdateOnboardingPreferences).not.toHaveBeenCalled();
+    expect(mockAnalyzeArtifact).not.toHaveBeenCalled();
+    expect(mockAcceptArtifact).not.toHaveBeenCalled();
+  });
+
   it("reacts to a warm os-open signal: consumes it and opens the review", async () => {
     mockGet.mockResolvedValueOnce({ stories: [] });
     renderLibrary();
-    await screen.findByRole("heading", { name: /ta bibliothèque est vide/i });
+    await screen.findByRole("heading", { name: /par quoi veux-tu commencer/i });
     await waitFor(() => {
       expect(mockAnalyzeOsOpen).toHaveBeenCalledTimes(1);
     });
@@ -5130,7 +5449,7 @@ describe("<LibraryRoute />", () => {
       )
       .mockResolvedValueOnce(OS_OPEN_ANALYZED_B);
     renderLibrary();
-    await screen.findByRole("heading", { name: /ta bibliothèque est vide/i });
+    await screen.findByRole("heading", { name: /par quoi veux-tu commencer/i });
 
     // The user opens B while A's read settles — the exact gesture the
     // multi-file copy advises ("Rouvre chaque fichier séparément").
@@ -5196,7 +5515,7 @@ describe("<LibraryRoute />", () => {
   it("keeps a PERSISTENT live region mounted before any notice and routes the copy through it", async () => {
     mockGet.mockResolvedValueOnce({ stories: [] });
     renderLibrary();
-    await screen.findByRole("heading", { name: /ta bibliothèque est vide/i });
+    await screen.findByRole("heading", { name: /par quoi veux-tu commencer/i });
     await waitFor(() => {
       expect(mockAnalyzeOsOpen).toHaveBeenCalledTimes(1);
     });
@@ -5229,7 +5548,7 @@ describe("<LibraryRoute />", () => {
     // A dialog-import analysis that never settles keeps the flow busy.
     mockAnalyzeArtifact.mockImplementation(() => new Promise(() => {}));
     renderLibrary();
-    await screen.findByRole("heading", { name: /ta bibliothèque est vide/i });
+    await screen.findByRole("heading", { name: /par quoi veux-tu commencer/i });
     await waitFor(() => {
       expect(mockAnalyzeOsOpen).toHaveBeenCalledTimes(1);
     });
@@ -5237,6 +5556,9 @@ describe("<LibraryRoute />", () => {
     await userEvent.click(
       screen.getByRole("button", { name: "Importer une histoire" }),
     );
+    await userEvent.click(screen.getByRole("button", {
+      name: "Choisir un fichier .rustory…",
+    }));
     expect(
       screen.getByText("Analyse de l'artefact…"),
     ).toBeInTheDocument();
@@ -5383,7 +5705,7 @@ describe("<LibraryRoute />", () => {
   it("declines an intent arriving during the PRIMARY creation submission — the creation stays intact", async () => {
     mockGet.mockResolvedValueOnce({ stories: [] });
     renderLibrary();
-    await screen.findByRole("heading", { name: /ta bibliothèque est vide/i });
+    await screen.findByRole("heading", { name: /par quoi veux-tu commencer/i });
     await waitFor(() => {
       expect(mockAnalyzeOsOpen).toHaveBeenCalledTimes(1);
     });
@@ -5423,7 +5745,7 @@ describe("<LibraryRoute />", () => {
         }),
     );
     renderLibrary();
-    await screen.findByRole("heading", { name: /ta bibliothèque est vide/i });
+    await screen.findByRole("heading", { name: /par quoi veux-tu commencer/i });
 
     // Silent for the user (no surface, no alert)… but the import CTA is
     // gated: no sibling flow may start under a live OS read.
@@ -5523,7 +5845,7 @@ describe("<LibraryRoute />", () => {
     mockGet.mockResolvedValueOnce({ stories: [] });
     renderLibrary();
 
-    await screen.findByRole("heading", { name: /ta bibliothèque est vide/i });
+    await screen.findByRole("heading", { name: /par quoi veux-tu commencer/i });
     await waitFor(() => {
       expect(mockAnalyzeDrop).toHaveBeenCalledTimes(1);
     });
@@ -5535,6 +5857,41 @@ describe("<LibraryRoute />", () => {
     ).not.toBeInTheDocument();
     expect(screen.queryByText(DROP_BUSY_COPY)).not.toBeInTheDocument();
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("leaves device discovery to display a drop notice without completing onboarding", async () => {
+    mockGet.mockResolvedValue({ stories: [] });
+    mockDevice.mockResolvedValue(supportedOrigine);
+    mockDeviceLibrary.mockResolvedValue(readableTwo);
+    mockGetOnboardingPreferences.mockResolvedValue({
+      welcomeCompleted: false,
+      deviceRecoveryPromptDismissed: false,
+    });
+    const router = renderLibrary({ initialScreen: "welcome/device" });
+    await screen.findByRole("heading", {
+      name: "2 histoires trouvées sur ta Lunii",
+    });
+    await waitFor(() => expect(mockAnalyzeDrop).toHaveBeenCalledTimes(1));
+    expect(router.state.location.pathname).toBe("/welcome/device");
+    mockAnalyzeDrop.mockResolvedValueOnce({
+      kind: "multipleItems",
+      message: DROP_MULTIPLE_ITEMS_COPY,
+    });
+
+    act(() => useDropShell.getState().raiseSignal());
+
+    const main = await screen.findByRole("main", {
+      name: "Collection d'histoires",
+    });
+    expect(router.state.location.pathname).toBe("/library");
+    const notices = within(main).getAllByText(DROP_MULTIPLE_ITEMS_COPY);
+    expect(notices).toHaveLength(2);
+    expect(notices.some((notice) => notice.getAttribute("role") === "status")).toBe(true);
+    expect(notices.find((notice) => notice.tagName === "P")).toBeVisible();
+    expect(mockUpdateOnboardingPreferences).not.toHaveBeenCalled();
+    expect(mockImport).not.toHaveBeenCalled();
+    expect(mockAnalyzeArtifact).not.toHaveBeenCalled();
+    expect(mockAnalyzeFolder).not.toHaveBeenCalled();
   });
 
   it("opens the EXISTING import review from a dormant dropped FILE (mount pull → artifact)", async () => {
@@ -5579,7 +5936,7 @@ describe("<LibraryRoute />", () => {
   it("reacts to a warm drop signal: consumes it and opens the review", async () => {
     mockGet.mockResolvedValueOnce({ stories: [] });
     renderLibrary();
-    await screen.findByRole("heading", { name: /ta bibliothèque est vide/i });
+    await screen.findByRole("heading", { name: /par quoi veux-tu commencer/i });
     await waitFor(() => {
       expect(mockAnalyzeDrop).toHaveBeenCalledTimes(1);
     });
@@ -5660,7 +6017,7 @@ describe("<LibraryRoute />", () => {
   it("renders the multipleItems calm limit VERBATIM through the PERSISTENT drop live region", async () => {
     mockGet.mockResolvedValueOnce({ stories: [] });
     renderLibrary();
-    await screen.findByRole("heading", { name: /ta bibliothèque est vide/i });
+    await screen.findByRole("heading", { name: /par quoi veux-tu commencer/i });
     await waitFor(() => {
       expect(mockAnalyzeDrop).toHaveBeenCalledTimes(1);
     });
@@ -5708,7 +6065,7 @@ describe("<LibraryRoute />", () => {
     // A dialog-import analysis that never settles keeps the flow busy.
     mockAnalyzeArtifact.mockImplementation(() => new Promise(() => {}));
     renderLibrary();
-    await screen.findByRole("heading", { name: /ta bibliothèque est vide/i });
+    await screen.findByRole("heading", { name: /par quoi veux-tu commencer/i });
     await waitFor(() => {
       expect(mockAnalyzeDrop).toHaveBeenCalledTimes(1);
     });
@@ -5716,6 +6073,9 @@ describe("<LibraryRoute />", () => {
     await userEvent.click(
       screen.getByRole("button", { name: "Importer une histoire" }),
     );
+    await userEvent.click(screen.getByRole("button", {
+      name: "Choisir un fichier .rustory…",
+    }));
     expect(screen.getByText("Analyse de l'artefact…")).toBeInTheDocument();
 
     act(() => {
@@ -5755,6 +6115,7 @@ describe("<LibraryRoute />", () => {
     await user.click(
       screen.getByRole("button", { name: /créer une histoire/i }),
     );
+    await selectCreationStep(user, "import");
     await user.click(
       await screen.findByRole("button", {
         name: "Démarrer depuis une page web",
@@ -5798,7 +6159,7 @@ describe("<LibraryRoute />", () => {
         }),
     );
     renderLibrary();
-    await screen.findByRole("heading", { name: /ta bibliothèque est vide/i });
+    await screen.findByRole("heading", { name: /par quoi veux-tu commencer/i });
     expect(mockAnalyzeDrop).not.toHaveBeenCalled();
 
     act(() => {
@@ -5866,6 +6227,7 @@ describe("<LibraryRoute />", () => {
     await user.click(
       screen.getByRole("button", { name: /créer une histoire/i }),
     );
+    await selectCreationStep(user, "import");
     await user.click(
       await screen.findByRole("button", {
         name: "Démarrer depuis une page web",
@@ -6078,7 +6440,7 @@ describe("<LibraryRoute />", () => {
       )
       .mockResolvedValueOnce(DROP_ARTIFACT_B);
     renderLibrary();
-    await screen.findByRole("heading", { name: /ta bibliothèque est vide/i });
+    await screen.findByRole("heading", { name: /par quoi veux-tu commencer/i });
 
     // The user drops B while A's read settles.
     act(() => {
@@ -6155,7 +6517,7 @@ describe("<LibraryRoute />", () => {
         }),
     );
     renderLibrary();
-    await screen.findByRole("heading", { name: /ta bibliothèque est vide/i });
+    await screen.findByRole("heading", { name: /par quoi veux-tu commencer/i });
 
     // Silent for the user… but the import CTA is gated: no sibling flow
     // may start under a live drop read.

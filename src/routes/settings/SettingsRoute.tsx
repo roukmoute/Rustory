@@ -144,6 +144,16 @@ export function SettingsRoute(): React.JSX.Element {
       </header>
       {/* The announcement voice: its own read (`read_announcement_voices`),
           its own calm unavailable state — independent of the profile reads. */}
+      <section className="settings-route__welcome">
+        <h2>Découvrir Rustory</h2>
+        <p>
+          Retrouve le choix des voix et la découverte des histoires de ton
+          appareil.
+        </p>
+        <Button variant="secondary" onClick={() => navigate("/welcome")}>
+          Revoir l'accueil
+        </Button>
+      </section>
       <AnnouncementVoiceSettings />
       <SupportProfileView profileRead={profileRead} policyRead={policyRead} />
     </main>

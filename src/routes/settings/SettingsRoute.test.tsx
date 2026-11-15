@@ -47,7 +47,12 @@ vi.mock("../../ipc/commands/presentation", () => ({
   readAnnouncementVoices: () =>
     Promise.resolve({
       voices: [
-        { id: "system:say:Thomas", name: "Thomas", language: "fr-FR", engine: "system" },
+        {
+          id: "system:say:Thomas",
+          name: "Thomas",
+          language: "fr-FR",
+          engine: "system",
+        },
       ],
       selectedVoiceId: "system:say:Thomas",
       selectedIsStored: false,
@@ -423,6 +428,7 @@ describe("<SettingsRoute />", () => {
     expect(
       screen.getAllByRole("heading", { level: 2 }).map((h) => h.textContent),
     ).toEqual([
+      "Découvrir Rustory",
       "Voix des annonces",
       "Appareils",
       "Artefacts locaux",

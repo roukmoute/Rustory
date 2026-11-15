@@ -1,6 +1,6 @@
 import type React from "react";
 import { useMemo, useRef } from "react";
-import { useNavigate, useParams } from "react-router-dom";
+import { useLocation, useNavigate, useParams } from "react-router-dom";
 
 import { StoryEditorShell } from "../../features/story-editor/components/StoryEditorShell";
 import { useStoryExport } from "../../features/import-export/hooks/use-story-export";
@@ -16,6 +16,9 @@ import "./StoryEditRoute.css";
 export function StoryEditRoute(): React.JSX.Element {
   const { storyId: rawStoryId } = useParams<{ storyId: string }>();
   const navigate = useNavigate();
+  const location = useLocation();
+  const returnCollection =
+    location.state?.collection === "/drafts" ? "/drafts" : "/library";
 
   // The library encodes ids with encodeURIComponent before pushing them into
   // the URL — decode here before comparing against canonical ids. A malformed
@@ -99,7 +102,7 @@ export function StoryEditRoute(): React.JSX.Element {
     void flushAll();
     // `replace` keeps the browser history a single in/out transition for the
     // library ↔ edit context — back button behavior stays predictable.
-    navigate("/library", { replace: true });
+    navigate(returnCollection, { replace: true });
   };
 
   if (state.kind === "loading") {
