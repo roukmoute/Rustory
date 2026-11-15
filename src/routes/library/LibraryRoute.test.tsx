@@ -2254,6 +2254,35 @@ describe("<LibraryRoute />", () => {
     );
   });
 
+  it("routes the empty-library catalogue action to settings without mounting catalogue management in device details", async () => {
+    const user = userEvent.setup();
+    mockGet.mockResolvedValue({ stories: [] });
+    mockDevice.mockResolvedValue({ kind: "none" });
+    const router = renderLibrary();
+    await screen.findByRole("heading", {
+      name: "Par quoi veux-tu commencer ?",
+    });
+    const details = openDetails();
+    expect(
+      within(details).queryByRole("button", { name: "Catalogue officiel" }),
+    ).not.toBeInTheDocument();
+    expect(
+      within(details).queryByRole("region", { name: "Catalogue officiel" }),
+    ).not.toBeInTheDocument();
+    expect(mockCatalogStatus).not.toHaveBeenCalled();
+    expect(mockCatalogRefresh).not.toHaveBeenCalled();
+    expect(mockCatalogImport).not.toHaveBeenCalled();
+    closeDetails();
+    await user.click(screen.getByRole("button", { name: "Voir le catalogue" }));
+    expect(router.state.location.pathname).toBe("/settings");
+    expect(screen.getByTestId("settings-stub")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("dialog", { name: "Catalogue officiel" }),
+    ).not.toBeInTheDocument();
+    expect(mockCatalogRefresh).not.toHaveBeenCalled();
+    expect(mockCatalogImport).not.toHaveBeenCalled();
+  });
+
   it("navigates to /settings through the permanent left-column support-profile entry", async () => {
     mockGet.mockResolvedValueOnce({ stories: [] });
     renderLibrary();
@@ -2263,7 +2292,7 @@ describe("<LibraryRoute />", () => {
     const user = userEvent.setup();
     await user.click(
       within(nav).getByRole("button", {
-        name: "Aide et réglages — Profil de support",
+        name: "Aide et réglages",
       }),
     );
     await waitFor(() => {

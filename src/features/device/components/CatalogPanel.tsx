@@ -66,6 +66,11 @@ export function CatalogPanel({ catalog }: CatalogPanelProps): React.JSX.Element 
         Catalogue officiel
       </h2>
 
+      <p className="catalog-panel__description">
+        Retrouve les titres et les images des histoires officielles déjà
+        présentes sur ton appareil.
+      </p>
+
       <div id={statusId} className="catalog-panel__status" aria-live="polite">
         {busyLabel !== null ? (
           <ProgressIndicator mode="indeterminate" label={busyLabel} />

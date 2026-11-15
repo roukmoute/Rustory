@@ -4,6 +4,12 @@ import { useNavigate } from "react-router-dom";
 
 import { getVersion } from "@tauri-apps/api/app";
 
+import {
+  CatalogPanel,
+  invalidateDeviceLibraryCache,
+  invalidatePackCoverCache,
+  useOfficialCatalog,
+} from "../../features/device";
 import type { SectionRead } from "../../features/settings/components/SupportProfileView";
 import { AnnouncementVoiceSettings } from "../../features/settings/components/AnnouncementVoiceSettings";
 import { SupportProfileView } from "../../features/settings/components/SupportProfileView";
@@ -19,9 +25,8 @@ import { Button, Icon } from "../../shared/ui";
 import "./SettingsRoute.css";
 
 /**
- * The read-only `Profil de support` screen (`Support Profile Screen
- * Contract`): a standalone single-column view on `/settings` — the
- * `StoryEditRoute` pattern, never the three-column library grid.
+ * `Aide et réglages` owns the catalogue, voices, updates and read-only
+ * support profile in a standalone view on `/settings`.
  *
  * Two INDEPENDENT pure reads feed the sections (`read_support_profile`
  * for devices + artifacts, `read_content_source_policy` reused
@@ -29,10 +34,19 @@ import "./SettingsRoute.css";
  * calm `unavailable` state without ever taking down the sections whose
  * read succeeded — fail-closed per section, never invented content, no
  * retry (a failed pure read is a contract drift, not a transient
- * failure). Zero network by construction (NFR14).
+ * failure). Catalogue network access requires an explicit user action.
  */
 export function SettingsRoute(): React.JSX.Element {
   const navigate = useNavigate();
+  const officialCatalog = useOfficialCatalog({
+    onChanged: () => {
+      // The collection routes remount after settings: discard both cached
+      // titles and covers so the return shows the newly recognized packs.
+      invalidateDeviceLibraryCache();
+      invalidatePackCoverCache();
+    },
+  });
+  const isCatalogBusy = officialCatalog.action !== "idle";
   const [profileRead, setProfileRead] = useState<SectionRead<SupportProfile>>({
     kind: "loading",
   });
@@ -98,7 +112,7 @@ export function SettingsRoute(): React.JSX.Element {
   return (
     <main
       className="settings-route"
-      aria-label="Profil de support"
+      aria-label="Aide et réglages"
       aria-busy={isLoading}
     >
       <header className="settings-route__header">
@@ -107,7 +121,7 @@ export function SettingsRoute(): React.JSX.Element {
             <span className="settings-route__emblem" aria-hidden="true">
               <Icon name="settings" />
             </span>
-            Profil de support
+            Aide et réglages
           </h1>
           {version !== null && (
             <p className="settings-route__version">Version {version}</p>
@@ -130,6 +144,7 @@ export function SettingsRoute(): React.JSX.Element {
         </div>
         <Button
           variant="secondary"
+          disabled={isCatalogBusy}
           onClick={() => {
             // `replace` keeps the browser history a single in/out
             // transition for the library ↔ settings context (the
@@ -142,6 +157,7 @@ export function SettingsRoute(): React.JSX.Element {
           Retour à la bibliothèque
         </Button>
       </header>
+      <CatalogPanel catalog={officialCatalog} />
       {/* The announcement voice: its own read (`read_announcement_voices`),
           its own calm unavailable state — independent of the profile reads. */}
       <section className="settings-route__welcome">
@@ -150,12 +166,21 @@ export function SettingsRoute(): React.JSX.Element {
           Retrouve le choix des voix et la découverte des histoires de ton
           appareil.
         </p>
-        <Button variant="secondary" onClick={() => navigate("/welcome")}>
+        <Button
+          variant="secondary"
+          disabled={isCatalogBusy}
+          onClick={() => navigate("/welcome")}
+        >
           Revoir l'accueil
         </Button>
       </section>
       <AnnouncementVoiceSettings />
-      <SupportProfileView profileRead={profileRead} policyRead={policyRead} />
+      <section aria-labelledby="support-profile-title">
+        <h2 id="support-profile-title" className="settings-route__section-title">
+          Profil de support
+        </h2>
+        <SupportProfileView profileRead={profileRead} policyRead={policyRead} />
+      </section>
     </main>
   );
 }

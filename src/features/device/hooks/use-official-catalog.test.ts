@@ -14,6 +14,16 @@ import {
 } from "../../../ipc/commands/device-catalog";
 import { useOfficialCatalog } from "./use-official-catalog";
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
 describe("useOfficialCatalog", () => {
   beforeEach(() => {
     vi.mocked(getOfficialCatalogStatus).mockReset();
@@ -101,7 +111,7 @@ describe("useOfficialCatalog", () => {
     expect(result.current.state).toEqual({ kind: "ready", count: 42 });
   });
 
-  it("calls onChanged after a successful refresh and a committed import (so the device re-reads)", async () => {
+  it("calls onChanged after a successful refresh and a committed import to invalidate global caches", async () => {
     vi.mocked(getOfficialCatalogStatus).mockResolvedValueOnce({ count: 0 });
     vi.mocked(refreshOfficialCatalog).mockResolvedValueOnce({ count: 1200 });
     vi.mocked(importOfficialCatalog).mockResolvedValueOnce({
@@ -120,6 +130,103 @@ describe("useOfficialCatalog", () => {
     });
     expect(onChanged).toHaveBeenCalledTimes(2);
   });
+
+  it("invalidates global caches when a refresh succeeds after navigation unmounts the hook", async () => {
+    vi.mocked(getOfficialCatalogStatus).mockResolvedValueOnce({ count: 3 });
+    const pending = deferred<Awaited<ReturnType<typeof refreshOfficialCatalog>>>();
+    vi.mocked(refreshOfficialCatalog).mockReturnValueOnce(pending.promise);
+    const onChanged = vi.fn();
+    const { result, unmount } = renderHook(() => useOfficialCatalog({ onChanged }));
+    await waitFor(() => expect(result.current.state.kind).toBe("ready"));
+
+    let completion!: Promise<void>;
+    act(() => {
+      completion = result.current.refresh();
+    });
+    expect(result.current.action).toBe("refreshing");
+    expect(onChanged).not.toHaveBeenCalled();
+    unmount();
+
+    await act(async () => {
+      pending.resolve({ count: 1200 });
+      await completion;
+    });
+    expect(onChanged).toHaveBeenCalledExactlyOnceWith();
+  });
+
+  it("invalidates global caches when a file import commits after navigation unmounts the hook", async () => {
+    vi.mocked(getOfficialCatalogStatus).mockResolvedValueOnce({ count: 3 });
+    const pending = deferred<Awaited<ReturnType<typeof importOfficialCatalog>>>();
+    vi.mocked(importOfficialCatalog).mockReturnValueOnce(pending.promise);
+    const onChanged = vi.fn();
+    const { result, unmount } = renderHook(() => useOfficialCatalog({ onChanged }));
+    await waitFor(() => expect(result.current.state.kind).toBe("ready"));
+
+    let completion!: Promise<void>;
+    act(() => {
+      completion = result.current.importFile();
+    });
+    expect(result.current.action).toBe("importing");
+    expect(onChanged).not.toHaveBeenCalled();
+    unmount();
+
+    await act(async () => {
+      pending.resolve({ kind: "imported", count: 42 });
+      await completion;
+    });
+    expect(onChanged).toHaveBeenCalledExactlyOnceWith();
+  });
+
+  it("does not invalidate global caches when a file picker is cancelled after unmount", async () => {
+    vi.mocked(getOfficialCatalogStatus).mockResolvedValueOnce({ count: 3 });
+    const pending = deferred<Awaited<ReturnType<typeof importOfficialCatalog>>>();
+    vi.mocked(importOfficialCatalog).mockReturnValueOnce(pending.promise);
+    const onChanged = vi.fn();
+    const { result, unmount } = renderHook(() => useOfficialCatalog({ onChanged }));
+    await waitFor(() => expect(result.current.state.kind).toBe("ready"));
+
+    let completion!: Promise<void>;
+    act(() => {
+      completion = result.current.importFile();
+    });
+    unmount();
+
+    await act(async () => {
+      pending.resolve({ kind: "cancelled" });
+      await completion;
+    });
+    expect(onChanged).not.toHaveBeenCalled();
+  });
+
+  it.each(["refresh", "importFile"] as const)(
+    "does not invalidate global caches when %s fails after unmount",
+    async (action) => {
+      vi.mocked(getOfficialCatalogStatus).mockResolvedValueOnce({ count: 3 });
+      const pending = deferred<never>();
+      const command = action === "refresh" ? refreshOfficialCatalog : importOfficialCatalog;
+      vi.mocked(command).mockReturnValueOnce(pending.promise);
+      const onChanged = vi.fn();
+      const { result, unmount } = renderHook(() => useOfficialCatalog({ onChanged }));
+      await waitFor(() => expect(result.current.state.kind).toBe("ready"));
+
+      let completion!: Promise<void>;
+      act(() => {
+        completion = result.current[action]();
+      });
+      unmount();
+
+      await act(async () => {
+        pending.reject({
+          code: "OFFICIAL_CATALOG_UNAVAILABLE",
+          message: "unavailable",
+          userAction: "retry",
+          details: null,
+        });
+        await completion;
+      });
+      expect(onChanged).not.toHaveBeenCalled();
+    },
+  );
 
   it("does NOT call onChanged when the import is cancelled or the refresh fails", async () => {
     vi.mocked(getOfficialCatalogStatus).mockResolvedValueOnce({ count: 3 });

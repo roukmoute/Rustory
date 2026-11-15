@@ -10,11 +10,9 @@ import {
 import { Outlet, useLocation, useMatch, useNavigate } from "react-router-dom";
 
 import {
-  CatalogPanel,
   DeviceBulkImportPanel,
   type DeviceStorySelectionMode,
   DeviceStoryInspector,
-  invalidatePackCoverCache,
   type DevicePackSendStatus,
   useConnectedLunii,
   useDeviceBulkImport,
@@ -24,7 +22,6 @@ import {
   useDeviceStoryImport,
   useDeviceStoryReorder,
   useDeviceStoryTitle,
-  useOfficialCatalog,
   useStoryValidation,
   useTransferPreview,
 } from "../../features/device";
@@ -168,7 +165,6 @@ export function LibraryRoute(): React.JSX.Element {
       ? "drafts"
       : "library";
   const [detailsOpen, setDetailsOpen] = useState(false);
-  const [catalogOpen, setCatalogOpen] = useState(false);
   const [operationDetails, setOperationDetails] = useState<
     "transfer" | "copy" | null
   >(null);
@@ -1318,20 +1314,6 @@ export function LibraryRoute(): React.JSX.Element {
       ? deviceTitle.status
       : undefined;
 
-  // Official-catalog management (Phase C). Global (not device-specific):
-  // caching the commercial index recognizes packs even before a device is
-  // plugged in. Offline-first — only the on-mount count read runs without a
-  // deliberate user action. On a cache change, re-read the displayed device
-  // inventory so freshly recognized titles appear immediately.
-  const officialCatalog = useOfficialCatalog({
-    onChanged: () => {
-      // Covers may have changed too — drop the cover cache so the re-read
-      // resolves the fresh covers from the local cache.
-      invalidatePackCoverCache();
-      deviceLibrary.refresh();
-    },
-  });
-
   // The import status belongs to ONE pack — the one the hook actually
   // started a copy for (`targetPackUuid`, set past its re-entrancy
   // guard). Selecting another card shows THAT card's (idle) status,
@@ -1528,7 +1510,9 @@ export function LibraryRoute(): React.JSX.Element {
     welcomeScreen
   );
 
-  const openCatalog = (): void => setCatalogOpen(true);
+  const openCatalog = (): void => {
+    navigate("/settings");
+  };
 
   const center = (
     <>
@@ -1853,7 +1837,6 @@ export function LibraryRoute(): React.JSX.Element {
                   className="library-filters-nav__entry"
                   type="button"
                   onClick={openSupportProfile}
-                  aria-label="Aide et réglages — Profil de support"
                 >
                   <Icon name="settings" />
                   Aide et réglages
@@ -1983,15 +1966,6 @@ export function LibraryRoute(): React.JSX.Element {
             <Button variant="quiet" onClick={closeDetails}>
               Fermer les détails
             </Button>
-            <Button
-              variant="quiet"
-              onClick={() => {
-                closeDetails();
-                openCatalog();
-              }}
-            >
-              Catalogue officiel
-            </Button>
           </div>
           {/* 2+ device stories selected → the bulk-import surface replaces
                 the single-story inspector; 0 or 1 → the inspector as before
@@ -2064,18 +2038,6 @@ export function LibraryRoute(): React.JSX.Element {
               onConsultSupportProfile={openSupportProfile}
             />
           ) : null}
-        </Dialog>
-      )}
-      {catalogOpen && (
-        <Dialog
-          open
-          title="Catalogue officiel"
-          onClose={() => setCatalogOpen(false)}
-        >
-          <CatalogPanel catalog={officialCatalog} />
-          <Button variant="quiet" onClick={() => setCatalogOpen(false)}>
-            Fermer le catalogue
-          </Button>
         </Dialog>
       )}
       {operationDetails && (

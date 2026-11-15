@@ -32,8 +32,9 @@ export interface UseOfficialCatalog {
 
 export interface UseOfficialCatalogOptions {
   /** Called after the cache actually changes (a successful refresh, or a
-   *  file import that committed). The route uses it to re-read the displayed
-   *  device inventory so newly recognized titles appear immediately. */
+   *  file import that committed), including after this hook unmounts.
+   *  Use this persistent notification to invalidate global caches, not to
+   *  update component state: navigating away must not hide catalog changes. */
   onChanged?: () => void;
 }
 
@@ -88,16 +89,12 @@ export function useOfficialCatalog(
     try {
       const status = await refreshOfficialCatalog();
       if (mountedRef.current) setState({ kind: "ready", count: status.count });
-      // The cache changed → let the route re-read the device inventory so
-      // freshly recognized titles surface without a manual refresh. Runs
-      // outside the catch and guarded by mount so a throwing/late callback
-      // never reclassifies the success.
-      if (mountedRef.current) {
-        try {
-          onChangedRef.current?.();
-        } catch {
-          // Deliberately swallowed.
-        }
+      // Global cache invalidation survives navigation. A callback failure
+      // must never reclassify the successfully committed refresh.
+      try {
+        onChangedRef.current?.();
+      } catch {
+        // Deliberately swallowed.
       }
     } catch (err) {
       if (mountedRef.current) setActionError(toAppError(err));
@@ -117,8 +114,8 @@ export function useOfficialCatalog(
     try {
       const outcome = await importOfficialCatalog();
       // A cancelled dialog is a no-op — leave the count untouched.
-      if (mountedRef.current && outcome.kind === "imported") {
-        setState({ kind: "ready", count: outcome.count });
+      if (outcome.kind === "imported") {
+        if (mountedRef.current) setState({ kind: "ready", count: outcome.count });
         try {
           onChangedRef.current?.();
         } catch {

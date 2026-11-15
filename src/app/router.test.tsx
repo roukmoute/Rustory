@@ -6,6 +6,21 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const getLibraryOverviewMock = vi.fn();
 const getStoryDetailMock = vi.fn();
 const getOnboardingPreferencesMock = vi.fn();
+const catalogStatusMock = vi.fn();
+const catalogRefreshMock = vi.fn();
+const catalogImportMock = vi.fn();
+
+vi.mock("../ipc/commands/device-catalog", async () => {
+  const actual = await vi.importActual<
+    typeof import("../ipc/commands/device-catalog")
+  >("../ipc/commands/device-catalog");
+  return {
+    ...actual,
+    getOfficialCatalogStatus: () => catalogStatusMock(),
+    refreshOfficialCatalog: () => catalogRefreshMock(),
+    importOfficialCatalog: () => catalogImportMock(),
+  };
+});
 
 vi.mock("../ipc/commands/onboarding", () => ({
   getOnboardingPreferences: () => getOnboardingPreferencesMock(),
@@ -95,13 +110,24 @@ vi.mock("@tauri-apps/api/app", () => ({
 
 import { createAppRouter } from "./router";
 import { invalidateLibraryOverviewCache } from "../features/library/hooks/use-library-overview";
-import { useDraftsShell, useLibraryShell } from "../shell/state/library-shell-store";
+import {
+  useDraftsShell,
+  useLibraryShell,
+} from "../shell/state/library-shell-store";
 
 describe("router", () => {
   beforeEach(() => {
+    catalogStatusMock.mockReset();
+    catalogStatusMock.mockResolvedValue({ count: 17 });
+    catalogRefreshMock.mockReset();
+    catalogImportMock.mockReset();
     invalidateLibraryOverviewCache();
     for (const store of [useLibraryShell, useDraftsShell]) {
-      store.setState({ selectedStoryIds: new Set(), query: "", sort: "titre-asc" });
+      store.setState({
+        selectedStoryIds: new Set(),
+        query: "",
+        sort: "titre-asc",
+      });
     }
     getOnboardingPreferencesMock.mockReset();
     getOnboardingPreferencesMock.mockResolvedValue({
@@ -238,12 +264,51 @@ describe("router", () => {
 
     await waitFor(() => {
       expect(
-        screen.getByRole("main", { name: "Profil de support" }),
+        screen.getByRole("main", { name: "Aide et réglages" }),
       ).toBeInTheDocument();
     });
     expect(
-      screen.getByRole("heading", { level: 1, name: "Profil de support" }),
+      screen.getByRole("heading", { level: 1, name: "Aide et réglages" }),
     ).toBeInTheDocument();
+  });
+
+  it("opens catalogue management in settings from the empty library and returns without a network request", async () => {
+    const user = userEvent.setup();
+    getLibraryOverviewMock.mockResolvedValue({ stories: [] });
+    const router = createAppRouter(["/library"]);
+    render(<RouterProvider router={router} />);
+    await screen.findByRole("heading", {
+      name: "Par quoi veux-tu commencer ?",
+    });
+    expect(catalogStatusMock).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("button", { name: "Voir le catalogue" }));
+    expect(router.state.location.pathname).toBe("/settings");
+    expect(
+      screen.getByRole("main", { name: "Aide et réglages" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("region", { name: "Catalogue officiel" }),
+    ).toBeInTheDocument();
+    await screen.findByText("17 titres officiels en cache.");
+    expect(catalogStatusMock).toHaveBeenCalledOnce();
+    expect(catalogRefreshMock).not.toHaveBeenCalled();
+    expect(catalogImportMock).not.toHaveBeenCalled();
+    expect(
+      screen.queryByRole("dialog", { name: "Catalogue officiel" }),
+    ).not.toBeInTheDocument();
+    await user.click(
+      screen.getByRole("button", { name: "Retour à la bibliothèque" }),
+    );
+    expect(router.state.location.pathname).toBe("/library");
+    expect(
+      await screen.findByRole("heading", {
+        name: "Par quoi veux-tu commencer ?",
+      }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("region", { name: "Catalogue officiel" }),
+    ).not.toBeInTheDocument();
+    expect(catalogStatusMock).toHaveBeenCalledOnce();
   });
 
   it("redirects / to /library", async () => {
@@ -266,13 +331,18 @@ describe("router", () => {
     const router = createAppRouter(["/"]);
     render(<RouterProvider router={router} />);
 
-    expect(await screen.findByRole("heading", {
-      level: 1, name: "Bienvenue sur Rustory",
-    })).toBeInTheDocument();
+    expect(
+      await screen.findByRole("heading", {
+        level: 1,
+        name: "Bienvenue sur Rustory",
+      }),
+    ).toBeInTheDocument();
     expect(router.state.location.pathname).toBe("/welcome");
-    expect(screen.queryByRole("main", {
-      name: "Collection d'histoires",
-    })).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("main", {
+        name: "Collection d'histoires",
+      }),
+    ).not.toBeInTheDocument();
   });
 
   it("keeps direct draft links direct even before welcome has been completed", async () => {
@@ -280,23 +350,41 @@ describe("router", () => {
       welcomeCompleted: false,
       deviceRecoveryPromptDismissed: false,
     });
-    getLibraryOverviewMock.mockResolvedValue({ stories: [
-      { id: "native", title: "Mon brouillon" },
-      { id: "native-2", title: "Mon deuxième brouillon", transferable: false },
-      { id: "imported", title: "Histoire importée", importState: "resolved" },
-      { id: "device", title: "Histoire copiée", transferable: true },
-    ] });
+    getLibraryOverviewMock.mockResolvedValue({
+      stories: [
+        { id: "native", title: "Mon brouillon" },
+        {
+          id: "native-2",
+          title: "Mon deuxième brouillon",
+          transferable: false,
+        },
+        { id: "imported", title: "Histoire importée", importState: "resolved" },
+        { id: "device", title: "Histoire copiée", transferable: true },
+      ],
+    });
     const router = createAppRouter(["/drafts"]);
     render(<RouterProvider router={router} />);
 
     await screen.findByRole("button", { name: "Mon brouillon" });
     expect(router.state.location.pathname).toBe("/drafts");
-    expect(screen.getByRole("heading", { level: 1, name: "Mes brouillons" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Mon deuxième brouillon" })).toBeInTheDocument();
-    expect(screen.getByText("2 brouillons · enregistrés sur cet ordinateur")).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Histoire importée" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Histoire copiée" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("heading", { name: "Bienvenue sur Rustory" })).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("heading", { level: 1, name: "Mes brouillons" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Mon deuxième brouillon" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("2 brouillons · enregistrés sur cet ordinateur"),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Histoire importée" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Histoire copiée" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("heading", { name: "Bienvenue sur Rustory" }),
+    ).not.toBeInTheDocument();
   });
 
   it("returns from the editor to the originating drafts collection with its search and selection", async () => {
@@ -305,15 +393,22 @@ describe("router", () => {
     render(<RouterProvider router={router} />);
     await user.click(await screen.findByRole("button", { name: "Le soleil" }));
     await user.type(screen.getByRole("searchbox"), "soleil");
-    await user.click(screen.getByRole("button", { name: "Continuer à écrire" }));
+    await user.click(
+      screen.getByRole("button", { name: "Continuer à écrire" }),
+    );
 
     await screen.findByRole("main", { name: /éditeur d'histoire/i });
     expect(router.state.location.state).toEqual({ collection: "/drafts" });
-    await user.click(screen.getByRole("button", { name: /retour à la bibliothèque/i }));
+    await user.click(
+      screen.getByRole("button", { name: /retour à la bibliothèque/i }),
+    );
     await screen.findByRole("heading", { level: 1, name: "Mes brouillons" });
     expect(router.state.location.pathname).toBe("/drafts");
     expect(screen.getByRole("searchbox")).toHaveValue("soleil");
-    expect(screen.getByRole("button", { name: "Le soleil" })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByRole("button", { name: "Le soleil" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
     expect(useLibraryShell.getState().selectedStoryIds.size).toBe(0);
     expect(useLibraryShell.getState().query).toBe("");
   });

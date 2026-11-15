@@ -12,10 +12,10 @@ The device matrix and the local-artifact registry below are ENUMERABLE
 in the pure domain (`src-tauri/src/domain/device/support_matrix.rs`,
 `src-tauri/src/domain/import/local_artifact.rs`) and served in-app by
 the pure `read_support_profile` command: the classifiers and the
-`Profil de support` screen (route `/settings`, see
+`Profil de support` section in `Aide et réglages` (route `/settings`, see
 [ui-states.md#Support Profile Screen Contract](./ui-states.md)) consult
 the SAME single truth. The `Consulter le profil de support` gesture
-targets that internal screen — this document stays the detailed
+targets that internal settings screen — this document stays the detailed
 developer reference.
 
 This document is the source of truth that the
@@ -260,6 +260,10 @@ the same pack without collision.
 
 **Catalog policy (offline-first / anti-catalog).**
 
+- The `Catalogue officiel` management panel lives in `Aide et réglages`
+  (`/settings`). The empty-library `Voir le catalogue` card opens that screen;
+  device details expose no catalogue action. This is a metadata cache for title
+  and cover recognition, not a source of downloadable audio stories.
 - The official catalog is fetched ONLY on an explicit user action ("Récupérer
   / mettre à jour"). There is no implicit network traffic and never any fetch
   during a device read. A 100%-offline alternative imports the catalog from a
@@ -275,6 +279,10 @@ the same pack without collision.
   silently wipe good titles. Network reads are byte-bounded; the whole
   auth + packs + covers cycle shares one wall-clock budget.
 - Honesty: a user-typed or community title is NEVER presented as "officiel".
+- A successful refresh or committed file import invalidates frontend cover and
+  device-inventory caches even if it settles after leaving settings. Mounted
+  consumers re-read the metadata; older pending responses cannot restore stale
+  cache entries. Failure or cancellation does not invalidate the existing cache.
 
 **Covers.** The catalog references covers as RELATIVE paths
 (`/public/images/packs/…`) under a CDN host. Offline-first forbids fetching

@@ -1,12 +1,12 @@
-/* Official-catalog management panel. Sits in the right column with the
- * device inspector + decision panel; visually distinct, quiet by default. */
+/* Official-catalog management within Aide et réglages. */
 .catalog-panel {
   display: flex;
   flex-direction: column;
   gap: 12px;
   min-width: 0;
-  padding: 20px;
-  background: #f7f3e9;
+  padding: 28px;
+  background: var(--color-surface-raised);
+  border-radius: 24px;
 }
 
 .catalog-panel__title {
@@ -25,6 +25,13 @@
   margin: 0;
   font-size: var(--font-size-meta);
   color: var(--color-text-secondary);
+  line-height: var(--line-height-normal);
+}
+
+.catalog-panel__description {
+  margin: 0;
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-body);
   line-height: var(--line-height-normal);
 }
 
@@ -75,24 +82,22 @@
 }
 
 .catalog-panel__actions {
-  flex-direction: column;
+  flex-direction: row;
   align-items: flex-start;
   gap: 8px;
 }
 
 .catalog-panel__actions > button {
-  width: 100%;
-  font-size: 12px;
-  padding: 9px 12px;
-}
-
-.catalog-panel__actions > .ds-button--quiet {
-  padding-block: 5px;
-  min-height: 32px;
+  width: auto;
 }
 
 .catalog-panel__error {
   padding: 12px;
   border-radius: 12px;
   background: #fff3d4;
+}
+
+@media (max-width: 720px) {
+  .catalog-panel { padding: 20px; }
+  .catalog-panel__actions > button { width: 100%; }
 }

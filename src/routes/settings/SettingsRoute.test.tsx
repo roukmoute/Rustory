@@ -1,5 +1,5 @@
 import { StrictMode } from "react";
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import {
   RouterProvider,
@@ -13,6 +13,49 @@ const mockReadContentSourcePolicy = vi.fn();
 const mockGetVersion = vi.fn();
 const mockReadUpdateApplyPlan = vi.fn();
 const mockReadUpdateApplyState = vi.fn();
+const mockCatalogStatus = vi.fn();
+const mockCatalogRefresh = vi.fn();
+const mockCatalogImport = vi.fn();
+const mockInvalidatePackCoverCache = vi.fn();
+const mockInvalidateDeviceLibraryCache = vi.fn();
+
+vi.mock("../../ipc/commands/device-catalog", async () => {
+  const actual = await vi.importActual<
+    typeof import("../../ipc/commands/device-catalog")
+  >("../../ipc/commands/device-catalog");
+  return {
+    ...actual,
+    getOfficialCatalogStatus: () => mockCatalogStatus(),
+    refreshOfficialCatalog: () => mockCatalogRefresh(),
+    importOfficialCatalog: () => mockCatalogImport(),
+  };
+});
+
+vi.mock("../../features/device/hooks/use-pack-cover", async () => {
+  const actual = await vi.importActual<
+    typeof import("../../features/device/hooks/use-pack-cover")
+  >("../../features/device/hooks/use-pack-cover");
+  return {
+    ...actual,
+    invalidatePackCoverCache: () => {
+      mockInvalidatePackCoverCache();
+      actual.invalidatePackCoverCache();
+    },
+  };
+});
+
+vi.mock("../../features/device/hooks/use-device-library", async () => {
+  const actual = await vi.importActual<
+    typeof import("../../features/device/hooks/use-device-library")
+  >("../../features/device/hooks/use-device-library");
+  return {
+    ...actual,
+    invalidateDeviceLibraryCache: () => {
+      mockInvalidateDeviceLibraryCache();
+      actual.invalidateDeviceLibraryCache();
+    },
+  };
+});
 
 vi.mock("../../ipc/commands/settings", async () => {
   const actual = await vi.importActual<
@@ -258,6 +301,14 @@ function renderSettings(options: { strict?: boolean } = {}) {
 
 describe("<SettingsRoute />", () => {
   beforeEach(() => {
+    mockCatalogStatus.mockReset();
+    mockCatalogStatus.mockResolvedValue({ count: 17 });
+    mockCatalogRefresh.mockReset();
+    mockCatalogRefresh.mockResolvedValue({ count: 23 });
+    mockCatalogImport.mockReset();
+    mockCatalogImport.mockResolvedValue({ kind: "cancelled" });
+    mockInvalidatePackCoverCache.mockReset();
+    mockInvalidateDeviceLibraryCache.mockReset();
     mockReadSupportProfile.mockReset();
     mockReadSupportProfile.mockResolvedValue(officialProfile());
     mockReadContentSourcePolicy.mockReset();
@@ -282,13 +333,13 @@ describe("<SettingsRoute />", () => {
     });
   });
 
-  it("renders the standalone screen: main landmark, h1, version header and the five sections", async () => {
+  it("renders the catalogue before the existing settings sections without fetching or importing automatically", async () => {
     renderSettings();
     expect(
-      screen.getByRole("main", { name: "Profil de support" }),
+      screen.getByRole("main", { name: "Aide et réglages" }),
     ).toBeInTheDocument();
     expect(
-      screen.getByRole("heading", { level: 1, name: "Profil de support" }),
+      screen.getByRole("heading", { level: 1, name: "Aide et réglages" }),
     ).toBeInTheDocument();
     await waitFor(() => {
       expect(screen.getByText("Version 0.1.0")).toBeInTheDocument();
@@ -296,6 +347,20 @@ describe("<SettingsRoute />", () => {
     await waitFor(() => {
       expect(screen.getByText("Origine v1")).toBeInTheDocument();
     });
+    const catalog = screen.getByRole("region", { name: "Catalogue officiel" });
+    expect(
+      await within(catalog).findByText("17 titres officiels en cache."),
+    ).toBeInTheDocument();
+    expect(
+      catalog.compareDocumentPosition(
+        screen.getByRole("heading", { name: "Découvrir Rustory" }),
+      ) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    expect(mockCatalogStatus).toHaveBeenCalledOnce();
+    expect(mockCatalogRefresh).not.toHaveBeenCalled();
+    expect(mockCatalogImport).not.toHaveBeenCalled();
+    expect(mockInvalidatePackCoverCache).not.toHaveBeenCalled();
+    expect(mockInvalidateDeviceLibraryCache).not.toHaveBeenCalled();
     expect(screen.getByText("Gen1")).toBeInTheDocument();
     expect(screen.getByText("Dossier structuré")).toBeInTheDocument();
     expect(screen.getByText("Paquet Linux (.deb / .rpm)")).toBeInTheDocument();
@@ -304,6 +369,155 @@ describe("<SettingsRoute />", () => {
       screen.getByText(/La distribution officielle autorise/),
     ).toBeInTheDocument();
   });
+
+  it.each(["refresh", "import"] as const)(
+    "holds Retour during catalogue %s and invalidates both caches only after success",
+    async (action) => {
+      const user = userEvent.setup();
+      let complete!: (
+        outcome: { count: number } | { kind: "imported"; count: number },
+      ) => void;
+      const operation =
+        action === "refresh" ? mockCatalogRefresh : mockCatalogImport;
+      operation.mockImplementation(
+        () =>
+          new Promise((resolve) => {
+            complete = resolve;
+          }),
+      );
+      const router = renderSettings();
+      const catalog = screen.getByRole("region", {
+        name: "Catalogue officiel",
+      });
+      await within(catalog).findByText("17 titres officiels en cache.");
+      const back = screen.getByRole("button", {
+        name: "Retour à la bibliothèque",
+      });
+      expect(back).toBeEnabled();
+      await user.click(
+        within(catalog).getByRole("button", {
+          name:
+            action === "refresh"
+              ? "Récupérer / mettre à jour"
+              : "Importer depuis un fichier",
+        }),
+      );
+      expect(operation).toHaveBeenCalledOnce();
+      expect(back).toBeDisabled();
+      await user.click(back);
+      expect(router.state.location.pathname).toBe("/settings");
+      expect(mockInvalidatePackCoverCache).not.toHaveBeenCalled();
+      expect(mockInvalidateDeviceLibraryCache).not.toHaveBeenCalled();
+
+      await act(async () =>
+        complete(
+          action === "refresh"
+            ? { count: 23 }
+            : { kind: "imported", count: 23 },
+        ),
+      );
+      expect(
+        within(catalog).getByText("23 titres officiels en cache."),
+      ).toBeInTheDocument();
+      expect(mockInvalidatePackCoverCache).toHaveBeenCalledOnce();
+      expect(mockInvalidateDeviceLibraryCache).toHaveBeenCalledOnce();
+      expect(back).toBeEnabled();
+      await user.click(back);
+      expect(screen.getByTestId(LIBRARY_MARKER)).toBeInTheDocument();
+      expect(operation).toHaveBeenCalledOnce();
+    },
+  );
+
+  it("leaves both caches and the cached count intact when catalogue file selection is cancelled", async () => {
+    const user = userEvent.setup();
+    renderSettings();
+    const catalog = screen.getByRole("region", { name: "Catalogue officiel" });
+    await within(catalog).findByText("17 titres officiels en cache.");
+    await user.click(
+      within(catalog).getByRole("button", {
+        name: "Importer depuis un fichier",
+      }),
+    );
+    expect(mockCatalogImport).toHaveBeenCalledOnce();
+    expect(mockCatalogRefresh).not.toHaveBeenCalled();
+    expect(
+      within(catalog).getByText("17 titres officiels en cache."),
+    ).toBeInTheDocument();
+    expect(mockInvalidatePackCoverCache).not.toHaveBeenCalled();
+    expect(mockInvalidateDeviceLibraryCache).not.toHaveBeenCalled();
+    expect(
+      screen.getByRole("button", { name: "Retour à la bibliothèque" }),
+    ).toBeEnabled();
+  });
+
+  it("keeps the cached inventory valid and restores Retour after a catalogue refresh fails", async () => {
+    const user = userEvent.setup();
+    mockCatalogRefresh.mockRejectedValue({
+      code: "OFFICIAL_CATALOG_UNAVAILABLE",
+      message: "Le catalogue officiel est indisponible.",
+      userAction: "Réessaie plus tard.",
+      details: null,
+    });
+    renderSettings();
+    const catalog = screen.getByRole("region", { name: "Catalogue officiel" });
+    await within(catalog).findByText("17 titres officiels en cache.");
+    await user.click(
+      within(catalog).getByRole("button", {
+        name: "Récupérer / mettre à jour",
+      }),
+    );
+    expect(await within(catalog).findByRole("alert")).toHaveTextContent(
+      "Le catalogue officiel est indisponible.",
+    );
+    expect(
+      within(catalog).getByText("17 titres officiels en cache."),
+    ).toBeInTheDocument();
+    expect(mockInvalidatePackCoverCache).not.toHaveBeenCalled();
+    expect(mockInvalidateDeviceLibraryCache).not.toHaveBeenCalled();
+    expect(
+      screen.getByRole("button", { name: "Retour à la bibliothèque" }),
+    ).toBeEnabled();
+    expect(screen.getByText("Origine v1")).toBeInTheDocument();
+  });
+
+  it.each(["pending", "failed"] as const)(
+    "keeps support, sources and navigation available when the catalogue read is %s",
+    async (catalogState) => {
+      const user = userEvent.setup();
+      if (catalogState === "pending")
+        mockCatalogStatus.mockImplementation(() => new Promise(() => {}));
+      else
+        mockCatalogStatus.mockRejectedValue(
+          new Error("Catalogue local illisible"),
+        );
+      const router = renderSettings();
+      await screen.findByText("Origine v1");
+      expect(screen.getByText("Flux RSS")).toBeInTheDocument();
+      expect(
+        screen.getByRole("heading", { name: "Voix des annonces" }),
+      ).toBeInTheDocument();
+      const catalog = screen.getByRole("region", {
+        name: "Catalogue officiel",
+      });
+      expect(
+        within(catalog).getByText(
+          catalogState === "pending"
+            ? "Lecture du catalogue local…"
+            : "Catalogue local illisible.",
+        ),
+      ).toBeInTheDocument();
+      expect(mockCatalogRefresh).not.toHaveBeenCalled();
+      expect(mockCatalogImport).not.toHaveBeenCalled();
+      expect(mockInvalidatePackCoverCache).not.toHaveBeenCalled();
+      expect(mockInvalidateDeviceLibraryCache).not.toHaveBeenCalled();
+      const back = screen.getByRole("button", {
+        name: "Retour à la bibliothèque",
+      });
+      expect(back).toBeEnabled();
+      await user.click(back);
+      expect(router.state.location.pathname).toBe("/library");
+    },
+  );
 
   it("marks the screen busy while the reads are pending, then clears it", async () => {
     let resolveProfile: (value: unknown) => void = () => {};
@@ -315,12 +529,12 @@ describe("<SettingsRoute />", () => {
     );
     renderSettings();
     expect(
-      screen.getByRole("main", { name: "Profil de support" }),
+      screen.getByRole("main", { name: "Aide et réglages" }),
     ).toHaveAttribute("aria-busy", "true");
     resolveProfile(officialProfile());
     await waitFor(() => {
       expect(
-        screen.getByRole("main", { name: "Profil de support" }),
+        screen.getByRole("main", { name: "Aide et réglages" }),
       ).toHaveAttribute("aria-busy", "false");
     });
   });
@@ -428,8 +642,17 @@ describe("<SettingsRoute />", () => {
     expect(
       screen.getAllByRole("heading", { level: 2 }).map((h) => h.textContent),
     ).toEqual([
+      "Catalogue officiel",
       "Découvrir Rustory",
       "Voix des annonces",
+      "Profil de support",
+    ]);
+    const profile = screen.getByRole("region", { name: "Profil de support" });
+    expect(
+      within(profile)
+        .getAllByRole("heading", { level: 3 })
+        .map((h) => h.textContent),
+    ).toEqual([
       "Appareils",
       "Artefacts locaux",
       "Association de fichiers",

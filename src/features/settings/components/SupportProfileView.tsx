@@ -99,10 +99,10 @@ export function SupportProfileView({
         elevation={1}
         className="support-profile__section"
       >
-        <h2 className="support-profile__section-title">
+        <h3 className="support-profile__section-title">
           <Icon name="device" />
           {SECTION_DEVICES}
-        </h2>
+        </h3>
         <div
           className="support-profile__section-body"
           aria-busy={profileRead.kind === "loading" || undefined}
@@ -113,9 +113,9 @@ export function SupportProfileView({
           {profileRead.kind === "loaded" &&
             groupByFamily(profileRead.data.devices).map((group) => (
               <div key={group.family} className="support-profile__family">
-                <h3 className="support-profile__family-title">
+                <h4 className="support-profile__family-title">
                   {group.familyLabel}
-                </h3>
+                </h4>
                 <div className="support-profile__cohorts">
                   {group.lines.map((line) => (
                     <div key={line.cohort} className="support-profile__cohort">
@@ -167,10 +167,10 @@ export function SupportProfileView({
         elevation={1}
         className="support-profile__section"
       >
-        <h2 className="support-profile__section-title">
+        <h3 className="support-profile__section-title">
           <Icon name="folder" />
           {SECTION_ARTIFACTS}
-        </h2>
+        </h3>
         <div
           className="support-profile__section-body"
           aria-busy={profileRead.kind === "loading" || undefined}
@@ -227,10 +227,10 @@ export function SupportProfileView({
         elevation={1}
         className="support-profile__section"
       >
-        <h2 className="support-profile__section-title">
+        <h3 className="support-profile__section-title">
           <Icon name="link" />
           {SECTION_FILE_ASSOCIATION}
-        </h2>
+        </h3>
         <div
           className="support-profile__section-body"
           aria-busy={profileRead.kind === "loading" || undefined}
@@ -288,10 +288,10 @@ export function SupportProfileView({
         elevation={1}
         className="support-profile__section"
       >
-        <h2 className="support-profile__section-title">
+        <h3 className="support-profile__section-title">
           <Icon name="headphones" />
           {SECTION_SOURCES}
-        </h2>
+        </h3>
         <div
           className="support-profile__section-body"
           aria-busy={policyRead.kind === "loading" || undefined}
@@ -327,10 +327,10 @@ export function SupportProfileView({
         elevation={1}
         className="support-profile__section"
       >
-        <h2 className="support-profile__section-title">
+        <h3 className="support-profile__section-title">
           <Icon name="leaf" />
           {SECTION_POSTURE}
-        </h2>
+        </h3>
         <p className="support-profile__posture">{DISTRIBUTION_POSTURE}</p>
       </SurfacePanel>
     </div>

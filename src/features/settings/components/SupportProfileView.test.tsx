@@ -253,10 +253,10 @@ function renderView(
 }
 
 describe("<SupportProfileView />", () => {
-  it("renders the five sections as h2 headings in the contract order", () => {
+  it("renders the five sections as h3 headings below the support-profile heading", () => {
     renderView();
     const headings = screen
-      .getAllByRole("heading", { level: 2 })
+      .getAllByRole("heading", { level: 3 })
       .map((h) => h.textContent);
     expect(headings).toEqual([
       "Appareils",
@@ -270,7 +270,7 @@ describe("<SupportProfileView />", () => {
   it("renders the full device matrix grouped by family (4 cohort lines)", () => {
     renderView();
     const familyHeadings = screen
-      .getAllByRole("heading", { level: 3 })
+      .getAllByRole("heading", { level: 4 })
       .map((h) => h.textContent);
     expect(familyHeadings).toEqual(["Lunii", "FLAM"]);
     for (const cohort of ["Origine v1", "Mid-Gen v2", "V3", "Gen1"]) {
@@ -543,7 +543,7 @@ describe("<SupportProfileView />", () => {
   it("adds no interactive element to the file-association section (read-only, no toggle)", () => {
     renderView(loaded(profileWithCurrentInstall()), loaded(officialPolicy()));
     const heading = screen.getByRole("heading", {
-      level: 2,
+      level: 3,
       name: "Association de fichiers",
     });
     const section = heading.closest("section") as HTMLElement;

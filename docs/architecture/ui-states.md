@@ -188,7 +188,7 @@ Avoid:
 - `bibliothèque` is also the landing context of every OS-open intent (`intention d'ouverture`): a file opened through the operating system always resolves into the library's existing artifact-import review — never a new screen, never a new route (see `OS Open Contract`)
 - `bibliothèque` is likewise the landing context of every drop intent (`intention de dépôt`): a file or folder dropped on the window always resolves into the library's existing import / folder-creation review (see `Drop Intent Contract`); the hover overlay that accompanies the drag gesture is APP-LEVEL (mounted by the shell above the routed outlet — the whole window is the drop target, no route owns it)
 - `édition` is a separate context and must not silently replace library state vocabulary
-- `Profil de support` (route `/settings`) is the read-only screen where the distribution's support facts live — devices, local artifacts, content sources, posture; it never becomes a settings/toggles surface (see `Support Profile Screen Contract`)
+- `Aide et réglages` (route `/settings`) hosts settings and catalogue maintenance. Its `Profil de support` section keeps the distribution's facts read-only — devices, local artifacts, content sources, posture; those facts never become activation toggles (see `Support Profile Screen Contract`)
 - `modals` and reports may clarify a state, but should not become the only place where a critical state exists
 
 ## Implementation Rule
@@ -236,8 +236,8 @@ The library, drafts and device screens share a two-column shell: navigation and 
 current collection. `/library` shows all local stories; `/drafts` shows stories created here; `/device` shows the device
 inventory. Only one collection is visible at a time. Selecting a story immediately reveals
 its floating bottom action bar without resizing or shifting the cards. There is
-no right panel or drawer at any width. Details and catalogue maintenance open
-only in explicitly requested dialogs. Transfers and copies keep their real
+no right panel or drawer at any width. Details open only in explicitly requested
+dialogs; catalogue maintenance lives in `Aide et réglages`. Transfers and copies keep their real
 progress/results visible independently of selection and screen.
 
 | Zone | Role | ARIA region |
@@ -1214,11 +1214,14 @@ the surviving outcome so the parent can still `Relancer` (a full fresh cycle) or
 
 ## Official Catalog Contract
 
-An explicitly opened dialog hosts the `Catalogue officiel` panel that manages the
-local commercial-catalog cache used for title recognition (see
+The `Aide et réglages` screen (`/settings`) hosts the `Catalogue officiel` panel
+that manages the local commercial-catalog cache used for title recognition (see
 [device-support-profile.md#Title Recognition & Catalog Policy](./device-support-profile.md)).
 It is global, not device-specific — caching the catalog recognizes packs even
-before a device is plugged in.
+before a device is plugged in. The empty-library `Voir le catalogue` card opens
+`/settings`; it remains a proposal, not a second maintenance surface. Catalogue
+maintenance hooks and modals no longer live in the library; device details expose
+no catalogue action.
 
 | Panel element | Content / behavior |
 | --- | --- |
@@ -1227,6 +1230,11 @@ before a device is plugged in.
 | `Récupérer / mettre à jour` | The ONLY networked action: guest auth → catalog download → EAGER cover download into the local cache, on explicit click. Soft-disabled + `aria-busy` while in flight. |
 | `Importer depuis un fichier` | 100%-offline alternative: a native open-file dialog picks a catalog file Rust reads/parses/caches (titles only — no cover download on the offline path). A cancelled dialog is a silent no-op. |
 | Failure | An in-context `role="alert"` (never a toast) with the normalized message + next gesture and an explicit `Fermer`. |
+
+A successful refresh or committed file import invalidates the frontend cover
+and device-inventory caches, including when it settles after leaving settings.
+Returning to the device screen re-reads its authoritative inventory. A failed
+operation or cancelled file picker leaves the existing cache intact.
 
 Covers are cached LOCALLY during the refresh and rendered from that cache:
 a recognized entry's `thumbnail` carries the local cache file name (never a
@@ -1314,7 +1322,7 @@ a send REPLACES it) stays the authority on what a send would do.
 | `/library` | Shared `LibraryRoute` controller, local screen | Local stories with their selection actions and optional decision panel. |
 | `/device` | Shared `LibraryRoute` controller, device screen | Connected-device inventory and its own selection actions; explicit detection state when no inventory can be read. |
 | `/story/:storyId/edit` | `StoryEditRoute` | Resume a `brouillon local` for a library-owned story. No device call, no mutation at this stage. |
-| `/settings` | `SettingsRoute` | Read-only `Profil de support` screen (see `Support Profile Screen Contract`). Standalone single-column view; zero network, zero mutation. |
+| `/settings` | `SettingsRoute` | `Aide et réglages`, a standalone single-column view with catalogue maintenance and the read-only `Profil de support` section (see `Support Profile Screen Contract`). Catalogue network access requires its explicit refresh action. |
 | `*` | redirect to `/library` | Unknown paths bounce back to the library. |
 
 Rules:
@@ -1326,8 +1334,8 @@ Rules:
   selection without restarting transfers/imports. Device disconnect and fresh
   inventories still prune invalid selections; hidden selection actions stay hidden.
 - Returning to `/library` from `/story/:storyId/edit` preserves shell continuity (selection, filters) through the Zustand store — the URL does not carry that state.
-- New routes land here only when a real dominant-context switch appears. The `settings` context is wired by the `Profil de support` screen — a real dominant-context switch, read-only by contract.
-- The library left column carries the permanent navigation entry to `/settings` (below the filters block, no business state — see `Support Profile Screen Contract`); the column's `<nav>` label is the generalized `Navigation bibliothèque`.
+- New routes land here only when a real dominant-context switch appears. `Aide et réglages` owns the `settings` context; its `Profil de support` section remains read-only by contract.
+- The library left column carries the permanent `Aide et réglages` navigation entry to `/settings` (below the filters block, no business state — see `Support Profile Screen Contract`); the column's `<nav>` label is the generalized `Navigation bibliothèque`.
 
 ## Story Creation Contract
 
@@ -2219,7 +2227,8 @@ message:
 
 ## Support Profile Screen Contract
 
-The read-only screen where the user consults what the OFFICIAL
+The read-only `Profil de support` section within `Aide et réglages` is where
+the user consults what the OFFICIAL
 DISTRIBUTION supports: device families and firmware cohorts, local
 artifact types, content sources, and the distribution posture. It is
 the navigable in-app face of the documented support profile
@@ -2230,16 +2239,16 @@ detailed developer reference) and the internal target the existing
 | Aspect | Value |
 | --- | --- |
 | Route | `/settings` — the `settings` dominant context. The screen is a standalone single-column view (the `StoryEditRoute` pattern), NOT the three-column library grid. |
-| Screen title | `<h1>` `Profil de support` (canonical term — never `matrice` in user copy). The `<main>` carries `aria-label="Profil de support"`. |
+| Screen title | `<h1>` `Aide et réglages`; the `<main>` carries `aria-label="Aide et réglages"`. `Profil de support` names the section grouping the read-only facts (never `matrice` in user copy). |
 | Version header | The app version renders in the header as `Version {version}` via `getVersion()` (`@tauri-apps/api/app`, covered by `core:default`). The `consulte le profil de support de ta version` gesture copy becomes literal. If the version read fails, the line is omitted — never an invented value. |
-| Entry points | (a) A permanent navigation entry in the library left column (below the filters block): a light `SurfacePanel` + quiet `Button` labeled `Profil de support` that navigates to `/settings` — no business state in the column. (b) The existing `Consulter le profil de support` gesture (detection panel, device story inspector, device import surface) navigates IN-APP to `/settings` — no external browser, no network. |
+| Entry points | (a) The permanent `Aide et réglages` navigation entry in the library left column opens `/settings`, with the same accessible label. (b) `Consulter le profil de support` (detection panel, device story inspector, device import surface) navigates IN-APP to `/settings`. (c) The empty-library `Voir le catalogue` card opens the same screen. These navigation gestures start no catalogue network action. |
 | Exit | A `Retour à la bibliothèque` button navigating to `/library`. |
-| Read model | Content is ENTIRELY Rust-driven through two independent pure reads at route entry: `read_support_profile` (devices + local artifacts, frozen labels and reasons) and `read_content_source_policy` (content sources, reused VERBATIM from the Content Source Activation Contract — the screen is a second consumer, never a second truth). NO hardcoded TS list of families, cohorts, kinds, labels or reasons. Reads are pinned by a per-mount token (the `policyReadTokenRef` pattern) so a stale resolution never applies. |
-| Screen states | `loading` (accessible via `aria-busy`) → `loaded` \| `unavailable` PER SECTION: a failed read renders the affected section(s) in a calm `unavailable` state (honest frozen copy, `role="status"`, NO `Réessayer` — a failed pure read is a contract drift, not a transient failure) while the sections whose read succeeded stay fully served (fail-closed per section, never invented content). |
-| Sections | Five `<h2>` sections, in order: `Appareils` (the device support matrix grouped by family — every cohort line with its metadata format label and its four capability lines), `Artefacts locaux` (the three artifact registry lines plus the node-media formats line `Formats acceptés : images PNG, JPEG ; sons MP3, WAV, OGG` VERBATIM), `Association de fichiers` (the four official-channel lines of the file-association registry — frozen Rust-carried labels, status and details, the AppImage line carrying its frozen reason — plus, when the Linux install probe speaks, the current-install notice rendered FIRST in `role="status"`; ABSENT on Windows/macOS and on an indeterminable executable — never an invented claim. Served by the SAME `read_support_profile` pure read, fail-closed WITH the profile sections; a registered channel renders StateChip `success` + its status label, a non-registered one StateChip `neutral` + its status label + its frozen reason — the durable-distribution-limit regime, NEVER `error`/`warning`, never `role="alert"`, and NO toggle: activation belongs to the OS gesture — see [device-support-profile.md#File Association Contract](./device-support-profile.md)), `Sources de contenu` (the read policy rendered as-is: an enabled kind with its Rust-carried frozen entry-level marker `Activée par la distribution officielle` — the DTO's `activationMarker` — non-enabled kinds with their Rust-carried frozen reasons), `Politique de distribution` (the frozen posture copy derived from the PRD distribution policy). |
+| Read model | Support facts are ENTIRELY Rust-driven through two independent pure reads at route entry: `read_support_profile` (devices + local artifacts, frozen labels and reasons) and `read_content_source_policy` (content sources, reused VERBATIM from the Content Source Activation Contract — the screen is a second consumer, never a second truth). NO hardcoded TS list of families, cohorts, kinds, labels or reasons. Reads are pinned by a per-mount token (the `policyReadTokenRef` pattern) so a stale resolution never applies. |
+| Support-profile states | `loading` (accessible via `aria-busy`) → `loaded` \| `unavailable` PER SECTION: a failed read renders the affected section(s) in a calm `unavailable` state (honest frozen copy, `role="status"`, NO `Réessayer` — a failed pure read is a contract drift, not a transient failure) while the sections whose read succeeded stay fully served (fail-closed per section, never invented content). |
+| Fact groups | Five groups within `Profil de support`, in order: `Appareils` (the device support matrix grouped by family — every cohort line with its metadata format label and its four capability lines), `Artefacts locaux` (the three artifact registry lines plus the node-media formats line `Formats acceptés : images PNG, JPEG ; sons MP3, WAV, OGG` VERBATIM), `Association de fichiers` (the four official-channel lines of the file-association registry — frozen Rust-carried labels, status and details, the AppImage line carrying its frozen reason — plus, when the Linux install probe speaks, the current-install notice rendered FIRST in `role="status"`; ABSENT on Windows/macOS and on an indeterminable executable — never an invented claim. Served by the SAME `read_support_profile` pure read, fail-closed WITH the profile sections; a registered channel renders StateChip `success` + its status label, a non-registered one StateChip `neutral` + its status label + its frozen reason — the durable-distribution-limit regime, NEVER `error`/`warning`, never `role="alert"`, and NO toggle: activation belongs to the OS gesture — see [device-support-profile.md#File Association Contract](./device-support-profile.md)), `Sources de contenu` (the read policy rendered as-is: an enabled kind with its Rust-carried frozen entry-level marker `Activée par la distribution officielle` — the DTO's `activationMarker` — non-enabled kinds with their Rust-carried frozen reasons), `Politique de distribution` (the frozen posture copy derived from the PRD distribution policy). |
 | Capability rendering | An available capability renders StateChip `success` + `Disponible`; a non-available one renders StateChip `neutral` + `Non disponible dans cette version` PLUS its frozen Rust reason — NEVER a bare ✗, NEVER tone `error`/`warning`, NEVER `role="alert"`: a distribution limit is durable calm information, not a runtime error (the fourth vocabulary — see the non-collision rule in [product-language.md](./product-language.md)). Chips carry glyphs; color alone never carries the distinction. |
-| Read-only | NO setting, NO toggle, NO persistence: activation is a DISTRIBUTION decision (Content Source Activation Contract). `/settings` is the route context; `Profil de support` is the screen. |
-| Offline | The screen triggers ZERO network request (NFR14). Repatriating the support-profile gesture REMOVES the only external-browser call of that path and introduces none. |
+| Read-only | The `Profil de support` facts have NO setting, NO toggle, NO persistence: activation is a DISTRIBUTION decision (Content Source Activation Contract). The surrounding `Aide et réglages` screen also hosts existing settings and the separate catalogue actions. |
+| Offline | Reading the support facts triggers ZERO network request (NFR14). Opening `/settings` does not fetch the catalogue; only its explicit `Récupérer / mettre à jour` action does (see `Official Catalog Contract`). |
 | Forbidden | No modal, no toast, no new design-system component (the matrix composes SurfacePanel / StateChip / Button), no runtime non-support copy reused for a matrix line (the detection panel's `raison de non-support` vocabulary stays its own). |
 
 ## OS Open Contract
@@ -2513,7 +2522,7 @@ TWO read-only surfaces, nothing else:
 | Aspect | Value |
 | --- | --- |
 | (a) Settings status line | One line in the `/settings` header, UNDER the existing `Version {version}` line (which does not move — `getVersion()` and its omission-on-failure stay as they are; the status line gives the "your version / the published version" context and never creates ambiguity about the installed version). The support-profile screen contract and its FIVE sections stay INTACT. Renders the verdict WHEN IT EXISTS: a paragraph `role="status"` carrying the Rust-carried `headline` + `notice` VERBATIM; a `StateChip` tone `info` (glyph included) accompanies the `updateAvailable` state ONLY — the three other states render in a calm neutral tone with NO chip. Renders NOTHING while no verdict exists: never a spinner, never a theatrical waiting state (nobody waits for a background check). |
-| (b) Library discreet signal | A compact block at the FOOT of the library's left navigation column (below the filters block and the support-profile entry — the navigation zone, never the central surface nor the decision panel). Renders ONLY when the verdict is `updateAvailable` — every other state (including "check in flight") is INVISIBLE here: silence is the rule, the positive is the exception. `role="status"`, `StateChip` tone `info` + the Rust-carried `headline` verbatim + ONE text button `Voir les détails` (frontend-frozen literal, `aria-label` `Consulter les détails de la mise à jour`) that navigates IN-APP to `/settings` (the existing consultation-gesture pattern — no external browser, no outbound link). Keyboard-reachable, visible focus. |
+| (b) Library discreet signal | A compact block at the FOOT of the library's left navigation column (below the filters block and the `Aide et réglages` entry — the navigation zone, never the central surface nor the decision panel). Renders ONLY when the verdict is `updateAvailable` — every other state (including "check in flight") is INVISIBLE here: silence is the rule, the positive is the exception. `role="status"`, `StateChip` tone `info` + the Rust-carried `headline` verbatim + ONE text button `Voir les détails` (frontend-frozen literal, `aria-label` `Consulter les détails de la mise à jour`) that navigates IN-APP to `/settings` (the existing consultation-gesture pattern — no external browser, no outbound link). Keyboard-reachable, visible focus. |
 | States | The four sealed wire states render as: `updateAvailable` → both surfaces; `upToDate` / `checkUnavailable` / `checkNotRun` → settings status line only, calm neutral tone; no verdict yet → NOTHING renders anywhere. |
 | Copies | Rust-carried `headline` + `notice`, rendered VERBATIM (no TS content literal beyond the `Voir les détails` button and its aria-label) — frozen in [product-language.md](./product-language.md). |
 | Forbidden | `role="alert"`, toast, modal, any blocking element, chip tone `error`/`warning`, color alone carrying the distinction, a spinner or waiting state, a retry button, an external link, any coupling of the core flow to the verdict. |

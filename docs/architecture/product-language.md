@@ -77,9 +77,10 @@ It exists to keep the same product concepts named the same way across:
 | Abandon a failed / incomplete transfer (action) | `Abandonner` | Returns to a stable library after a failed / incomplete transfer; the local draft stays intact | `annuler`, `cancel`, `supprimer` |
 | Supported local input/output | `artefact local supporté` | Project, archive, or local file explicitly supported by Rustory | `payload`, `package`, `blob` |
 | Availability policy | `profil de support` | Official support statement for devices and local artifacts | `matrix` in user-facing copy |
-| Support profile screen (title + nav entry) | `Profil de support` | The `<h1>` of the read-only `/settings` screen AND the label of its permanent library-column navigation entry — one literal, one destination | `Réglages`, `Paramètres`, `Support`, `matrice` |
+| Settings screen (title + nav entry) | `Aide et réglages` | The `<h1>` and accessible main-region name of `/settings`, also the label of its permanent library navigation entry; hosts catalogue maintenance and the read-only support profile | `Paramètres`, `Support` alone |
+| Support profile section | `Profil de support` | The read-only section within `Aide et réglages` grouping the distribution's support facts; never a set of activation toggles | `matrice` |
 | Support profile screen — version header | `Version {version}` | Header line carrying the running app version (via `getVersion()`); makes the `consulte le profil de support de ta version` gesture literal. Omitted if the version read fails — never invented | `v{version}` alone, build hashes |
-| Support profile screen — section headers | `Appareils` / `Artefacts locaux` / `Association de fichiers` / `Sources de contenu` / `Politique de distribution` | The five frozen `<h2>` of the support-profile screen, in this order | `Matrice`, `Devices`, `Flux`, `Légal` |
+| Support profile — fact-group headers | `Appareils` / `Artefacts locaux` / `Association de fichiers` / `Sources de contenu` / `Politique de distribution` | The five frozen group headings within `Profil de support`, in this order | `Matrice`, `Devices`, `Flux`, `Légal` |
 | Support profile — capability available (state) | `Disponible` | Calm state chip (`success` tone) of a capability or artifact the distribution supports on this line | `OK`, `activée` (reserved for content sources), `supportée` used loosely |
 | Support profile — capability not available (state) | `Non disponible dans cette version` | Calm state chip (`neutral` tone, NEVER `error`/`warning`) of a capability or artifact the current distribution does not offer — the FOURTH vocabulary: a durable distribution limit, never a runtime error | `indisponible` (runtime policy refusal), `échoué` (transport), `bloquée`, `erreur` |
 | Support profile — V3 limit reason | `Rétro-ingénierie du format en cours` | Frozen Rust-carried reason on the Lunii V3 import and write capability lines (same rationale as the documented matrix) | `corruption risk` verbatim, `en développement`, `bientôt` |
@@ -91,7 +92,7 @@ It exists to keep the same product concepts named the same way across:
 | Local artifact capability labels (support profile) | `Import et export` (`.rustory`) / `Création d'une histoire` (dossier structuré) | Frozen capability wording of an AVAILABLE artifact line — aligned word for word with the documented table | `lecture/écriture`, `I/O` |
 | Local artifact format label (support profile) | `Format v1` | Frozen format-version line of an artifact registry line that documents one; omitted when the table documents none (archive) | `formatVersion == 1` verbatim in UI |
 | Support profile — archive limit reason | `Lecture d'archives non prise en charge` | Frozen Rust-carried reason on the deferred structured-archive line | `zip non supporté`, `règle zéro-dépendance` in user copy |
-| File association (section header) | `Association de fichiers` | The fifth read-only `<h2>` of the support-profile screen: whether each official distribution channel registers Rustory as the OS handler for its supported file type — see [device-support-profile.md#File Association Contract](./device-support-profile.md) | `types de fichiers`, `handler`, `enregistrement OS` |
+| File association (section header) | `Association de fichiers` | Read-only group within `Profil de support`: whether each official distribution channel registers Rustory as the OS handler for its supported file type — see [device-support-profile.md#File Association Contract](./device-support-profile.md) | `types de fichiers`, `handler`, `enregistrement OS` |
 | File association — extension label | `.rustory` | The frozen extension label of the file-association section (the single associated type) | listing several extensions, `*.rustory`, `rustory` bare |
 | File association — channel labels | `Paquet Linux (.deb / .rpm)` / `AppImage (Linux)` / `Installeur Windows (.msi / .exe)` / `Application macOS (.dmg)` | Frozen Rust-carried labels of the four official-channel lines of the file-association registry | raw wire tags (`linuxSystemPackage`, `macosAppBundle`…) in UI |
 | File association — registered at install (state) | `Enregistrée à l'installation` | Calm status label (`success` chip) of a channel whose package/installer declares the association at install time (Linux system package, Windows installer) | `activée` (reserved for content sources), `Disponible` (reserved for capabilities) |
@@ -332,7 +333,7 @@ The UI should favor these labels when they are user-visible:
 | Title the user typed for a device story | `Titre saisi` |
 | Name an unrecognized device story | `Nommer cette histoire` |
 | Edit a name the user typed earlier | `Renommer cette histoire` |
-| Official-catalog cache management area | `Catalogue officiel` |
+| Official-catalog cache management section in `Aide et réglages` | `Catalogue officiel` |
 | Fetch / refresh the official catalog (explicit, networked) | `Récupérer / mettre à jour` |
 | Import the official catalog from a local file (offline) | `Importer depuis un fichier` |
 | Official-catalog action failed (chip header; the actionable text is the alert's `message` + `userAction`) | `Catalogue indisponible` |
@@ -407,7 +408,7 @@ The UI should favor these labels when they are user-visible:
 | Support profile — structured-archive deferral (Rust-carried reason) | `Lecture d'archives non prise en charge` |
 | Support profile — devices/artifacts sections could not be read (calm `role="status"`, no retry) | `Le profil de support n'a pas pu être lu.` |
 | Support profile — sources section could not be read (calm `role="status"`, no retry) | `Les sources de contenu n'ont pas pu être lues.` |
-| File association — section header (fifth `<h2>` of the support profile) | `Association de fichiers` |
+| File association — fact-group header within the support profile | `Association de fichiers` |
 | File association — channel registered at install (calm `success` chip) | `Enregistrée à l'installation` |
 | File association — channel registered by the system (calm `success` chip, macOS) | `Enregistrée par le système` |
 | File association — channel not registered by default (calm `neutral` chip, AppImage; a NEW literal of the durable-limit regime) | `Non enregistrée d'office` |
@@ -549,7 +550,8 @@ flow's defensive rendering, but only the RSS flow ever emits it.
   profile does not authorize copying. `Pas maintenant` dismisses the suggestion.
 - `Par quoi veux-tu commencer ?` introduces the empty library's catalogue,
   import and writing choices. The catalogue contains titles and covers, not
-  downloadable audio stories.
+  downloadable audio stories. `Voir le catalogue` opens `/settings`, where
+  the catalogue is managed.
 - `Sur l'appareil` opens the separate device-inventory screen at `/device`.
   These navigation entries change routes, not scroll positions or local filters.
   Neither entry claims a transfer took place.
@@ -558,7 +560,8 @@ flow's defensive rendering, but only the RSS flow ever emits it.
   Switching screens preserves their independent selections.
 - `Aucun appareil connecté` describes an absent device on `/device`, not an empty
   inventory. `Aucune histoire sur l'appareil` requires a successful inventory read.
-- `Aide et réglages` opens the existing settings and support-profile route.
+- `Aide et réglages` opens `/settings`, with its `Catalogue officiel` panel and
+  the read-only facts grouped under `Profil de support`.
 - Selection opens a floating bottom action bar, never a right panel. Its counter
   reads `1 sélectionnée` / `N sélectionnées`; `Effacer la sélection` clears only
   the current collection's selection.
@@ -567,13 +570,14 @@ flow's defensive rendering, but only the RSS flow ever emits it.
   `Envoyer vers la Lunii` action, with identical capability and story gates.
 - `Détails` opens `Détails de la sélection` explicitly; `Détails de l'appareil`
   opens the same dialog from the live device summary. Closing it preserves
-  selection and running operations. Catalogue maintenance has its own dialog.
+  selection and running operations. Catalogue maintenance belongs to settings,
+  with no catalogue action in this dialog.
 - `Voir le transfert` opens the operation's details independently of the current
   selection; a running or completed operation never disappears on deselection.
 - `Reprendre` opens the existing story editor. It does not imply an unsaved draft.
 - `Affichage en cartes` / `Affichage en liste` change presentation only.
-- `Catalogue officiel` opens the existing catalogue maintenance panel, not a
-  store or a collection of downloadable commercial stories.
+- `Catalogue officiel` names the catalogue maintenance panel in `Aide et réglages`,
+  not a store or a collection of downloadable commercial stories.
 - `Des histoires à emporter.`, `À lire, à écouter, à imaginer` and
   `La première page de tes aventures` are decorative editorial copy, not states.
 
