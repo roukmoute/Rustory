@@ -69,18 +69,25 @@ Règle : un concept produit stable → un libellé préféré. Pas de synonyme l
 
 ## Livraison
 
-Rustory est en **livraison manuelle** tant que la chaîne officielle n'est pas en place. Voir [`docs/release-runbook.md`](docs/release-runbook.md) pour la procédure et les critères de passage à la livraison automatisée.
+La chaîne officielle de livraison est **active** : `build-release.yml` construit et signe les artefacts des trois plateformes, puis `promote-release.yml` publie la release après contrôle. Voir [`docs/release-runbook.md`](docs/release-runbook.md) pour la procédure. Chaque livraison doit aboutir à une nouvelle version, un tag poussé et une release publique ; laisser une draft ne termine pas la livraison.
 
 ## Workflow de livraison
 
-- Une unité de travail = **un seul commit** Git. Si la CI GitHub échoue, corriger localement puis `git commit --amend --no-edit` (cf. [`docs/project-context.md`](docs/project-context.md)).
-- Le commit n'est prêt à revue que si (a) les tests locaux pertinents sont verts et (b) la CI GitHub est verte sur ce commit.
+- Une intention autonome = **un commit atomique**. Séparer les changements indépendants ; une livraison peut comporter plusieurs commits.
+- Après les vérifications locales, pousser directement sur `main`, sans PR pour le moment, conformément à la consigne de l'utilisateur.
+- Réserver `git commit --amend` aux commits qui n'ont pas encore été poussés. Si la CI échoue après publication du commit, ajouter un correctif atomique et relancer les vérifications ; ne jamais forcer le push de `main`.
+- Incrémenter la version à chaque livraison et synchroniser dans un même commit `package.json`, `src-tauri/Cargo.toml`, l'entrée `rustory` de `src-tauri/Cargo.lock` et `src-tauri/tauri.conf.json`.
+- Après les vérifications locales, pousser le commit sur `main` et son tag `vMAJOR.MINOR.PATCH`. Attendre la réussite de `Verify` et `Build Release` sur ce même commit, contrôler les notes, les artefacts, les signatures et `latest.json`, puis lancer `promote-release.yml` et vérifier la publication effective.
+- L'autorisation explicite de l'utilisateur couvre le push et la publication à chaque livraison : les contrôles restent obligatoires, sans nouvelle demande d'accord systématique. Si la version est déjà publique, toute correction nécessite une nouvelle version, un nouveau tag et une nouvelle release.
+
+La politique complète est consignée dans [`docs/project-context.md`](docs/project-context.md).
 
 ## Convention de versioning
 
 Les versions de release suivent la convention stricte `MAJOR.MINOR.PATCH` :
-- exactement **trois composantes** séparées par des points (`.),
-- chaque composante est un **chiffre ASCII** (0-9), **zéros de tête refusés** (ex. `01`, `007` invalides),
+- choisir l'incrément SemVer adapté : `PATCH` pour une correction compatible, `MINOR` pour une fonctionnalité compatible, `MAJOR` pour une rupture de compatibilité, en tenant compte du stade `0.x`,
+- exactement **trois composantes** séparées par des points (`.`),
+- chaque composante est un **entier en chiffres ASCII** (0-9), **zéros de tête refusés** (ex. `01`, `007` invalides),
 - un préfixe `v` est **toléré au parse** mais **jamais affiché à l'utilisateur**,
 - le parsing est **fail-closed** : un tag hors convention ne produit **JAMAIS** de verdict de mise à jour.
 

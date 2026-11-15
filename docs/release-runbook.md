@@ -63,12 +63,18 @@ Les quatre critères de sortie sont REMPLIS (le premier a été exécuté comme 
 
 ## Automated delivery path
 
-Le chemin de livraison automatisé, une fois les secrets provisionnés :
+Depuis la consigne utilisateur du 2026-11-15, chaque livraison comprend un
+numéro de version synchronisé, un tag et une release publiée. Les commits
+atomiques sont poussés directement sur `main`, sans PR pour le moment, selon
+[`project-context.md`](project-context.md). Cette consigne autorise la publication
+après les vérifications ci-dessous, sans nouvelle demande de confirmation.
 
-1. **Tag** : pousser un tag `v*` conforme à la convention stricte `vMAJOR.MINOR.PATCH` (aligné sur les trois manifests du repo — le verrou d'alignement des versions est testé en CI).
+Le chemin de livraison courant utilise les secrets déjà provisionnés :
+
+1. **Tag** : après les vérifications locales, pousser sur `main` le commit à livrer, puis son tag conforme à la convention stricte `vMAJOR.MINOR.PATCH` (aligné sur les trois manifests du repo — le verrou d'alignement des versions est testé en CI). `Verify` et `Build Release` peuvent s'exécuter en parallèle.
 2. **Build** : `build-release.yml` construit et signe les artefacts des trois cibles, génère `latest.json` + les `.sig`, et attache le tout à une release **draft**. Rien n'est public à ce stade : une draft n'apparaît pas dans `releases/latest`.
-3. **Revue humaine** : vérifier la release draft (artefacts présents pour les trois cibles, signatures, versions cohérentes, notes de release).
-4. **Promotion** : lancer `promote-release.yml` avec le tag. Le workflow re-vérifie la complétude (jamais de feed partiel) puis publie la draft — le feed `releases/latest/download/latest.json` devient public et les copies AppImage distribuées porteuses de la clé publique voient la mise à jour via le geste intégré.
+3. **Vérification de la release** : attendre la réussite complète de `verify.yml` et de `build-release.yml` pour le commit tagué, puis vérifier la draft (artefacts présents pour les trois cibles, signatures, versions cohérentes, notes de release). La consigne de publication systématique ne dispense d'aucun de ces contrôles.
+4. **Promotion autorisée** : lancer `promote-release.yml` avec le tag. Le workflow re-vérifie la complétude et les signatures (jamais de feed partiel) puis publie la draft — le feed `releases/latest/download/latest.json` devient public et les copies AppImage distribuées porteuses de la clé publique voient la mise à jour via le geste intégré. Vérifier ensuite la release publique et son feed avant d'annoncer la livraison terminée.
 
 **Banc d'essai passé** : la première release réelle (v0.1.0, 2026-07-21) a exercé le passage complet build → draft → promotion → feed public, et a corrigé au passage le seul défaut trouvé (l'overlay doit porter la clé publique — voir la posture ci-dessus). Pièges opérateur constatés à connaître :
 
@@ -146,5 +152,5 @@ Même en livraison manuelle, ne **jamais** :
 - publier un binaire non issu d'une checkout `main` propre et vérifiée localement
 - promouvoir une CI verte comme « release ready » — `verify.yml` valide la compilation et les tests, pas la signature ni la reproductibilité release
 - activer un feed updater partiel pointant vers un sous-ensemble de plateformes (donnerait l'illusion d'une couverture complète) — `promote-release.yml` outille désormais ce garde-fou : il refuse de publier une draft dont `latest.json` ne couvre pas les trois cibles, et publier la draft à la main en contournant ce contrôle reste interdit
-- publier une release automatiquement — la promotion passe TOUJOURS par la revue humaine puis `promote-release.yml`
+- publier une release sans les contrôles complets de la draft et de `promote-release.yml`, même lorsque la publication est déjà autorisée
 - distribuer un build dont les vérifications locales ne sont pas toutes vertes
