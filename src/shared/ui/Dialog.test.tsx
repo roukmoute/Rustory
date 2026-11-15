@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
 import { Dialog } from "./Dialog";
@@ -37,6 +37,50 @@ describe("<Dialog />", () => {
       screen.getByRole("heading", { name: /confirmer la suppression/i }),
     ).toBeInTheDocument();
     expect(screen.getByText(/êtes-vous sûr/i)).toBeInTheDocument();
+    expect(
+      screen.getByRole("dialog").querySelector(".ds-dialog__eyebrow"),
+    ).toBeNull();
+  });
+
+  it("places the optional eyebrow before the heading without changing the accessible name", () => {
+    render(
+      <Dialog
+        open
+        title="Que veux-tu faire ?"
+        eyebrow={
+          <>
+            Étape <strong>1</strong> sur 2
+          </>
+        }
+        onClose={() => {}}
+      >
+        body
+      </Dialog>,
+    );
+    const heading = screen.getByRole("heading", {
+      name: "Que veux-tu faire ?",
+    });
+    expect(heading.previousElementSibling).toHaveClass("ds-dialog__eyebrow");
+    expect(heading.previousElementSibling).toHaveTextContent("Étape 1 sur 2");
+    expect(screen.getByRole("dialog")).toHaveAccessibleName(
+      "Que veux-tu faire ?",
+    );
+  });
+
+  it("prevents native Escape dismissal only while dismissal is locked", () => {
+    const onClose = vi.fn();
+    const { rerender } = render(
+      <Dialog open title="Créer" onClose={onClose} dismissible={false} />,
+    );
+    const dialog = screen.getByRole("dialog");
+    expect(fireEvent(dialog, new Event("cancel", { cancelable: true }))).toBe(
+      false,
+    );
+    expect(onClose).not.toHaveBeenCalled();
+    rerender(<Dialog open title="Créer" onClose={onClose} />);
+    expect(fireEvent(dialog, new Event("cancel", { cancelable: true }))).toBe(
+      true,
+    );
   });
 
   it("is not open initially when open=false", () => {
@@ -64,12 +108,7 @@ describe("<Dialog />", () => {
 
   it("forwards aria-describedby to the dialog element", () => {
     const { container } = render(
-      <Dialog
-        open
-        title="X"
-        ariaDescribedBy="dialog-desc"
-        onClose={() => {}}
-      >
+      <Dialog open title="X" ariaDescribedBy="dialog-desc" onClose={() => {}}>
         body
       </Dialog>,
     );

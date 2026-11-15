@@ -14,6 +14,14 @@
   background: rgb(35 49 74 / 35%);
 }
 
+.ds-dialog__eyebrow {
+  margin: 0 0 var(--space-2);
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-meta);
+  font-weight: var(--font-weight-semibold);
+  line-height: var(--line-height-normal);
+}
+
 .ds-dialog__title {
   margin: 0 0 var(--space-3) 0;
   font-family: var(--font-family-display);

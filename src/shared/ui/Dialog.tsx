@@ -7,6 +7,8 @@ export interface DialogProps {
   open: boolean;
   onClose: () => void;
   title: string;
+  eyebrow?: React.ReactNode;
+  dismissible?: boolean;
   ariaDescribedBy?: string;
   children?: React.ReactNode;
 }
@@ -19,6 +21,8 @@ export function Dialog({
   open,
   onClose,
   title,
+  eyebrow,
+  dismissible = true,
   ariaDescribedBy,
   children,
 }: DialogProps): React.JSX.Element {
@@ -41,8 +45,12 @@ export function Dialog({
       className="ds-dialog"
       aria-labelledby={titleId}
       aria-describedby={ariaDescribedBy}
+      onCancel={(event) => {
+        if (!dismissible) event.preventDefault();
+      }}
       onClose={onClose}
     >
+      {eyebrow != null ? <p className="ds-dialog__eyebrow">{eyebrow}</p> : null}
       <h2 id={titleId} className="ds-dialog__title">
         {title}
       </h2>
