@@ -4,7 +4,9 @@ Fredoka 600 and Nunito 400–800 are bundled locally in WOFF2 format.
 The Latin and Latin Extended subsets cover the French interface. These files
 come from Google Fonts; no font request is made to a CDN at runtime.
 Both families are distributed under the SIL Open Font License 1.1.
-See the adjacent `*-OFL.txt` files for the copyright notices and licenses.
+See [`public/licenses/fonts/`](../../../public/licenses/fonts/) for the copyright
+notices and licenses. Vite copies these files unchanged into `dist/licenses/fonts/`,
+which Tauri embeds with the frontend assets in production builds.
 
 Retrieved on 2026-11-15 using the Google Fonts CSS API:
 `https://fonts.googleapis.com/css2?family=Fredoka:wght@600&family=Nunito:wght@400;600;700;800&display=swap`.
@@ -26,11 +28,11 @@ Nunito uses a variable font; its requested weights share one file per subset.
   Source: https://fonts.gstatic.com/s/nunito/v32/XRXV3I6Li01BKofIO-aBXso.woff2
   SHA-256: `2c8d792869818ecb253a46bc3c63c7013df7aac2f69291c3c85e5cdc94160960`
 
-- `Fredoka-OFL.txt` (4,387 bytes)
+- `public/licenses/fonts/Fredoka-OFL.txt` (4,387 bytes)
   Source: https://raw.githubusercontent.com/google/fonts/main/ofl/fredoka/OFL.txt
   SHA-256: `9bbd4f5f107895d5a213579b73821fadd05105241cf4360e86050199fcfd6034`
 
-- `Nunito-OFL.txt` (4,384 bytes)
+- `public/licenses/fonts/Nunito-OFL.txt` (4,384 bytes)
   Source: https://raw.githubusercontent.com/google/fonts/main/ofl/nunito/OFL.txt
   SHA-256: `ee9491ad3ea5d390878695bd6cce49beb3cacd5c4312f8ab574b541e9f7afa21`
 
