@@ -48,7 +48,10 @@ function formatMegabytes(bytes: number): string {
  * comes from Rust (`read_announcement_voices`); this renders and triggers.
  * A failed read is the calm `unavailable` state, never invented voices.
  */
-export function AnnouncementVoiceSettings(): React.JSX.Element {
+export function AnnouncementVoiceSettings({
+  variant = "settings",
+}: { variant?: "settings" | "welcome" } = {}): React.JSX.Element {
+  const isWelcome = variant === "welcome";
   const [read, setRead] = useState<VoicesRead>({ kind: "loading" });
   const [previewing, setPreviewing] = useState<string | null>(null);
   const [installProgress, setInstallProgress] = useState<number | null>(null);
@@ -124,14 +127,16 @@ export function AnnouncementVoiceSettings(): React.JSX.Element {
     <SurfacePanel
       as="section"
       elevation={1}
-      className="announcement-voices"
+      className={`announcement-voices${isWelcome ? " announcement-voices--welcome" : ""}`}
       ariaLabelledBy="announcement-voices-title"
     >
       <h2 id="announcement-voices-title" className="announcement-voices__title">
-        <Icon name="mic" />
-        {SECTION_TITLE}
+        {!isWelcome && <Icon name="mic" />}
+        {isWelcome ? "Qui présente les histoires ?" : SECTION_TITLE}
       </h2>
-      <p className="announcement-voices__lead">{SECTION_LEAD}</p>
+      <p className="announcement-voices__lead">
+        {isWelcome ? "Cette voix annonce les titres quand on choisit une histoire." : SECTION_LEAD}
+      </p>
 
       {read.kind === "loading" && (
         <p className="announcement-voices__state" role="status">
@@ -185,8 +190,12 @@ export function AnnouncementVoiceSettings(): React.JSX.Element {
           )}
 
           <div className="announcement-voices__embedded">
-            <h3 className="announcement-voices__subtitle">{EMBEDDED_TITLE}</h3>
-            <p className="announcement-voices__lead">{EMBEDDED_LEAD}</p>
+            <h3 className="announcement-voices__subtitle">
+              {isWelcome ? "Voix de qualité supérieure" : EMBEDDED_TITLE}
+            </h3>
+            <p className="announcement-voices__lead">
+              {isWelcome ? "Même rendu sur tous les ordinateurs, utilisable hors ligne." : EMBEDDED_LEAD}
+            </p>
             {read.data.embedded.state === "unsupported" && (
               <StateChip tone="neutral" label={UNSUPPORTED_NOTE} />
             )}
@@ -204,7 +213,9 @@ export function AnnouncementVoiceSettings(): React.JSX.Element {
                 />
               ) : (
                 <Button variant="secondary" onClick={() => void install()}>
-                  {INSTALL_LABEL} ({formatMegabytes(read.data.embedded.downloadBytes)})
+                  {isWelcome
+                    ? `Télécharger · ${formatMegabytes(read.data.embedded.downloadBytes)}`
+                    : `${INSTALL_LABEL} (${formatMegabytes(read.data.embedded.downloadBytes)})`}
                 </Button>
               ))}
           </div>

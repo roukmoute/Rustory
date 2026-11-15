@@ -1,0 +1,33 @@
+.onboarding-discovery__device {
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  margin: 0;
+  padding: 10px 13px;
+  color: var(--color-action-primary);
+  background: #e3f3ea;
+  border-radius: 14px;
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.onboarding-discovery__device > span { width: 11px; height: 11px; border-radius: 50%; background: currentColor; }
+
+.onboarding-discovery__body {
+  display: grid;
+  grid-template-columns: minmax(0, 1.65fr) minmax(180px, 1fr);
+  align-items: center;
+  gap: 24px;
+  min-height: 370px;
+  padding: 36px 0 20px;
+}
+
+.onboarding-discovery__content { min-width: 0; }
+.onboarding-discovery__progress { margin: 28px 0 12px; max-width: 420px; }
+.onboarding-discovery__progress .ds-progress__track { height: 12px; }
+.onboarding-discovery__progress .ds-progress__label { font-size: 13px; }
+
+@media (max-width: 800px) {
+  .onboarding-discovery__body { grid-template-columns: minmax(0, 1fr); padding: 32px 0 0; min-height: 0; }
+  .onboarding-discovery .onboarding__device-art { max-width: 220px; }
+}

@@ -1,0 +1,60 @@
+.onboarding-welcome {
+  display: grid;
+  grid-template-columns: minmax(0, .85fr) minmax(0, 1.15fr);
+  align-items: center;
+  gap: 52px;
+  min-height: 440px;
+}
+
+.onboarding-welcome__intro { min-width: 0; }
+.onboarding-welcome__intro .onboarding__title { max-width: 330px; }
+.onboarding-welcome__setup { min-width: 0; }
+
+.onboarding-welcome .announcement-voices--welcome {
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+  background: transparent;
+  gap: 8px;
+}
+
+.onboarding-welcome .announcement-voices__title { font-size: 21px; font-weight: 600; }
+.onboarding-welcome .announcement-voices__lead { font-size: 14px; line-height: 1.45; }
+.onboarding-welcome .announcement-voices__list { grid-template-columns: minmax(0, 1fr); gap: 8px; margin-top: 8px; }
+.onboarding-welcome .announcement-voices__item { padding: 8px 12px; border-radius: 18px; background: #fff; gap: 8px; }
+.onboarding-welcome .announcement-voices__item:has(input:checked) { background: #fff0bf; border-color: var(--color-action-bright); box-shadow: inset 0 0 0 1px var(--color-action-bright); }
+.onboarding-welcome .announcement-voices__choice { flex-basis: 150px; }
+.onboarding-welcome .announcement-voices__meta { font-size: 11px; }
+.onboarding-welcome .announcement-voices__item > .ds-button { min-height: 32px; padding: 6px 12px; font-size: 12px; border-color: var(--color-border-subtle); background: #fff; }
+.onboarding-welcome .announcement-voices__item > .ds-button svg { width: 14px; height: 14px; }
+.onboarding-welcome .announcement-voices__embedded { display: grid; grid-template-columns: minmax(0, 1fr) auto; column-gap: 12px; row-gap: 4px; padding: 12px 14px; border-style: dashed; background: #fff; border-radius: 18px; }
+.onboarding-welcome .announcement-voices__subtitle { font-family: var(--font-family-ui); font-size: 14px; font-weight: 800; }
+.onboarding-welcome .announcement-voices__embedded > .announcement-voices__lead { grid-column: 1; font-size: 12px; }
+.onboarding-welcome .announcement-voices__embedded > .ds-button { grid-column: 2; grid-row: 1 / 3; align-self: center; min-height: 34px; padding: 8px 12px; font-size: 12px; }
+.onboarding-welcome .announcement-voices__embedded > .ds-progress,
+.onboarding-welcome .announcement-voices__embedded > .ds-state-chip { grid-column: 1 / -1; }
+
+.onboarding-welcome__connection { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 14px; margin-top: 20px; }
+.onboarding-welcome__connection > .onboarding__note { flex: 1 1 150px; }
+.onboarding-welcome__connection > .ds-button { min-height: 30px; padding: 4px 0; font-size: 12px; }
+.onboarding-welcome__device { display: inline-flex; align-items: center; gap: 10px; margin: 0; padding: 10px 14px; border: 1px dashed var(--color-border-strong); border-radius: 15px; font-size: 13px; font-weight: 800; color: var(--color-text-primary); }
+.onboarding-welcome__device > span { width: 11px; height: 11px; flex-shrink: 0; border-radius: 50%; background: #e4b224; }
+.onboarding-welcome__device--connected { border-color: transparent; background: #e3f3ea; }
+.onboarding-welcome__device--connected > span { background: var(--color-action-primary); }
+.onboarding-welcome__continue { margin-top: 14px; flex-wrap: wrap; }
+.onboarding-welcome__continue > .onboarding__note { flex: 1 1 180px; }
+
+@media (max-width: 1100px) {
+  .onboarding-welcome { gap: 32px; grid-template-columns: minmax(0, .8fr) minmax(0, 1.2fr); }
+}
+
+@media (max-width: 800px) {
+  .onboarding-welcome { grid-template-columns: minmax(0, 1fr); gap: 32px; min-height: 0; }
+  .onboarding-welcome__intro .onboarding__title { max-width: none; }
+}
+
+@media (max-width: 480px) {
+  .onboarding-welcome .announcement-voices__embedded { grid-template-columns: minmax(0, 1fr); }
+  .onboarding-welcome .announcement-voices__embedded > .ds-button { grid-column: 1; grid-row: auto; justify-self: start; margin-top: 6px; }
+}
