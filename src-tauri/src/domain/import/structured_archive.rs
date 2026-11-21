@@ -45,8 +45,9 @@ pub const MAX_ARCHIVE_MEDIA_FILES: usize = 8192;
 /// Ceiling on ONE media of a story archive — a memory guard: every reader
 /// loads a media whole. ONE constant for every place an archive media is
 /// read (the creation's probe, extraction and promotion; the device send and
-/// the archive export of a story that retained its archive), so every media
-/// the creation admitted can be sent and exported again.
+/// the archive export of a story that retained its archive) AND for every
+/// media the export writes, so an archive Rustory exported is always an
+/// archive Rustory imports whole and can send.
 ///
 /// It equals the widest ceiling of the node-media store: a media the library
 /// holds fits an archive as is, and a media an archive carries fits the

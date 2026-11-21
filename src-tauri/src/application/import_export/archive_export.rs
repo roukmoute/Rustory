@@ -18,6 +18,13 @@
 //! opened — no converter needed on the other side. No device is involved:
 //! the pack is never ciphered, and nothing is read from or written to one.
 //!
+//! No media larger than the creation flow admits
+//! ([`MAX_ARCHIVE_MEDIA_BYTES`]) is ever written: transcoding to the fixed
+//! device bitrate can make a long, lightly encoded sound LARGER than its
+//! source, so the bound is checked on the converted bytes and the export
+//! refuses rather than write an archive another Rustory would import with
+//! that sound left out.
+//!
 //! Two phases, like every flow that touches both the library and the disk:
 //!
 //! 1. [`plan_story_archive_export`] — UNDER the SQLite lock, no other I/O:
@@ -52,6 +59,7 @@ use crate::domain::import::MAX_ARCHIVE_MEDIA_BYTES;
 use crate::domain::shared::AppError;
 use crate::domain::story::CanonicalStructure;
 use crate::infrastructure::db::DbHandle;
+use crate::infrastructure::device::audio_transcode::DEVICE_MP3_KBPS;
 use crate::infrastructure::device::{
     audio_is_device_ready, to_device_audio, to_device_image, AssetConvertError,
 };
@@ -139,10 +147,32 @@ pub fn plan_story_archive_export(
 /// `media_dir` is the node-media store (the assets of a synthesized pack,
 /// and the cover of every story). `on_progress` receives the integer
 /// percent (0..=99) as assets are converted and stored.
+///
+/// Every media written is within [`MAX_ARCHIVE_MEDIA_BYTES`], the bound the
+/// creation flow reads an archive with: what this writes, Rustory imports
+/// whole and can send.
 pub fn export_story_archive(
     plan: &StoryArchiveExportPlan,
     media_dir: &Path,
     destination: &Path,
+    on_progress: &dyn Fn(u8),
+) -> Result<ExportedStoryArchive, AppError> {
+    write_story_archive(
+        plan,
+        media_dir,
+        destination,
+        MAX_ARCHIVE_MEDIA_BYTES,
+        on_progress,
+    )
+}
+
+/// [`export_story_archive`] with the per-media bound of the WRITTEN assets
+/// as an input (`max_media_bytes`, inclusive, on the converted bytes).
+fn write_story_archive(
+    plan: &StoryArchiveExportPlan,
+    media_dir: &Path,
+    destination: &Path,
+    max_media_bytes: u64,
     on_progress: &dyn Fn(u8),
 ) -> Result<ExportedStoryArchive, AppError> {
     let parent = destination.parent().ok_or_else(|| {
@@ -236,6 +266,18 @@ pub fn export_story_archive(
                 ),
             };
             drop(bytes);
+            // The bound of the READER, applied to what is about to be
+            // WRITTEN: a converted media over it would be left out of the
+            // story by the very flow this archive is made for.
+            let written_bytes = device_ready.len() as u64;
+            if written_bytes > max_media_bytes {
+                return Err(converted_oversize_error(
+                    origin,
+                    asset,
+                    written_bytes,
+                    max_media_bytes,
+                ));
+            }
             write_entry(
                 &mut archive,
                 &format!("{STORY_ARCHIVE_ASSETS_PREFIX}{}", asset.archive_name),
@@ -582,6 +624,65 @@ fn unavailable_asset_error(
     match reason {
         AssetUnavailable::Missing => missing_asset_error(origin, source_ref),
         AssetUnavailable::Oversize => oversize_asset_error(origin, source_ref),
+    }
+}
+
+/// A media was read and converted, but its DEVICE form weighs more than an
+/// archive media may. Only a sound gets there in practice — a device
+/// picture is a few tens of kilobytes — and only when it had to be
+/// transcoded: at the fixed device bitrate, a long sound outgrows the bound
+/// whatever its source weighed. Written anyway, it would be left out of the
+/// story by the library that imports the archive — refused instead.
+fn converted_oversize_error(
+    origin: AssetOrigin,
+    asset: &StoryArchiveAsset,
+    written_bytes: u64,
+    max_media_bytes: u64,
+) -> AppError {
+    let message = match asset.kind {
+        StoryArchiveAssetKind::Audio => format!(
+            "Export impossible: un son de l'histoire est trop long pour une archive (plus de {} environ).",
+            device_sound_duration_text(max_media_bytes)
+        ),
+        StoryArchiveAssetKind::Image => format!(
+            "Export impossible: une image de l'histoire dépasse la taille autorisée une fois convertie ({}).",
+            format_device_bytes(max_media_bytes)
+        ),
+    };
+    let action = match (origin, asset.kind) {
+        (AssetOrigin::SourceArchive, StoryArchiveAssetKind::Audio) => {
+            "Dans l'archive d'origine, remplace ce son par des sons plus courts, réimporte l'archive dans Rustory, puis réessaie l'export."
+        }
+        (AssetOrigin::SourceArchive, StoryArchiveAssetKind::Image) => {
+            "Dans l'archive d'origine, remplace cette image, réimporte l'archive dans Rustory, puis réessaie l'export."
+        }
+        (AssetOrigin::MediaStore, StoryArchiveAssetKind::Audio) => {
+            "Remplace cet épisode par des épisodes plus courts, puis réessaie l'export."
+        }
+        (AssetOrigin::MediaStore, StoryArchiveAssetKind::Image) => {
+            "Rouvre l'histoire pour remplacer cette image, puis réessaie l'export."
+        }
+    };
+    AppError::export_failed(message, action).with_details(serde_json::json!({
+        "source": "asset_convert",
+        "cause": "oversize",
+        "byte_size": written_bytes,
+        "max_bytes": max_media_bytes,
+        // Only the device basename (8 characters), never a path.
+        "asset": device_asset_basename(&asset.source_ref),
+    }))
+}
+
+/// How long a sound of `byte_size` bytes plays in the device format (the
+/// bitrate every transcoded sound is written at), rounded to the minute and
+/// worded for a refusal: `2 h 20`, `45 min`.
+fn device_sound_duration_text(byte_size: u64) -> String {
+    let bytes_per_second = u64::from(DEVICE_MP3_KBPS) * 1000 / 8;
+    let minutes = (byte_size / bytes_per_second + 30) / 60;
+    match (minutes / 60, minutes % 60) {
+        (0, minutes) => format!("{minutes} min"),
+        (hours, 0) => format!("{hours} h"),
+        (hours, minutes) => format!("{hours} h {minutes:02}"),
     }
 }
 
@@ -1122,6 +1223,99 @@ mod tests {
             exported_back == exported,
             "the sound is carried byte for byte"
         );
+    }
+
+    #[test]
+    fn a_converted_sound_is_written_up_to_the_bound_included_and_refused_one_byte_over() {
+        let mut library = Library::new();
+        let id = one_sound_story(
+            &mut library,
+            "Seul",
+            "wav",
+            &wav_sine(44_100, 1, 440.0, 1.0, 0.5),
+        );
+        let plan = library.plan(&id).expect("plan");
+        let out_dir = TempDir::new().expect("out");
+
+        // What the sound weighs once converted to the device format.
+        let reference = out_dir.path().join("reference.zip");
+        export_story_archive(&plan, &library.media_dir(), &reference, &|_| {}).expect("export");
+        let converted = stage_sound(&reference, 0).1.len() as u64;
+        std::fs::remove_file(&reference).expect("remove the reference");
+
+        // A bound of exactly that size admits it…
+        let at_bound = out_dir.path().join("a-la-borne.zip");
+        write_story_archive(&plan, &library.media_dir(), &at_bound, converted, &|_| {})
+            .expect("a sound of exactly the bound is written");
+        std::fs::remove_file(&at_bound).expect("remove the archive");
+
+        // …one byte less refuses it BEFORE it is written: the reason is the
+        // sound's length, and nothing is left behind.
+        let destination = out_dir.path().join("refusee.zip");
+        let err = write_story_archive(
+            &plan,
+            &library.media_dir(),
+            &destination,
+            converted - 1,
+            &|_| {},
+        )
+        .expect_err("refused");
+        assert_eq!(err.code, AppErrorCode::ExportFailed);
+        assert_eq!(details(&err)["source"], "asset_convert");
+        assert_eq!(details(&err)["cause"], "oversize");
+        assert_eq!(details(&err)["byte_size"], converted);
+        assert_eq!(details(&err)["max_bytes"], converted - 1);
+        assert_eq!(details(&err)["asset"], "1234ABCD");
+        assert!(
+            err.message
+                .starts_with("Export impossible: un son de l'histoire est trop long"),
+            "{}",
+            err.message
+        );
+        assert!(!destination.exists());
+        assert_eq!(
+            std::fs::read_dir(out_dir.path()).expect("out dir").count(),
+            0,
+            "the staged archive is dropped"
+        );
+    }
+
+    #[test]
+    fn the_too_long_refusal_names_the_listening_time_the_bound_stands_for() {
+        // The figure the refusal (and the contract) quotes follows from the
+        // two constants it is made of: the per-media bound and the bitrate
+        // every transcoded sound is written at.
+        assert_eq!(
+            device_sound_duration_text(MAX_ARCHIVE_MEDIA_BYTES),
+            "2 h 20"
+        );
+        assert_eq!(device_sound_duration_text(16_000 * 60 * 45), "45 min");
+        assert_eq!(device_sound_duration_text(16_000 * 60 * 60), "1 h");
+
+        let asset = StoryArchiveAsset {
+            kind: StoryArchiveAssetKind::Audio,
+            source_ref: format!("{}.wav", "a".repeat(56) + "1234abcd"),
+            archive_name: format!("{}.mp3", "0".repeat(40)),
+        };
+        for (origin, next_step) in [
+            (AssetOrigin::MediaStore, "épisodes plus courts"),
+            (AssetOrigin::SourceArchive, "archive d'origine"),
+        ] {
+            let err = converted_oversize_error(
+                origin,
+                &asset,
+                MAX_ARCHIVE_MEDIA_BYTES + 1,
+                MAX_ARCHIVE_MEDIA_BYTES,
+            );
+            assert_eq!(
+                err.message,
+                "Export impossible: un son de l'histoire est trop long pour une archive (plus de 2 h 20 environ)."
+            );
+            assert!(err
+                .user_action
+                .as_deref()
+                .is_some_and(|action| action.contains(next_step)));
+        }
     }
 
     #[test]
