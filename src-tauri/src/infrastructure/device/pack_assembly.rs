@@ -258,6 +258,118 @@ mod tests {
         );
     }
 
+    /// Deterministic bytes standing for one asset: `len` bytes that depend on
+    /// `seed` and on their position, so two assets never look alike and a
+    /// misplaced cipher boundary shows.
+    fn asset_bytes(seed: u8, len: usize) -> Vec<u8> {
+        (0..len)
+            .map(|i| (i as u8).wrapping_mul(31).wrapping_add(seed))
+            .collect()
+    }
+
+    /// The device format is proven against real hardware by the env-gated
+    /// ground-truth tests; this one freezes the same bytes for every run. A
+    /// pack whose assets each have a device name of their own — hash-named
+    /// files, the way the tools that write the format name them — is
+    /// assembled to exactly these files, in this order. A picture and a sound
+    /// may share a name (they live in two folders), a repeated asset is
+    /// written once, and every length class of the cipher is covered: a short
+    /// unaligned file, a short aligned one, one byte under the ciphered
+    /// region, exactly the region, and past it.
+    #[test]
+    fn the_files_of_a_pack_without_a_name_clash_are_frozen() {
+        use sha2::{Digest, Sha256};
+
+        const PICTURE_A: &str = "5b699d67ef92f738012e3db36f3b2837532195b9.bmp";
+        const PICTURE_B: &str =
+            "0f3c5a7e9b1d2f4a6c8e0b2d4f6a8c0e1b3d5f7a9c1e3b5d7f9a1c3e9a8b7c6d.png";
+        const SOUND_A: &str = "ca31822c1384c4847d22acfedfb0c2ff8b70753a.mp3";
+        const SOUND_B: &str = "77e1c4a90d3b5f2e8a6c1d0b9f7e5a3c9a8b7c6d.mp3";
+        const SOUND_C: &str = "1a2b3c4d5e6f708192a3b4c5d6e7f809e4d5c6b7.mp3";
+        const SOUND_D: &str = "f0e1d2c3b4a5968778695a4b3c2d1e0f00ff00ff.mp3";
+
+        let json = format!(
+            r#"{{
+            "version":2,"nightModeAvailable":true,
+            "stageNodes":[
+              {{"uuid":"s0","squareOne":true,"image":"{PICTURE_A}","audio":"{SOUND_A}",
+                "okTransition":{{"actionNode":"a0","optionIndex":1}},"homeTransition":null,
+                "controlSettings":{{"wheel":true,"ok":true,"home":false,"pause":false,"autoplay":false}}}},
+              {{"uuid":"s1","image":"{PICTURE_B}","audio":"{SOUND_B}",
+                "okTransition":{{"actionNode":"a1","optionIndex":0}},
+                "homeTransition":{{"actionNode":"a0","optionIndex":0}},
+                "controlSettings":{{"wheel":true,"ok":true,"home":true,"pause":false,"autoplay":false}}}},
+              {{"uuid":"s2","image":"{PICTURE_A}","audio":"{SOUND_C}",
+                "okTransition":{{"actionNode":"a1","optionIndex":0}},
+                "homeTransition":{{"actionNode":"a0","optionIndex":1}},
+                "controlSettings":{{"wheel":true,"ok":true,"home":true,"pause":false,"autoplay":false}}}},
+              {{"uuid":"s3","image":null,"audio":"{SOUND_D}",
+                "okTransition":null,
+                "homeTransition":{{"actionNode":"a0","optionIndex":1}},
+                "controlSettings":{{"wheel":false,"ok":false,"home":true,"pause":true,"autoplay":true}}}}
+            ],
+            "actionNodes":[
+              {{"id":"a0","options":["s1","s2"]}},
+              {{"id":"a1","options":["s3"]}}
+            ]
+        }}"#
+        );
+        let pack: crate::domain::device::StudioStoryPack = serde_json::from_str(&json).unwrap();
+        let transcoded = transcode_pack(&pack).unwrap();
+
+        let assets: HashMap<&str, Vec<u8>> = HashMap::from([
+            (PICTURE_A, asset_bytes(1, 100)),
+            (PICTURE_B, asset_bytes(2, 512)),
+            (SOUND_A, asset_bytes(3, 600)),
+            (SOUND_B, asset_bytes(4, 5000)),
+            (SOUND_C, asset_bytes(5, 16)),
+            (SOUND_D, asset_bytes(6, 511)),
+        ]);
+        let resolve = |f: &str| assets.get(f).cloned();
+        let files = assemble_v3_pack(&transcoded, &tiny_md(), &resolve).expect("assemble");
+
+        // The files and their order: the index files and markers, then the
+        // pictures and the sounds in index order, each under the last 8
+        // characters of its source name.
+        let paths: Vec<&str> = files.iter().map(|f| f.rel_path.as_str()).collect();
+        assert_eq!(
+            paths,
+            [
+                "ni",
+                "bt",
+                "nm",
+                "li",
+                "ri",
+                "si",
+                "rf/000/532195B9",
+                "rf/000/9A8B7C6D",
+                "sf/000/8B70753A",
+                "sf/000/9A8B7C6D",
+                "sf/000/E4D5C6B7",
+                "sf/000/00FF00FF",
+            ]
+        );
+
+        // Their bytes: one digest over every file, in order — its path, its
+        // length, its content.
+        let mut digest = Sha256::new();
+        for file in &files {
+            digest.update(file.rel_path.as_bytes());
+            digest.update([0]);
+            digest.update((file.bytes.len() as u64).to_le_bytes());
+            digest.update(&file.bytes);
+        }
+        let digest: String = digest
+            .finalize()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        assert_eq!(
+            digest, "2f4b5f0a77b06cf42ab20e00d0f562d4da97494f84dc755976bb4d6c3c0344ff",
+            "the bytes written for a pack without a name clash changed"
+        );
+    }
+
     /// Ground truth: assemble the full pack from a real STUdio `story.json` + its
     /// `.zip` assets + the device `.md`, and assert EVERY produced file equals the
     /// device's actual `.content/<SHORTID>/` file, byte-for-byte. Env:
