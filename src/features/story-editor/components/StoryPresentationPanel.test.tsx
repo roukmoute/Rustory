@@ -279,7 +279,7 @@ describe("StoryPresentationPanel", () => {
     ).toBeInTheDocument();
     expect(
       within(panel).getByText(
-        "Pour l'envoyer, chaque nœud a besoin d'un audio et chaque option d'une destination.",
+        "Pour l'envoyer, chaque option a besoin d'une destination. Un nœud sans audio reste silencieux sur la Lunii.",
       ),
     ).toBeInTheDocument();
     // The options ARE the navigation: neither layout is offered, nothing is

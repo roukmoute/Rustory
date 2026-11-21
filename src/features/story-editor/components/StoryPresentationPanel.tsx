@@ -46,7 +46,7 @@ const NOT_LINEAR_NOTE =
 const CHOICES_NOTE =
   "Cette histoire propose des choix : la Lunii la joue en suivant ses options. Le nœud de départ sert de couverture ; quand un nœud propose plusieurs options, l'enfant choisit sur la molette, et avec une seule la suite s'enchaîne.";
 const CHOICES_REQUIREMENT =
-  "Pour l'envoyer, chaque nœud a besoin d'un audio et chaque option d'une destination.";
+  "Pour l'envoyer, chaque option a besoin d'une destination. Un nœud sans audio reste silencieux sur la Lunii.";
 const EDIT_LOCKED_NOTE =
   "Présentation verrouillée tant que l'histoire n'est pas modifiable (restauration en attente).";
 const LAYOUT_LEGEND = "Comment la Lunii joue cette histoire";
