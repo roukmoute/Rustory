@@ -773,13 +773,18 @@ ambiguous, and what blocks the import. Anything not explicitly listed is refused
 (no implicit format).
 
 The **OS open channel** (a file opened through the operating system, see
-[ui-states.md#OS Open Contract](./ui-states.md)) routes into this SAME import
-pipeline: the `.rustory` artifact is the only double-clickable file of the
-registry (a structured folder is not a file; the structured archive is
-deferred), gated by the same `is_supported_artifact_source_name` authority and
-producing the same verdicts and copies. The declarative REGISTRATION of Rustory
-as an OS handler for its file types (`bundle.fileAssociations`, macOS
-`exportedType`, Linux MIME) stays OUTSIDE this channel — it belongs to the
+[ui-states.md#OS Open Contract](./ui-states.md)) routes into the SAME registry
+flows, by the NAME of the opened file: a `.zip` file is a structured archive
+and feeds the archive-creation review (the picker's analysis, unchanged — the
+same verdicts, the same copies, the same acceptance); any other file feeds
+this import pipeline, gated by the same `is_supported_artifact_source_name`
+authority and producing the same verdicts and copies. The `.rustory` artifact
+stays the only DOUBLE-CLICKABLE file of the registry: a structured folder is
+not a file, and no association is declared for `.zip` — an archive reaches
+this channel through an explicit "open with Rustory" gesture or a
+command-line argument. The declarative REGISTRATION of Rustory as an OS
+handler for its file types (`bundle.fileAssociations`, macOS `exportedType`,
+Linux MIME) stays OUTSIDE this channel — it belongs to the
 [File Association Contract](#file-association-contract) below.
 
 The **drop channel** (a file or folder dropped on the window, see
@@ -789,13 +794,15 @@ registry flows, with the same authorities and the same verdicts: a dropped
 `is_supported_artifact_source_name` gate, same findings); a dropped
 STRUCTURED FOLDER feeds the folder-creation review (the drop replaces the
 picker — the folder is the drop channel's added value, since a folder is
-not double-clickable); a dropped archive receives the honest deferred
-verdict of the registry (no archive reader). The channel grants the
-registry NO new capability — same types, new gesture. Media files
-(PNG/JPEG/MP3/WAV/OGG) remain **Node Media Source Formats** (see that
-section): an EDITING contract (slot-directed attach), never an import
-artifact — a dropped media receives the calm envelope verdict of the file
-flow; the "drop on a node slot" gesture is a dedicated deferred workstream.
+not double-clickable); a dropped STRUCTURED ARCHIVE (a regular `.zip` file)
+feeds the archive-creation review the same way — the picker's analysis,
+unchanged, so a `.zip` that is not a pack gets the archive's own calm
+envelope verdict. The channel grants the registry NO new capability — same
+types, new gesture. Media files (PNG/JPEG/MP3/WAV/OGG) remain **Node Media
+Source Formats** (see that section): an EDITING contract (slot-directed
+attach), never an import artifact — a dropped media receives the calm
+envelope verdict of the file flow; the "drop on a node slot" gesture is a
+dedicated deferred workstream.
 
 ### Supported local artifact types
 
@@ -1296,8 +1303,12 @@ The `.rustory` story artifact is the ONLY associated type — the single
 double-clickable file of the local-artifact registry above:
 
 - a structured folder is not a file (nothing to associate);
-- the structured archive is deferred (no reader ships — associating it would
-  advertise a capability the distribution does not offer);
+- the structured archive is READ but not associated: `.zip` is a
+  general-purpose container, and no association is declared for it, so
+  Rustory is never proposed as a handler for every archive on the machine.
+  An archive handed to Rustory anyway (an explicit "open with", a
+  command-line argument) is received and routed to its creation review (see
+  the OS Open Contract);
 - media files (PNG/JPEG/MP3/WAV/OGG) are node-media SOURCE formats — an
   EDITING contract (see `Node Media Source Formats`), never import
   artifacts: claiming them would make Rustory an invasive default candidate

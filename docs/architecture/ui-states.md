@@ -1629,10 +1629,13 @@ local library as a canonical, re-openable story. It is **distinct from the
 typed recognition verdict that may be `Partiellement exploitable`. The supported
 artifact set for THIS flow is **the `.rustory` v1 artifact only** (see
 [device-support-profile.md#Local Artifact Import Contract](./device-support-profile.md)).
-The **structured folder** is supported by its own CREATION flow (see
-`Structured Folder Creation Contract` below — a different door into the same
-canonical model, never an implicit extension of this one); structured archives
-(zip…) remain out of scope (no archive reader — zero-dependency rule).
+The **structured folder** and the **structured archive** (a `.zip` pack) are
+each supported by their own CREATION flow (see `Structured Folder Creation
+Contract` below, which the archive creation follows on its own aspect set) —
+different doors into the same canonical model, never an implicit extension of
+this one. A `.zip` that reaches the app through the OS-open or the drop
+channel is routed to that archive creation, never to this import (see `OS Open
+Contract` and `Drop Intent Contract`).
 
 The flow is **two-phase, with no mutation before acceptance (AC1)**:
 
@@ -2337,7 +2340,11 @@ Intent state (Rust-owned, one-shot):
 
 - The absolute path NEVER crosses the IPC boundary — the frontend only ever
   sees the file's `sourceName` (basename), the exact PII discipline of the
-  Local Artifact Import Contract.
+  Local Artifact Import Contract. ONE exception, the structured archive: its
+  verdict carries `archivePath`, ONLY to be passed back to
+  `accept_structured_archive_creation` — the `folderPath` doctrine of the
+  Structured Folder Creation Contract (round-trip only, never rendered,
+  persisted or logged, zero authority: the accept re-analyzes from zero).
 - ONE pending intent at a time; a newer offer REPLACES it (the user's last
   gesture wins) — and this holds UNDER RACE: every offer stamps a
   monotonic generation, a settling analysis claims exactly the generation
@@ -2372,9 +2379,23 @@ Intent state (Rust-owned, one-shot):
 - On a warm-channel intent the `main` window is unminimized, shown and
   focused (best-effort) — "s'ouvre ou se réveille".
 
-Routing — INTO THE EXISTING artifact-import review, nothing new:
+Routing — by the NAME of the opened file, INTO THE EXISTING reviews, nothing
+new:
 
-- The analysis reuses `analyze_artifact` VERBATIM (same
+- A file whose name ends in `.zip` (ASCII-case-insensitive — the
+  discriminant of the archive picker's filter) is a STRUCTURED ARCHIVE: it
+  goes through the UNCHANGED picker analysis (`analyze_structured_archive`),
+  never through the `.rustory` envelope parse (which would refuse it as
+  unrecognized), and settles as the `archive` verdict — the exact field set
+  of the picker's archive `analyzed` verdict under its own tag. The library
+  injects it into the archive-creation machine (the `Création depuis une
+  archive de pack` review, see `Structured Folder Creation Contract`);
+  acceptance is the UNCHANGED `accept_structured_archive_creation`. The
+  CONTENT decides the verdict: a `.zip` that is not a pack gets the
+  archive's calm envelope verdict. A non-UTF-8 archive path cannot
+  round-trip to the accept and is refused at the boundary (the folder
+  flow's `non_filesystem_path` error).
+- Any other file: the analysis reuses `analyze_artifact` VERBATIM (same
   `is_supported_artifact_source_name` authority, same findings, same
   copies); the acceptance is the UNCHANGED `accept_artifact_import` phase 2.
   No new route, no new pipeline, no new verdict: the landing screen is
@@ -2399,13 +2420,14 @@ Closed flow states:
 | --- | --- |
 | No pending intent (`none`) | TOTAL silent no-op — nothing renders, nothing announces. |
 | Artifact intent | The existing import machine: analysis → recognition report (sourceName + verdict) → explicit accept — no ambiguity about the content type. |
+| Artifact intent naming a `.zip` (`archive`) | The existing archive-creation machine (Structured Folder Creation Contract): analysis → `Création depuis une archive de pack` review → `Créer l'histoire` — the archive is read, never refused as "not a `.rustory`". |
 | Several files in one gesture (`multipleFiles`) | Calm named limit: the Rust-carried frozen copy renders VERBATIM inline in the library, `role="status"` — never a toast, never a modal, never an error. The intent is consumed (no partial processing). |
 | A library flow is busy (import / creation — the primary title submission included — / RSS / transfer in flight / an ACTIVE drop channel — a drop settlement in flight or a displayed drop-fed surface, see the Drop Intent Contract) | Calm refusal: the frontend-frozen busy copy renders inline (`role="status"`) and the intent is DISCARDED — the living flow is NEVER interrupted (the user reopens the file afterwards; no queue, no hybrid state). The refusal applies to an intent ARRIVING WARM (signal); a dormant intent re-served by the library-mount pull follows the cold-start regime — its pure analysis may render its verdict beside a live flow (which re-hydrates asynchronously) without ever interrupting it. The exclusion is MUTUAL: while an OS-open read is settling (internally busy, visually silent), no sibling flow may start — the import CTA, the folder/RSS entries and the primary `Créer` submission are gated; the OS channel itself is NOT gated by its own settling — it serializes through its mono-slot queue. |
-| Unreadable file (gone, permissions, oversize) | The existing `failed` transport state (`IMPORT_FAILED` / `file_read`): the intent STAYS PENDING Rust-side, so `Réessayer` replays the SAME intent; `Fermer` discards it. |
-| Unsupported / invalid content | A calm CONTENT VERDICT through the existing findings envelope (`state: blocked`) — never an `AppError`, never a silent redirect: the refused file gets a VISIBLE recognition report. |
+| Unreadable file (gone, permissions, oversize) | The existing `failed` transport state (`IMPORT_FAILED` / `file_read`): the intent STAYS PENDING Rust-side, so `Réessayer` replays the SAME intent; `Fermer` discards it. A `.zip` is the exception: the archive analysis folds an archive it cannot open into its calm envelope verdict (the picker's behavior), which consumes the intent. |
+| Unsupported / invalid content | A calm CONTENT VERDICT through the existing findings envelopes (`state: blocked` — the import findings, or the archive findings for a `.zip`) — never an `AppError`, never a silent redirect: the refused file gets a VISIBLE recognition report. |
 
 Non-corruption (AC2, by construction): the analysis is PURE (zero mutation
-before `accept_artifact_import` — the unchanged two-phase flow); an intent
+before the UNCHANGED accepts — the two-phase flows); an intent
 arriving during an edit session lets the editor unmount through its normal
 flush; an intent arriving during a live flow is refused without touching
 that flow; the intent is consumed one-shot Rust-side (no double
@@ -2504,10 +2526,21 @@ Routing — by the TYPE of the dropped element, INTO THE EXISTING flows:
 - Classification happens at ANALYSIS time (not at drop time) via
   `fs::metadata` (which follows symlinks, like a picker would — the
   no-follow hardening joins the known "no-follow parity" workstream):
-  - **regular file** → `read_artifact_bounded` (8 MiB cap, FIFO/device
-    refusal, TOCTOU re-check — VERBATIM) + `analyze_artifact` (same
-    `is_supported_artifact_source_name` authority, same findings — a
-    media/`.zip`/`.txt` falls into the calm envelope verdict) → the
+  - **regular `.zip` file** (a name ending in `.zip`, ASCII-case-insensitive
+    — the discriminant of the archive picker's filter) → a STRUCTURED ARCHIVE:
+    UTF-8 path required (the wire round-trip to the accept — otherwise the
+    `non_filesystem_path` refusal, as for a folder) +
+    `analyze_structured_archive` VERBATIM (the picker's analysis; the
+    CONTENT decides — a `.zip` that is not a pack gets the archive's calm
+    envelope verdict) → the verdict feeds the SAME archive-creation review
+    machine as the picker (see `Structured Folder Creation Contract`) — the
+    drop replaces the picker, NOTHING else changes; the carried
+    `archivePath` follows the `folderPath` doctrine below; acceptance is
+    the UNCHANGED `accept_structured_archive_creation`.
+  - **any other regular file** → `read_artifact_bounded` (8 MiB cap,
+    FIFO/device refusal, TOCTOU re-check — VERBATIM) + `analyze_artifact`
+    (same `is_supported_artifact_source_name` authority, same findings — a
+    media/`.txt` falls into the calm envelope verdict) → the
     verdict feeds the SAME import review machine as the Local Artifact
     Import Contract and the OS Open Contract; acceptance is the
     UNCHANGED `accept_artifact_import`.
@@ -2553,14 +2586,15 @@ Closed flow states:
 | Situation | Behavior |
 | --- | --- |
 | No pending intent (`none`) | TOTAL silent no-op — nothing renders, nothing announces. |
-| Dropped regular file | The existing import machine (Local Artifact Import Contract): analysis → recognition report (sourceName + verdict) → explicit accept — a media/archive/unknown file gets the calm envelope verdict, never a half-treatment. |
+| Dropped regular file (not a `.zip`) | The existing import machine (Local Artifact Import Contract): analysis → recognition report (sourceName + verdict) → explicit accept — a media/unknown file gets the calm envelope verdict, never a half-treatment. |
+| Dropped archive (a regular `.zip` file) | The existing archive-creation machine (Structured Folder Creation Contract): analysis → `Création depuis une archive de pack` review → `Créer l'histoire` — a `.zip` that is not a pack gets the calm archive envelope verdict. |
 | Dropped folder | The existing folder-creation machine (Structured Folder Creation Contract): analysis → `Création depuis un dossier` review → `Créer l'histoire` — a folder without a readable manifest gets the calm folder envelope verdict. |
 | Several elements in one gesture (`multipleItems`) | Calm named limit: the Rust-carried frozen copy renders VERBATIM inline in the library, `role="status"` — NOTHING is processed (neither the first nor the rest). |
 | A library flow is busy (import / creation — the primary title submission included — / RSS / transfer in flight / an OS-open settlement in flight) | Calm refusal: the frontend-frozen busy copy renders inline (`role="status"`) and the intent is DISCARDED — the living flow is NEVER interrupted. The refusal applies to an intent ARRIVING WARM (signal); a dormant intent re-served by the library-mount pull follows the cold-start regime. The cross-channel exclusion is DELIBERATELY ASYMMETRIC: the OS-open busy gate covers the drop channel whenever it is ACTIVE (a drop settlement in flight OR a displayed drop-fed surface — a drop verdict is a consumed one-shot, a dropped folder has no reopenable file, so it must never be silently replaced), while the drop gate covers a settling OS-open READ only — a displayed OS-open review stays replaceable by a newer gesture (the surfaces' "last gesture wins" doctrine, the OS Open Contract behavior unchanged: a double-clickable file can simply be reopened). NEITHER channel gates on its own settling (each serializes through its own queue). |
 | Unreadable element (gone, permissions, oversize, special file) | The existing `failed` transport state (`IMPORT_FAILED` / `file_read`): the intent STAYS PENDING Rust-side, so `Réessayer` replays the SAME intent; `Fermer` discards it. |
-| Unsupported / invalid content | A calm CONTENT VERDICT through the existing findings envelopes (file: import findings; folder: folder findings) — never an `AppError`, never a silent redirect. |
+| Unsupported / invalid content | A calm CONTENT VERDICT through the existing findings envelopes (file: import findings; archive: archive findings; folder: folder findings) — never an `AppError`, never a silent redirect. |
 
-Non-corruption (AC1/AC2, by construction): both analyses are PURE (zero
+Non-corruption (AC1/AC2, by construction): the three analyses are PURE (zero
 mutation before the UNCHANGED accepts); a drop arriving during an edit
 session lets the editor unmount through its normal flush (the `replace`
 navigation to the library); a drop arriving during a live flow is refused
