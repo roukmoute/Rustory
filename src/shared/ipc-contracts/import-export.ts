@@ -69,6 +69,60 @@ export function isExportStoryDialogOutcome(
   return true;
 }
 
+// ===== Story archive export (library story → shareable `.zip` pack) =====
+
+/**
+ * Tagged outcome returned by `export_story_archive_with_save_dialog`.
+ * Mirror of `ExportStoryArchiveOutcomeDto`. The command takes the same
+ * input as the `.rustory` export ([`ExportStoryDialogInput`]).
+ *
+ * A cancelled dialog is NOT an error — `{ kind: "cancelled" }` is a silent
+ * no-op. Every failure crosses the boundary as an `AppError` rejection:
+ * `EXPORT_FAILED` when the story itself cannot become an archive (a
+ * different destination will not help), `EXPORT_DESTINATION_UNAVAILABLE`
+ * when the file cannot be written where the user asked.
+ *
+ * `imageCount` / `audioCount` are the DISTINCT pictures and sounds the
+ * archive carries.
+ */
+export type ExportStoryArchiveOutcome =
+  | {
+      kind: "exported";
+      destinationPath: string;
+      bytesWritten: number;
+      imageCount: number;
+      audioCount: number;
+    }
+  | { kind: "cancelled" };
+
+function isNonNegativeInteger(value: unknown): value is number {
+  return typeof value === "number" && Number.isInteger(value) && value >= 0;
+}
+
+/**
+ * Runtime guard for an [`ExportStoryArchiveOutcome`] payload — the export
+ * success surface must never render against an arbitrary object.
+ */
+export function isExportStoryArchiveOutcome(
+  value: unknown,
+): value is ExportStoryArchiveOutcome {
+  if (typeof value !== "object" || value === null) return false;
+  const candidate = value as Record<string, unknown>;
+  if (candidate.kind === "cancelled") {
+    // The cancelled variant carries no other field.
+    return Object.keys(candidate).length === 1;
+  }
+  if (candidate.kind !== "exported") return false;
+  return (
+    typeof candidate.destinationPath === "string" &&
+    candidate.destinationPath.length > 0 &&
+    isNonNegativeInteger(candidate.bytesWritten) &&
+    isNonNegativeInteger(candidate.imageCount) &&
+    isNonNegativeInteger(candidate.audioCount) &&
+    Object.keys(candidate).length === 5
+  );
+}
+
 // ===== Local artifact import (`.rustory` file → library) =====
 //
 // Mirror of `src-tauri/src/ipc/dto/import_export.rs` (import side). Rust is

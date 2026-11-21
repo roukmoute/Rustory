@@ -106,13 +106,57 @@ fn write_artifact_atomically(
     destination: &Path,
     bytes: &[u8],
 ) -> Result<(), AppError> {
+    let mut temp = stage_export_file(parent)?;
+
+    temp.write_all(bytes)
+        .map_err(|err| export_write_error(&err, None))?;
+
+    temp.flush()
+        .map_err(|err| export_write_error(&err, Some("flush")))?;
+
+    temp.as_file()
+        .sync_all()
+        .map_err(|err| export_write_error(&err, Some("sync_all")))?;
+
+    promote_export_file(temp, destination)
+}
+
+/// Create the temp file an export is staged into, CO-LOCATED with its
+/// destination so the promoting rename stays on one filesystem (atomic).
+/// Shared by every export of this module family: the `.rustory` artifact
+/// and the story archive stage and promote the same way.
+pub(super) fn stage_export_file(parent: &Path) -> Result<NamedTempFile, AppError> {
+    stage_export_file_with(&tempfile::Builder::new(), parent)
+}
+
+/// [`stage_export_file`] for an export made to be HANDED TO SOMEONE ELSE (the
+/// story archive): the staged file gets the permissions any document the
+/// user saves gets — the platform default, narrowed by the user's umask —
+/// instead of the owner-only mode a temp file is born with, which the
+/// promotion would otherwise leave on the exported file. A shared folder or
+/// another account on the machine can then read what was exported for them.
+pub(super) fn stage_shareable_export_file(parent: &Path) -> Result<NamedTempFile, AppError> {
+    #[cfg_attr(not(unix), allow(unused_mut))]
+    let mut builder = tempfile::Builder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        builder.permissions(std::fs::Permissions::from_mode(0o666));
+    }
+    stage_export_file_with(&builder, parent)
+}
+
+fn stage_export_file_with(
+    builder: &tempfile::Builder<'_, '_>,
+    parent: &Path,
+) -> Result<NamedTempFile, AppError> {
     let temp_parent: &Path = if parent.as_os_str().is_empty() {
         Path::new(".")
     } else {
         parent
     };
 
-    let mut temp = NamedTempFile::new_in(temp_parent).map_err(|err| {
+    builder.tempfile_in(temp_parent).map_err(|err| {
         // ENOENT at temp-create time means the parent directory did
         // not exist when we reached for it — surface that as
         // `parent_missing` rather than the generic `temp_create`, so
@@ -131,43 +175,28 @@ fn write_artifact_atomically(
             "source": source,
             "kind": io_error_kind_tag(&err),
         }))
-    })?;
+    })
+}
 
-    temp.write_all(bytes).map_err(|err| {
-        AppError::export_destination_unavailable(
-            export_io_message(&err),
-            export_io_user_action(&err),
-        )
-        .with_details(serde_json::json!({
-            "source": "write_temp",
-            "kind": io_error_kind_tag(&err),
-        }))
-    })?;
+/// The refusal of a failed write into the staged export file. `stage`
+/// names the finishing step that failed (`flush` / `sync_all`), when it is
+/// not the write itself.
+pub(super) fn export_write_error(err: &std::io::Error, stage: Option<&'static str>) -> AppError {
+    let mut details = serde_json::json!({
+        "source": "write_temp",
+        "kind": io_error_kind_tag(err),
+    });
+    if let (Some(stage), Some(object)) = (stage, details.as_object_mut()) {
+        object.insert("stage".into(), serde_json::json!(stage));
+    }
+    AppError::export_destination_unavailable(export_io_message(err), export_io_user_action(err))
+        .with_details(details)
+}
 
-    temp.flush().map_err(|err| {
-        AppError::export_destination_unavailable(
-            export_io_message(&err),
-            export_io_user_action(&err),
-        )
-        .with_details(serde_json::json!({
-            "source": "write_temp",
-            "kind": io_error_kind_tag(&err),
-            "stage": "flush",
-        }))
-    })?;
-
-    temp.as_file().sync_all().map_err(|err| {
-        AppError::export_destination_unavailable(
-            export_io_message(&err),
-            export_io_user_action(&err),
-        )
-        .with_details(serde_json::json!({
-            "source": "write_temp",
-            "kind": io_error_kind_tag(&err),
-            "stage": "sync_all",
-        }))
-    })?;
-
+/// Promote a fully written, synced staged export onto `destination` with an
+/// atomic rename. A failure drops the temp file — nothing half-written is
+/// ever left behind.
+pub(super) fn promote_export_file(temp: NamedTempFile, destination: &Path) -> Result<(), AppError> {
     // Final-stage symlink check: even though the command layer rejects
     // a symlink destination upfront, the filesystem could have been
     // manipulated between validation and persist. Refusing here too

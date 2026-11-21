@@ -1006,7 +1006,107 @@ matrices, contract tests); it is deliberately NOT bundled with a bound change.
 
 The `.rustory` artifact is unaffected: it stays a JSON document that embeds NO
 media (see its contract above), so a portable story WITH its images and sounds
-travels as a structured archive, not as a `.rustory`.
+travels as a structured archive, not as a `.rustory` — which is exactly what
+the export below writes.
+
+### Structured archive export contract
+
+A library story is exported to the SAME structured archive the creation flow
+reads (`Exporter en archive`, see
+[ui-states.md#Story Archive Export Contract](./ui-states.md)), media included,
+so it can be handed to another Rustory library or to another tool that reads
+the community pack format.
+
+**The archive is the pack the device send would write.** One source
+selection, shared with the single send gesture:
+
+- a story that RETAINED its source archive is exported from that archive (its
+  own descriptor, its own assets);
+- any other story (created from a web page, an RSS feed, a folder or the
+  editor) has its pack SYNTHESIZED from its structure and its node media — the
+  sequential or the menu layout its presentation selects.
+
+The export therefore refuses exactly what the send refuses, for the same
+reasons (worded for the export, see the refusal table below). It involves **no
+device**: the pack is never ciphered, nothing is read from or written to a
+device, and no device needs to be connected.
+
+| Entry | Content |
+| --- | --- |
+| `story.json` | The pack descriptor — ALWAYS the first entry, so a reader that streams the archive meets the graph before the assets it attaches to it. UTF-8 JSON, pretty-printed, trailing newline. |
+| `thumbnail.png` | The story's cover (its START node's stored picture), when it has one. Decoration: an unreadable cover is omitted, never a failure. |
+| `assets/<40 hex>.bmp` | One entry per DISTINCT picture the stages reference, in first-reference order. |
+| `assets/<40 hex>.mp3` | One entry per DISTINCT sound the stages reference, in first-reference order, after the pictures. |
+
+What makes the archive ready to use elsewhere, with no converter on the other
+side:
+
+- **Every asset is in the format a device plays** — the send engine's own
+  normalization: pictures as BMP 320×240, 4-bit, RLE4 (letterboxed, never
+  stretched); sounds as bare MPEG-1 Layer III, 44 100 Hz, mono (128 kbps when
+  transcoded). An asset that already is in that format passes byte for byte
+  (an ID3 wrapper is stripped, losslessly).
+- **Every stage `uuid` and every action `id` is a well-formed UUID.** The
+  synthesis names its inner nodes `<pack>-episode-<n>` and the like; a reader
+  that parses every stage id as a UUID rejects those, and the tools that
+  write the format only ever emit UUIDs, so each one is replaced by a UUID
+  derived from the pack identity and the original id (version 8,
+  deterministic, one namespace per node kind) and every option and transition
+  follows. A well-formed id is carried verbatim. The ENTRY stage keeps its
+  uuid: it is the pack's identity, and for a synthesized pack it is the story
+  id — sent from any library, the story lands on a device as the SAME pack.
+- **Every asset reference is a bare `<40 hex>.<ext>` name** carrying the
+  device format's extension (readers pick the media type from it). A device
+  keeps only the LAST 8 characters of the stem as the on-device file name:
+  those 8 characters are unique across the archive by construction.
+- **The pack metadata is always present**: `format` (`v1`), `version`, `title`
+  (the story's CURRENT library title — a story renamed after its import is
+  shared under its new name), `description`, `nightModeAvailable`. Whatever
+  else a retained descriptor carries (node names, positions, types) is
+  preserved; a synthesized one names its stages (the story title for the
+  cover, the episode labels, `Question` and `Choix : <titre>` for a menu).
+- **The export is reproducible**: entry timestamps are pinned, so exporting
+  the same story twice yields the same bytes.
+
+Round trip: an exported archive goes back through the structured-archive
+creation flow with a clean verdict, is retained there, and exports again with
+its device-ready assets carried byte for byte and its pack identity unchanged.
+The layout above also follows the reader rules of the tools that consume the
+community pack — the STUdio archive reader, and the STUdio-archive import of
+Lunii.QT (UUID-shaped stage ids, a `v1` format tag, the media type taken from
+the asset extension, an `.mp3` already mono at 44 100 Hz taken as is, a
+320×240 RLE4 bitmap taken as is). That conformance is established against
+their published source, not by running them: a release that changes those
+rules is outside what this contract can promise.
+
+| Refusal (`EXPORT_FAILED`) | `details.source` / `details.cause` |
+| --- | --- |
+| The story has no episode | `story_pack` / `empty` |
+| The story's structure is unreadable | `story_pack` / `malformed` |
+| The story offers choices (not laid out by the synthesis) | `story_pack` / `branching` |
+| An episode has no audio | `story_pack` / `missing_audio` |
+| The menu layout lacks a spoken announcement | `story_pack` / `missing_announcements` |
+| A device-copied pack (its content is the copied pack, not converted) | `story_pack` / `device_pack` |
+| A media or a spoken announcement the structure references is no longer backed by the library | `story_pack` / `asset_missing`, `announcement_missing` |
+| The retained source pack cannot be read back | `source_archive` / `open`, `not_a_zip`, `too_many_entries`, `descriptor_missing`, `descriptor_invalid` |
+| The pack's graph cannot be described (no stage, a dangling reference, an entry stage without a UUID identity) | `source_archive` or `media_store` / `descriptor_unreadable`, `descriptor_empty`, `descriptor_inconsistent`, `pack_identity` |
+| A media is not where the pack says it is | `source_archive` or `media_store` / `asset_missing` |
+| A media cannot be converted to the device format | `asset_convert` / `image_undecodable`, `audio_unsupported` |
+
+Every story-level refusal is decided BEFORE a destination is asked for. A
+problem with the destination itself is NOT this code: it stays
+`EXPORT_DESTINATION_UNAVAILABLE`, with the taxonomy of the `.rustory` export.
+Whatever fails, the destination is either the complete archive or untouched
+(the archive is staged beside it and promoted with an atomic rename).
+
+KNOWN ROUGH EDGE: at 128 kbps a transcoded sound weighs about 1 MiB per
+minute, so an episode longer than ~35 minutes exceeds the 32 MiB per-media
+bound the CREATION flow applies (see the table above). A library importing
+such an archive keeps the archive — the send from it stays possible up to the
+send engine's own 64 MiB per-asset bound, about 70 minutes — but flags that
+media and leaves it out of the imported story. Raising those bounds is a
+change to the creation and send contracts; it is deliberately NOT bundled with
+the export.
 
 ## File Association Contract
 

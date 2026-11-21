@@ -12,7 +12,7 @@ use crate::application::import_export::{
 };
 use crate::application::story::get_story_detail;
 use crate::commands::shared::validate_story_id;
-use crate::domain::export::RUSTORY_ARTIFACT_EXTENSION;
+use crate::domain::export::{RUSTORY_ARTIFACT_EXTENSION, STORY_ARCHIVE_EXTENSION};
 use crate::domain::import::{feed_url_host, official_content_sources};
 use crate::domain::shared::AppError;
 use crate::infrastructure::diagnostics::import_log;
@@ -20,9 +20,9 @@ use crate::ipc::dto::import_export::state_db_tag;
 use crate::ipc::dto::import_export::ContentSourcePolicyDto;
 use crate::ipc::dto::{
     AcceptArchiveCreationInputDto, AcceptArtifactImportInputDto, AcceptStructuredCreationInputDto,
-    ArchiveCreationAnalysisDto, DropAnalysisDto, ExportStoryDialogInputDto,
-    ExportStoryDialogOutcomeDto, ImportArtifactAnalysisDto, OsOpenAnalysisDto,
-    RssCreationOutcomeDto, RssItemRefDto, RssPreviewDto, StoryCardDto,
+    ArchiveCreationAnalysisDto, DropAnalysisDto, ExportStoryArchiveOutcomeDto,
+    ExportStoryDialogInputDto, ExportStoryDialogOutcomeDto, ImportArtifactAnalysisDto,
+    OsOpenAnalysisDto, RssCreationOutcomeDto, RssItemRefDto, RssPreviewDto, StoryCardDto,
     StructuredCreationAnalysisDto, WebCreationOutcomeDto, WebPreviewDto,
 };
 use crate::AppState;
@@ -40,6 +40,9 @@ const RSS_MEDIA_BUDGET: Duration = Duration::from_secs(180);
 
 const EXPORT_DIALOG_FILTER_NAME: &str = "Artefact Rustory";
 const MAX_DESTINATION_PATH_LEN: usize = 4096;
+
+/// Name shown by the system dialog's filter when saving a story archive.
+const ARCHIVE_EXPORT_DIALOG_FILTER_NAME: &str = "Archive d'histoire";
 
 /// Dialog filter shown when picking a `.rustory` artifact to import.
 const IMPORT_DIALOG_FILTER_NAME: &str = "Artefact Rustory";
@@ -123,17 +126,7 @@ pub async fn export_story_with_save_dialog(
 
     let picked = match rx.recv().await {
         Some(inner) => inner,
-        None => {
-            return Err(AppError::export_destination_unavailable(
-                "La fenêtre de sauvegarde n'a pas pu s'ouvrir.",
-                "Relance Rustory ; si le problème persiste, consulte les traces locales.",
-            )
-            .with_details(serde_json::json!({
-                "source": "dialog_failed",
-                "kind": "other",
-                "cause": "channel_closed",
-            })));
-        }
+        None => return Err(export_dialog_failed_error()),
     };
 
     let Some(file_path) = picked else {
@@ -164,6 +157,137 @@ pub async fn export_story_with_save_dialog(
     })
 }
 
+/// Export the story identified by `storyId` as a shareable STORY ARCHIVE
+/// (`story.json` + `assets/` + `thumbnail.png`, zipped) at a destination
+/// chosen by the user in a native save dialog.
+///
+/// The archive is the pack the single "send to the device" gesture would
+/// write, with every media already converted to the format a device plays:
+/// another Rustory library imports it as is, and so do the other tools that
+/// read the community pack format. NO device is involved — nothing is read
+/// from or written to one, and no device needs to be connected.
+///
+/// Same boundary discipline as [`export_story_with_save_dialog`]: Rust owns
+/// the dialog, the validation of the returned path and the disk I/O; the
+/// frontend passes a suggested file name and receives a tagged outcome. A
+/// cancelled dialog resolves with `{ kind: "cancelled" }`.
+///
+/// Order of the steps, so a refusal lands as early as it can:
+///
+/// 1. the export is PLANNED under the SQLite lock (released before any
+///    `.await`): a story that cannot become an archive — an episode without
+///    audio, a story with choices, a device-copied pack — rejects with
+///    `EXPORT_FAILED` BEFORE the dialog opens;
+/// 2. the dialog, then the destination checks;
+/// 3. the conversion and the write run on a blocking worker, WITHOUT the
+///    lock: a long transcode never freezes the library. The archive is
+///    staged beside its destination and promoted atomically.
+///
+/// `on_progress` streams the export's integer percent (0..=99) — a SIGNAL
+/// only; the settled outcome is the return value.
+#[tauri::command]
+pub async fn export_story_archive_with_save_dialog(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    input: ExportStoryDialogInputDto,
+    on_progress: Channel<u8>,
+) -> Result<ExportStoryArchiveOutcomeDto, AppError> {
+    validate_story_id(&input.story_id)?;
+
+    let app_data_dir = app.path().app_data_dir().map_err(|_| {
+        AppError::library_inconsistent(
+            "Export impossible: dossier de données introuvable.",
+            "Vérifie les permissions de ton dossier utilisateur puis relance Rustory.",
+        )
+        .with_details(serde_json::json!({ "source": "app_data_unavailable" }))
+    })?;
+
+    // The story's retained source archive selects the pack source. Probed
+    // BEFORE the lock, exactly as the send does.
+    let retained_archive = crate::infrastructure::filesystem::resolve_source_archive_path(
+        &app_data_dir,
+        &input.story_id,
+    );
+    let retained_archive = retained_archive.is_file().then_some(retained_archive);
+    let plan = {
+        // Scoped so the guard is dropped BEFORE the first `.await`.
+        let db = state
+            .db
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        import_export::plan_story_archive_export(&db, &input.story_id, retained_archive)?
+    };
+
+    let (tx, mut rx) = async_runtime::channel::<Option<FilePath>>(1);
+    app.dialog()
+        .file()
+        .set_file_name(&input.suggested_filename)
+        .add_filter(
+            ARCHIVE_EXPORT_DIALOG_FILTER_NAME,
+            &[STORY_ARCHIVE_EXTENSION],
+        )
+        .save_file(move |path| {
+            let _ = tx.try_send(path);
+        });
+
+    let picked = match rx.recv().await {
+        Some(inner) => inner,
+        None => return Err(export_dialog_failed_error()),
+    };
+
+    let Some(file_path) = picked else {
+        return Ok(ExportStoryArchiveOutcomeDto::Cancelled);
+    };
+
+    let raw_path = file_path_to_pathbuf(&file_path)?;
+    let destination = validate_export_destination(&raw_path, STORY_ARCHIVE_EXTENSION)?;
+    reject_internal_app_directory(&app, &destination)?;
+
+    let media_dir = crate::infrastructure::filesystem::resolve_node_media_dir(&app_data_dir);
+    let write_to = destination.clone();
+    let exported = async_runtime::spawn_blocking(move || {
+        // Forward only on an integer-percent CHANGE (bounded IPC).
+        let last = std::cell::Cell::new(-1i16);
+        let forward = |pct: u8| {
+            if i16::from(pct) != last.get() {
+                last.set(i16::from(pct));
+                let _ = on_progress.send(pct);
+            }
+        };
+        import_export::export_story_archive(&plan, &media_dir, &write_to, &forward)
+    })
+    .await
+    .map_err(|_| {
+        AppError::export_failed(
+            "Export impossible: l'opération a été interrompue.",
+            "Réessaie l'export.",
+        )
+        .with_details(serde_json::json!({ "source": "spawn_blocking_join" }))
+    })??;
+
+    // Echo the dialog-selected (post-normalization) path, never a
+    // canonicalized one — same rule as the `.rustory` export.
+    Ok(ExportStoryArchiveOutcomeDto::Exported {
+        destination_path: destination.to_string_lossy().into_owned(),
+        bytes_written: exported.bytes_written,
+        image_count: exported.image_count as u32,
+        audio_count: exported.audio_count as u32,
+    })
+}
+
+/// The native save dialog could not hand a choice back.
+fn export_dialog_failed_error() -> AppError {
+    AppError::export_destination_unavailable(
+        "La fenêtre de sauvegarde n'a pas pu s'ouvrir.",
+        "Relance Rustory ; si le problème persiste, consulte les traces locales.",
+    )
+    .with_details(serde_json::json!({
+        "source": "dialog_failed",
+        "kind": "other",
+        "cause": "channel_closed",
+    }))
+}
+
 /// Convert a Tauri `FilePath` into a native `PathBuf`. Desktop save
 /// dialogs always return a local path; a URL form is unexpected and
 /// refused at the boundary.
@@ -181,10 +305,19 @@ fn file_path_to_pathbuf(file_path: &FilePath) -> Result<PathBuf, AppError> {
     })
 }
 
-/// Validate the dialog-returned path and auto-append the `.rustory`
-/// extension if the user typed a bare basename. The returned `PathBuf`
-/// is the one actually written to disk.
+/// Validate the dialog-returned path of a `.rustory` export and auto-append
+/// the `.rustory` extension if the user typed a bare basename. The returned
+/// `PathBuf` is the one actually written to disk.
 fn validate_and_normalize_destination(raw: &Path) -> Result<PathBuf, AppError> {
+    validate_export_destination(raw, RUSTORY_ARTIFACT_EXTENSION)
+}
+
+/// Validate the dialog-returned path of an export whose file carries
+/// `extension` (no leading dot) and auto-append that extension if the user
+/// typed a bare basename. The returned `PathBuf` is the one actually written
+/// to disk. ONE rule set for every export of the registry (`.rustory`
+/// artifact, story archive): same refusals, same `details.cause` tags.
+fn validate_export_destination(raw: &Path, extension: &str) -> Result<PathBuf, AppError> {
     let raw_str = raw.to_string_lossy();
     if raw_str.is_empty() {
         return Err(destination_unavailable(
@@ -225,7 +358,7 @@ fn validate_and_normalize_destination(raw: &Path) -> Result<PathBuf, AppError> {
     }
 
     // Windows strips a trailing space or dot from the last path
-    // component, silently remapping `foo .rustory` → `foo.rustory` and
+    // component, silently remapping `foo.rustory ` → `foo.rustory` and
     // `foo.rustory.` → `foo.rustory`. Refuse at the boundary so what
     // the user sees on disk matches the name they typed.
     if file_name.ends_with(' ') || file_name.ends_with('.') {
@@ -238,7 +371,7 @@ fn validate_and_normalize_destination(raw: &Path) -> Result<PathBuf, AppError> {
 
     // Refuse POSIX-style hidden names (e.g. `.rustory` on its own) and
     // any leading-dot basename — the user almost certainly did not
-    // intend a hidden file, and auto-appending `.rustory` would yield
+    // intend a hidden file, and auto-appending the extension would yield
     // `.rustory.rustory` which is worse.
     if file_name.starts_with('.') {
         return Err(destination_unavailable(
@@ -251,16 +384,16 @@ fn validate_and_normalize_destination(raw: &Path) -> Result<PathBuf, AppError> {
     // Auto-append the extension when the user typed a bare basename.
     // The filter in the save dialog is active but on most platforms
     // the user can still type any free-form name.
-    let has_rustory_extension = raw
+    let has_expected_extension = raw
         .extension()
         .and_then(|ext| ext.to_str())
-        .is_some_and(|ext| ext.eq_ignore_ascii_case(RUSTORY_ARTIFACT_EXTENSION));
-    let normalized = if has_rustory_extension {
+        .is_some_and(|ext| ext.eq_ignore_ascii_case(extension));
+    let normalized = if has_expected_extension {
         raw.to_path_buf()
     } else {
         let mut with_ext = raw.as_os_str().to_owned();
         with_ext.push(".");
-        with_ext.push(RUSTORY_ARTIFACT_EXTENSION);
+        with_ext.push(extension);
         PathBuf::from(with_ext)
     };
 
@@ -1161,6 +1294,35 @@ mod tests {
         let err = validate_and_normalize_destination(Path::new("/tmp/.rustory"))
             .expect_err("must reject");
         assert_invalid_path(&err, "empty_file_stem");
+    }
+
+    #[test]
+    fn archive_destination_keeps_or_appends_the_zip_extension() {
+        // The story archive rides the SAME rule set with its own extension.
+        let kept = validate_export_destination(Path::new("/tmp/histoire.zip"), "zip").expect("ok");
+        assert_eq!(kept, Path::new("/tmp/histoire.zip"));
+        let upper = validate_export_destination(Path::new("/tmp/histoire.ZIP"), "zip").expect("ok");
+        assert_eq!(upper, Path::new("/tmp/histoire.ZIP"));
+        let bare = validate_export_destination(Path::new("/tmp/histoire"), "zip").expect("ok");
+        assert_eq!(bare, Path::new("/tmp/histoire.zip"));
+        // A foreign extension is part of the name the user typed: the
+        // archive extension is appended, never substituted.
+        let foreign =
+            validate_export_destination(Path::new("/tmp/histoire.rustory"), "zip").expect("ok");
+        assert_eq!(foreign, Path::new("/tmp/histoire.rustory.zip"));
+    }
+
+    #[test]
+    fn archive_destination_shares_the_boundary_refusals() {
+        for (raw, cause) in [
+            ("relative/histoire.zip", "not_absolute"),
+            ("/tmp/histoire.zip ", "trailing_whitespace"),
+            ("/tmp/histoire.zip.", "trailing_whitespace"),
+            ("/tmp/.zip", "empty_file_stem"),
+        ] {
+            let err = validate_export_destination(Path::new(raw), "zip").expect_err("must reject");
+            assert_invalid_path(&err, cause);
+        }
     }
 
     #[cfg(unix)]

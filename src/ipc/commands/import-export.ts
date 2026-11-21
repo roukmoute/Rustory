@@ -8,6 +8,7 @@ import type {
   ArchiveCreationAnalysis,
   ContentSourcePolicy,
   DropAnalysis,
+  ExportStoryArchiveOutcome,
   ExportStoryDialogInput,
   ExportStoryDialogOutcome,
   ImportArtifactAnalysis,
@@ -23,6 +24,7 @@ import {
   isArchiveCreationAnalysis,
   isContentSourcePolicy,
   isDropAnalysis,
+  isExportStoryArchiveOutcome,
   isExportStoryDialogOutcome,
   isImportArtifactAnalysis,
   isImportFinding,
@@ -77,6 +79,72 @@ export async function exportStoryWithSaveDialog(
   });
   if (!isExportStoryDialogOutcome(raw)) {
     throw new ExportStoryContractDriftError(raw);
+  }
+  return raw;
+}
+
+/**
+ * Error thrown when `export_story_archive_with_save_dialog` returns a
+ * payload that does not match the wire contract. The raw response is
+ * attached to `raw` for debugging.
+ */
+export class ExportStoryArchiveContractDriftError extends Error {
+  readonly raw: unknown;
+  constructor(raw: unknown) {
+    super(
+      "export_story_archive_with_save_dialog returned a payload that does not match the contract",
+    );
+    this.name = "ExportStoryArchiveContractDriftError";
+    this.raw = raw;
+  }
+}
+
+/**
+ * Open the native save dialog and, if the user confirms a destination,
+ * export the story as a shareable story archive there — `story.json`,
+ * `assets/` and `thumbnail.png`, zipped, with every media already in the
+ * format a device plays. Another Rustory library imports it as is.
+ *
+ * Rust owns the whole boundary (the dialog, the path validation, the media
+ * conversion, the atomic write) and needs NO device: nothing is read from or
+ * written to one. A story that cannot become an archive rejects BEFORE the
+ * dialog opens.
+ *
+ * A cancelled dialog resolves with `{ kind: "cancelled" }` — a silent
+ * no-op. Failures reject with a normalized `AppError`; a drifted payload
+ * rejects with [`ExportStoryArchiveContractDriftError`].
+ *
+ * `onProgress`, when given, receives the export's integer percent (0..99)
+ * as the media are converted and stored — a SIGNAL only, over a Tauri
+ * channel; the settled outcome is the resolved value. A malformed or
+ * out-of-range tick is clamped/ignored, never surfaced.
+ *
+ * Components MUST NOT call `invoke` directly — go through this facade so
+ * the wire contract stays owned by `src/ipc/`.
+ */
+export async function exportStoryArchiveWithSaveDialog(
+  input: ExportStoryDialogInput,
+  onProgress?: (percent: number) => void,
+): Promise<ExportStoryArchiveOutcome> {
+  const channel = new Channel<number>();
+  if (onProgress) {
+    channel.onmessage = (percent) => {
+      if (typeof percent === "number" && Number.isFinite(percent)) {
+        onProgress(Math.max(0, Math.min(99, Math.round(percent))));
+      }
+    };
+  }
+  let raw: unknown;
+  try {
+    raw = await invoke<unknown>("export_story_archive_with_save_dialog", {
+      input,
+      onProgress: channel,
+    });
+  } catch (err) {
+    throw toAppError(err);
+  }
+  if (!isExportStoryArchiveOutcome(raw)) {
+    throw new ExportStoryArchiveContractDriftError(raw);
   }
   return raw;
 }

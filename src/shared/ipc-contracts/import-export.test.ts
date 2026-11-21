@@ -5,6 +5,7 @@ import {
   isContentSourceEntry,
   isContentSourcePolicy,
   isDropAnalysis,
+  isExportStoryArchiveOutcome,
   isExportStoryDialogOutcome,
   isImportArtifactAnalysis,
   isImportFinding,
@@ -14,6 +15,7 @@ import {
   isStructuredCreationAnalysis,
   type ContentSourcePolicy,
   type DropAnalysis,
+  type ExportStoryArchiveOutcome,
   type ExportStoryDialogOutcome,
   type ImportArtifactAnalysis,
   type OsOpenAnalysis,
@@ -28,6 +30,96 @@ const VALID_EXPORTED: ExportStoryDialogOutcome = {
   bytesWritten: 451,
   contentChecksum: "a".repeat(64),
 };
+
+const VALID_EXPORTED_ARCHIVE: ExportStoryArchiveOutcome = {
+  kind: "exported",
+  destinationPath: "/home/moi/Mon histoire.zip",
+  bytesWritten: 12_345_678,
+  imageCount: 1,
+  audioCount: 2,
+};
+
+describe("isExportStoryArchiveOutcome", () => {
+  it("accepts a canonical exported payload", () => {
+    expect(isExportStoryArchiveOutcome(VALID_EXPORTED_ARCHIVE)).toBe(true);
+  });
+
+  it("accepts an archive without any picture", () => {
+    expect(
+      isExportStoryArchiveOutcome({ ...VALID_EXPORTED_ARCHIVE, imageCount: 0 }),
+    ).toBe(true);
+  });
+
+  it("accepts a cancelled payload with only the kind discriminant", () => {
+    expect(isExportStoryArchiveOutcome({ kind: "cancelled" })).toBe(true);
+  });
+
+  it("rejects a cancelled payload that carries extra fields", () => {
+    expect(
+      isExportStoryArchiveOutcome({ kind: "cancelled", leaked: true }),
+    ).toBe(false);
+  });
+
+  it("rejects an unknown kind", () => {
+    expect(isExportStoryArchiveOutcome({ kind: "weird" })).toBe(false);
+  });
+
+  it.each([null, undefined, 42, "string", []])(
+    "rejects non-objects (%s)",
+    (value) => {
+      expect(isExportStoryArchiveOutcome(value)).toBe(false);
+    },
+  );
+
+  it.each(["destinationPath", "bytesWritten", "imageCount", "audioCount"])(
+    "rejects an exported payload missing %s",
+    (field) => {
+      const { [field]: _omitted, ...rest } = VALID_EXPORTED_ARCHIVE as Record<
+        string,
+        unknown
+      >;
+      expect(isExportStoryArchiveOutcome(rest)).toBe(false);
+    },
+  );
+
+  it("rejects an empty destinationPath", () => {
+    expect(
+      isExportStoryArchiveOutcome({
+        ...VALID_EXPORTED_ARCHIVE,
+        destinationPath: "",
+      }),
+    ).toBe(false);
+  });
+
+  it.each(["bytesWritten", "imageCount", "audioCount"])(
+    "rejects a negative, fractional or non-numeric %s",
+    (field) => {
+      for (const value of [-1, 1.5, "3", null]) {
+        expect(
+          isExportStoryArchiveOutcome({
+            ...VALID_EXPORTED_ARCHIVE,
+            [field]: value,
+          }),
+        ).toBe(false);
+      }
+    },
+  );
+
+  it("rejects an exported payload carrying a field outside the contract", () => {
+    // The `.rustory` export's checksum has no meaning for an archive: a
+    // payload that mixes the two shapes is a drift, never rendered.
+    expect(
+      isExportStoryArchiveOutcome({
+        ...VALID_EXPORTED_ARCHIVE,
+        contentChecksum: "a".repeat(64),
+      }),
+    ).toBe(false);
+  });
+
+  it("does not accept the `.rustory` export outcome", () => {
+    expect(isExportStoryArchiveOutcome(VALID_EXPORTED)).toBe(false);
+  });
+});
 
 describe("isExportStoryDialogOutcome", () => {
   it("accepts a canonical exported payload", () => {

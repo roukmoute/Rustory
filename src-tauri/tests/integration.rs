@@ -9,6 +9,9 @@ mod story_persistence;
 #[path = "integration/story_export.rs"]
 mod story_export;
 
+#[path = "integration/story_archive_export.rs"]
+mod story_archive_export;
+
 #[path = "integration/story_drafts_migration.rs"]
 mod story_drafts_migration;
 

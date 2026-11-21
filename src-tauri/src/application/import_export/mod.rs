@@ -1,4 +1,5 @@
 pub mod archive_creation;
+pub mod archive_export;
 pub mod creation_common;
 pub mod drop_intent;
 pub mod export;
@@ -11,6 +12,9 @@ pub mod web_episode_extraction;
 pub use archive_creation::{
     accept_structured_archive_creation, analyze_structured_archive,
     prepare_structured_archive_creation, ArchiveCreationOutcome,
+};
+pub use archive_export::{
+    export_story_archive, plan_story_archive_export, ExportedStoryArchive, StoryArchiveExportPlan,
 };
 
 pub use drop_intent::{analyze_pending_drop, DropIntent, DropIntentState, DROP_INTENT_STATE};

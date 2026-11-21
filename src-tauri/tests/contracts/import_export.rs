@@ -1,9 +1,9 @@
 use rustory_lib::domain::shared::AppError;
 use rustory_lib::ipc::dto::{
-    AcceptArtifactImportInputDto, AcceptStructuredCreationInputDto, ExportStoryDialogInputDto,
-    ExportStoryDialogOutcomeDto, ImportArtifactAnalysisDto, ImportAspectDto, ImportCategoryDto,
-    ImportFindingDto, ImportQualityDto, ImportStateDto, ImportableContentDto,
-    StructuredCreationAnalysisDto,
+    AcceptArtifactImportInputDto, AcceptStructuredCreationInputDto, ExportStoryArchiveOutcomeDto,
+    ExportStoryDialogInputDto, ExportStoryDialogOutcomeDto, ImportArtifactAnalysisDto,
+    ImportAspectDto, ImportCategoryDto, ImportFindingDto, ImportQualityDto, ImportStateDto,
+    ImportableContentDto, StructuredCreationAnalysisDto,
 };
 
 #[test]
@@ -98,6 +98,75 @@ fn cancelled_outcome_wire_shape_carries_only_kind() {
 }
 
 // ===== Local artifact import =====
+
+// ===== Story archive export (library story → shareable `.zip` pack) =====
+
+#[test]
+fn export_story_archive_takes_the_same_input_as_the_artifact_export() {
+    // ONE input shape for both exports of the registry: the story and the
+    // file name the save dialog suggests — never a destination path.
+    let dto: ExportStoryDialogInputDto = serde_json::from_value(serde_json::json!({
+        "storyId": "0197a5d0-0000-7000-8000-000000000000",
+        "suggestedFilename": "Mon histoire.zip",
+    }))
+    .expect("deser");
+    assert_eq!(dto.suggested_filename, "Mon histoire.zip");
+}
+
+#[test]
+fn exported_archive_outcome_wire_shape_is_tagged_camel_case() {
+    let dto = ExportStoryArchiveOutcomeDto::Exported {
+        destination_path: "/home/moi/Mon histoire.zip".into(),
+        bytes_written: 12_345_678,
+        image_count: 1,
+        audio_count: 2,
+    };
+    let v = serde_json::to_value(&dto).expect("ser");
+    assert_eq!(
+        v,
+        serde_json::json!({
+            "kind": "exported",
+            "destinationPath": "/home/moi/Mon histoire.zip",
+            "bytesWritten": 12_345_678,
+            "imageCount": 1,
+            "audioCount": 2,
+        })
+    );
+}
+
+#[test]
+fn cancelled_archive_outcome_wire_shape_carries_only_kind() {
+    let v = serde_json::to_value(ExportStoryArchiveOutcomeDto::Cancelled).expect("ser");
+    assert_eq!(v, serde_json::json!({ "kind": "cancelled" }));
+}
+
+#[test]
+fn app_error_wire_shape_for_export_failed() {
+    let err = AppError::export_failed(
+        "Export impossible: un ou plusieurs épisodes de cette histoire n'ont pas d'audio.",
+        "Ajoute un audio à chaque épisode, puis réessaie l'export.",
+    )
+    .with_details(serde_json::json!({
+        "source": "story_pack",
+        "cause": "missing_audio",
+    }));
+    let v = serde_json::to_value(&err).expect("serialize");
+    assert_eq!(v["code"], "EXPORT_FAILED");
+    assert_eq!(
+        v["message"],
+        "Export impossible: un ou plusieurs épisodes de cette histoire n'ont pas d'audio."
+    );
+    assert_eq!(
+        v["userAction"],
+        "Ajoute un audio à chaque épisode, puis réessaie l'export."
+    );
+    assert_eq!(v["details"]["source"], "story_pack");
+    assert_eq!(v["details"]["cause"], "missing_audio");
+    assert!(
+        v.get("user_action").is_none(),
+        "snake_case must never leak across the boundary"
+    );
+}
 
 fn importable_content_json() -> serde_json::Value {
     serde_json::json!({

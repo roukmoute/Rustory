@@ -11,6 +11,7 @@ pub enum AppErrorCode {
     LibraryInconsistent,
     InvalidStoryTitle,
     ExportDestinationUnavailable,
+    ExportFailed,
     RecoveryDraftUnavailable,
     DeviceScanFailed,
     DeviceUnsupported,
@@ -96,6 +97,24 @@ impl AppError {
     ) -> Self {
         Self {
             code: AppErrorCode::ExportDestinationUnavailable,
+            message: message.into(),
+            user_action: Some(user_action.into()),
+            details: None,
+        }
+    }
+
+    /// Constructed when a story cannot be turned into the artifact an export
+    /// asked for — a refusal about the STORY or its media, never about where
+    /// the file goes (that is `EXPORT_DESTINATION_UNAVAILABLE`, which a
+    /// different destination can fix; this one cannot be fixed that way).
+    /// Raised by the story archive export: a story that does not lay out as
+    /// a pack, a media the library no longer backs or cannot convert, a
+    /// retained source pack that cannot be read. The reason is carried by
+    /// `details.source` + `details.cause` from closed sets, PII-free (never
+    /// a path, never a file name beyond an opaque 8-character asset tag).
+    pub fn export_failed(message: impl Into<String>, user_action: impl Into<String>) -> Self {
+        Self {
+            code: AppErrorCode::ExportFailed,
             message: message.into(),
             user_action: Some(user_action.into()),
             details: None,
@@ -392,6 +411,20 @@ mod tests {
         assert_eq!(v["code"], "EXPORT_DESTINATION_UNAVAILABLE");
         assert_eq!(v["message"], "msg");
         assert_eq!(v["userAction"], "action");
+    }
+
+    #[test]
+    fn export_failed_serializes_with_stable_code_and_details() {
+        let err = AppError::export_failed(
+            "Export impossible: un ou plusieurs épisodes de cette histoire n'ont pas d'audio.",
+            "Ajoute un audio à chaque épisode, puis réessaie l'export.",
+        )
+        .with_details(serde_json::json!({ "source": "story_pack", "cause": "missing_audio" }));
+        let v = serde_json::to_value(&err).expect("serialize");
+        assert_eq!(v["code"], "EXPORT_FAILED");
+        assert_eq!(v["details"]["source"], "story_pack");
+        assert_eq!(v["details"]["cause"], "missing_audio");
+        assert!(v["userAction"].is_string());
     }
 
     #[test]

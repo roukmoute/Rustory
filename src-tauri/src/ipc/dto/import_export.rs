@@ -39,6 +39,29 @@ pub enum ExportStoryDialogOutcomeDto {
     Cancelled,
 }
 
+/// Tagged outcome returned by `export_story_archive_with_save_dialog`.
+///
+/// Same rule as [`ExportStoryDialogOutcomeDto`]: a cancelled dialog is NOT
+/// an error (`{ kind: "cancelled" }`), and every failure crosses the
+/// boundary as an [`AppError`] rejection. The `exported` variant echoes the
+/// destination the user picked and what the archive carries — the counts of
+/// DISTINCT pictures and sounds, which the success surface announces.
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum ExportStoryArchiveOutcomeDto {
+    Exported {
+        #[serde(rename = "destinationPath")]
+        destination_path: String,
+        #[serde(rename = "bytesWritten")]
+        bytes_written: u64,
+        #[serde(rename = "imageCount")]
+        image_count: u32,
+        #[serde(rename = "audioCount")]
+        audio_count: u32,
+    },
+    Cancelled,
+}
+
 // ===== Local artifact import (`.rustory` file → library) =====
 
 /// Recognition quality of an analyzed local artifact. Mirror of the domain
@@ -1421,6 +1444,39 @@ mod tests {
         let v = serde_json::to_value(&dto).expect("serialize");
         assert_eq!(v["kind"], "cancelled");
         // Only the discriminant is present — no destination, no bytes.
+        assert_eq!(v.as_object().expect("object").len(), 1);
+    }
+
+    #[test]
+    fn exported_archive_outcome_wire_shape_is_tagged_camel_case() {
+        let dto = ExportStoryArchiveOutcomeDto::Exported {
+            destination_path: "/tmp/histoire.zip".into(),
+            bytes_written: 1_048_576,
+            image_count: 3,
+            audio_count: 12,
+        };
+        let v = serde_json::to_value(&dto).expect("serialize");
+        assert_eq!(v["kind"], "exported");
+        assert_eq!(v["destinationPath"], "/tmp/histoire.zip");
+        assert_eq!(v["bytesWritten"], 1_048_576);
+        assert_eq!(v["imageCount"], 3);
+        assert_eq!(v["audioCount"], 12);
+        assert_eq!(v.as_object().expect("object").len(), 5);
+        for snake in [
+            "destination_path",
+            "bytes_written",
+            "image_count",
+            "audio_count",
+        ] {
+            assert!(v.get(snake).is_none(), "{snake} must be camelCase");
+        }
+    }
+
+    #[test]
+    fn cancelled_archive_outcome_wire_shape_carries_only_kind() {
+        let dto = ExportStoryArchiveOutcomeDto::Cancelled;
+        let v = serde_json::to_value(&dto).expect("serialize");
+        assert_eq!(v["kind"], "cancelled");
         assert_eq!(v.as_object().expect("object").len(), 1);
     }
 

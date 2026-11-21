@@ -15,6 +15,7 @@ import { invoke } from "@tauri-apps/api/core";
 import {
   ContentSourcePolicyContractDriftError,
   DropContractDriftError,
+  ExportStoryArchiveContractDriftError,
   ExportStoryContractDriftError,
   ImportArtifactContractDriftError,
   OsOpenContractDriftError,
@@ -29,6 +30,7 @@ import {
   analyzeStructuredFolderForCreation,
   discardDropRequest,
   discardOsOpenRequest,
+  exportStoryArchiveWithSaveDialog,
   exportStoryWithSaveDialog,
   fetchRssSourcePreview,
   fetchWebPodcastPreview,
@@ -122,6 +124,94 @@ describe("exportStoryWithSaveDialog", () => {
         suggestedFilename: SUGGESTED,
       }),
     ).rejects.toEqual(rustError);
+  });
+});
+
+/** Structural view of the fake channel the mocked `invoke` receives. */
+type ChannelLike = { onmessage?: ((msg: number) => void) | null };
+
+describe("exportStoryArchiveWithSaveDialog", () => {
+  const ARCHIVE_INPUT = {
+    storyId: STORY_ID,
+    suggestedFilename: "Mon histoire.zip",
+  };
+  const ARCHIVE_OUTCOME = {
+    kind: "exported",
+    destinationPath: "/home/moi/Mon histoire.zip",
+    bytesWritten: 12_345_678,
+    imageCount: 1,
+    audioCount: 2,
+  };
+
+  beforeEach(() => {
+    vi.mocked(invoke).mockReset();
+  });
+
+  it("calls the command with the input and a progress channel", async () => {
+    vi.mocked(invoke).mockResolvedValueOnce(ARCHIVE_OUTCOME);
+    const result = await exportStoryArchiveWithSaveDialog(ARCHIVE_INPUT);
+    expect(invoke).toHaveBeenCalledTimes(1);
+    const [command, args] = vi.mocked(invoke).mock.calls[0];
+    expect(command).toBe("export_story_archive_with_save_dialog");
+    expect((args as { input: unknown }).input).toEqual(ARCHIVE_INPUT);
+    expect((args as { onProgress: unknown }).onProgress).toBeDefined();
+    expect(result).toEqual(ARCHIVE_OUTCOME);
+  });
+
+  it("forwards the streamed percent, clamping out-of-range and dropping non-finite ticks", async () => {
+    vi.mocked(invoke).mockImplementationOnce(async (_cmd, args) => {
+      const channel = (args as { onProgress?: ChannelLike } | undefined)
+        ?.onProgress;
+      channel?.onmessage?.(12);
+      channel?.onmessage?.(150); // out of range → clamped to 99
+      channel?.onmessage?.(Number.NaN); // non-finite → dropped
+      channel?.onmessage?.(41.6); // rounded
+      return ARCHIVE_OUTCOME;
+    });
+    const seen: number[] = [];
+    await exportStoryArchiveWithSaveDialog(ARCHIVE_INPUT, (p) => seen.push(p));
+    expect(seen).toEqual([12, 99, 42]);
+  });
+
+  it("returns a cancelled outcome when the user cancelled the dialog", async () => {
+    vi.mocked(invoke).mockResolvedValueOnce({ kind: "cancelled" });
+    await expect(
+      exportStoryArchiveWithSaveDialog(ARCHIVE_INPUT),
+    ).resolves.toEqual({ kind: "cancelled" });
+  });
+
+  it("rejects with a drift error (carrying the raw payload) on a shape drift", async () => {
+    const raw = { ...ARCHIVE_OUTCOME, audioCount: "deux" };
+    vi.mocked(invoke).mockResolvedValueOnce(raw);
+    const err = (await exportStoryArchiveWithSaveDialog(ARCHIVE_INPUT).then(
+      () => {
+        throw new Error("expected rejection");
+      },
+      (e: unknown) => e,
+    )) as ExportStoryArchiveContractDriftError;
+    expect(err).toBeInstanceOf(ExportStoryArchiveContractDriftError);
+    expect(err.raw).toEqual(raw);
+  });
+
+  it("propagates an EXPORT_FAILED refusal verbatim", async () => {
+    const rustError = {
+      code: "EXPORT_FAILED",
+      message:
+        "Export impossible: un ou plusieurs épisodes de cette histoire n'ont pas d'audio.",
+      userAction: "Ajoute un audio à chaque épisode, puis réessaie l'export.",
+      details: { source: "story_pack", cause: "missing_audio" },
+    };
+    vi.mocked(invoke).mockRejectedValueOnce(rustError);
+    await expect(
+      exportStoryArchiveWithSaveDialog(ARCHIVE_INPUT),
+    ).rejects.toEqual(rustError);
+  });
+
+  it("normalizes a non-AppError rejection to UNKNOWN", async () => {
+    vi.mocked(invoke).mockRejectedValueOnce(new Error("boom"));
+    await expect(
+      exportStoryArchiveWithSaveDialog(ARCHIVE_INPUT),
+    ).rejects.toMatchObject({ code: "UNKNOWN" });
   });
 });
 
