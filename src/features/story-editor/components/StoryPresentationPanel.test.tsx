@@ -262,15 +262,51 @@ describe("StoryPresentationPanel", () => {
     ).toBeInTheDocument();
   });
 
-  it("names a branching node and falls back to the generic note without a blocker", async () => {
+  it("says how the device plays a story with choices, with no layout to pick", async () => {
     vi.mocked(readStoryPresentation).mockResolvedValueOnce({
       ...SEQUENTIAL,
       linear: false,
       chapters: [],
       linearBlocker: { reason: "branching", nodeId: "n1", label: "Un" },
     });
+    // Not editable: there is no control to lock, so no locked note either.
+    render(<StoryPresentationPanel storyId="s1" editable={false} structureKey="k" />);
+    const panel = await screen.findByRole("region", { name: /présentation sur la lunii/i });
+    expect(
+      await within(panel).findByText(
+        "Cette histoire propose des choix : la Lunii la joue en suivant ses options. Le nœud de départ sert de couverture ; quand un nœud propose plusieurs options, l'enfant choisit sur la molette, et avec une seule la suite s'enchaîne.",
+      ),
+    ).toBeInTheDocument();
+    expect(
+      within(panel).getByText(
+        "Pour l'envoyer, chaque nœud a besoin d'un audio et chaque option d'une destination.",
+      ),
+    ).toBeInTheDocument();
+    // The options ARE the navigation: neither layout is offered, nothing is
+    // announced as unavailable, and no announcement is asked for.
+    expect(within(panel).queryByRole("radio")).not.toBeInTheDocument();
+    expect(within(panel).queryByText(/indisponible/i)).not.toBeInTheDocument();
+    expect(within(panel).queryByText(/présentation verrouillée/i)).not.toBeInTheDocument();
+    expect(within(panel).queryByRole("list", { name: /annonces/i })).not.toBeInTheDocument();
+    expect(
+      within(panel).queryByRole("button", { name: "Générer les annonces" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("keeps the archive note alone for a story with choices sent from its archive", async () => {
+    vi.mocked(readStoryPresentation).mockResolvedValueOnce({
+      ...SEQUENTIAL,
+      archiveRetained: true,
+      linear: false,
+      chapters: [],
+      linearBlocker: { reason: "branching", nodeId: "n1", label: "Un" },
+    });
     renderPanel();
-    expect(await screen.findByText(/l'épisode « Un » propose des choix/i)).toBeInTheDocument();
+    expect(await screen.findByText(/archive d'origine/i)).toBeInTheDocument();
+    expect(screen.queryByText(/propose des choix/i)).not.toBeInTheDocument();
+  });
+
+  it("falls back to the generic note when no node can be named", async () => {
     vi.mocked(readStoryPresentation).mockResolvedValueOnce({ ...SEQUENTIAL, linear: false, chapters: [] });
     render(<StoryPresentationPanel storyId="s2" editable structureKey="k" />);
     expect(await screen.findByText(/demande un audio sur chaque épisode/i)).toBeInTheDocument();

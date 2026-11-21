@@ -2,11 +2,13 @@ import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
-import type { StoryDetailDto } from "../../../shared/ipc-contracts/story";
+import type { OptionLink, StoryDetailDto } from "../../../shared/ipc-contracts/story";
 import type { UseStoryExport } from "../../import-export/hooks/use-story-export";
 import type { UseNodeEditor } from "../hooks/use-node-editor";
 import type { UseStoryRecovery } from "../hooks/use-story-recovery";
 import type { UseStructureEditor } from "../hooks/use-structure-editor";
+
+import { readStoryPresentation } from "../../../ipc/commands/presentation";
 
 import { StoryEditorShell } from "./StoryEditorShell";
 
@@ -379,5 +381,58 @@ describe("<StoryEditorShell />", () => {
     expect(
       screen.queryByText("Contenu porté par le pack de l'appareil"),
     ).not.toBeInTheDocument();
+  });
+
+  it("re-reads the presentation when a node starts offering options, not on an unrelated change", () => {
+    vi.mocked(readStoryPresentation).mockClear();
+    const shell = (detail: StoryDetailDto) => (
+      <StoryEditorShell
+        detail={detail}
+        draftTitle={detail.title}
+        saveStatus={{ kind: "idle" }}
+        recovery={stubRecovery()}
+        exporter={stubExporter()}
+        nodeEditor={stubNodeEditor()}
+        structureEditor={stubStructureEditor()}
+        onSetDraftTitle={vi.fn()}
+        onRetrySave={vi.fn()}
+        onFlushAutoSave={vi.fn()}
+        onBack={vi.fn()}
+      />
+    );
+    const twoNodes = (options: OptionLink[]): StoryDetailDto =>
+      buildDetail({
+        structure: {
+          startNodeId: "n1",
+          nodes: [
+            { id: "n1", label: "Le carrefour", isStart: true, hasIssue: false, options },
+            { id: "n2", label: "La forêt", isStart: false, hasIssue: false, options: [] },
+          ],
+        },
+      });
+    const { rerender } = render(shell(twoNodes([])));
+    expect(readStoryPresentation).toHaveBeenCalledTimes(1);
+
+    // A change that says nothing about how the device plays the story.
+    rerender(shell({ ...twoNodes([]), title: "Un autre titre" }));
+    expect(readStoryPresentation).toHaveBeenCalledTimes(1);
+
+    // The crossroads now offers an option: the story has choices, the
+    // zone must say so (it no longer offers a layout).
+    rerender(
+      shell(twoNodes([{ label: "À gauche", target: "n2", state: "linked" }])),
+    );
+    expect(readStoryPresentation).toHaveBeenCalledTimes(2);
+
+    // A second option on a node that already offers one changes nothing.
+    rerender(
+      shell(
+        twoNodes([
+          { label: "À gauche", target: "n2", state: "linked" },
+          { label: "Rester", target: null, state: "unlinked" },
+        ]),
+      ),
+    );
+    expect(readStoryPresentation).toHaveBeenCalledTimes(2);
   });
 });

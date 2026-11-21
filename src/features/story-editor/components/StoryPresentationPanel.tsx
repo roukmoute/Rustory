@@ -43,6 +43,10 @@ const ARCHIVE_NOTE =
   "Cette histoire est envoyée telle quelle depuis son archive d'origine : la présentation ci-dessous ne s'applique pas à l'envoi.";
 const NOT_LINEAR_NOTE =
   "La présentation au choix demande un audio sur chaque épisode et aucun choix dans l'histoire.";
+const CHOICES_NOTE =
+  "Cette histoire propose des choix : la Lunii la joue en suivant ses options. Le nœud de départ sert de couverture ; quand un nœud propose plusieurs options, l'enfant choisit sur la molette, et avec une seule la suite s'enchaîne.";
+const CHOICES_REQUIREMENT =
+  "Pour l'envoyer, chaque nœud a besoin d'un audio et chaque option d'une destination.";
 const EDIT_LOCKED_NOTE =
   "Présentation verrouillée tant que l'histoire n'est pas modifiable (restauration en attente).";
 const LAYOUT_LEGEND = "Comment la Lunii joue cette histoire";
@@ -75,7 +79,8 @@ type PresentationRead =
   | { kind: "loaded"; data: StoryPresentationDto }
   | { kind: "unavailable" };
 
-/** The precise, actionable reason « Au choix » is unavailable. */
+/** The precise, actionable reason « Au choix » is unavailable. A story with
+ *  choices never gets here: it has no layout to pick (see `CHOICES_NOTE`). */
 function notLinearReason(blocker: LinearBlockerDto | undefined): string {
   if (blocker === undefined) return NOT_LINEAR_NOTE;
   const name =
@@ -88,7 +93,7 @@ function notLinearReason(blocker: LinearBlockerDto | undefined): string {
     case "missingAudio":
       return `« Au choix » indisponible : l'épisode ${name} n'a pas d'audio. Ajoute-lui un audio depuis « Structure de l'histoire ».`;
     case "branching":
-      return `« Au choix » indisponible : l'épisode ${name} propose des choix. Retire ses options pour une lecture par épisodes.`;
+      return CHOICES_NOTE;
     case "empty":
       return "« Au choix » indisponible : l'histoire n'a aucun épisode.";
     case "malformed":
@@ -139,8 +144,10 @@ export interface StoryPresentationPanelProps {
  * The `Présentation sur la Lunii` zone of the editor: the layout (episodes
  * in sequence, or a spoken menu) and, for the menu, the spoken
  * announcements — their state per Rust, one generation gesture, a listen
- * button per generated clip. Every fact comes from
- * `read_story_presentation`; a failed read is the calm unavailable state.
+ * button per generated clip. A story WITH CHOICES has no layout to pick:
+ * its options are the navigation, and the zone only says how the device
+ * plays them. Every fact comes from `read_story_presentation`; a failed
+ * read is the calm unavailable state.
  */
 export function StoryPresentationPanel({
   storyId,
@@ -255,6 +262,9 @@ export function StoryPresentationPanel({
   };
 
   const busy = generating !== null || !editable;
+  // A story with choices is played by its own options: no layout applies.
+  const withChoices =
+    read.kind === "loaded" && read.data.linearBlocker?.reason === "branching";
 
   return (
     <SurfacePanel
@@ -282,7 +292,15 @@ export function StoryPresentationPanel({
           {ARCHIVE_NOTE}
         </p>
       )}
-      {read.kind === "loaded" && !read.data.archiveRetained && (
+      {read.kind === "loaded" && !read.data.archiveRetained && withChoices && (
+        <>
+          <p className="story-presentation__state" role="status">
+            {CHOICES_NOTE}
+          </p>
+          <p className="story-presentation__state">{CHOICES_REQUIREMENT}</p>
+        </>
+      )}
+      {read.kind === "loaded" && !read.data.archiveRetained && !withChoices && (
         <>
           <fieldset className="story-presentation__layout" disabled={busy}>
             <legend className="story-presentation__legend">{LAYOUT_LEGEND}</legend>

@@ -316,8 +316,14 @@ export function StoryEditorShell({
         <StoryPresentationPanel
           storyId={detail.id}
           editable={detail.editable && !recoveryActive}
+          // A node that starts (or stops) offering options changes how the
+          // device plays the story: the zone re-reads on that too.
           structureKey={JSON.stringify(
-            detail.structure?.nodes.map((node) => [node.id, node.label]) ?? [],
+            detail.structure?.nodes.map((node) => [
+              node.id,
+              node.label,
+              node.options.length > 0,
+            ]) ?? [],
           )}
         />
       )}
