@@ -72,6 +72,7 @@ It exists to keep the same product concepts named the same way across:
 | Send refused — the device lacks room (next gesture) | `Supprime une histoire de l'appareil puis relance l'envoi.` | The real gesture: free room on the device, then send again | `libère de l'espace` (vague), `formate l'appareil`, `réessaie` alone |
 | Send or archive export refused — a media too large to be read (message) | `Envoi impossible: un média du pack dépasse la taille autorisée ({taille}).` / `Export impossible: un média du pack dépasse la taille autorisée ({taille}).` (`un média de l'histoire` when the media is the library's own) | A media that is THERE but over the per-media bound is named for what it is, with the bound in decimal units (`134 Mo`) — the editor's own `dépasse la taille autorisée`. Its next gesture replaces the media (`… remplace ce média par un fichier plus léger …`), where a missing media asks to check or re-import | `introuvable`, `manquant` (the media is present), `corrompu`, binary units (`128 Mio`), a raw byte count |
 | Creation review — media too large (finding copy) | `… dépassent la taille autorisée ({taille} par fichier). …` (a media left out) / `… dépassent ensemble la taille autorisée ({taille}). …` (media blocking together) | The review of a structured folder or archive names a SIZE reason on its own line (`MediaSize`), with the bound of the flow in decimal units: `34 Mo par fichier` / `268 Mo` for a folder, `134 Mo par fichier` / `34,4 Go` for an archive. `par fichier` and `ensemble` keep the two bounds apart. Frozen copies: the two recognition tables below | `fichier trop volumineux` without the bound, `introuvable` (the media is there), `structure … incohérente` for a size reason, binary units (`128 Mio`, `32 Gio`), a raw byte count |
+| Creation review — too many media (finding copy) | `… dépassent le nombre autorisé ({nombre} fichiers différents). …` | The review of a structured folder or archive names a COUNT reason on its own line (`MediaCount`), with the reference bound of the flow in digits: `64 fichiers différents` for a folder, `8192 fichiers différents` for an archive. `différents` says what is counted: a file used by several nodes counts once. Always a `blocage réel` (no media is read beyond the bound), closed by the gesture of the flow. Frozen copies: the two recognition tables below | `structure … incohérente` for a count reason, `trop de médias` without the number, `taille` / `volumineux` (nothing was weighed), `introuvable` (nothing was looked for) |
 | Archive export refused — a sound too long for an archive (message) | `Export impossible: un son de l'histoire est trop long pour une archive (plus de {durée} environ).` | The sound, once converted to the device format, would cross the per-media bound of an archive. `{durée}` is that bound in listening time (`2 h 20`) — the figure a parent can act on; the next gesture asks for shorter episodes (or shorter sounds in the archive the story came from) | a size alone for a sound (`134 Mo`), `trop volumineux`, `introuvable` |
 | Unprovable device pack — refusal (message) | `Envoi interrompu : la copie présente sur l'appareil est dans un état que Rustory ne reconnaît pas, rien n'a été modifié.` | The dedicated `devicePackUnprovable` refusal: RUSTORY protects the present content (fail-closed) — never worded as the device refusing | `la Lunii a refusé…` (reserved for the pure write-I/O `writeRejected`), `corrompu`, technical jargon |
 | Unprovable device pack — refusal (next gesture) | `Vérifie l'appareil, débranche-le puis rebranche-le, puis relance l'envoi.` | The real gesture for an unprovable on-device state | `Vérifie l'espace disponible…` (the `writeRejected` gesture), `nettoie l'appareil` |
@@ -484,9 +485,9 @@ keeps speaking of an artifact and an import), except the shared
 `Title × reconnu` line whose copy is identical; the `Media × reconnu` and
 `Media × information manquante` pairs speak of the FOLDER (the structured
 archive words its own — see below), while the `Media × ambiguïté` copy is
-shared with the structured archive; the `MediaSize` pairs name the folder's
-OWN bounds, spelled from the constants the analysis applies. Every
-`blocage réel` copy names the corrective gesture (fix or lighten the
+shared with the structured archive; the `MediaSize` and `MediaCount` pairs
+name the folder's OWN bounds, spelled from the constants the analysis applies.
+Every `blocage réel` copy names the corrective gesture (fix, lighten or trim the
 folder/manifest, re-run the analysis). Quality labels are reused verbatim
 (`Propre` / `Partiellement exploitable` / `Inexploitable`), as are the report
 headers and the per-category chips (`reconnu` / `ambiguïté` /
@@ -510,6 +511,7 @@ headers and the per-category chips (`reconnu` / `ambiguïté` /
 | MediaSize | reconnu | `Aucun fichier audio ou image référencé ne dépasse la taille autorisée.` |
 | MediaSize | ambiguïté | `Certains fichiers audio ou image référencés dépassent la taille autorisée (34 Mo par fichier). L'histoire sera créée sans eux ; tu pourras ajouter des fichiers plus légers dans l'éditeur.` |
 | MediaSize | blocage réel | `Les fichiers audio et image référencés dépassent ensemble la taille autorisée (268 Mo). Allège le dossier (moins de médias ou des fichiers plus légers) puis relance l'analyse.` |
+| MediaCount | blocage réel | `Les fichiers audio et image référencés dépassent le nombre autorisé (64 fichiers différents). Réduis le nombre de médias référencés par le manifest puis relance l'analyse ; tu pourras ajouter les autres dans l'éditeur.` |
 
 The size is never one cause among others: a media left out for its size is
 named on the `MediaSize` line, with the bound (`par fichier` for one media,
@@ -518,6 +520,17 @@ format and name only. Its next gesture is its own: the editor's attach has the
 folder's bound, so `tu pourras ajouter des fichiers plus légers dans
 l'éditeur` (never `tu pourras les ajouter` — the file itself would be refused
 there too).
+
+Nor is the number of media a structure reason: a manifest that references
+more DISTINCT files than the folder's reference bound blocks on the
+`MediaCount` line, which names that number (`64 fichiers différents` — a file
+used by several nodes counts once), never on `Structure × blocage réel`, whose
+`Corrige le manifest` would send the user looking for an error that is not
+there. `MediaCount` has ONE row: it only ever blocks (within the bound the
+count has no line, and beyond it no media is read, so the `Media` and
+`MediaSize` lines are absent). Its copy closes on what the user can still do:
+the editor has no such bound, so `tu pourras ajouter les autres dans
+l'éditeur` once the story is created with fewer media.
 
 **Copy of the reports written before `MediaSize` existed** (kept VERBATIM, for
 those summaries only — see
@@ -537,11 +550,13 @@ structured-archive matrix (see
 The archive flow owns the wording of its `Envelope`, `Title` and `Structure`
 pairs (they speak of a descriptor and a pack), of the `Media` pairs that speak
 of presence (an archive is not a folder: the PACK references files that are,
-or are not, IN THE ARCHIVE) and of the `MediaSize` pairs that name ITS bounds;
-it analyzes no `FormatVersion`. Only the `Media × ambiguïté` copy is the
-folder table's, verbatim. These copies render in the review, on the card
-returned at creation and in the durable card report alike — and none of them
-speaks of a folder or of a manifest, whatever pair a report carries.
+or are not, IN THE ARCHIVE) and of the `MediaSize` and `MediaCount` pairs that
+name ITS bounds; it analyzes no `FormatVersion`. Only the `Media × ambiguïté`
+copy is the folder table's, verbatim. These copies render in the review, on
+the card returned at creation and in the durable card report alike (the
+`MediaCount` one in the review only: it blocks, and a blocked verdict is never
+stored) — and none of them speaks of a folder or of a manifest, whatever pair
+a report carries.
 
 | Aspect | Catégorie | Message figé |
 | --- | --- | --- |
@@ -559,6 +574,7 @@ speaks of a folder or of a manifest, whatever pair a report carries.
 | MediaSize | reconnu | `Aucun fichier audio ou image référencé ne dépasse la taille autorisée.` |
 | MediaSize | ambiguïté | `Certains fichiers audio ou image référencés dépassent la taille autorisée (134 Mo par fichier). L'histoire sera créée sans eux ; pour les garder, remplace-les dans l'archive par des fichiers plus légers puis relance l'analyse.` |
 | MediaSize | blocage réel | `Les fichiers audio et image référencés dépassent ensemble la taille autorisée (34,4 Go). Allège l'archive (moins de médias ou des fichiers plus légers) puis relance l'analyse.` |
+| MediaCount | blocage réel | `Les fichiers audio et image référencés dépassent le nombre autorisé (8192 fichiers différents). Réduis le nombre de médias de l'archive (par exemple en répartissant le pack sur plusieurs archives) puis relance l'analyse.` |
 
 The `Media × reconnu` and `Media × information manquante` copies name what
 REFERENCES the files (the pack) and where they are, or are not (the archive)
@@ -581,6 +597,17 @@ lighter file in the editor would not reach the device. It is the review-time
 twin of the send and export refusals (`… un média du pack dépasse la taille
 autorisée (134 Mo).` / `Dans l'archive d'origine, remplace ce média par un
 fichier plus léger …`): same words for the bound, same gesture.
+
+The same holds for `MediaCount × blocage réel`: the first sentence is the
+folder's with the archive's own number, the gesture is the archive's own —
+on the pack (`en répartissant le pack sur plusieurs archives`), never `dans
+l'éditeur`. The number is written in digits as the constant spells it
+(`8192`).
+
+The `MediaSize` and `MediaCount` pairs that no flow emits, and the two aspects
+re-rendered through a flow that has no bound to name (`.rustory`, RSS), keep
+figure-less defensive copies: a pair stays renderable without a bound that is
+not its own.
 
 No new card provenance label (the existing `Importée` marker is honest — the
 content comes from outside Rustory) and no label for a settled review

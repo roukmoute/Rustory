@@ -1774,13 +1774,16 @@ analyzes `Envelope`, `FormatVersion`, `Title`, `Structure`, `Media` and
 timestamps). The `Media` and `MediaSize` aspects are analyzed TOGETHER, and
 ONLY when the declared `formatVersion` is the listed one: an unlisted format
 never triggers a single media read (no implicit / partial support) and its
-verdict carries neither finding. The full aspect × category matrix, the
-named bounds and the manifest schema live in the support profile contract.
+verdict carries neither finding. A manifest that references more media than
+its reference bound is not read either: its verdict carries the single
+`MediaCount` block in their place (the count is the line of a bound that is
+crossed — within the bound it has none). The full aspect × category matrix,
+the named bounds and the manifest schema live in the support profile contract.
 State derivation (folder flow):
 
 | Findings | Quality | Durable state |
 | --- | --- | --- |
-| any `Blocking` (the media too large TOGETHER included — `MediaSize`) | `Inexploitable` | `blocked` — nothing created, never persisted |
+| any `Blocking` (the media too large TOGETHER — `MediaSize` — and too MANY referenced media — `MediaCount` — included) | `Inexploitable` | `blocked` — nothing created, never persisted |
 | else any `Missing` (a referenced media absent) | `Partiellement exploitable` | `partial` — the FIRST real emitter of this state |
 | else any `Ambiguous` (a media left out for its size included — `MediaSize`) | `Partiellement exploitable` | `needs_review` |
 | none of the above | `Propre` | `recognized` (no report, no marker) |
@@ -1803,13 +1806,28 @@ sound:
 The surface adds no logic for it: a finding's message is Rust-authoritative
 and rendered verbatim, the surface never words a size.
 
+**A count reason reads as a count reason.** A manifest that references more
+DISTINCT media than the folder's reference bound (64 — reachable by an honest
+long story: 33 nodes with a picture and a sound each) is not a manifest to
+correct, and the review does not say so:
+
+| Case | What the review shows |
+| --- | --- |
+| More distinct referenced media than the reference bound | `Inexploitable`, `role="alert"`; ONE `blocage réel` chip, on the `MediaCount` line, which names the number and the gesture (`… dépassent le nombre autorisé (64 fichiers différents). Réduis le nombre de médias référencés par le manifest puis relance l'analyse ; tu pourras ajouter les autres dans l'éditeur.`); the `Structure` line stays under `Ce que Rustory a reconnu`; NO `Media` and NO `MediaSize` line (no media was read, so nothing is said of them); no summary, `Abandonner` only |
+| As many as the bound, or fewer | no count line at all: the media are read, and the `Media` and `MediaSize` lines say what was found |
+
+Here too the surface adds no logic: the count line is one more finding,
+rendered verbatim in the group its category puts it in.
+
 **The structured-archive creation follows this contract** (surface `Création
 depuis une archive de pack`, `use-archive-creation`, commands
 `analyze_structured_archive_for_creation` / `accept_structured_archive_creation`,
 `source_format = 'structured-archive'`): same phases, same state derivation,
 same review — on the archive aspect set (`Envelope`, `Title`, `Structure`,
-`Media`, `MediaSize`; no `FormatVersion`), with the archive's own copies and
-bounds (`134 Mo par fichier`, `34,4 Go`), and its media summarized as counts
+`Media`, `MediaSize`; no `FormatVersion`; the single `MediaCount` block in
+place of the two media lines beyond the reference bound), with the archive's
+own copies and bounds (`134 Mo par fichier`, `34,4 Go`, `8192 fichiers
+différents`), and its media summarized as counts
 (a long discarded list collapses to a count). Its bounds and its matrix live
 in
 [device-support-profile.md#Structured archive v1 format contract](./device-support-profile.md).
@@ -1819,13 +1837,14 @@ matrix (fixed in `product-language.md#Change Control`). Every `Envelope`,
 `FormatVersion`, `Title` and `Structure` pair carries a FOLDER wording (the
 folder speaks of a manifest and a creation, not of an artifact and an import)
 — except the shared `Title × reconnu` line, whose copy is identical to the
-`.rustory` one; every `MediaSize` pair names the folder's own bound. The
+`.rustory` one; every `MediaSize` pair that crosses a bound, and the
+`MediaCount` block, name the folder's own bound. The
 wording of a flow renders everywhere that flow appears: the review, the card
 returned at creation AND the durable card report (the projection branches on
 the provenance's `source_format` — `structured-folder`, `structured-archive`,
-`rss`). Every BLOCKING copy of the matrix names the corrective gesture (fix or
-lighten the folder/manifest, then re-run the analysis) — the blocked surface
-itself only offers `Abandonner`. A report persisted before the `MediaSize`
+`rss`). Every BLOCKING copy of the matrix names the corrective gesture (fix,
+lighten or trim the folder/manifest, then re-run the analysis) — the blocked
+surface itself only offers `Abandonner`. A report persisted before the `MediaSize`
 aspect existed keeps, for its `Media` ambiguity, the copy it was written under
 (see the support profile contract): that line of an older story's card says
 what it said.
@@ -1880,8 +1899,9 @@ Local Artifact Import Contract (`file_read`, `db_commit`, `spawn_blocking_join`,
 `app_data_unavailable`, `dialog_failed`, `other`) — the functional verdict is
 the typed DTO, never an error. A folder whose CONTENT exceeds a bound is a
 FINDING (typed verdict), never a transport error — on the `MediaSize` line
-when the bound is a media byte bound. The folder flow ADDS these documented
-sub-values to the reused set:
+when the bound is a media byte bound, on the `MediaCount` line when it is the
+number of referenced media. The folder flow ADDS these documented sub-values
+to the reused set:
 
 - `file_read.stage` gains `folder_name` (the chosen folder's name cannot be
   carried as a provenance source — no real UTF-8 basename, or outside the

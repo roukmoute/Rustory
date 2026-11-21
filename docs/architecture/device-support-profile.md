@@ -908,27 +908,36 @@ it. The manifest is transcoded to the canonical v3 structure (ids preserved,
 stays the final oracle.
 
 The folder flow analyzes its OWN aspect set (documented separately from the
-`.rustory` set — each flow owns its contract). Exactly one finding per aspect;
-one matrix cell = one test:
+`.rustory` set — each flow owns its contract). Exactly one finding per JUDGED
+aspect; one matrix cell = one test:
 
 | Aspect | Recognized | Ambiguous (`ambiguïté`) | Missing (`information manquante`) | Blocking (`blocage réel`) |
 | --- | --- | --- | --- | --- |
 | `Envelope` | `histoire.json` present, readable as a regular file, valid JSON | — | — | manifest absent, unreadable, or malformed JSON |
 | `FormatVersion` | `formatVersion == 1` | — | — | absent or `!= 1` |
 | `Title` | valid as-is | normalizable (`value != normalize_title(value)`) | — | absent, empty after normalization, or invalid |
-| `Structure` | transcodable and canonically valid | unknown manifest field; an option `target` pointing at an unknown node (preserved broken — `BrokenOptionLink` is `Fixable`, repairable in the editor) | — | `nodes` absent/empty, duplicate `id`, `startNodeId` given but unknown, a node text or label over its bound, more distinct referenced media than `MAX_FOLDER_MEDIA_FILES` (decided without reading a single media), untranscodable structure |
+| `Structure` | transcodable and canonically valid | unknown manifest field; an option `target` pointing at an unknown node (preserved broken — `BrokenOptionLink` is `Fixable`, repairable in the editor) | — | `nodes` absent/empty, duplicate `id`, `startNodeId` given but unknown, a node text or label over its bound, untranscodable structure |
 | `Media` (`RecognitionAspect::Media`) | every referenced media present, regular, sniffed inside the closed set, in the right slot | a media present but unusable (magic bytes outside the set, wrong slot, symlink/irregular, non-sober basename) — the media is discarded | a referenced media ABSENT from the folder — the media is discarded | — |
 | `MediaSize` (`RecognitionAspect::MediaSize`) | no referenced media over the per-media bound, and the retained media together within the aggregate bound | a media present but over the per-media bound — the media is discarded, never loaded | — | the retained media together over the aggregate bound — nothing is created |
+| `MediaCount` (`RecognitionAspect::MediaCount`) | — (within the bound the count has no line) | — | — | more DISTINCT referenced media than `MAX_FOLDER_MEDIA_FILES` — decided on the manifest alone, without reading a single media; nothing is created |
 
 No `SchemaVersion` / `Integrity` / `Timestamps` aspects: an author manifest has
 no declared canonical schema, no checksum and no timestamps (the story is BORN
-at acceptance — see provenance below). The `Media` and `MediaSize` aspects are
-analyzed TOGETHER, and ONLY when the declared `formatVersion` is the listed one
-and the reference count is within its bound: an unlisted format never triggers
-a single media read and its verdict carries neither finding (no implicit /
-partial support). A discarded media (`Ambiguous` or `Missing`, on either
-aspect) never prevents the creation: the node is born with the empty slot,
-repairable in the editor.
+at acceptance — see provenance below). The three media aspects are judged ONLY
+when the declared `formatVersion` is the listed one: an unlisted format never
+triggers a single media read, its references are not even counted, and its
+verdict carries no media finding at all (no implicit / partial support). For
+the listed format the references are COUNTED first:
+
+- within the reference bound, `Media` and `MediaSize` are analyzed TOGETHER —
+  and the count, which has nothing to report, gets no line;
+- beyond it, the verdict carries the `MediaCount` block ALONE: no media is
+  read, so neither `Media` nor `MediaSize` is asserted (see
+  [The number of media has its own line](#the-number-of-media-has-its-own-line)).
+
+A discarded media (`Ambiguous` or `Missing`, on `Media` or `MediaSize`) never
+prevents the creation: the node is born with the empty slot, repairable in the
+editor.
 
 **The size of the media is an aspect of its own.** The weight of a media is a
 fact independent of its presence, of its format and of the story's structure,
@@ -952,6 +961,14 @@ One finding per aspect still holds: when the retained media block together,
 that is what the `MediaSize` line says (a media also left out for its own size
 shows once the folder is lightened and analyzed again).
 
+**So is their number.** How many media a manifest references is read off the
+manifest alone, and says nothing against the structure that references them:
+a manifest over its reference bound blocks on `MediaCount × Blocking`, whose
+copy names the number — never on `Structure × Blocking`, which keeps meaning
+that the manifest itself has to be corrected. The rule, shared with the
+structured archive, and the reasons for it:
+[The number of media has its own line](#the-number-of-media-has-its-own-line).
+
 State derivation (folder flow — extends the shared derivation without changing
 the `.rustory` one): any `Blocking` → `Unusable` → nothing is created (the
 `blocked` verdict is never persisted); else any `Missing` → quality `Partial` →
@@ -960,9 +977,11 @@ else any `Ambiguous` → quality `Partial` → `needs_review`; else `Clean` →
 `recognized` (no report, no marker).
 
 Named bounds (anti-DoS, tested): `MAX_MANIFEST_BYTES` = 1 MiB;
-`MAX_FOLDER_MEDIA_FILES` = 64 referenced media; per-media bound =
-`MAX_FOLDER_MEDIA_BYTES`, 32 MiB — the node-media store's local-attach ceiling
-(`MAX_MEDIA_BYTES`, the bound of a media added by hand in the editor,
+`MAX_FOLDER_MEDIA_FILES` = 64 DISTINCT referenced media, inclusive (a file
+referenced by several nodes counts once; crossing it is the `MediaCount`
+finding, whose copy names the number — `64 fichiers différents`); per-media
+bound = `MAX_FOLDER_MEDIA_BYTES`, 32 MiB — the node-media store's local-attach
+ceiling (`MAX_MEDIA_BYTES`, the bound of a media added by hand in the editor,
 deliberately NOT the wider one of a story archive below; the domain names the
 bound for the verdict and its copy, and the equality with the store's ceiling
 is asserted at compile time); `MAX_FOLDER_TOTAL_MEDIA_BYTES` = 256 MiB,
@@ -1016,16 +1035,18 @@ failure leaves the previous library state intact, media files compensated).
 The community `.zip` pack (a `story.json` stage/action graph plus an
 `assets/` directory) is the creation entry point for the files users actually
 hold. It rides the folder flow's analysis, findings and commit discipline —
-the SAME media walk decides what each probe means — on its own aspect set:
-`Envelope`, `Title`, `Structure`, `Media` and `MediaSize` (the pack format
-declares no format version, so `FormatVersion` is never asserted). Only the
-bounds below are its own, and for each of them ONE constant governs the
-analysis verdict, the promotion and the copy that names it, so the three can
-never disagree.
+the SAME media judgement counts the references, then decides what each probe
+means — on its own aspect set: `Envelope`, `Title`, `Structure`, `Media` and
+`MediaSize` (the pack format declares no format version, so `FormatVersion` is
+never asserted), with the single `MediaCount` block in place of the last two
+when the descriptor references more media than its bound. Only the bounds
+below are its own, and for each of them ONE constant governs the analysis
+verdict, the promotion and the copy that names it, so the three can never
+disagree.
 
 | Bound | Value | Why |
 | --- | --- | --- |
-| Distinct referenced media | 8192 | A real pack carries one image + one sound per stage node — hundreds to a few thousand. An anti-runaway guard, sized for real packs. |
+| Distinct referenced media | 8192, inclusive | A real pack carries one image + one sound per stage node — hundreds to a few thousand. An anti-runaway guard, sized for real packs. Crossing it blocks on `MediaCount × Blocking`, with the number as the stated reason, without a single entry read (see [The number of media has its own line](#the-number-of-media-has-its-own-line)). |
 | Aggregate referenced media bytes | 32 GiB, inclusive | A COMPLETE audio collection (a whole podcast series, a long narrated collection) exceeds a few gigabytes while every single media stays well under the per-file bound. ZIP64 carries such an archive; the user should not have to split the collection or lower its audio quality to import it. Only REFERENCED media count, and a media referenced twice counts once. |
 | One media file | 128 MiB, inclusive | A MEMORY guard: every reader loads a media whole. See "One media, one bound" below. |
 | Archive entries | 32 768 | Bounds the enumeration of a hostile or runaway archive. |
@@ -1150,20 +1171,85 @@ invented at read time, and that line of an older story's report says exactly
 what it said. (Read by a version older than the aspect, a newer summary
 degrades to an empty report — the marker still shows from the state column.)
 
-STILL GENERIC — bounds that are not media-size reasons, and whose refusal
-does not name them: a descriptor (or a manifest) over its byte bound and an
-archive over its entry count block on `Envelope` (`… ne contient pas de
-descripteur story.json lisible …`); more distinct referenced media than the
-reference bound block on `Structure`. For an archive these are anti-runaway
-guards honest content does not reach (8192 media, 32 768 entries, a 4 MiB
-descriptor).
+#### The number of media has its own line
 
-KNOWN ROUGH EDGE: the FOLDER's reference bound is 64 media, which an honest
-long story can reach (33 nodes with a picture and a sound each). It still
-reads `La structure du manifest est incomplète ou incohérente.` — a COUNT
-reason worded as a structure one. It is not a size reason and `MediaSize`
-does not cover it (no media is read once the count is exceeded); naming it is
-a separate change.
+How the finding matrix carries a COUNT reason, for the same two flows. A
+source that references more DISTINCT media than its reference bound
+(`MAX_FOLDER_MEDIA_FILES` = 64 for a folder, `MAX_ARCHIVE_MEDIA_FILES` = 8192
+for an archive) is never read: the application is handed an empty list to
+probe, and the verdict blocks. For an archive the bound is an anti-runaway
+guard honest content does not reach; for a folder an honest long story reaches
+it (33 nodes with a picture and a sound each are 66 files). So the refusal has
+to say what it is — the number allowed, and what to do — instead of `La
+structure du manifest est incomplète ou incohérente.`, the copy of a structure
+that is in fact sound.
+
+| Candidate | Verdict |
+| --- | --- |
+| Keep `Structure × Blocking` and reword its copy | Rejected. One pair has ONE copy within a flow, so the structure line would have to list the count among its causes ("incomplete, incoherent, or too many media") — the "one cause among others" the size line was created to end — and it would still read `blocage réel` on a structure that has nothing to correct. |
+| `MediaSize × Blocking`, emitted without a `Media` finding | Rejected. It is not a size: the verdict is reached by counting references, without measuring a byte, and `MediaSize` is never asserted for media that were not read. One pair, one copy: `MediaSize × Blocking` already says "too heavy together (268 Mo)", so a second meaning would need a copy chosen by which sibling findings are present, or one that says "too many or too heavy". And the rule the guards enforce — `Media` and `MediaSize` together or not at all — would gain an exception exactly where it protects: a size line standing without the media line it is judged with. |
+| A new ASPECT, `MediaCount` | Retained. How many media a source references is a part of the input of its own: read off the manifest or the descriptor alone, independent of the presence, of the format and of the weight of the media, and of the structure that references them. Its own line gives the count its own copy, bound and gesture, and leaves `Structure × Blocking` its exact meaning. |
+
+**`MediaCount` is the line of a bound that is CROSSED.** It is emitted only
+as `Blocking`, and only by the two flows that have a reference bound:
+
+- **Beyond the bound**, the verdict carries the `MediaCount` block and NEITHER
+  `Media` NOR `MediaSize`: no media was read, so nothing is said of their
+  presence, of their format or of their size — no finding asserts work that
+  was not done. Every other aspect is judged for what it is: the review shows
+  ONE `blocage réel` chip, on the count line, and the structure under `Ce que
+  Rustory a reconnu`. The count hides nothing either: an invalid title or a
+  broken structure still blocks on its own line, in the same pass.
+- **Within the bound** (inclusive), the count has NO line — the media are
+  read and `Media` and `MediaSize` say what they found. The size has a
+  `Recognized` cell because it has a durable middle state to be read against
+  (a media left out, kept in the stored report); the count has none: either
+  it blocks and nothing is created, or the story is created exactly as if the
+  bound did not exist. A `Recognized` count line could never read otherwise
+  in a stored report (a blocked verdict is never persisted): it would add a
+  code to every stored summary, and an empty report on a downgrade, to state
+  a limit the user did not meet.
+- **An unlisted folder format** is not counted at all: its references are
+  never evaluated, so its verdict blocks on `FormatVersion` and neither the
+  count nor the structure is blamed for them.
+
+What the choice costs and what it leaves untouched:
+
+- **Creatable verdicts and stored summaries: nothing changes.** A creatable
+  folder verdict keeps its six aspects, an archive one its five, and
+  `story_local_imports.findings_summary` is byte-identical to before: no
+  summary Rustory stores carries the `mediaCount` code, since the aspect only
+  ever blocks. Nothing to migrate, nothing to recognize at read time, and a
+  downgrade reads today's summaries exactly as it read yesterday's.
+- **`.rustory`, RSS and web flows: nothing changes.** They never emit the
+  aspect (a negative test locks it for the `.rustory` flow); their message
+  tables only gain figure-less defensive copies, so a foreign or forged pair
+  stays renderable without naming a bound that is not theirs.
+- **The TypeScript guards mirror the rule.** On a folder or an archive
+  verdict `mediaCount` is accepted only as `blocking`, and only without
+  `media` and `mediaSize`; a creatable verdict never carries it. A verdict
+  that says "too many to be read" AND words the media is refused as a drift.
+- **The message stays Rust-authoritative**, the number spelled in digits
+  from the very constant the analysis applies. The wire finding keeps its
+  `{ aspect, category, message }` shape (`aspect: "mediaCount"`).
+- **Each flow names ITS bound and ITS gesture.** A folder: `… dépassent le
+  nombre autorisé (64 fichiers différents). Réduis le nombre de médias
+  référencés par le manifest puis relance l'analyse ; tu pourras ajouter les
+  autres dans l'éditeur.` — the editor has no such bound, so the story the
+  user wanted is not lost. An archive: `… (8192 fichiers différents). Réduis
+  le nombre de médias de l'archive (par exemple en répartissant le pack sur
+  plusieurs archives) puis relance l'analyse.` — an archive story is sent
+  from its archive, so the gesture is on the pack, never in the editor.
+  `différents` says what is counted: a file referenced by several nodes
+  counts once.
+
+STILL GENERIC — bounds that are neither media-size nor media-count reasons,
+and whose refusal does not name them: a descriptor (or a manifest) over its
+byte bound and an archive over its entry count block on `Envelope` (`… ne
+contient pas de descripteur story.json lisible …`); a folder node text or
+label over its bound (the editor's own write bounds) blocks on `Structure`.
+The first two are anti-runaway guards honest content does not reach (32 768
+entries, a 4 MiB descriptor, a 1 MiB manifest).
 
 The `.rustory` artifact is unaffected: it stays a JSON document that embeds NO
 media (see its contract above), so a portable story WITH its images and sounds
