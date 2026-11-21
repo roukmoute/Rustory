@@ -320,26 +320,39 @@ fn a_story_with_choices_written_in_the_editor_is_sent_and_plays_by_its_options()
     assert_eq!(wire["details"]["source"], "story_pack");
     assert_eq!(wire["details"]["cause"], "option_without_destination");
     assert_eq!(wire["details"]["node"], tale.as_str());
-    set_option_link(&mut library.db, &id, &tale, 0, Some(left.as_str())).expect("link the option");
-    set_option_link(&mut library.db, &id, &tale, 1, Some(right.as_str())).expect("link the option");
-
-    // A node without a sound: the device would stay mute on it — refused
-    // with its reason, by node, the volume still untouched.
-    let err = send(&library, volume.path(), &id).expect_err("refused");
-    assert_eq!(err.code, AppErrorCode::DeviceWriteFailed);
-    let wire = serde_json::to_value(&err).expect("serialize");
-    assert_eq!(wire["details"]["cause"], "node_without_audio");
-    assert_eq!(wire["details"]["node"], tale.as_str());
     assert!(!volume.path().join(".content").exists(), "nothing written");
     assert_eq!(
         std::fs::read(volume.path().join(".pi")).expect(".pi"),
         OTHER_PACK,
         "the device index is untouched"
     );
+    set_option_link(&mut library.db, &id, &tale, 0, Some(left.as_str())).expect("link the option");
+    set_option_link(&mut library.db, &id, &tale, 1, Some(right.as_str())).expect("link the option");
+
+    // Every option now leads to a node. The tale has no sound yet: the
+    // story is sent all the same, the tale as a SILENT stage — no sound of
+    // its own in the index, its navigation intact.
+    let two_ways = |selected: i32| (0, 2, selected);
+    let sent = send(&library, volume.path(), &id).expect("send with a silent node");
+    assert_eq!(sent.pack_uuid, id);
+    assert_eq!((sent.image_count, sent.audio_count), (1, 3));
+    let (stages, option_lists, (_, audio_count)) = read_device_pack(&content, &md);
+    assert_eq!(audio_count, 3);
+    assert_eq!(option_lists, vec![1, 2, 3]);
+    assert_eq!(
+        stages[3],
+        DeviceStage {
+            image: -1,
+            audio: -1,
+            ok: two_ways(1),
+            home: two_ways(1),
+            controls: PLAYED,
+        }
+    );
     voice(&mut library, &id, &tale, "Le conte", 0.45);
 
-    // Every option leads to a node, every node has a sound: the story is
-    // written as a pack filed under its own id.
+    // The tale is given its sound and the story is sent again: its pack is
+    // REPLACED, filed under the story's own id.
     let sent = send(&library, volume.path(), &id).expect("send the story");
     assert_eq!(sent.pack_uuid, id);
     assert_eq!(sent.short_id, short_id);
@@ -351,7 +364,6 @@ fn a_story_with_choices_written_in_the_editor_is_sent_and_plays_by_its_options()
     // Two option lists: the two ways (offered by the crossroads AND by the
     // tale, which share them), then the tale alone.
     assert_eq!(option_lists, vec![1, 2, 3]);
-    let two_ways = |selected: i32| (0, 2, selected);
     assert_eq!(
         stages,
         vec![

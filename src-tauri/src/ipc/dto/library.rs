@@ -41,7 +41,7 @@ pub struct StoryCardDto {
     /// `.zip` (a structured-archive import — transcode + re-cipher for the
     /// target) or its structure lays out as a device pack (a web / RSS /
     /// editor story): without choices, every episode has an audio; with
-    /// choices, every option leads to a node and every node has an audio.
+    /// choices, every option leads to a node.
     /// Independent of `transferable` (the V1/V2 byte-copy round-trip).
     /// Skipped on the wire when `false` so a card without it keeps its
     /// minimal shape. The library overview projection is authoritative; a
@@ -124,8 +124,6 @@ pub enum SendBlockerDto {
     /// A story with choices: an option leads to no node (not linked yet,
     /// or its destination is gone).
     OptionWithoutDestination,
-    /// A story with choices: at least one node has no audio.
-    NodeWithoutAudio,
 }
 
 impl SendBlockerDto {
@@ -149,7 +147,6 @@ impl SendBlockerDto {
         match blocker {
             ChoiceLayoutBlocker::Structure(blocker) => Self::from_domain(*blocker),
             ChoiceLayoutBlocker::OptionWithoutDestination { .. } => Self::OptionWithoutDestination,
-            ChoiceLayoutBlocker::NodeWithoutAudio { .. } => Self::NodeWithoutAudio,
         }
     }
 }
@@ -281,19 +278,13 @@ mod tests {
             let dto = SendBlockerDto::from_domain(domain);
             assert_eq!(serde_json::to_value(dto).expect("serialize"), wire);
         }
-        // A story with choices: its own reasons, and the ones it shares.
+        // A story with choices: its own reason, and the ones it shares.
         for (domain, wire) in [
             (
                 ChoiceLayoutBlocker::OptionWithoutDestination {
                     node_id: "n1".into(),
                 },
                 "optionWithoutDestination",
-            ),
-            (
-                ChoiceLayoutBlocker::NodeWithoutAudio {
-                    node_id: "n1".into(),
-                },
-                "nodeWithoutAudio",
             ),
             (
                 ChoiceLayoutBlocker::Structure(StoryPackBlocker::Malformed),

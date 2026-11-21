@@ -3,8 +3,7 @@ use std::collections::HashSet;
 use tauri::AppHandle;
 
 use crate::domain::device::{
-    choice_layout, linear_episodes, menu_blocker, offers_choices, SilentNodes, StoryLayout,
-    StoryPackBlocker,
+    choice_layout, linear_episodes, menu_blocker, offers_choices, StoryLayout, StoryPackBlocker,
 };
 use crate::domain::shared::AppError;
 use crate::domain::story::CanonicalStructure;
@@ -249,10 +248,10 @@ pub(crate) struct PresentationFacts<'a> {
 /// structure that lays out as a device pack can (`domain::device::story_pack`)
 /// — WITHOUT choices, every episode has an audio and, for the menu layout,
 /// every spoken announcement exists; WITH choices, every option leads to a
-/// node and every node has an audio (the presentation does not apply: the
-/// options are the navigation). Anything else is blocked for the domain's
-/// reason (an unparsable structure counts as malformed) — the very verdict
-/// the send's plan reaches at the gesture.
+/// node (the presentation does not apply: the options are the navigation;
+/// a node without audio is sent as a silent stage). Anything else is
+/// blocked for the domain's reason (an unparsable structure counts as
+/// malformed) — the very verdict the send's plan reaches at the gesture.
 pub(crate) fn send_readiness(
     story_id: &str,
     structure: Option<&CanonicalStructure>,
@@ -264,11 +263,9 @@ pub(crate) fn send_readiness(
     }
     let blocker = match structure {
         // A story with choices: its own graph, read as the plan reads it.
-        Some(structure) if offers_choices(structure) => {
-            choice_layout(story_id, structure, SilentNodes::Refused)
-                .err()
-                .map(|blocker| SendBlockerDto::from_choice_layout(&blocker))
-        }
+        Some(structure) if offers_choices(structure) => choice_layout(story_id, structure)
+            .err()
+            .map(|blocker| SendBlockerDto::from_choice_layout(&blocker)),
         Some(structure) => linear_episodes(structure)
             .and_then(|episodes| match presentation.layout {
                 StoryLayout::Sequential => Ok(()),
@@ -905,7 +902,7 @@ mod tests {
     #[test]
     fn a_story_with_choices_is_sendable_by_its_own_graph() {
         let sequential = PresentationFacts::default();
-        // Every option leads to a node, every node has an audio → sendable.
+        // Every option leads to a node → sendable.
         let ready = choice_structure(&[
             ("n1", Some("a1"), &[Some("n2"), Some("n3")]),
             ("n2", Some("a2"), &[Some("n1")]),
@@ -927,11 +924,21 @@ mod tests {
             (true, None)
         );
 
-        // A node without audio → the device would stay mute on it.
+        // A node without audio is no reason: it is sent as a silent stage —
+        // unlike an episode, which blocks a story without choices.
         let mute = choice_structure(&[("n1", Some("a1"), &[Some("n2")]), ("n2", None, &[])]);
         assert_eq!(
             super::send_readiness(STORY_ID, Some(&mute), false, &sequential),
-            (false, Some(SendBlockerDto::NodeWithoutAudio))
+            (true, None)
+        );
+        let mute_episodes: CanonicalStructure = serde_json::from_str(&structure_json(&[
+            ("n1", Some("a1"), false),
+            ("n2", None, false),
+        ]))
+        .unwrap();
+        assert_eq!(
+            super::send_readiness(STORY_ID, Some(&mute_episodes), false, &sequential),
+            (false, Some(SendBlockerDto::MissingAudio))
         );
         // An option whose destination is gone → the graph comes first.
         let dangling = choice_structure(&[("n1", None, &[Some("ghost")])]);
@@ -1124,10 +1131,11 @@ mod tests {
                 Some(SendBlockerDto::OptionWithoutDestination),
                 Some("option_without_destination"),
             ),
+            // A node without audio: sendable, planned with a silent stage.
             (
                 &[("n1", Some("a1"), &[Some("n2")]), ("n2", None, &[])],
-                Some(SendBlockerDto::NodeWithoutAudio),
-                Some("node_without_audio"),
+                None,
+                None,
             ),
         ];
         for (nodes, blocker, cause) in cases {

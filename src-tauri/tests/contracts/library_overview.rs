@@ -97,7 +97,6 @@ fn library_overview_send_readiness_wire_shape() {
             SendBlockerDto::OptionWithoutDestination,
             "optionWithoutDestination",
         ),
-        (SendBlockerDto::NodeWithoutAudio, "nodeWithoutAudio"),
     ] {
         assert_eq!(serde_json::to_value(blocker).expect("serialize"), wire);
     }

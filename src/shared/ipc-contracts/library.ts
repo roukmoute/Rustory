@@ -34,8 +34,8 @@ export interface StoryCardDto {
    *  "Envoyer vers la Lunii" gesture: it retained its ORIGINAL source `.zip`
    *  (a structured-archive import) OR its structure lays out as a device
    *  pack (a web / RSS / editor story): without choices, every episode has
-   *  an audio; with choices, every option leads to a node and every node
-   *  has an audio. Independent of `transferable` (the V1/V2 round-trip).
+   *  an audio; with choices, every option leads to a node. Independent of
+   *  `transferable` (the V1/V2 round-trip).
    *  Absent (falsy) otherwise, so the shape is unchanged. */
   sendable?: boolean;
   /** WHY the story is not sendable, when it is not — the closed set behind
@@ -50,16 +50,15 @@ export interface StoryCardDto {
 }
 
 /** Mirror of `SendBlockerDto` (camelCase wire values). A story with choices
- *  is sent by its own graph: its two reasons are an option that leads to no
- *  node, and a node without audio. */
+ *  is sent by its own graph: its one reason of its own is an option that
+ *  leads to no node (a node without audio is sent as a silent stage). */
 export type SendBlocker =
   | "devicePack"
   | "empty"
   | "malformed"
   | "missingAudio"
   | "missingAnnouncements"
-  | "optionWithoutDestination"
-  | "nodeWithoutAudio";
+  | "optionWithoutDestination";
 
 const SEND_BLOCKERS: ReadonlySet<string> = new Set([
   "devicePack",
@@ -68,7 +67,6 @@ const SEND_BLOCKERS: ReadonlySet<string> = new Set([
   "missingAudio",
   "missingAnnouncements",
   "optionWithoutDestination",
-  "nodeWithoutAudio",
 ]);
 
 const CARD_IMPORT_STATES: ReadonlySet<string> = new Set([

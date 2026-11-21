@@ -100,7 +100,7 @@ describe("presentation guards", () => {
     expect(
       isStoryPresentationDto({
         ...PRESENTATION,
-        linearBlocker: { reason: "nodeWithoutAudio" },
+        linearBlocker: { reason: "optionWithoutDestination" },
       }),
     ).toBe(false);
     expect(

@@ -180,7 +180,6 @@ describe("isLibraryOverviewDto guard", () => {
       "missingAudio",
       "missingAnnouncements",
       "optionWithoutDestination",
-      "nodeWithoutAudio",
     ]) {
       expect(
         isLibraryOverviewDto({
@@ -194,12 +193,15 @@ describe("isLibraryOverviewDto guard", () => {
       }),
     ).toBe(false);
     // "Having choices" is no reason on a card any more: a story with
-    // choices is sent by its own graph.
-    expect(
-      isLibraryOverviewDto({
-        stories: [{ id: "a", title: "A", sendBlocker: "branching" }],
-      }),
-    ).toBe(false);
+    // choices is sent by its own graph — and a node without audio goes with
+    // it, as a silent stage.
+    for (const former of ["branching", "nodeWithoutAudio"]) {
+      expect(
+        isLibraryOverviewDto({
+          stories: [{ id: "a", title: "A", sendBlocker: former }],
+        }),
+      ).toBe(false);
+    }
     expect(
       isLibraryOverviewDto({
         stories: [{ id: "a", title: "A", sendable: "yes" }],

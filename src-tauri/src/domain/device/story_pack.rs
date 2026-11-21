@@ -59,9 +59,9 @@
 //!    Nodes that offer the same options share one action node. A menu pack
 //!    exported by step 3 and read back as a story lays out as that very
 //!    graph again. The device send and the archive export write this SAME
-//!    graph; they differ on one question only — may a stage be silent?
-//!    ([`SilentNodes`]: a device plays nothing else, an archive may carry a
-//!    picture alone).
+//!    graph, read once ([`choice_layout`]): a node without sound is a
+//!    silent stage in both — unlike an episode, which always needs its
+//!    audio.
 //!
 //! The pack UUID is the cover stage's uuid (see the send engine's
 //! `pack_entry_uuid`): the caller passes the STORY id, a canonical lowercase
@@ -530,25 +530,6 @@ pub enum ChoiceLayoutBlocker {
     /// its destination is not a node of the story. A wheel entry must be a
     /// stage, so the pack cannot carry it.
     OptionWithoutDestination { node_id: String },
-    /// Node `node_id` carries no sound, and the layout was asked to refuse
-    /// a silent stage ([`SilentNodes::Refused`]): the device has nothing to
-    /// play for it — the rule every episode follows
-    /// ([`StoryPackBlocker::MissingAudio`]).
-    NodeWithoutAudio { node_id: String },
-}
-
-/// What a layout does with a node WITHOUT SOUND in a story with choices.
-/// The graph is the same either way; the two gestures that write it only
-/// answer differently to "may a stage be silent?".
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SilentNodes {
-    /// Refused — the device send: a device plays nothing else, so a pack
-    /// Rustory lays out for one never holds a stage it would stay mute on.
-    Refused,
-    /// Carried as silent stages — the archive export: a pack stage may be a
-    /// picture alone (or nothing at all), and a story created from a pack
-    /// goes back out with exactly the stages it had.
-    Carried,
 }
 
 /// A story with choices read for the pack it lays out as: the pack identity
@@ -560,25 +541,19 @@ pub struct ChoiceLayout<'a> {
 }
 
 /// Read `structure` — a story with choices — for the pack it lays out as,
-/// or say why it does not. The ONE verdict the library card (pre-click) and
-/// the plan (at the gesture) share, so they can never disagree: the graph
-/// first (a usable structure, every option a destination, a pack identity),
-/// then — when `silent_nodes` refuses them — a sound on every node.
+/// or say why it does not. The ONE verdict the library card (pre-click),
+/// the send and the export (at the gesture) share, so they can never
+/// disagree: a usable structure, every option a destination, a pack
+/// identity. A node without sound is no reason: it is a silent stage, for a
+/// device as for an archive (a pack stage may be a picture alone, and a
+/// story created from a pack goes out with exactly the stages it had).
 pub fn choice_layout<'a>(
     story_id: &str,
     structure: &'a CanonicalStructure,
-    silent_nodes: SilentNodes,
 ) -> Result<ChoiceLayout<'a>, ChoiceLayoutBlocker> {
     let nodes = choice_nodes(structure)?;
     let pack_uuid = choice_pack_uuid(story_id, &nodes)
         .ok_or(ChoiceLayoutBlocker::Structure(StoryPackBlocker::Malformed))?;
-    if silent_nodes == SilentNodes::Refused {
-        if let Some(silent) = nodes.iter().find(|node| node.audio_asset_id.is_none()) {
-            return Err(ChoiceLayoutBlocker::NodeWithoutAudio {
-                node_id: silent.node_id.to_string(),
-            });
-        }
-    }
     Ok(ChoiceLayout { pack_uuid, nodes })
 }
 
@@ -1628,10 +1603,10 @@ mod tests {
     }
 
     #[test]
-    fn the_layout_reading_is_one_verdict_the_graph_first_then_the_sounds() {
+    fn the_layout_reading_is_one_verdict_shared_by_the_card_the_send_and_the_export() {
         const STORY: &str = "0197a5d0-1111-7222-8333-444455556666";
-        // Every option a destination, every node a sound: the pack identity
-        // and the nodes, the start node first.
+        // Every option a destination: the pack identity and the nodes, the
+        // start node first.
         let ready = structure(
             "n2",
             vec![
@@ -1640,21 +1615,19 @@ mod tests {
                 node("n3", Some("a3"), Some("i3")),
             ],
         );
-        for silent_nodes in [SilentNodes::Refused, SilentNodes::Carried] {
-            let layout = choice_layout(STORY, &ready, silent_nodes).expect("laid out");
-            assert_eq!(layout.pack_uuid, STORY);
-            assert_eq!(
-                layout
-                    .nodes
-                    .iter()
-                    .map(|node| node.node_id)
-                    .collect::<Vec<_>>(),
-                vec!["n2", "n1", "n3"]
-            );
-        }
+        let layout = choice_layout(STORY, &ready).expect("laid out");
+        assert_eq!(layout.pack_uuid, STORY);
+        assert_eq!(
+            layout
+                .nodes
+                .iter()
+                .map(|node| node.node_id)
+                .collect::<Vec<_>>(),
+            vec!["n2", "n1", "n3"]
+        );
 
-        // A node without sound: refused for a device (the FIRST one, in
-        // layout order), carried for an archive.
+        // A node without sound is no reason: it is laid out as it is — a
+        // picture alone, or nothing at all.
         let silent = structure(
             "n1",
             vec![
@@ -1663,21 +1636,15 @@ mod tests {
                 node("n3", Some(""), None),
             ],
         );
-        assert_eq!(
-            choice_layout(STORY, &silent, SilentNodes::Refused),
-            Err(ChoiceLayoutBlocker::NodeWithoutAudio {
-                node_id: "n2".into()
-            })
-        );
-        let carried = choice_layout(STORY, &silent, SilentNodes::Carried).expect("carried");
+        let carried = choice_layout(STORY, &silent).expect("laid out");
         assert_eq!(carried.nodes[1].audio_asset_id, None);
+        assert_eq!(carried.nodes[1].image_asset_id, Some("i2"));
         assert_eq!(
             carried.nodes[2].audio_asset_id, None,
             "a blank asset id is no sound"
         );
 
-        // The graph comes first: an option that leads nowhere is the reason,
-        // whatever the sounds — and whatever the policy.
+        // An option that leads nowhere is the reason, whatever the sounds.
         let unlinked = structure(
             "n1",
             vec![
@@ -1685,15 +1652,13 @@ mod tests {
                 offering(node("n1", None, None), &["ghost"]),
             ],
         );
-        for silent_nodes in [SilentNodes::Refused, SilentNodes::Carried] {
-            assert_eq!(
-                choice_layout(STORY, &unlinked, silent_nodes),
-                Err(ChoiceLayoutBlocker::OptionWithoutDestination {
-                    node_id: "n1".into()
-                })
-            );
-        }
-        // …then the identity: the story id cannot name two stages.
+        assert_eq!(
+            choice_layout(STORY, &unlinked),
+            Err(ChoiceLayoutBlocker::OptionWithoutDestination {
+                node_id: "n1".into()
+            })
+        );
+        // The identity: the story id cannot name two stages.
         let clash = structure(
             "n1",
             vec![
@@ -1701,12 +1666,10 @@ mod tests {
                 node(STORY, None, None),
             ],
         );
-        for silent_nodes in [SilentNodes::Refused, SilentNodes::Carried] {
-            assert_eq!(
-                choice_layout(STORY, &clash, silent_nodes),
-                Err(ChoiceLayoutBlocker::Structure(StoryPackBlocker::Malformed))
-            );
-        }
+        assert_eq!(
+            choice_layout(STORY, &clash),
+            Err(ChoiceLayoutBlocker::Structure(StoryPackBlocker::Malformed))
+        );
         // A story created from a pack keeps that pack's identity.
         let from_pack = structure(
             PACK,
@@ -1716,7 +1679,7 @@ mod tests {
             ],
         );
         assert_eq!(
-            choice_layout(STORY, &from_pack, SilentNodes::Refused)
+            choice_layout(STORY, &from_pack)
                 .expect("laid out")
                 .pack_uuid,
             PACK
