@@ -4893,6 +4893,94 @@ describe("<LibraryRoute />", () => {
     );
   });
 
+  it("re-reads the comparison once a send settled: the panel stops announcing an addition", async () => {
+    const user = userEvent.setup();
+    mockGet.mockResolvedValueOnce({
+      stories: [{ id: "s1", title: "Le soleil", sendable: true }],
+    });
+    const sendableV3 = {
+      ...supportedV3,
+      supportedOperations: {
+        ...supportedV3.supportedOperations,
+        sendArchive: true,
+      },
+    };
+    mockDevice.mockResolvedValue(sendableV3);
+    // The pack is ALREADY on the device, but nothing in the library ties it
+    // to the story yet (an archive imported again, a pack sent by another
+    // library): the send REPLACES it and records the link. The device index
+    // is untouched, so the device identifier — the key the comparison is
+    // read under — does not move. The comparison must be read again all the
+    // same, or the panel would keep announcing an addition beside its own
+    // send report.
+    const sentPackUuid = "abababab-abab-abab-abab-ababfac5562d";
+    const listedPack = {
+      ...readableTwo.stories[0],
+      uuid: sentPackUuid,
+      shortId: "FAC5562D",
+    };
+    mockDeviceLibrary.mockImplementation(() =>
+      Promise.resolve({
+        ...readableTwo,
+        stories: [
+          readableTwo.stories[1],
+          mockSendPack.mock.calls.length > 0
+            ? {
+                ...listedPack,
+                alreadyImported: true,
+                localStoryId: "s1",
+                title: "Le soleil",
+                titleSource: "unofficial",
+              }
+            : listedPack,
+        ],
+      }),
+    );
+    mockStoryValidation.mockResolvedValue(presumedTransferableValidation);
+    // The comparison as Rust composes it, before then after the link.
+    mockTransferPreview.mockImplementation(() =>
+      Promise.resolve(
+        mockSendPack.mock.calls.length > 0
+          ? { ...readyNew, onDevice: true, unchangedCount: 1 }
+          : readyNew,
+      ),
+    );
+    mockSendPack.mockResolvedValue({
+      packUuid: sentPackUuid,
+      imageCount: 2,
+      audioCount: 3,
+    });
+    renderLibrary();
+
+    await user.click(await screen.findByRole("button", { name: /le soleil/i }));
+    const panel = openDetails();
+    const comparison = within(panel).getByRole("region", {
+      name: /comparaison avant envoi/i,
+    });
+    await waitFor(() =>
+      expect(comparison).toHaveTextContent(/nouvelle sur l'appareil/i),
+    );
+    const send = within(panel).getByRole("button", {
+      name: /envoyer vers la lunii/i,
+    });
+    await waitFor(() =>
+      expect(send).not.toHaveAttribute("aria-disabled", "true"),
+    );
+    await user.click(send);
+
+    expect(
+      await within(panel).findByText("Pack envoyé sur l'appareil."),
+    ).toBeInTheDocument();
+    // The send report and the comparison now agree.
+    await waitFor(() =>
+      expect(comparison).toHaveTextContent(
+        /déjà présente sur l'appareil — un envoi la remplacerait/i,
+      ),
+    );
+    expect(comparison).not.toHaveTextContent(/serait ajoutée/i);
+    expect(comparison).toHaveTextContent(/1 autre histoire.*restera inchangée/i);
+  });
+
   it("keeps the send CTA disabled even when the comparison is ready (AC2)", async () => {
     const user = userEvent.setup();
     mockGet.mockResolvedValueOnce({

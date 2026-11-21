@@ -44,9 +44,10 @@ export function invalidateDeviceLibraryCache(): void {
   for (const listener of invalidationListeners) listener();
 }
 
-/** True for the Rust `device_changed` refusal of a library read (the
+/** True for the Rust `device_changed` refusal of a device read — the
+ *  inventory or the pre-send comparison, which shares its pipeline (the
  *  requested identifier no longer matches the live device). */
-function isDeviceChangedError(error: AppError): boolean {
+export function isDeviceChangedError(error: AppError): boolean {
   if (typeof error.details !== "object" || error.details === null) return false;
   return (
     (error.details as Record<string, unknown>).source === "device_changed"

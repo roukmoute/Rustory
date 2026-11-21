@@ -163,6 +163,144 @@ describe("useTransferPreview", () => {
     });
   });
 
+  /** The Rust refusal of a read keyed on an identifier the live device no
+   *  longer has (the device-library read's identity guard). */
+  const deviceChangedRefusal = {
+    code: "DEVICE_SCAN_FAILED",
+    message:
+      "Lecture de la bibliothèque appareil indisponible: l'appareil connecté a changé.",
+    userAction:
+      "Rebranche l'appareil souhaité puis réessaie la lecture de la bibliothèque.",
+    details: { source: "device_changed" },
+  };
+
+  it("refreshAfterDeviceWrite() re-reads the pair when the write left the identifier as it was", async () => {
+    // A send that REPLACED a pack: `.pi` is untouched, the identifier holds,
+    // and the re-read answers directly — the verdict follows the send.
+    vi.mocked(readTransferPreview)
+      .mockReturnValueOnce(mockHandle(Promise.resolve(ready(false, 2))) as never)
+      .mockReturnValueOnce(mockHandle(Promise.resolve(ready(true, 1))) as never);
+    const { result } = renderHook(() => useTransferPreview(STORY, ID_A));
+    await waitFor(() => expect(result.current.state.kind).toBe("ready"));
+
+    act(() => {
+      result.current.refreshAfterDeviceWrite();
+    });
+    // Never the pre-send verdict while the re-read is in flight.
+    expect(result.current.state.kind).toBe("loading");
+    await waitFor(() => {
+      expect(
+        result.current.state.kind === "ready" && result.current.state.onDevice,
+      ).toBe(true);
+    });
+    expect(vi.mocked(readTransferPreview).mock.lastCall?.[0]).toEqual({
+      storyId: STORY,
+      deviceIdentifier: ID_A,
+    });
+  });
+
+  it("stays calm on the device_changed refusal that follows a write, then re-reads on the fresh identifier", async () => {
+    // A send that ADDED a pack: the content-derived identifier changed, so
+    // the re-read keyed on the pre-send one is refused. Expected — no alert
+    // about the user's own successful send, no stale verdict either.
+    vi.mocked(readTransferPreview)
+      .mockReturnValueOnce(mockHandle(Promise.resolve(ready(false, 2))) as never)
+      // Rejected lazily: a rejection created before its read would sit
+      // unhandled until the hook asks for it.
+      .mockImplementationOnce(
+        () => mockHandle(Promise.reject(deviceChangedRefusal)) as never,
+      )
+      .mockReturnValueOnce(
+        mockHandle(
+          Promise.resolve({ ...ready(true, 2), deviceIdentifier: ID_B }),
+        ) as never,
+      );
+    const { result, rerender } = renderHook(
+      ({ id }) => useTransferPreview(STORY, id),
+      { initialProps: { id: ID_A } },
+    );
+    await waitFor(() => expect(result.current.state.kind).toBe("ready"));
+
+    act(() => {
+      result.current.refreshAfterDeviceWrite();
+    });
+    await waitFor(() =>
+      expect(vi.mocked(readTransferPreview)).toHaveBeenCalledTimes(2),
+    );
+    // Let the refusal settle: the comparison keeps its in-flight state.
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(result.current.state.kind).toBe("loading");
+
+    // The detection delivers the post-send identifier: the hook re-reads by
+    // itself and the verdict now says the story is on the device.
+    rerender({ id: ID_B });
+    await waitFor(() => {
+      expect(
+        result.current.state.kind === "ready" && result.current.state.onDevice,
+      ).toBe(true);
+    });
+    expect(vi.mocked(readTransferPreview).mock.lastCall?.[0]).toEqual({
+      storyId: STORY,
+      deviceIdentifier: ID_B,
+    });
+  });
+
+  it("refreshAfterDeviceWrite() still surfaces any other failure", async () => {
+    vi.mocked(readTransferPreview)
+      .mockReturnValueOnce(mockHandle(Promise.resolve(ready(false, 2))) as never)
+      .mockImplementationOnce(
+        () =>
+          mockHandle(
+            Promise.reject({
+              code: "LOCAL_STORAGE_UNAVAILABLE",
+              message:
+                "Comparaison indisponible: vérifie le disque local et réessaie.",
+              userAction: "Réessaie.",
+              details: { source: "transfer_preview", stage: "select_pack_uuid" },
+            }),
+          ) as never,
+      );
+    const { result } = renderHook(() => useTransferPreview(STORY, ID_A));
+    await waitFor(() => expect(result.current.state.kind).toBe("ready"));
+
+    act(() => {
+      result.current.refreshAfterDeviceWrite();
+    });
+    await waitFor(() => expect(result.current.state.kind).toBe("error"));
+    if (result.current.state.kind === "error") {
+      expect(result.current.state.error.code).toBe("LOCAL_STORAGE_UNAVAILABLE");
+    }
+  });
+
+  it("refresh() keeps surfacing a device_changed refusal — only the re-read after a write expects one", async () => {
+    // The user's own retry: nothing announces a fresh identifier, so the
+    // refusal is the honest answer.
+    vi.mocked(readTransferPreview)
+      .mockReturnValueOnce(mockHandle(Promise.resolve(ready(false, 2))) as never)
+      .mockImplementationOnce(
+        () => mockHandle(Promise.reject(deviceChangedRefusal)) as never,
+      );
+    const { result } = renderHook(() => useTransferPreview(STORY, ID_A));
+    await waitFor(() => expect(result.current.state.kind).toBe("ready"));
+
+    act(() => {
+      result.current.refresh();
+    });
+    await waitFor(() => expect(result.current.state.kind).toBe("error"));
+  });
+
+  it("refreshAfterDeviceWrite() issues no IPC without a comparable pair", () => {
+    const { result } = renderHook(() => useTransferPreview(null, ID_A));
+    act(() => {
+      result.current.refreshAfterDeviceWrite();
+    });
+    expect(result.current.state.kind).toBe("idle");
+    expect(readTransferPreview).not.toHaveBeenCalled();
+  });
+
   it("re-reads when the device identifier changes (another Lunii plugged)", async () => {
     vi.mocked(readTransferPreview).mockReturnValue(
       mockHandle(Promise.resolve(ready(false, 1))) as never,

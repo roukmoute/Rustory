@@ -7,6 +7,8 @@ import {
 import { toAppError, type AppError } from "../../../shared/errors/app-error";
 import type { SupportedFamilyDto } from "../../../shared/ipc-contracts/device";
 
+import { isDeviceChangedError } from "./use-device-library";
+
 export type TransferPreviewState =
   | { kind: "idle" }
   | { kind: "loading" }
@@ -52,6 +54,11 @@ export interface UseTransferPreview {
   state: TransferPreviewState;
   /** User-triggered re-read. No-op when there is no comparable pair. */
   refresh: () => void;
+  /** Re-read once THIS app has written to the device (a send settled): the
+   *  verdict shown was composed before that write. Same read as `refresh`,
+   *  except that a `device_changed` refusal is expected rather than an
+   *  error — see the guardrails. No-op when there is no comparable pair. */
+  refreshAfterDeviceWrite: () => void;
 }
 
 /**
@@ -75,6 +82,16 @@ export interface UseTransferPreview {
  *   longer there) surfaces a recoverable "device changed" error with a retry —
  *   never an `idle` that the route would mislabel "plug a Lunii", and never a
  *   touch on the local library. `idle` is reserved for "no comparable pair".
+ * - a send changes what the comparison says, so the route re-reads it once
+ *   the send settled (`refreshAfterDeviceWrite`). The device identifier is
+ *   derived from the `.pi` CONTENT: a send that ADDED a pack changed it, and
+ *   Rust honestly refuses that re-read (still keyed on the pre-send
+ *   identifier) with `device_changed`. That refusal is the expected,
+ *   self-healing case — the detection delivers the fresh identifier and this
+ *   id-keyed hook re-reads by itself — so the comparison stays in its calm
+ *   `loading` state instead of alerting the user about their own successful
+ *   send. A send that REPLACED a pack leaves the identifier as it was: the
+ *   re-read then answers directly.
  * - StrictMode-safe active-call guard + cancel() on unmount.
  */
 export function useTransferPreview(
@@ -89,7 +106,7 @@ export function useTransferPreview(
   const mountedRef = useRef(true);
   const cancelRef = useRef<(() => void) | null>(null);
 
-  const load = useCallback((sid: string, did: string) => {
+  const load = useCallback((sid: string, did: string, afterDeviceWrite = false) => {
     const callId = ++activeCallRef.current;
     setState({ kind: "loading" });
     if (cancelRef.current) {
@@ -145,14 +162,24 @@ export function useTransferPreview(
         // toast, never a touch on the local library.
         if (err instanceof ReadTransferPreviewContractDriftError) {
           setState({ kind: "error", error: DRIFT_ERROR });
-        } else {
-          setState({ kind: "error", error: toAppError(err) });
+          return;
         }
+        const error = toAppError(err);
+        // The app's own write changed the device's content-derived
+        // identifier: this pair is stale and the fresh one is on its way
+        // (see the guardrails). Stay in `loading` — the id-keyed re-read
+        // settles it.
+        if (afterDeviceWrite && isDeviceChangedError(error)) return;
+        setState({ kind: "error", error });
       });
   }, [deviceFamily]);
 
   const refresh = useCallback(() => {
     if (storyId && deviceIdentifier) load(storyId, deviceIdentifier);
+  }, [storyId, deviceIdentifier, load]);
+
+  const refreshAfterDeviceWrite = useCallback(() => {
+    if (storyId && deviceIdentifier) load(storyId, deviceIdentifier, true);
   }, [storyId, deviceIdentifier, load]);
 
   useEffect(() => {
@@ -178,5 +205,5 @@ export function useTransferPreview(
     };
   }, [storyId, deviceIdentifier, load]);
 
-  return { state, refresh };
+  return { state, refresh, refreshAfterDeviceWrite };
 }

@@ -619,10 +619,16 @@ export function LibraryRoute(): React.JSX.Element {
   // `.pi` changes the content-derived device identifier, and the library hook
   // is keyed on it — the fresh identifier re-reads by itself; the direct
   // refresh below covers the identifier-unchanged case (idempotent re-send).
+  // The comparison follows the same two paths: its verdict was composed
+  // BEFORE the send, and a send that replaced a pack the library had not
+  // tied to the story yet leaves the identifier as it was — without this
+  // re-read the panel would keep announcing an addition beside its own
+  // "envoyée sur la Lunii".
   const devicePackSend = useDevicePackSend({
     onSent: () => {
       device.refresh();
       deviceLibrary.refresh();
+      transferPreview.refreshAfterDeviceWrite();
     },
   });
   // Two durable facts of the selected card, read straight from the overview (no
