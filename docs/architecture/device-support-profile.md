@@ -1264,19 +1264,63 @@ reads (`Exporter en archive`, see
 so it can be handed to another Rustory library or to another tool that reads
 the community pack format.
 
-**The archive is the pack the device send would write.** One source
-selection, shared with the single send gesture:
+**The archive is the pack the device send writes.** One source selection,
+shared with the single send gesture:
 
 - a story that RETAINED its source archive is exported from that archive (its
   own descriptor, its own assets);
 - any other story (created from a web page, an RSS feed, a folder or the
   editor) has its pack SYNTHESIZED from its structure and its node media — the
-  sequential or the menu layout its presentation selects.
+  sequential or the menu layout its presentation selects, or the layout of
+  its own graph when the story has choices (below).
 
-The export therefore refuses exactly what the send refuses, for the same
-reasons (worded for the export, see the refusal table below). It involves **no
-device**: the pack is never ciphered, nothing is read from or written to a
-device, and no device needs to be connected.
+The export therefore refuses what the send refuses, for the same reasons
+(worded for the export, see the refusal table below) — with ONE layout the
+send does not have yet: **a story with choices is exported**, where the send
+still refuses it (`branching`). It involves **no device**: the pack is never
+ciphered, nothing is read from or written to a device, and no device needs to
+be connected.
+
+**A story with choices is laid out by its own graph.** A story has choices as
+soon as ONE node offers an option; its presentation (`À la suite` /
+`Au choix`) then does not apply — the options ARE the navigation. The layout
+is the exact inverse of the reading the creation flow makes of a pack (see
+"Structured archive v1 format contract": every stage a node, the targets of a
+stage's OK action its options), so a story created from a pack whose archive
+was NOT retained — a retention that failed, a library moved without its
+`source-archives/` folder — goes back out as the pack it came from:
+
+| The story | The pack |
+| --- | --- |
+| Every node, the start node first, the others in their node order | One stage each, carrying the node's stored picture and sound. Either may be absent: unlike an episode, a node needs no sound (a pack stage may be a picture alone). |
+| The options of a node, in their order | The action node its OK transition enters: ONE option, its destination comes next; SEVERAL, they are the entries of a wheel. Nodes that offer the same options share one action node. |
+| The start node | The cover (`squareOne`): wheel + OK, no home. |
+| A node offered beside at least one other (an entry of a wheel) | Waits for the listener: wheel + OK + home, no autoplay. |
+| Every other node | Plays through: autoplay, pause + home. A node without options ends the pack. |
+
+What the story does not carry is settled by the conventions of the tools
+that write the format — the same ones the menu layout follows:
+
+- **Where a wheel is entered.** On its first entry — except when the listener
+  CAME THROUGH one of its entries (the first walk from the start node,
+  breadth-first, options in order): the wheel is then entered on that entry.
+  A story that returns to the wheel it was picked on lands on its own title,
+  not on the first one.
+- **Where HOME leads.** Back to the last wheel the listener chose from on the
+  way to the node, on the entry chosen — from a story, the wheel it was picked
+  on; from a wheel entry, the wheel one level up. With no wheel above, HOME is
+  the device's own "back to the pack selection" (no home transition).
+- **The pack identity.** The start node's own id when it is a well-formed
+  UUID — a story created from a pack is exported under that pack's identity,
+  exactly as its retained archive would be — else the story id, like the
+  other layouts.
+
+A menu pack written by the menu layout and read back as a story lays out as
+that very graph again, with one difference: its question stage, played with
+every control off, comes back as a node that plays through (pause and home
+on). What does NOT travel in an archive, whatever the layout: the narrative
+text of the nodes, and the label typed for an option (an importing library
+labels each option after the node it leads to).
 
 | Entry | Content |
 | --- | --- |
@@ -1311,7 +1355,9 @@ side:
   shared under its new name), `description`, `nightModeAvailable`. Whatever
   else a retained descriptor carries (node names, positions, types) is
   preserved; a synthesized one names its stages (the story title for the
-  cover, the episode labels, `Question` and `Choix : <titre>` for a menu).
+  cover, the episode labels, `Question` and `Choix : <titre>` for a menu; for
+  a story with choices, each node's label, else the story title for the start
+  node and `Nœud N` for any other).
 - **The export is reproducible**: entry timestamps are pinned, so exporting
   the same story twice yields the same bytes.
 - **No media exceeds the per-media bound of the creation flow** (128 MiB,
@@ -1340,8 +1386,8 @@ rules is outside what this contract can promise.
 | --- | --- |
 | The story has no episode | `story_pack` / `empty` |
 | The story's structure is unreadable | `story_pack` / `malformed` |
-| The story offers choices (not laid out by the synthesis) | `story_pack` / `branching` |
-| An episode has no audio | `story_pack` / `missing_audio` |
+| An episode has no audio (a story WITHOUT choices: every node is an episode) | `story_pack` / `missing_audio` |
+| A story with choices has an option that leads nowhere — not linked yet, or its destination is gone (`details.node`) | `story_pack` / `option_without_destination` |
 | The menu layout lacks a spoken announcement | `story_pack` / `missing_announcements` |
 | A device-copied pack (its content is the copied pack, not converted) | `story_pack` / `device_pack` |
 | A media or a spoken announcement the structure references is no longer backed by the library | `story_pack` / `asset_missing`, `announcement_missing` |
