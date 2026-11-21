@@ -151,6 +151,29 @@ const REVIEW_SIZE_BLOCKED: StructuredCreationStatus = {
   },
 };
 
+// The copy Rust sends when a manifest references more media than its bound
+// (the surface never words a number itself).
+const COUNT_BLOCKED =
+  "Les fichiers audio et image référencés dépassent le nombre autorisé (64 fichiers différents). Réduis le nombre de médias référencés par le manifest puis relance l'analyse ; tu pourras ajouter les autres dans l'éditeur.";
+
+// The REAL wire of a folder over its reference bound: the manifest, its
+// format, its title and its structure are judged; no media was read, so
+// neither media line exists.
+const REVIEW_COUNT_BLOCKED: StructuredCreationStatus = {
+  kind: "review",
+  verdict: {
+    kind: "analyzed",
+    quality: "unusable",
+    state: "blocked",
+    findings: [
+      ...CLEAN_FINDINGS.slice(0, 4),
+      { aspect: "mediaCount", category: "blocking", message: COUNT_BLOCKED },
+    ],
+    folderName: "longue-histoire",
+    folderPath: "/home/user/longue-histoire",
+  },
+};
+
 /** The list item of the report that carries `message`. */
 function findingRow(message: string): HTMLElement {
   const row = screen.getByText(message).closest("li");
@@ -299,6 +322,37 @@ describe("CreateFromFolderSurface", () => {
     expect(
       within(findingRow(CLEAN_FINDINGS[3].message)).getByText("reconnu"),
     ).toBeInTheDocument();
+    // Nothing will be created: no summary, no accept — only `Abandonner`.
+    expect(screen.queryByText("Ce qui sera créé")).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Créer l'histoire" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Abandonner" }),
+    ).toBeInTheDocument();
+  });
+
+  it("blocks on the count with the number as the stated reason — the structure is not blamed", () => {
+    renderSurface(REVIEW_COUNT_BLOCKED);
+    const alert = screen.getByRole("alert");
+    expect(alert).toHaveTextContent("Inexploitable");
+    // The limit is named, with the gesture — never the structure copy.
+    expect(alert).toHaveTextContent("(64 fichiers différents)");
+    expect(alert).toHaveTextContent(COUNT_BLOCKED);
+    expect(alert).not.toHaveTextContent("incomplète ou incohérente");
+    // ONE blocker, on the count line; the structure reads as recognized.
+    expect(screen.getAllByText("blocage réel")).toHaveLength(1);
+    expect(
+      within(findingRow(COUNT_BLOCKED)).getByText("blocage réel"),
+    ).toBeInTheDocument();
+    expect(
+      within(findingRow(CLEAN_FINDINGS[3].message)).getByText("reconnu"),
+    ).toBeInTheDocument();
+    // Nothing is said of media that were never read.
+    expect(
+      screen.queryByText(CLEAN_FINDINGS[4].message),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByText(/taille autorisée/)).not.toBeInTheDocument();
     // Nothing will be created: no summary, no accept — only `Abandonner`.
     expect(screen.queryByText("Ce qui sera créé")).not.toBeInTheDocument();
     expect(

@@ -35,8 +35,11 @@ pub const STRUCTURED_FOLDER_MANIFEST_NAME: &str = "histoire.json";
 pub const STRUCTURED_FOLDER_FORMAT_VERSION: u64 = 1;
 
 /// Ceiling on the DISTINCT media files a manifest may reference (anti-DoS:
-/// bounds the probe/promotion work). Exceeding it is a `Structure` blocking
-/// finding — a typed verdict, never a transport error.
+/// bounds the probe/promotion work). Exceeding it is a `MediaCount` blocking
+/// finding — a typed verdict that names the number, never a transport error
+/// — reached on the references alone: no media is read. An honest long
+/// story reaches it (33 nodes with a picture and a sound each), which is
+/// why its refusal says what it is.
 pub const MAX_FOLDER_MEDIA_FILES: usize = 64;
 
 /// Ceiling on ONE media file of a structured folder: the local-attach
@@ -211,7 +214,7 @@ pub fn referenced_media(manifest_bytes: &[u8]) -> Vec<String> {
         return Vec::new();
     }
     let raw_refs = raw_media_refs(&root);
-    if exceeds_media_file_bound(&raw_refs) {
+    if exceeds_media_file_bound(&raw_refs, MAX_FOLDER_MEDIA_FILES) {
         return Vec::new();
     }
     let mut seen = BTreeSet::new();
@@ -224,11 +227,14 @@ pub fn referenced_media(manifest_bytes: &[u8]) -> Vec<String> {
     ordered
 }
 
-/// True iff the manifest references more DISTINCT basenames than the
-/// anti-DoS bound allows — the probe/promotion work is then never started.
-fn exceeds_media_file_bound(raw_refs: &[MediaReference]) -> bool {
-    let distinct: BTreeSet<&str> = raw_refs.iter().map(|r| r.basename.as_str()).collect();
-    distinct.len() > MAX_FOLDER_MEDIA_FILES
+/// True iff `references` name more DISTINCT basenames than `max_files`, the
+/// reference bound of their source — the probe/promotion work is then never
+/// started. ONE count for the folder and the archive flows, and for the two
+/// places of each that must agree on it: the list of what to probe and the
+/// verdict. A file referenced by several nodes counts once.
+pub(super) fn exceeds_media_file_bound(references: &[MediaReference], max_files: usize) -> bool {
+    let distinct: BTreeSet<&str> = references.iter().map(|r| r.basename.as_str()).collect();
+    distinct.len() > max_files
 }
 
 /// A media reference as written in an author manifest or a pack descriptor:
@@ -300,7 +306,7 @@ impl MediaWalk {
 /// Size and format are judged INDEPENDENTLY: a file over the per-file bound
 /// is left out for its size, and its format and slot are still held against
 /// it when they are wrong — neither reason hides the other.
-pub(super) fn walk_media_references(
+fn walk_media_references(
     references: &[MediaReference],
     probes: &BTreeMap<String, MediaProbe>,
 ) -> MediaWalk {
@@ -350,6 +356,60 @@ pub(super) fn walk_media_references(
     }
     walk.retained_bytes = retained_sizes.values().sum();
     walk
+}
+
+/// What the media references of a source come to once held against its
+/// reference bound. ONE judgement for the folder and the archive flows, so
+/// the two can never disagree on what crossing the bound means.
+pub(super) enum MediaJudgement {
+    /// More DISTINCT referenced files than the bound — decided on the
+    /// references alone. No media is read, so the verdict says nothing of
+    /// their presence, of their format or of their size: only that they are
+    /// too many.
+    TooMany,
+    /// Within the bound: each reference decided against its probe.
+    Walked(MediaWalk),
+}
+
+impl MediaJudgement {
+    /// The media findings of a verdict, against the source's aggregate byte
+    /// bound: the single `MediaCount` block of a source that references too
+    /// many media, else the `Media` and `MediaSize` findings of the media
+    /// that were read. Never both — no finding is asserted for work that
+    /// was never done.
+    pub(super) fn findings(&self, max_total_bytes: u64) -> Vec<RecognitionFinding> {
+        match self {
+            Self::TooMany => vec![RecognitionFinding::blocking(RecognitionAspect::MediaCount)],
+            Self::Walked(walk) => vec![
+                walk.media_finding(),
+                walk.media_size_finding(max_total_bytes),
+            ],
+        }
+    }
+
+    /// The references the creation keeps and the basenames it leaves out —
+    /// none of either when the media were never read.
+    pub(super) fn into_retained_and_discarded(self) -> (Vec<RetainedMediaRef>, Vec<String>) {
+        match self {
+            Self::TooMany => (Vec::new(), Vec::new()),
+            Self::Walked(walk) => (walk.retained, walk.discarded),
+        }
+    }
+}
+
+/// Judge the media references of a source: COUNT them against `max_files`
+/// first — beyond it nothing is walked (the caller was handed nothing to
+/// probe either) —, else decide each one against its probe.
+pub(super) fn judge_media_references(
+    references: &[MediaReference],
+    probes: &BTreeMap<String, MediaProbe>,
+    max_files: usize,
+) -> MediaJudgement {
+    if exceeds_media_file_bound(references, max_files) {
+        MediaJudgement::TooMany
+    } else {
+        MediaJudgement::Walked(walk_media_references(references, probes))
+    }
 }
 
 /// Extract every (node, slot, basename) media reference from the raw JSON,
@@ -552,10 +612,13 @@ fn optional_string(value: Option<&Value>) -> Result<String, ()> {
 
 /// Analyze a structured folder from its manifest bytes + the media probes
 /// (all I/O done by the caller — see [`referenced_media`] for what to
-/// probe). Pure and deterministic. Produces exactly one finding per aspect
-/// of the folder matrix (`Envelope`, `FormatVersion`, `Title`, `Structure`,
-/// `Media`, `MediaSize`) when the manifest parses; a malformed manifest is
-/// the single `Envelope` blocking verdict (calque of the `.rustory` flow).
+/// probe). Pure and deterministic. Produces exactly one finding per JUDGED
+/// aspect of the folder matrix: `Envelope`, `FormatVersion`, `Title` and
+/// `Structure` whenever the manifest parses, then — for the listed format
+/// only — `Media` and `MediaSize` when the media were read, or the single
+/// `MediaCount` block when the manifest references more of them than its
+/// bound. A malformed manifest is the single `Envelope` blocking verdict
+/// (calque of the `.rustory` flow).
 pub fn analyze_structured_folder_components(
     manifest_bytes: &[u8],
     probes: &BTreeMap<String, MediaProbe>,
@@ -573,23 +636,18 @@ pub fn analyze_structured_folder_components(
         RecognitionFinding::blocking(RecognitionAspect::FormatVersion)
     });
 
-    // Media walk: decide each REFERENCE and collect the retained refs + the
-    // discarded basenames. The media are evaluated ONLY when the declared
-    // format is the LISTED one: an unlisted format is a `FormatVersion`
-    // block whose media were never read (no implicit / partial support), so
-    // its verdict carries neither a `Media` nor a `MediaSize` finding.
-    let mut structure_blocked = extraction.structure_blocked;
-    let raw_refs = raw_media_refs(&root);
-    // More distinct referenced files than the anti-DoS bound: a Structure
-    // block decided WITHOUT evaluating a single media (mirrors
-    // `referenced_media`, which exposed nothing to probe) — no `Media`
-    // finding may be asserted for work that was never done.
-    let media_bound_exceeded = exceeds_media_file_bound(&raw_refs);
-    if media_bound_exceeded {
-        structure_blocked = true;
-    }
-    let media_walk = (extraction.format_version_ok && !media_bound_exceeded)
-        .then(|| walk_media_references(&raw_refs, probes));
+    // Media: judged ONLY when the declared format is the LISTED one — an
+    // unlisted format is a `FormatVersion` block whose media references are
+    // never evaluated, not even counted (no implicit / partial support), so
+    // its verdict carries no media finding at all. For the listed format
+    // the references are first COUNTED against the reference bound: beyond
+    // it the verdict blocks on `MediaCount` without a single media read
+    // (mirrors `referenced_media`, which exposed nothing to probe); within
+    // it each REFERENCE is decided against its probe. Either way the
+    // structure is left alone, and judged below for what it is.
+    let media = extraction
+        .format_version_ok
+        .then(|| judge_media_references(&raw_media_refs(&root), probes, MAX_FOLDER_MEDIA_FILES));
 
     // Canonical oracle over the transcoded structure — the same
     // `validate_canonical` a transfer and the editor run. Only meaningful
@@ -599,6 +657,7 @@ pub fn analyze_structured_folder_components(
     // blocked structure must never mask an invalid title (the AC1 report
     // names EVERYTHING that is wrong, not just the first blocker found).
     let mut broken_option_link = false;
+    let mut structure_blocked = extraction.structure_blocked;
     let mut title_blocked =
         !extraction.title_present || validate_title(&normalize_title(&extraction.title)).is_err();
     let structure = CanonicalStructure {
@@ -642,17 +701,18 @@ pub fn analyze_structured_folder_components(
         RecognitionFinding::recognized(RecognitionAspect::Structure)
     });
 
-    // The `Media` and `MediaSize` aspects exist on the verdict ONLY when
-    // the media were actually analyzed (listed format, in-bounds reference
-    // count) — never asserted for work that was never done. The aggregate
-    // byte bound is a SIZE verdict of its own (`MediaSize` blocking): the
-    // structure it leaves alone is judged for what it is.
-    if let Some(walk) = &media_walk {
-        findings.push(walk.media_finding());
-        findings.push(walk.media_size_finding(MAX_FOLDER_TOTAL_MEDIA_BYTES));
+    // The media aspects exist on the verdict ONLY for what was actually
+    // judged — never asserted for work that was never done: `Media` and
+    // `MediaSize` when the media were read, the `MediaCount` block alone
+    // when they were too many to be. Both bounds are verdicts of their own
+    // (`MediaSize` blocking for the aggregate bytes, `MediaCount` blocking
+    // for the number of references): the structure they leave alone says
+    // what it is.
+    if let Some(media) = &media {
+        findings.extend(media.findings(MAX_FOLDER_TOTAL_MEDIA_BYTES));
     }
-    let (retained_media, discarded_media) = media_walk
-        .map(|walk| (walk.retained, walk.discarded))
+    let (retained_media, discarded_media) = media
+        .map(MediaJudgement::into_retained_and_discarded)
         .unwrap_or_default();
 
     let quality = recognition_quality(&findings);
@@ -1083,38 +1143,6 @@ mod tests {
     }
 
     #[test]
-    fn too_many_distinct_media_references_block_without_a_single_probe() {
-        let refs: Vec<String> = (0..=MAX_FOLDER_MEDIA_FILES)
-            .map(|i| format!(r#"{{ "id": "n{i}", "image": "img{i}.png" }}"#))
-            .collect();
-        let manifest = format!(
-            r#"{{ "formatVersion": 1, "title": "Trop", "nodes": [ {} ] }}"#,
-            refs.join(",")
-        );
-        let analysis = analyze(&manifest, &[]);
-        assert_eq!(
-            category_of(&analysis, RecognitionAspect::Structure),
-            RecognitionCategory::Blocking,
-            "more than MAX_FOLDER_MEDIA_FILES distinct files is an anti-DoS block"
-        );
-        // The bound short-circuits BEFORE any media work: nothing exposed
-        // to probe (zero I/O possible), no `Media` finding asserted, no
-        // discarded list built from unprobed references.
-        assert!(
-            referenced_media(manifest.as_bytes()).is_empty(),
-            "a bounds-breaking manifest exposes nothing to probe"
-        );
-        assert!(
-            !analysis.findings.iter().any(|f| matches!(
-                f.aspect,
-                RecognitionAspect::Media | RecognitionAspect::MediaSize
-            )),
-            "no media finding may be asserted for unprobed references"
-        );
-        assert!(analysis.discarded_media.is_empty());
-    }
-
-    #[test]
     fn an_empty_media_reference_means_no_media_like_null() {
         // An author's `"image": ""` is "no media here" — the exact calque
         // of the tolerated `null`: no reference, no finding, no discarded
@@ -1135,6 +1163,210 @@ mod tests {
         let creatable = analysis.creatable.expect("creatable");
         assert!(creatable.retained_media.is_empty());
         assert!(referenced_media(manifest.as_bytes()).is_empty());
+    }
+
+    // ---- Media count -------------------------------------------------------
+
+    /// A manifest of `nodes` nodes, each with its OWN picture.
+    fn manifest_of_pictures(format_version: u64, nodes: usize) -> String {
+        let refs: Vec<String> = (0..nodes)
+            .map(|i| format!(r#"{{ "id": "n{i}", "image": "img{i}.png" }}"#))
+            .collect();
+        format!(
+            r#"{{ "formatVersion": {format_version}, "title": "Trop", "nodes": [ {} ] }}"#,
+            refs.join(",")
+        )
+    }
+
+    fn judges_no_media(analysis: &StructuredFolderAnalysis) -> bool {
+        !analysis.findings.iter().any(|f| {
+            matches!(
+                f.aspect,
+                RecognitionAspect::Media | RecognitionAspect::MediaSize
+            )
+        })
+    }
+
+    #[test]
+    fn too_many_distinct_media_references_block_on_their_count_without_a_single_probe() {
+        let manifest = manifest_of_pictures(1, MAX_FOLDER_MEDIA_FILES + 1);
+        let analysis = analyze(&manifest, &[]);
+        assert_eq!(
+            category_of(&analysis, RecognitionAspect::MediaCount),
+            RecognitionCategory::Blocking,
+            "more than MAX_FOLDER_MEDIA_FILES distinct files block on their NUMBER"
+        );
+        assert_eq!(analysis.quality, RecognitionQuality::Unusable);
+        assert_eq!(analysis.state, ImportState::Blocked);
+        assert!(analysis.creatable.is_none());
+        // The count is the ONLY blocker: the manifest and its structure are
+        // sound, and their own lines say so.
+        for aspect in [
+            RecognitionAspect::Envelope,
+            RecognitionAspect::FormatVersion,
+            RecognitionAspect::Title,
+            RecognitionAspect::Structure,
+        ] {
+            assert_eq!(
+                category_of(&analysis, aspect),
+                RecognitionCategory::Recognized,
+                "{aspect:?} is not blamed for a count reason"
+            );
+        }
+        assert_eq!(analysis.findings.len(), 5);
+        // The bound short-circuits BEFORE any media work: nothing exposed
+        // to probe (zero I/O possible), no `Media` nor `MediaSize` finding
+        // asserted, no discarded list built from unprobed references.
+        assert!(
+            referenced_media(manifest.as_bytes()).is_empty(),
+            "a bounds-breaking manifest exposes nothing to probe"
+        );
+        assert!(
+            judges_no_media(&analysis),
+            "no media finding may be asserted for unprobed references"
+        );
+        assert!(analysis.discarded_media.is_empty());
+    }
+
+    #[test]
+    fn the_media_count_bound_is_inclusive_and_says_nothing_within_it() {
+        // Exactly MAX_FOLDER_MEDIA_FILES distinct files: the media are read
+        // and judged, and the count — which has nothing to report — gets no
+        // line at all.
+        let manifest = manifest_of_pictures(1, MAX_FOLDER_MEDIA_FILES);
+        let names: Vec<String> = (0..MAX_FOLDER_MEDIA_FILES)
+            .map(|i| format!("img{i}.png"))
+            .collect();
+        assert_eq!(referenced_media(manifest.as_bytes()), names);
+        let probes: Vec<(&str, MediaProbe)> = names
+            .iter()
+            .map(|name| (name.as_str(), usable_image()))
+            .collect();
+        let analysis = analyze(&manifest, &probes);
+        assert_eq!(analysis.quality, RecognitionQuality::Clean);
+        assert!(!analysis
+            .findings
+            .iter()
+            .any(|f| f.aspect == RecognitionAspect::MediaCount));
+        assert_eq!(analysis.findings.len(), 6);
+        let creatable = analysis.creatable.expect("creatable at the bound");
+        assert_eq!(creatable.retained_media.len(), MAX_FOLDER_MEDIA_FILES);
+    }
+
+    #[test]
+    fn an_honest_long_story_reaches_the_media_count_bound() {
+        // 33 nodes with a picture and a sound each: 66 distinct files for a
+        // bound of 64. Nothing is wrong with the story — the refusal is a
+        // matter of NUMBER, and that is the line that blocks.
+        let nodes: Vec<String> = (0..33)
+            .map(|i| {
+                format!(r#"{{ "id": "n{i}", "image": "image-{i}.png", "audio": "son-{i}.mp3" }}"#)
+            })
+            .collect();
+        let manifest = format!(
+            r#"{{ "formatVersion": 1, "title": "Une longue histoire", "nodes": [ {} ] }}"#,
+            nodes.join(",")
+        );
+        let analysis = analyze(&manifest, &[]);
+        assert_eq!(
+            category_of(&analysis, RecognitionAspect::MediaCount),
+            RecognitionCategory::Blocking
+        );
+        assert_eq!(
+            category_of(&analysis, RecognitionAspect::Structure),
+            RecognitionCategory::Recognized
+        );
+    }
+
+    #[test]
+    fn a_media_referenced_by_several_nodes_counts_once_against_the_count_bound() {
+        // One shared picture on every node, one sound of its own each: 63
+        // nodes fill 126 slots with only 64 distinct files — the folder is
+        // creatable; one node more makes 65 files, one too many.
+        let manifest_of = |nodes: usize| {
+            let refs: Vec<String> = (0..nodes)
+                .map(|i| {
+                    format!(r#"{{ "id": "n{i}", "image": "commune.png", "audio": "son-{i}.mp3" }}"#)
+                })
+                .collect();
+            format!(
+                r#"{{ "formatVersion": 1, "title": "Une image pour tous", "nodes": [ {} ] }}"#,
+                refs.join(",")
+            )
+        };
+        let within = manifest_of(MAX_FOLDER_MEDIA_FILES - 1);
+        assert_eq!(
+            referenced_media(within.as_bytes()).len(),
+            MAX_FOLDER_MEDIA_FILES
+        );
+        let mut probes: Vec<(String, MediaProbe)> = (0..MAX_FOLDER_MEDIA_FILES - 1)
+            .map(|i| (format!("son-{i}.mp3"), usable_audio()))
+            .collect();
+        probes.push(("commune.png".to_string(), usable_image()));
+        let probe_refs: Vec<(&str, MediaProbe)> = probes
+            .iter()
+            .map(|(name, probe)| (name.as_str(), *probe))
+            .collect();
+        let analysis = analyze(&within, &probe_refs);
+        assert_eq!(analysis.quality, RecognitionQuality::Clean);
+        assert!(analysis.creatable.is_some());
+
+        let beyond = analyze(&manifest_of(MAX_FOLDER_MEDIA_FILES), &[]);
+        assert_eq!(
+            category_of(&beyond, RecognitionAspect::MediaCount),
+            RecognitionCategory::Blocking
+        );
+    }
+
+    #[test]
+    fn the_media_count_never_hides_what_else_is_wrong() {
+        // The report names EVERYTHING to fix: a blank title and a broken
+        // structure block on their own lines, next to the count.
+        let refs: Vec<String> = (0..=MAX_FOLDER_MEDIA_FILES)
+            .map(|i| format!(r#"{{ "id": "n{i}", "image": "img{i}.png" }}"#))
+            .collect();
+        let manifest = format!(
+            r#"{{ "formatVersion": 1, "title": "   ", "startNodeId": "ghost", "nodes": [ {} ] }}"#,
+            refs.join(",")
+        );
+        let analysis = analyze(&manifest, &[]);
+        for aspect in [
+            RecognitionAspect::Title,
+            RecognitionAspect::Structure,
+            RecognitionAspect::MediaCount,
+        ] {
+            assert_eq!(
+                category_of(&analysis, aspect),
+                RecognitionCategory::Blocking,
+                "{aspect:?} must block on its own line"
+            );
+        }
+        assert!(judges_no_media(&analysis));
+    }
+
+    #[test]
+    fn the_references_of_an_unlisted_format_are_not_counted_either() {
+        // No implicit / partial support: the media references of an
+        // UNLISTED format are never evaluated — not probed, and not counted.
+        // The verdict blocks on `FormatVersion`, and neither the count nor
+        // the structure is blamed for references Rustory has no business
+        // interpreting.
+        let manifest = manifest_of_pictures(2, MAX_FOLDER_MEDIA_FILES + 1);
+        assert!(referenced_media(manifest.as_bytes()).is_empty());
+        let analysis = analyze(&manifest, &[]);
+        assert_eq!(
+            category_of(&analysis, RecognitionAspect::FormatVersion),
+            RecognitionCategory::Blocking
+        );
+        assert_eq!(
+            category_of(&analysis, RecognitionAspect::Structure),
+            RecognitionCategory::Recognized
+        );
+        assert!(!analysis
+            .findings
+            .iter()
+            .any(|f| f.aspect == RecognitionAspect::MediaCount));
+        assert!(judges_no_media(&analysis));
     }
 
     // ---- Media size --------------------------------------------------------

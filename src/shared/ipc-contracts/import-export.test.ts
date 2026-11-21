@@ -249,6 +249,23 @@ describe("isImportFinding", () => {
     }
   });
 
+  it("accepts the media-count aspect in the closed finding set", () => {
+    expect(
+      isImportFinding({
+        aspect: "mediaCount",
+        category: "blocking",
+        message:
+          "Les fichiers audio et image référencés dépassent le nombre autorisé (64 fichiers différents).",
+      }),
+    ).toBe(true);
+    // The wire tag is camelCase — never the Rust variant nor snake_case.
+    for (const drifted of ["MediaCount", "media_count", "count"]) {
+      expect(
+        isImportFinding({ aspect: drifted, category: "blocking", message: "x" }),
+      ).toBe(false);
+    }
+  });
+
   it("rejects an unknown aspect or category", () => {
     expect(
       isImportFinding({ aspect: "weird", category: "ambiguous", message: "x" }),
@@ -775,6 +792,117 @@ describe("isStructuredCreationAnalysis", () => {
     ).toBe(false);
   });
 
+  // The count copy below is the one Rust sends for a folder (the guard
+  // never reads a message — it is here so the fixture is the real wire).
+  const FOLDER_COUNT_BLOCKED = {
+    kind: "analyzed",
+    quality: "unusable",
+    state: "blocked",
+    findings: [
+      ...FOLDER_FINDINGS_CLEAN.slice(0, 4),
+      {
+        aspect: "mediaCount",
+        category: "blocking",
+        message:
+          "Les fichiers audio et image référencés dépassent le nombre autorisé (64 fichiers différents). Réduis le nombre de médias référencés par le manifest puis relance l'analyse ; tu pourras ajouter les autres dans l'éditeur.",
+      },
+    ],
+    folderName: "longue-histoire",
+    folderPath: "/home/user/longue-histoire",
+  };
+
+  it("accepts a verdict blocked on the media count: no media line, nothing to create", () => {
+    // Too many referenced media: the manifest, its format, its title and
+    // its structure are judged; the media were never read, so neither
+    // `media` nor `mediaSize` is there — only the count line, which blocks.
+    expect(isStructuredCreationAnalysis(FOLDER_COUNT_BLOCKED)).toBe(true);
+    // A count block creates nothing: a summary on it is a drift.
+    expect(
+      isStructuredCreationAnalysis({
+        ...FOLDER_COUNT_BLOCKED,
+        creatableSummary: FOLDER_ANALYZED_CLEAN.creatableSummary,
+      }),
+    ).toBe(false);
+    // The same verdict settles the drop channel.
+    expect(isDropAnalysis({ ...FOLDER_COUNT_BLOCKED, kind: "folder" })).toBe(
+      true,
+    );
+  });
+
+  it("accepts the count block next to the other blockers of the same manifest", () => {
+    // The report names everything to fix: an invalid title blocks on its
+    // own line, beside the count.
+    expect(
+      isStructuredCreationAnalysis({
+        ...FOLDER_COUNT_BLOCKED,
+        findings: [
+          FOLDER_FINDINGS_CLEAN[0],
+          FOLDER_FINDINGS_CLEAN[1],
+          {
+            aspect: "title",
+            category: "blocking",
+            message: "Le titre du manifest est manquant ou n'est pas valide.",
+          },
+          FOLDER_FINDINGS_CLEAN[3],
+          FOLDER_COUNT_BLOCKED.findings[4],
+        ],
+      }),
+    ).toBe(true);
+  });
+
+  it("rejects a count block that still judges the media or their size", () => {
+    // Beyond the reference bound no media is read: a verdict that says so
+    // AND words their presence or their size claims work that was not done.
+    for (const extra of [
+      [FOLDER_FINDINGS_CLEAN[4]],
+      [FOLDER_FINDINGS_CLEAN[5]],
+      [FOLDER_FINDINGS_CLEAN[4], FOLDER_FINDINGS_CLEAN[5]],
+    ]) {
+      expect(
+        isStructuredCreationAnalysis({
+          ...FOLDER_COUNT_BLOCKED,
+          findings: [...FOLDER_COUNT_BLOCKED.findings, ...extra],
+        }),
+      ).toBe(false);
+    }
+  });
+
+  it("rejects a count line that does not block", () => {
+    // Within the bound the count has NO line: a creatable verdict carries
+    // exactly its six aspects, never a seventh that says "the count is fine".
+    expect(
+      isStructuredCreationAnalysis({
+        ...FOLDER_ANALYZED_CLEAN,
+        findings: [
+          ...FOLDER_FINDINGS_CLEAN,
+          {
+            aspect: "mediaCount",
+            category: "recognized",
+            message:
+              "Les fichiers audio et image référencés ne dépassent pas le nombre autorisé.",
+          },
+        ],
+      }),
+    ).toBe(false);
+    // Nor is it ever an ambiguity or a missing information.
+    for (const [category, state] of [
+      ["ambiguous", "needsReview"],
+      ["missing", "partial"],
+    ] as const) {
+      expect(
+        isStructuredCreationAnalysis({
+          ...FOLDER_ANALYZED_CLEAN,
+          quality: "partial",
+          state,
+          findings: [
+            ...FOLDER_FINDINGS_CLEAN.slice(0, 4),
+            { aspect: "mediaCount", category, message: "x" },
+          ],
+        }),
+      ).toBe(false);
+    }
+  });
+
   it("rejects a creatable verdict without its summary", () => {
     const { creatableSummary: _dropped, ...rest } = FOLDER_ANALYZED_CLEAN;
     expect(isStructuredCreationAnalysis(rest)).toBe(false);
@@ -1030,8 +1158,8 @@ describe("isArchiveCreationAnalysis", () => {
   });
 
   it("rejects a verdict judging the media without their size, or the reverse", () => {
-    // A descriptor referencing more files than the reference bound blocks
-    // on the structure WITHOUT a single media read: neither line exists.
+    // The two lines are judged together or not at all — on a blocked
+    // verdict too: here the structure blocks, and the media were read.
     const blockedOnStructure = {
       ...ARCHIVE_ANALYZED_BLOCKED,
       findings: [
@@ -1042,21 +1170,113 @@ describe("isArchiveCreationAnalysis", () => {
           category: "blocking",
           message: "La structure du descripteur est incomplète ou incohérente.",
         },
+        ARCHIVE_FINDINGS_CLEAN[3],
+        ARCHIVE_FINDINGS_CLEAN[4],
       ],
     };
     expect(isArchiveCreationAnalysis(blockedOnStructure)).toBe(true);
+    for (const dropped of ["media", "mediaSize"]) {
+      expect(
+        isArchiveCreationAnalysis({
+          ...blockedOnStructure,
+          findings: blockedOnStructure.findings.filter(
+            (finding) => finding.aspect !== dropped,
+          ),
+        }),
+      ).toBe(false);
+    }
+  });
+
+  // The count copy below is the one Rust sends for an archive (the guard
+  // never reads a message — it is here so the fixture is the real wire).
+  const ARCHIVE_COUNT_BLOCKED = {
+    kind: "analyzed",
+    quality: "unusable",
+    state: "blocked",
+    findings: [
+      ...ARCHIVE_FINDINGS_CLEAN.slice(0, 3),
+      {
+        aspect: "mediaCount",
+        category: "blocking",
+        message:
+          "Les fichiers audio et image référencés dépassent le nombre autorisé (8192 fichiers différents). Réduis le nombre de médias de l'archive (par exemple en répartissant le pack sur plusieurs archives) puis relance l'analyse.",
+      },
+    ],
+    archiveName: "pack-sans-fin.zip",
+    archivePath: "/home/user/pack-sans-fin.zip",
+  };
+
+  it("accepts a verdict blocked on the media count: no media line, nothing to create", () => {
+    // A descriptor referencing more files than the reference bound blocks
+    // on their NUMBER without a single media read: the descriptor, its
+    // title and its structure are judged, neither media line exists.
+    expect(isArchiveCreationAnalysis(ARCHIVE_COUNT_BLOCKED)).toBe(true);
     expect(
       isArchiveCreationAnalysis({
-        ...blockedOnStructure,
-        findings: [...blockedOnStructure.findings, ARCHIVE_FINDINGS_CLEAN[3]],
+        ...ARCHIVE_COUNT_BLOCKED,
+        creatableSummary: ARCHIVE_ANALYZED_CLEAN.creatableSummary,
       }),
     ).toBe(false);
+    // The same verdict settles the drop and the OS-open channels.
+    expect(isDropAnalysis({ ...ARCHIVE_COUNT_BLOCKED, kind: "archive" })).toBe(
+      true,
+    );
+    expect(
+      isOsOpenAnalysis({ ...ARCHIVE_COUNT_BLOCKED, kind: "archive" }),
+    ).toBe(true);
+  });
+
+  it("rejects a count block that still judges the media or their size", () => {
+    // Beyond the reference bound no media is read: a verdict that says so
+    // AND words their presence or their size claims work that was not done.
+    for (const extra of [
+      [ARCHIVE_FINDINGS_CLEAN[3]],
+      [ARCHIVE_FINDINGS_CLEAN[4]],
+      [ARCHIVE_FINDINGS_CLEAN[3], ARCHIVE_FINDINGS_CLEAN[4]],
+    ]) {
+      const drifted = {
+        ...ARCHIVE_COUNT_BLOCKED,
+        findings: [...ARCHIVE_COUNT_BLOCKED.findings, ...extra],
+      };
+      expect(isArchiveCreationAnalysis(drifted)).toBe(false);
+      expect(isDropAnalysis({ ...drifted, kind: "archive" })).toBe(false);
+      expect(isOsOpenAnalysis({ ...drifted, kind: "archive" })).toBe(false);
+    }
+  });
+
+  it("rejects a count line that does not block", () => {
+    // Within the bound the count has NO line: a creatable verdict carries
+    // exactly its five aspects.
     expect(
       isArchiveCreationAnalysis({
-        ...blockedOnStructure,
-        findings: [...blockedOnStructure.findings, ARCHIVE_FINDINGS_CLEAN[4]],
+        ...ARCHIVE_ANALYZED_CLEAN,
+        findings: [
+          ...ARCHIVE_FINDINGS_CLEAN,
+          {
+            aspect: "mediaCount",
+            category: "recognized",
+            message:
+              "Les fichiers audio et image référencés ne dépassent pas le nombre autorisé.",
+          },
+        ],
       }),
     ).toBe(false);
+    for (const [category, state] of [
+      ["ambiguous", "needsReview"],
+      ["missing", "partial"],
+    ] as const) {
+      expect(
+        isArchiveCreationAnalysis({
+          ...ARCHIVE_ANALYZED_CLEAN,
+          quality: "partial",
+          state,
+          findings: [
+            ...ARCHIVE_FINDINGS_CLEAN.slice(0, 3),
+            { aspect: "mediaCount", category, message: "x" },
+          ],
+        }),
+      ).toBe(false);
+    }
   });
 
   it("rejects a creatable verdict without its summary", () => {

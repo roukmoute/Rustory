@@ -865,7 +865,321 @@ fn an_archive_story_report_words_its_media_with_the_archive_copy() {
     );
 }
 
+// ===== Media count (structured folder + structured archive) =====
+//
+// How many media a source references is an aspect of its own on the wire:
+// `mediaCount`. It only ever BLOCKS — within the bound it has no line —, its
+// message is Rust-authoritative and names the bound of the flow that emits
+// it, and it never stands next to `media` or `mediaSize`: beyond the bound
+// no media is read.
+
+/// A folder manifest of `count` nodes, each with its OWN picture, declaring
+/// `format_version`.
+fn manifest_of_pictures_in_format(format_version: u64, count: usize) -> String {
+    let nodes: Vec<serde_json::Value> = (0..count)
+        .map(|i| serde_json::json!({ "id": format!("n{i}"), "image": format!("image-{i}.png") }))
+        .collect();
+    serde_json::json!({
+        "formatVersion": format_version,
+        "title": "Longue histoire",
+        "nodes": nodes,
+    })
+    .to_string()
+}
+
+/// The same manifest in the LISTED format.
+fn manifest_of_pictures(count: usize) -> String {
+    manifest_of_pictures_in_format(1, count)
+}
+
+/// A pack descriptor of `count` stages, each showing its OWN picture.
+fn pack_of_pictures(count: usize) -> String {
+    let stages: Vec<serde_json::Value> = (0..count)
+        .map(|i| {
+            serde_json::json!({
+                "uuid": format!("s{i}"), "squareOne": i == 0,
+                "image": format!("image-{i}.png"), "audio": null,
+                "okTransition": null, "controlSettings": {}
+            })
+        })
+        .collect();
+    serde_json::json!({ "title": "Pack sans fin", "stageNodes": stages, "actionNodes": [] })
+        .to_string()
+}
+
+fn aspects_of(wire: &serde_json::Value) -> Vec<&str> {
+    wire["findings"]
+        .as_array()
+        .expect("findings")
+        .iter()
+        .map(|finding| finding["aspect"].as_str().expect("aspect"))
+        .collect()
+}
+
+const FOLDER_COUNT_NAMED: &str = "Les fichiers audio et image référencés dépassent le nombre autorisé (64 fichiers différents). Réduis le nombre de médias référencés par le manifest puis relance l'analyse ; tu pourras ajouter les autres dans l'éditeur.";
+
+const ARCHIVE_COUNT_NAMED: &str = "Les fichiers audio et image référencés dépassent le nombre autorisé (8192 fichiers différents). Réduis le nombre de médias de l'archive (par exemple en répartissant le pack sur plusieurs archives) puis relance l'analyse.";
+
+#[test]
+fn a_folder_referencing_65_media_blocks_on_their_number_and_names_the_limit_of_64_on_the_wire() {
+    let analysis = folder_analysis(&manifest_of_pictures(65));
+    let dto = StructuredCreationAnalysisDto::analyzed(
+        &analysis,
+        "longue-histoire".into(),
+        "/home/user/longue-histoire".into(),
+    );
+    let v = serde_json::to_value(&dto).expect("serialize");
+    // The WHOLE wire verdict — the frontend contract test feeds this very
+    // payload to its guard. No media was read: neither `media` nor
+    // `mediaSize` is on the wire; the structure is not blamed for a count
+    // reason; a count block creates nothing (no `creatableSummary`).
+    assert_eq!(
+        v,
+        serde_json::json!({
+            "kind": "analyzed",
+            "quality": "unusable",
+            "state": "blocked",
+            "findings": [
+                {
+                    "aspect": "envelope",
+                    "category": "recognized",
+                    "message": "Le manifest histoire.json est présent et lisible.",
+                },
+                {
+                    "aspect": "formatVersion",
+                    "category": "recognized",
+                    "message": "La version de format du manifest est prise en charge.",
+                },
+                {
+                    "aspect": "title",
+                    "category": "recognized",
+                    "message": "Le titre de l'histoire est valide.",
+                },
+                {
+                    "aspect": "structure",
+                    "category": "recognized",
+                    "message": "La structure de l'histoire est reconnue.",
+                },
+                {
+                    "aspect": "mediaCount",
+                    "category": "blocking",
+                    "message": FOLDER_COUNT_NAMED,
+                },
+            ],
+            "folderName": "longue-histoire",
+            "folderPath": "/home/user/longue-histoire",
+        })
+    );
+    assert!(
+        !v.to_string().contains("media_count"),
+        "the wire tag is camelCase"
+    );
+}
+
+#[test]
+fn a_folder_referencing_64_media_carries_no_count_line_on_the_wire() {
+    // The bound is inclusive, and a bound that is respected is not a line:
+    // the creatable verdict keeps exactly its six aspects.
+    let names: Vec<String> = (0..64).map(|i| format!("image-{i}.png")).collect();
+    let probes: Vec<(&str, MediaProbe)> = names
+        .iter()
+        .map(|name| {
+            (
+                name.as_str(),
+                MediaProbe::Usable {
+                    kind: FolderMediaKind::Image,
+                    byte_size: 1024,
+                },
+            )
+        })
+        .collect();
+    let analysis = folder_analysis_with(&manifest_of_pictures(64), &probes);
+    let dto = StructuredCreationAnalysisDto::analyzed(&analysis, "d".into(), "/tmp/d".into());
+    let v = serde_json::to_value(&dto).expect("serialize");
+    assert_eq!(v["quality"], "clean");
+    assert_eq!(
+        aspects_of(&v),
+        [
+            "envelope",
+            "formatVersion",
+            "title",
+            "structure",
+            "media",
+            "mediaSize"
+        ]
+    );
+    assert_eq!(
+        v["creatableSummary"]["retainedMedia"]
+            .as_array()
+            .expect("retained")
+            .len(),
+        64
+    );
+}
+
+#[test]
+fn an_archive_referencing_8193_media_blocks_on_their_number_and_names_the_limit_of_8192() {
+    let analysis = archive_analysis_with(&pack_of_pictures(8193), &[]);
+    let dto = ArchiveCreationAnalysisDto::analyzed(
+        &analysis,
+        "pack-sans-fin.zip".into(),
+        "/home/user/pack-sans-fin.zip".into(),
+    );
+    let v = serde_json::to_value(&dto).expect("serialize");
+    // The WHOLE wire verdict — the frontend contract test feeds this very
+    // payload to its guard. No entry was read (neither `media` nor
+    // `mediaSize`), the pack format declares no format version, and the
+    // structure is not blamed for a count reason.
+    assert_eq!(
+        v,
+        serde_json::json!({
+            "kind": "analyzed",
+            "quality": "unusable",
+            "state": "blocked",
+            "findings": [
+                {
+                    "aspect": "envelope",
+                    "category": "recognized",
+                    "message": "Le descripteur story.json est présent et lisible.",
+                },
+                {
+                    "aspect": "title",
+                    "category": "recognized",
+                    "message": "Le titre de l'histoire est valide.",
+                },
+                {
+                    "aspect": "structure",
+                    "category": "recognized",
+                    "message": "La structure du pack est reconnue et convertie en histoire.",
+                },
+                {
+                    "aspect": "mediaCount",
+                    "category": "blocking",
+                    "message": ARCHIVE_COUNT_NAMED,
+                },
+            ],
+            "archiveName": "pack-sans-fin.zip",
+            "archivePath": "/home/user/pack-sans-fin.zip",
+        })
+    );
+
+    // One media fewer: the bound is inclusive, the count has no line.
+    let analysis = archive_analysis_with(&pack_of_pictures(8192), &[]);
+    let dto = ArchiveCreationAnalysisDto::analyzed(&analysis, "p.zip".into(), "/tmp/p.zip".into());
+    let v = serde_json::to_value(&dto).expect("serialize");
+    assert_eq!(
+        aspects_of(&v),
+        ["envelope", "title", "structure", "media", "mediaSize"]
+    );
+}
+
+#[test]
+fn the_drop_and_os_open_channels_carry_the_media_count_finding_unchanged() {
+    // The two channels re-tag the picker verdicts: same findings, same copy.
+    let archive = archive_analysis_with(&pack_of_pictures(8193), &[]);
+    let picker = serde_json::to_value(ArchiveCreationAnalysisDto::analyzed(
+        &archive,
+        "p.zip".into(),
+        "/tmp/p.zip".into(),
+    ))
+    .expect("serialize");
+    let dropped = serde_json::to_value(DropAnalysisDto::archive(
+        &archive,
+        "p.zip".into(),
+        "/tmp/p.zip".into(),
+    ))
+    .expect("serialize");
+    let opened = serde_json::to_value(OsOpenAnalysisDto::archive(
+        &archive,
+        "p.zip".into(),
+        "/tmp/p.zip".into(),
+    ))
+    .expect("serialize");
+    assert_eq!(dropped["kind"], "archive");
+    assert_eq!(opened["kind"], "archive");
+    assert_eq!(dropped["findings"], picker["findings"]);
+    assert_eq!(opened["findings"], picker["findings"]);
+    assert_eq!(
+        finding_of(&dropped, "mediaCount")["message"],
+        ARCHIVE_COUNT_NAMED
+    );
+
+    let folder = folder_analysis(&manifest_of_pictures(65));
+    let picker = serde_json::to_value(StructuredCreationAnalysisDto::analyzed(
+        &folder,
+        "d".into(),
+        "/tmp/d".into(),
+    ))
+    .expect("serialize");
+    let dropped = serde_json::to_value(DropAnalysisDto::folder(
+        &folder,
+        "d".into(),
+        "/tmp/d".into(),
+    ))
+    .expect("serialize");
+    assert_eq!(dropped["kind"], "folder");
+    assert_eq!(dropped["findings"], picker["findings"]);
+    assert_eq!(
+        finding_of(&dropped, "mediaCount")["message"],
+        FOLDER_COUNT_NAMED
+    );
+}
+
+#[test]
+fn the_media_count_aspect_never_reaches_the_flows_that_judge_no_media() {
+    // A folder whose format is not the listed one: its references are never
+    // evaluated — not even counted.
+    let analysis = folder_analysis(&manifest_of_pictures_in_format(2, 65));
+    let dto = StructuredCreationAnalysisDto::analyzed(&analysis, "d".into(), "/tmp/d".into());
+    let v = serde_json::to_value(&dto).expect("serialize");
+    assert_eq!(finding_of(&v, "formatVersion")["category"], "blocking");
+    assert_eq!(
+        aspects_of(&v),
+        ["envelope", "formatVersion", "title", "structure"]
+    );
+    assert!(!v.to_string().contains("mediaCount"));
+    // The wire tag itself is camelCase, like every aspect.
+    assert_eq!(
+        serde_json::to_value(ImportAspectDto::MediaCount).expect("serialize"),
+        "mediaCount"
+    );
+}
+
 // ===== Persisted findings summaries =====
+
+#[test]
+fn summaries_stored_before_the_media_count_aspect_render_unchanged() {
+    // A blocked verdict is never persisted, so no stored summary carries the
+    // aspect: what a creation stored yesterday is exactly what one stores
+    // today — the six folder pairs, the five archive pairs — and it renders
+    // pair for pair, with nothing invented for the count.
+    let folder = r#"[{"aspect":"envelope","category":"recognized"},{"aspect":"formatVersion","category":"recognized"},{"aspect":"title","category":"recognized"},{"aspect":"structure","category":"recognized"},{"aspect":"media","category":"missing"},{"aspect":"mediaSize","category":"ambiguous"}]"#;
+    let archive = r#"[{"aspect":"envelope","category":"recognized"},{"aspect":"title","category":"ambiguous"},{"aspect":"structure","category":"recognized"},{"aspect":"media","category":"recognized"},{"aspect":"mediaSize","category":"recognized"}]"#;
+    for (report, stored) in [
+        (folder_import_findings_from_summary(folder), folder),
+        (archive_import_findings_from_summary(archive), archive),
+    ] {
+        let pairs: Vec<serde_json::Value> = serde_json::from_str(stored).expect("stored pairs");
+        assert_eq!(report.len(), pairs.len(), "every stored pair still renders");
+        for (finding, pair) in report.iter().zip(&pairs) {
+            let wire = serde_json::to_value(finding).expect("serialize");
+            assert_eq!(wire["aspect"], pair["aspect"]);
+            assert_eq!(wire["category"], pair["category"]);
+            assert!(!finding.message.is_empty());
+        }
+        assert!(report
+            .iter()
+            .all(|finding| finding.aspect != ImportAspectDto::MediaCount));
+    }
+    assert_eq!(
+        folder_import_findings_from_summary(folder)[5].message,
+        "Certains fichiers audio ou image référencés dépassent la taille autorisée (34 Mo par fichier). L'histoire sera créée sans eux ; tu pourras ajouter des fichiers plus légers dans l'éditeur."
+    );
+    assert_eq!(
+        folder_import_findings_from_summary(folder)[3].message,
+        "La structure de l'histoire est reconnue."
+    );
+}
 
 #[test]
 fn summaries_persisted_before_the_media_size_aspect_stay_readable() {

@@ -21,10 +21,17 @@
 //! presence, of their format and of the story's structure, so it is judged
 //! — and worded — on its own line, whatever the other aspects say.
 //!
+//! So is a COUNT reason ([`MediaCount`]): how many media a source references
+//! is read off its manifest alone, and says nothing against the structure
+//! that references them. It is the line of a bound that is CROSSED — within
+//! the bound it has nothing to report, and beyond it no media is read, so it
+//! never stands next to a `Media` or a `MediaSize` finding.
+//!
 //! [`Missing`]: RecognitionCategory::Missing
 //! [`Partial`]: ImportState::Partial
 //! [`Resolved`]: ImportState::Resolved
 //! [`MediaSize`]: RecognitionAspect::MediaSize
+//! [`MediaCount`]: RecognitionAspect::MediaCount
 
 /// Global recognition quality of an analyzed artifact (UI: `Propre` /
 /// `Partiellement exploitable` / `Inexploitable`).
@@ -44,11 +51,12 @@ pub enum RecognitionQuality {
 /// / `Structure` / `Integrity` / `Title` / `Timestamps`; the
 /// structured-folder flow analyzes `Envelope` / `FormatVersion` / `Title`
 /// / `Structure` / `Media` / `MediaSize` (an author manifest has no
-/// declared schema, no checksum, no timestamps); the structured-archive
-/// flow analyzes the same set minus `FormatVersion` (the pack format
-/// declares none); the RSS ingestion flow analyzes `Envelope` /
-/// `FormatVersion` / `Source` / `Title` / `Structure` (+ `Media` when the
-/// chosen item references an enclosure).
+/// declared schema, no checksum, no timestamps) — with the single
+/// `MediaCount` block in place of the last two when the manifest references
+/// more media than its bound; the structured-archive flow analyzes the same
+/// set minus `FormatVersion` (the pack format declares none); the RSS
+/// ingestion flow analyzes `Envelope` / `FormatVersion` / `Source` / `Title`
+/// / `Structure` (+ `Media` when the chosen item references an enclosure).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RecognitionAspect {
     Envelope,
@@ -73,6 +81,15 @@ pub enum RecognitionAspect {
     /// together cross the aggregate bound (nothing is created). Never
     /// `Missing`.
     MediaSize,
+    /// The NUMBER of distinct media a structured folder or archive
+    /// references, against the reference bound of its source. Counted off
+    /// the manifest or the descriptor alone — no media is read to count
+    /// them. Emitted by the structured-folder and structured-archive flows
+    /// ONLY, and ONLY as `Blocking`: more distinct references than the
+    /// bound, nothing is created and no media is read, so the verdict
+    /// carries neither `Media` nor `MediaSize`. Within the bound the count
+    /// has nothing to report and gets no line.
+    MediaCount,
     /// The external source an ingestion came from (an RSS feed). Emitted
     /// by the RSS ingestion flow ONLY, and always as `Ambiguous`: external
     /// content that was not reread by a human is never "clean", so this
@@ -341,6 +358,19 @@ mod tests {
             RecognitionFinding::recognized(RecognitionAspect::Structure),
             RecognitionFinding::recognized(RecognitionAspect::Media),
             RecognitionFinding::blocking(RecognitionAspect::MediaSize),
+        ];
+        assert_eq!(recognition_quality(&findings), RecognitionQuality::Unusable);
+        assert_eq!(folder_import_state(&findings), ImportState::Blocked);
+    }
+
+    #[test]
+    fn folder_state_blocks_on_the_media_count_alone() {
+        // Too many referenced media: the only blocker of a verdict whose
+        // other lines are sound — and no media line stands next to it.
+        let findings = [
+            RecognitionFinding::recognized(RecognitionAspect::Envelope),
+            RecognitionFinding::recognized(RecognitionAspect::Structure),
+            RecognitionFinding::blocking(RecognitionAspect::MediaCount),
         ];
         assert_eq!(recognition_quality(&findings), RecognitionQuality::Unusable);
         assert_eq!(folder_import_state(&findings), ImportState::Blocked);

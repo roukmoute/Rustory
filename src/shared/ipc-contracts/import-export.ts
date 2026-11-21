@@ -140,8 +140,12 @@ export type ImportState =
 /** The aspect of the analyzed input a finding refers to (`media` belongs
  *  to the structured-folder, structured-archive and RSS flows; `mediaSize`
  *  — the byte size of the referenced media against the bounds of their
- *  source — to the structured-folder and structured-archive flows only;
- *  `source` to the RSS ingestion flow only). */
+ *  source — and `mediaCount` — how many distinct media the source
+ *  references, against its reference bound — to the structured-folder and
+ *  structured-archive flows only; `source` to the RSS ingestion flow only).
+ *  `mediaCount` is the line of a bound that is CROSSED: it only ever
+ *  blocks, and never stands next to `media` or `mediaSize` (beyond the
+ *  bound no media is read). */
 export type ImportAspect =
   | "envelope"
   | "formatVersion"
@@ -152,6 +156,7 @@ export type ImportAspect =
   | "timestamps"
   | "media"
   | "mediaSize"
+  | "mediaCount"
   | "source";
 
 /** The recognition category of a finding. */
@@ -266,6 +271,7 @@ const IMPORT_ASPECTS: ReadonlySet<string> = new Set([
   "timestamps",
   "media",
   "mediaSize",
+  "mediaCount",
   "source",
 ]);
 const IMPORT_CATEGORIES: ReadonlySet<string> = new Set([
@@ -832,10 +838,11 @@ export function isContentSourcePolicy(
   );
 }
 
-/** The folder flow's OWN aspect set (no schemaVersion / integrity /
- *  timestamps — an author manifest has none). `mediaSize` judges the byte
- *  size of the media on its own line: a media left out for its size, or
- *  media too large together, is never filed under `media` or `structure`. */
+/** The folder flow's OWN aspect set — the six aspects EVERY creatable
+ *  folder verdict carries (no schemaVersion / integrity / timestamps — an
+ *  author manifest has none). `mediaSize` judges the byte size of the media
+ *  on its own line: a media left out for its size, or media too large
+ *  together, is never filed under `media` or `structure`. */
 const FOLDER_ASPECTS: ReadonlySet<string> = new Set([
   "envelope",
   "formatVersion",
@@ -845,8 +852,9 @@ const FOLDER_ASPECTS: ReadonlySet<string> = new Set([
   "mediaSize",
 ]);
 
-/** The ARCHIVE flow's OWN aspect set: the foreign pack format declares no
- *  format version, so the aspect is never asserted (work never done). */
+/** The ARCHIVE flow's OWN aspect set — the five aspects EVERY creatable
+ *  archive verdict carries: the foreign pack format declares no format
+ *  version, so the aspect is never asserted (work never done). */
 const ARCHIVE_ASPECTS: ReadonlySet<string> = new Set([
   "envelope",
   "title",
@@ -855,11 +863,29 @@ const ARCHIVE_ASPECTS: ReadonlySet<string> = new Set([
   "mediaSize",
 ]);
 
-/** `media` and `mediaSize` are judged TOGETHER or not at all (an unlisted
- *  format or a runaway reference count never reads a single media): a
- *  verdict asserting one without the other claims work that was not done. */
-function judgesMediaAndTheirSizeTogether(aspects: ReadonlySet<string>): boolean {
-  return aspects.has("media") === aspects.has("mediaSize");
+/** The one aspect a folder or an archive verdict may carry BESIDE its own
+ *  set: how many distinct media the source references. It is the line of a
+ *  bound that is crossed — never one of the aspects a creatable verdict
+ *  carries (within the bound the count has nothing to report). */
+const MEDIA_COUNT_ASPECT = "mediaCount";
+
+/** What a folder or an archive verdict may say of the media it references,
+ *  so that no finding claims work that was not done:
+ *
+ *  - `media` and `mediaSize` are judged TOGETHER or not at all (an unlisted
+ *    format never reads a single media): a verdict asserting one without
+ *    the other is a drift;
+ *  - `mediaCount` only ever BLOCKS, and a verdict that carries it carries
+ *    neither `media` nor `mediaSize`: beyond the reference bound no media
+ *    is read, so nothing can be said of their presence, their format or
+ *    their size. */
+function judgesTheMediaHonestly(findings: readonly ImportFinding[]): boolean {
+  const judgesMedia = findings.some((f) => f.aspect === "media");
+  const judgesSize = findings.some((f) => f.aspect === "mediaSize");
+  if (judgesMedia !== judgesSize) return false;
+  const count = findings.find((f) => f.aspect === MEDIA_COUNT_ASPECT);
+  if (count === undefined) return true;
+  return count.category === "blocking" && !judgesMedia;
 }
 
 function isCreatableSummary(value: unknown): value is CreatableSummary {
@@ -883,10 +909,11 @@ function isCreatableSummary(value: unknown): value is CreatableSummary {
  * the `.rustory` guard where the folder derivation is fully deterministic:
  * the `partial` state requires at least one `missing` finding, `needsReview`
  * requires an ambiguity and NO missing (missing would have derived
- * `partial`), aspects come from the FOLDER set without duplicates, `media`
- * and `mediaSize` come together, a non-blocked verdict carries exactly the
- * six folder aspects AND a creatable summary, and the `folderPath` /
- * `folderName` are non-empty.
+ * `partial`), aspects come from the FOLDER set without duplicates — plus
+ * `mediaCount`, which only ever blocks and excludes the two media lines —,
+ * `media` and `mediaSize` come together, a non-blocked verdict carries
+ * exactly the six folder aspects AND a creatable summary, and the
+ * `folderPath` / `folderName` are non-empty.
  */
 export function isStructuredCreationAnalysis(
   value: unknown,
@@ -913,14 +940,19 @@ export function isStructuredCreationAnalysis(
   ) {
     return false;
   }
-  // Aspects: from the folder set, no duplicates.
+  // Aspects: from the folder set (or the count line), no duplicates.
   const aspects = new Set<string>();
   for (const finding of findings) {
-    if (!FOLDER_ASPECTS.has(finding.aspect)) return false;
+    if (
+      !FOLDER_ASPECTS.has(finding.aspect) &&
+      finding.aspect !== MEDIA_COUNT_ASPECT
+    ) {
+      return false;
+    }
     if (aspects.has(finding.aspect)) return false;
     aspects.add(finding.aspect);
   }
-  if (!judgesMediaAndTheirSizeTogether(aspects)) return false;
+  if (!judgesTheMediaHonestly(findings)) return false;
   // Quality must be the one derived from the findings; state must be the
   // FOLDER derivation (deterministic): missing ⟹ partial, ambiguous-only ⟹
   // needsReview.
@@ -929,8 +961,9 @@ export function isStructuredCreationAnalysis(
   const hasMissing = findings.some((f) => f.category === "missing");
   if (c.state === "partial" && !hasMissing) return false;
   if (c.state === "needsReview" && hasMissing) return false;
-  // A non-blocked verdict analyzes the WHOLE folder matrix (six aspects)
-  // and carries what will be created; a blocked one carries nothing.
+  // A non-blocked verdict analyzes the WHOLE folder matrix (six aspects —
+  // never the count line, which blocks whenever it is there) and carries
+  // what will be created; a blocked one carries nothing.
   const hasSummary = c.creatableSummary !== undefined;
   if (c.quality === "unusable") {
     if (hasSummary) return false;
@@ -944,8 +977,9 @@ export function isStructuredCreationAnalysis(
 /**
  * Runtime guard for an [`ArchiveCreationAnalysis`] payload — the folder
  * guard's rules on the ARCHIVE aspect set: the same state derivation,
- * `media` and `mediaSize` together, and a non-blocked verdict carrying
- * exactly the five archive aspects AND a creatable summary.
+ * `media` and `mediaSize` together, `mediaCount` only as a block that
+ * excludes them, and a non-blocked verdict carrying exactly the five
+ * archive aspects AND a creatable summary.
  */
 export function isArchiveCreationAnalysis(
   value: unknown,
@@ -972,22 +1006,27 @@ export function isArchiveCreationAnalysis(
   ) {
     return false;
   }
-  // Aspects: from the archive set, no duplicates.
+  // Aspects: from the archive set (or the count line), no duplicates.
   const aspects = new Set<string>();
   for (const finding of findings) {
-    if (!ARCHIVE_ASPECTS.has(finding.aspect)) return false;
+    if (
+      !ARCHIVE_ASPECTS.has(finding.aspect) &&
+      finding.aspect !== MEDIA_COUNT_ASPECT
+    ) {
+      return false;
+    }
     if (aspects.has(finding.aspect)) return false;
     aspects.add(finding.aspect);
   }
-  if (!judgesMediaAndTheirSizeTogether(aspects)) return false;
+  if (!judgesTheMediaHonestly(findings)) return false;
   if (c.quality !== qualityFromFindings(findings)) return false;
   if (!isCoherentQualityState(c.quality, c.state)) return false;
   const hasMissing = findings.some((f) => f.category === "missing");
   if (c.state === "partial" && !hasMissing) return false;
   if (c.state === "needsReview" && hasMissing) return false;
   // A non-blocked verdict analyzes the WHOLE archive matrix (five
-  // aspects) and carries what will be created; a blocked one carries
-  // nothing.
+  // aspects — never the count line, which blocks whenever it is there)
+  // and carries what will be created; a blocked one carries nothing.
   const hasSummary = c.creatableSummary !== undefined;
   if (c.quality === "unusable") {
     if (hasSummary) return false;

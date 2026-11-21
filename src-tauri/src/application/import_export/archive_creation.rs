@@ -1320,6 +1320,99 @@ mod tests {
     }
 
     #[test]
+    fn a_pack_referencing_too_many_media_blocks_with_their_number_as_the_stated_reason() {
+        // One picture of its own per stage, one stage more than the
+        // reference bound. The archive carries the descriptor alone: beyond
+        // the bound no entry is ever looked up, so the review blocks on the
+        // NUMBER — with the bound and the gesture — and reports neither a
+        // missing media nor a structure that is in fact sound.
+        const NAMED: &str = "Les fichiers audio et image référencés dépassent le nombre autorisé (8192 fichiers différents). Réduis le nombre de médias de l'archive (par exemple en répartissant le pack sur plusieurs archives) puis relance l'analyse.";
+        let dir = tempfile::tempdir().expect("tempdir");
+        let app_data_dir = dir.path().join("appdata");
+        std::fs::create_dir_all(&app_data_dir).expect("appdata");
+        let zip_path = dir.path().join("pack-sans-fin.zip");
+        let stages: Vec<serde_json::Value> = (0..=crate::domain::import::MAX_ARCHIVE_MEDIA_FILES)
+            .map(|i| {
+                serde_json::json!({
+                    "uuid": format!("stage-{i}"),
+                    "squareOne": i == 0,
+                    "image": format!("image-{i}.png"),
+                    "audio": null,
+                    "okTransition": null,
+                    "controlSettings": {}
+                })
+            })
+            .collect();
+        let descriptor = serde_json::json!({
+            "title": "Pack sans fin",
+            "stageNodes": stages,
+            "actionNodes": []
+        })
+        .to_string();
+        write_zip(&zip_path, &[("story.json", descriptor.as_bytes())]);
+
+        let outcome = analyze_structured_archive(&zip_path).expect("analyze");
+        let ArchiveCreationAnalysisDto::Analyzed {
+            quality,
+            state,
+            findings,
+            creatable_summary,
+            ..
+        } = ArchiveCreationAnalysisDto::analyzed(
+            &outcome.analysis,
+            outcome.archive_name.clone(),
+            zip_path.to_string_lossy().into_owned(),
+        )
+        else {
+            unreachable!("an analysis always maps to the analyzed verdict");
+        };
+        assert_eq!(quality, ImportQualityDto::Unusable);
+        assert_eq!(state, ImportStateDto::Blocked);
+        assert!(creatable_summary.is_none(), "nothing will be created");
+        let blockers: Vec<(ImportAspectDto, &str)> = findings
+            .iter()
+            .filter(|finding| finding.category == ImportCategoryDto::Blocking)
+            .map(|finding| (finding.aspect, finding.message.as_str()))
+            .collect();
+        assert_eq!(
+            blockers,
+            vec![(ImportAspectDto::MediaCount, NAMED)],
+            "the number is the only blocker, and it is named"
+        );
+        let aspects: Vec<ImportAspectDto> = findings.iter().map(|f| f.aspect).collect();
+        assert_eq!(
+            aspects,
+            vec![
+                ImportAspectDto::Envelope,
+                ImportAspectDto::Title,
+                ImportAspectDto::Structure,
+                ImportAspectDto::MediaCount,
+            ],
+            "no entry was read: neither `media` nor `mediaSize` is asserted"
+        );
+        let structure = findings
+            .iter()
+            .find(|finding| finding.aspect == ImportAspectDto::Structure)
+            .expect("a structure finding");
+        assert_eq!(
+            structure.message,
+            "La structure du pack est reconnue et convertie en histoire."
+        );
+        assert!(outcome.analysis.discarded_media.is_empty());
+
+        // The acceptance re-analyzes and refuses before extracting a byte.
+        let mut handle = fresh_db();
+        let err = accept_structured_archive_creation(&mut handle, &app_data_dir, &zip_path)
+            .expect_err("a blocked pack must refuse acceptance");
+        assert_eq!(err.code, crate::domain::shared::AppErrorCode::ImportFailed);
+        let count: i64 = handle
+            .conn()
+            .query_row("SELECT COUNT(*) FROM stories", [], |r| r.get(0))
+            .expect("count");
+        assert_eq!(count, 0);
+    }
+
+    #[test]
     fn missing_title_uses_the_archive_stem() {
         let dir = tempfile::tempdir().expect("tempdir");
         let zip_path = dir.path().join("Histoire du soir.zip");

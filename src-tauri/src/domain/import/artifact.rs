@@ -793,9 +793,11 @@ mod tests {
             assert!(
                 analysis.findings.iter().all(|f| !matches!(
                     f.aspect,
-                    RecognitionAspect::Media | RecognitionAspect::MediaSize
+                    RecognitionAspect::Media
+                        | RecognitionAspect::MediaSize
+                        | RecognitionAspect::MediaCount
                 )),
-                "a .rustory artifact embeds no media: the flow never judges one, nor its size"
+                "a .rustory artifact embeds no media: the flow never judges one, nor its size, nor their number"
             );
         }
     }

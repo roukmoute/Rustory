@@ -31,8 +31,9 @@ use super::recognition::{
     RecognitionQuality,
 };
 use super::structured_folder::{
-    is_sober_media_basename, walk_media_references, CreatableStory, FolderMediaKind, MediaProbe,
-    MediaReference, StructuredFolderAnalysis, MAX_FOLDER_NODE_LABEL_CHARS,
+    exceeds_media_file_bound, is_sober_media_basename, judge_media_references, CreatableStory,
+    FolderMediaKind, MediaProbe, MediaReference, StructuredFolderAnalysis,
+    MAX_FOLDER_NODE_LABEL_CHARS,
 };
 
 /// Ceiling on the DISTINCT media files a community pack may reference.
@@ -40,6 +41,8 @@ use super::structured_folder::{
 /// image + one sound per stage node); the folder flow's 64-file bound was
 /// far too small and rejected legitimate packs as "structure incohérente".
 /// This bound stays only as an anti-runaway guard, sized for real packs.
+/// Exceeding it is a `MediaCount` blocking finding — a typed verdict that
+/// names the number, reached on the references alone: no entry is read.
 pub const MAX_ARCHIVE_MEDIA_FILES: usize = 8192;
 
 /// Ceiling on ONE media of a story archive — a memory guard: every reader
@@ -89,7 +92,7 @@ pub fn archive_referenced_media(story_json: &[u8]) -> Vec<(String, FolderMediaKi
         return Vec::new();
     };
     let refs = raw_archive_media_refs(&root);
-    if exceeds_media_file_bound(&refs) {
+    if exceeds_media_file_bound(&refs, MAX_ARCHIVE_MEDIA_FILES) {
         return Vec::new();
     }
     let mut seen = BTreeSet::new();
@@ -122,18 +125,17 @@ pub fn analyze_structured_archive_components(
     let extraction = extract(&root);
     let mut findings = vec![RecognitionFinding::recognized(RecognitionAspect::Envelope)];
 
-    // Media walk — the folder flow's own walk: decide each REFERENCE,
-    // collect retained refs + discarded basenames. Evaluated only within
-    // the anti-DoS reference bound (a bounds-breaking descriptor is a
-    // `Structure` block whose media were never probed — no `Media` finding
-    // may be asserted for work that was never done).
-    let mut structure_blocked = extraction.structure_blocked;
-    let raw_refs = raw_archive_media_refs(&root);
-    let media_bound_exceeded = exceeds_media_file_bound(&raw_refs);
-    if media_bound_exceeded {
-        structure_blocked = true;
-    }
-    let media_walk = (!media_bound_exceeded).then(|| walk_media_references(&raw_refs, probes));
+    // Media — the folder flow's own judgement: the references are first
+    // COUNTED against the anti-runaway reference bound; beyond it the
+    // verdict blocks on `MediaCount` without a single entry read (mirrors
+    // `archive_referenced_media`, which exposed nothing to probe), within
+    // it each REFERENCE is decided against its probe. Either way the
+    // structure is left alone, and judged below for what it is.
+    let media = judge_media_references(
+        &raw_archive_media_refs(&root),
+        probes,
+        MAX_ARCHIVE_MEDIA_FILES,
+    );
 
     // Title: the descriptor's own title wins; the archive stem is the
     // HONEST fallback (flagged, never clean). No title at all blocks.
@@ -147,6 +149,7 @@ pub fn analyze_structured_archive_components(
     // Canonical oracle over the transcoded structure — the same
     // `validate_canonical` the editor and a transfer run.
     let mut broken_option_link = false;
+    let mut structure_blocked = extraction.structure_blocked;
     let structure = CanonicalStructure {
         schema_version: CANONICAL_STORY_SCHEMA_VERSION,
         start_node_id: extraction.start_node_id.clone().unwrap_or_default(),
@@ -185,15 +188,12 @@ pub fn analyze_structured_archive_components(
         RecognitionFinding::recognized(RecognitionAspect::Structure)
     });
 
-    // The aggregate byte bound is a SIZE verdict of its own (`MediaSize`
-    // blocking), never filed under a structure that is in fact sound.
-    if let Some(walk) = &media_walk {
-        findings.push(walk.media_finding());
-        findings.push(walk.media_size_finding(MAX_ARCHIVE_TOTAL_MEDIA_BYTES));
-    }
-    let (retained_media, discarded_media) = media_walk
-        .map(|walk| (walk.retained, walk.discarded))
-        .unwrap_or_default();
+    // Both media bounds are verdicts of their own — `MediaSize` blocking
+    // for the aggregate bytes, `MediaCount` blocking for the number of
+    // references —, never filed under a structure that is in fact sound.
+    // `Media` and `MediaSize` are asserted only for media that were read.
+    findings.extend(media.findings(MAX_ARCHIVE_TOTAL_MEDIA_BYTES));
+    let (retained_media, discarded_media) = media.into_retained_and_discarded();
 
     let quality = recognition_quality(&findings);
     let state = folder_import_state(&findings);
@@ -412,11 +412,6 @@ fn raw_archive_media_refs(root: &Value) -> Vec<MediaReference> {
     refs
 }
 
-fn exceeds_media_file_bound(refs: &[MediaReference]) -> bool {
-    let distinct: BTreeSet<&str> = refs.iter().map(|r| r.basename.as_str()).collect();
-    distinct.len() > MAX_ARCHIVE_MEDIA_FILES
-}
-
 #[cfg(test)]
 mod tests {
     use super::super::recognition::RecognitionCategory;
@@ -562,11 +557,9 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_bounds_breaking_descriptor_asserts_no_media_finding_at_all() {
-        // More distinct references than the anti-runaway bound: the media
-        // were never probed, so neither `Media` nor `MediaSize` is asserted.
-        let stages: Vec<String> = (0..=MAX_ARCHIVE_MEDIA_FILES)
+    /// A pack of `stages` stages, each showing its OWN picture.
+    fn pack_of_pictures(stages: usize) -> String {
+        let stages: Vec<String> = (0..stages)
             .map(|i| {
                 format!(
                     r#"{{"uuid":"s{i}","squareOne":{sq},"image":"img{i}.png","audio":null,"okTransition":null,"controlSettings":{{}}}}"#,
@@ -574,19 +567,77 @@ mod tests {
                 )
             })
             .collect();
-        let pack = format!(
+        format!(
             r#"{{"title":"Trop","stageNodes":[{}],"actionNodes":[]}}"#,
             stages.join(",")
+        )
+    }
+
+    #[test]
+    fn a_bounds_breaking_descriptor_blocks_on_the_media_count_and_asserts_no_media_finding() {
+        // More distinct references than the anti-runaway bound: the block
+        // is a matter of NUMBER — the descriptor and its structure are
+        // sound and say so —, and the media were never probed, so neither
+        // `Media` nor `MediaSize` is asserted.
+        let pack = pack_of_pictures(MAX_ARCHIVE_MEDIA_FILES + 1);
+        assert!(
+            archive_referenced_media(pack.as_bytes()).is_empty(),
+            "a bounds-breaking descriptor exposes nothing to probe"
         );
         let analysis = analyze(&pack, &[], None);
         assert_eq!(
-            category_of(&analysis, RecognitionAspect::Structure),
+            category_of(&analysis, RecognitionAspect::MediaCount),
             RecognitionCategory::Blocking
         );
+        assert_eq!(analysis.quality, RecognitionQuality::Unusable);
+        assert!(analysis.creatable.is_none());
+        for aspect in [
+            RecognitionAspect::Envelope,
+            RecognitionAspect::Title,
+            RecognitionAspect::Structure,
+        ] {
+            assert_eq!(
+                category_of(&analysis, aspect),
+                RecognitionCategory::Recognized,
+                "{aspect:?} is not blamed for a count reason"
+            );
+        }
+        assert_eq!(analysis.findings.len(), 4);
         assert!(!analysis.findings.iter().any(|f| matches!(
             f.aspect,
             RecognitionAspect::Media | RecognitionAspect::MediaSize
         )));
+        assert!(analysis.discarded_media.is_empty());
+    }
+
+    #[test]
+    fn the_media_count_bound_is_inclusive_and_says_nothing_within_it() {
+        // Exactly MAX_ARCHIVE_MEDIA_FILES distinct files: the media are
+        // read and judged, and the count gets no line at all.
+        let pack = pack_of_pictures(MAX_ARCHIVE_MEDIA_FILES);
+        let referenced = archive_referenced_media(pack.as_bytes());
+        assert_eq!(referenced.len(), MAX_ARCHIVE_MEDIA_FILES);
+        let probes: BTreeMap<String, MediaProbe> = referenced
+            .into_iter()
+            .map(|(name, kind)| {
+                (
+                    name,
+                    MediaProbe::Usable {
+                        kind,
+                        byte_size: 10,
+                    },
+                )
+            })
+            .collect();
+        let analysis = analyze_structured_archive_components(Some(pack.as_bytes()), &probes, None);
+        assert_eq!(analysis.quality, RecognitionQuality::Clean);
+        assert!(!analysis
+            .findings
+            .iter()
+            .any(|f| f.aspect == RecognitionAspect::MediaCount));
+        assert_eq!(analysis.findings.len(), 5);
+        let creatable = analysis.creatable.expect("creatable at the bound");
+        assert_eq!(creatable.retained_media.len(), MAX_ARCHIVE_MEDIA_FILES);
     }
 
     fn analyze(

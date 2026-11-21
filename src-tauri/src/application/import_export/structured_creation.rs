@@ -985,7 +985,7 @@ fn db_commit_error(err: &rusqlite::Error, stage: &'static str) -> AppError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::import::{ImportState, RecognitionQuality};
+    use crate::domain::import::{ImportState, RecognitionQuality, MAX_FOLDER_MEDIA_FILES};
     use crate::domain::shared::AppErrorCode;
     use crate::infrastructure::db;
     use crate::ipc::dto::import_export::{
@@ -1965,6 +1965,138 @@ mod tests {
         assert_eq!(err.code, AppErrorCode::ImportFailed);
         assert_eq!(count(&db, "stories"), 0);
         assert_eq!(store_file_count(app_data.path()), 0);
+    }
+
+    /// A folder of `node_count` nodes, each with its OWN picture and its OWN
+    /// sound — every file really there, every one a media Rustory reads.
+    fn long_story_folder(tmp: &TempDir, node_count: usize) -> std::path::PathBuf {
+        let folder = tmp.path().join("longue-histoire");
+        std::fs::create_dir(&folder).expect("mkdir");
+        let nodes: Vec<serde_json::Value> = (0..node_count)
+            .map(|i| {
+                serde_json::json!({
+                    "id": format!("n{i}"),
+                    "text": format!("Chapitre {}", i + 1),
+                    "image": format!("image-{i}.png"),
+                    "audio": format!("son-{i}.mp3"),
+                })
+            })
+            .collect();
+        write_manifest(
+            &folder,
+            &serde_json::json!({
+                "formatVersion": 1,
+                "title": "Une longue histoire",
+                "nodes": nodes,
+            })
+            .to_string(),
+        );
+        let picture = png();
+        for i in 0..node_count {
+            std::fs::write(folder.join(format!("image-{i}.png")), &picture).expect("png");
+            std::fs::write(folder.join(format!("son-{i}.mp3")), MP3).expect("mp3");
+        }
+        folder
+    }
+
+    #[test]
+    fn a_folder_referencing_too_many_media_blocks_with_their_number_as_the_stated_reason() {
+        // The honest long story: 33 nodes with a picture and a sound each —
+        // 66 distinct files for a bound of 64. Every file is there and every
+        // one is sound: the review blocks on their NUMBER, names the bound
+        // and the gesture, and blames neither the manifest's structure nor
+        // media it never read.
+        const NAMED: &str = "Les fichiers audio et image référencés dépassent le nombre autorisé (64 fichiers différents). Réduis le nombre de médias référencés par le manifest puis relance l'analyse ; tu pourras ajouter les autres dans l'éditeur.";
+        let tmp = TempDir::new().expect("tmp");
+        let app_data = TempDir::new().expect("app data");
+        let folder = long_story_folder(&tmp, MAX_FOLDER_MEDIA_FILES / 2 + 1);
+
+        let outcome = analyze_structured_folder(&folder).expect("analyze");
+        let StructuredCreationAnalysisDto::Analyzed {
+            quality,
+            state,
+            findings,
+            creatable_summary,
+            ..
+        } = StructuredCreationAnalysisDto::analyzed(
+            &outcome.analysis,
+            outcome.folder_name.clone(),
+            folder.to_string_lossy().into_owned(),
+        )
+        else {
+            unreachable!("an analysis always maps to the analyzed verdict");
+        };
+        assert_eq!(quality, ImportQualityDto::Unusable);
+        assert_eq!(state, ImportStateDto::Blocked);
+        assert!(creatable_summary.is_none(), "nothing will be created");
+        let blockers: Vec<(ImportAspectDto, &str)> = findings
+            .iter()
+            .filter(|finding| finding.category == ImportCategoryDto::Blocking)
+            .map(|finding| (finding.aspect, finding.message.as_str()))
+            .collect();
+        assert_eq!(
+            blockers,
+            vec![(ImportAspectDto::MediaCount, NAMED)],
+            "the number is the only blocker, and it is named"
+        );
+        // Every other line reads as what it is: recognized.
+        let aspects: Vec<ImportAspectDto> = findings.iter().map(|f| f.aspect).collect();
+        assert_eq!(
+            aspects,
+            vec![
+                ImportAspectDto::Envelope,
+                ImportAspectDto::FormatVersion,
+                ImportAspectDto::Title,
+                ImportAspectDto::Structure,
+                ImportAspectDto::MediaCount,
+            ],
+            "no media was read: neither `media` nor `mediaSize` is asserted"
+        );
+        let structure = findings
+            .iter()
+            .find(|finding| finding.aspect == ImportAspectDto::Structure)
+            .expect("a structure finding");
+        assert_eq!(structure.category, ImportCategoryDto::Recognized);
+        assert_eq!(
+            structure.message,
+            "La structure de l'histoire est reconnue."
+        );
+        assert!(outcome.analysis.discarded_media.is_empty());
+
+        // The acceptance re-analyzes and refuses before promoting a byte.
+        let mut db = fresh_db();
+        let err = accept_structured_creation(&mut db, app_data.path(), &folder)
+            .expect_err("a blocked folder must refuse");
+        assert_eq!(err.code, AppErrorCode::ImportFailed);
+        assert_eq!(count(&db, "stories"), 0);
+        assert_eq!(store_file_count(app_data.path()), 0);
+    }
+
+    #[test]
+    fn a_folder_of_exactly_the_media_count_bound_is_created_with_every_media() {
+        // 32 nodes with a picture and a sound each: 64 distinct files, the
+        // bound to the unit. The bound is inclusive from the review to the
+        // library — and within it the count has no line at all.
+        let tmp = TempDir::new().expect("tmp");
+        let app_data = TempDir::new().expect("app data");
+        let node_count = MAX_FOLDER_MEDIA_FILES / 2;
+        let folder = long_story_folder(&tmp, node_count);
+
+        let outcome = analyze_structured_folder(&folder).expect("analyze");
+        assert_eq!(outcome.analysis.quality, RecognitionQuality::Clean);
+        assert!(outcome
+            .analysis
+            .findings
+            .iter()
+            .all(|finding| finding.aspect != crate::domain::import::RecognitionAspect::MediaCount));
+        let creatable = outcome.analysis.creatable.expect("creatable at the bound");
+        assert_eq!(creatable.retained_media.len(), MAX_FOLDER_MEDIA_FILES);
+
+        let mut db = fresh_db();
+        let card = accept_structured_creation(&mut db, app_data.path(), &folder)
+            .expect("a folder at the bound is created");
+        assert!(card.import_report.is_none(), "a clean creation: no report");
+        assert_eq!(count(&db, "assets") as usize, MAX_FOLDER_MEDIA_FILES);
     }
 
     #[test]

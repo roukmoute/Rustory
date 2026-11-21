@@ -268,3 +268,54 @@ describe("<CreateFromArchiveSurface /> — media presence", () => {
     expect(screen.queryByRole("alert")).toBeNull();
   });
 });
+
+// The copy Rust sends when a pack references more media than its bound (the
+// surface renders it verbatim — it never words a number itself).
+const COUNT_BLOCKED =
+  "Les fichiers audio et image référencés dépassent le nombre autorisé (8192 fichiers différents). Réduis le nombre de médias de l'archive (par exemple en répartissant le pack sur plusieurs archives) puis relance l'analyse.";
+
+describe("<CreateFromArchiveSurface /> — media count", () => {
+  it("blocks on the count with the number as the stated reason — the structure is not blamed", () => {
+    // The REAL wire of a pack over its reference bound: the descriptor, its
+    // title and its structure are judged; no media was read, so neither
+    // media line exists.
+    renderSurface({
+      kind: "review",
+      verdict: {
+        kind: "analyzed",
+        quality: "unusable",
+        state: "blocked",
+        findings: [
+          ...CLEAN_FINDINGS.slice(0, 3),
+          { aspect: "mediaCount", category: "blocking", message: COUNT_BLOCKED },
+        ],
+        archiveName: "pack-sans-fin.zip",
+        archivePath: "/home/user/pack-sans-fin.zip",
+      },
+    });
+
+    const alert = screen.getByRole("alert");
+    expect(alert).toHaveTextContent("Inexploitable");
+    // The limit is named, with the gesture.
+    expect(alert).toHaveTextContent("(8192 fichiers différents)");
+    expect(alert).toHaveTextContent(COUNT_BLOCKED);
+    // ONE blocker, on the count line; the structure reads as recognized.
+    expect(screen.getAllByText("blocage réel")).toHaveLength(1);
+    expect(
+      within(findingRow(COUNT_BLOCKED)).getByText("blocage réel"),
+    ).toBeInTheDocument();
+    expect(
+      within(
+        findingRow("La structure du pack est reconnue et convertie en histoire."),
+      ).getByText("reconnu"),
+    ).toBeInTheDocument();
+    // Nothing is said of media that were never read.
+    expect(screen.queryByText(CLEAN_FINDINGS[3].message)).toBeNull();
+    expect(screen.queryByText(CLEAN_FINDINGS[4].message)).toBeNull();
+    expect(screen.queryByText(/taille autorisée/)).toBeNull();
+    // Nothing will be created: no summary, no accept — only `Abandonner`.
+    expect(screen.queryByText("Ce qui sera créé")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Créer l'histoire" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Abandonner" })).toBeInTheDocument();
+  });
+});
