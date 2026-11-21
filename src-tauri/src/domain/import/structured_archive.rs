@@ -27,12 +27,12 @@ use crate::domain::story::{
 };
 
 use super::recognition::{
-    folder_import_state, recognition_quality, RecognitionAspect, RecognitionCategory,
-    RecognitionFinding, RecognitionQuality,
+    folder_import_state, recognition_quality, RecognitionAspect, RecognitionFinding,
+    RecognitionQuality,
 };
 use super::structured_folder::{
-    is_sober_media_basename, CreatableStory, FolderMediaKind, MediaProbe, RetainedMediaRef,
-    StructuredFolderAnalysis, MAX_FOLDER_NODE_LABEL_CHARS,
+    is_sober_media_basename, walk_media_references, CreatableStory, FolderMediaKind, MediaProbe,
+    MediaReference, StructuredFolderAnalysis, MAX_FOLDER_NODE_LABEL_CHARS,
 };
 
 /// Ceiling on the DISTINCT media files a community pack may reference.
@@ -74,15 +74,6 @@ pub const STRUCTURED_ARCHIVE_ASSETS_PREFIX: &str = "assets/";
 /// itself declares no format version — this is the provenance row's
 /// `source_format_version`, never a value read from the foreign file).
 pub const STRUCTURED_ARCHIVE_FORMAT_VERSION: u64 = 1;
-
-/// One media reference extracted from the stage graph: which stage (the
-/// future canonical node), which slot, which bare basename.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct ArchiveMediaReference {
-    node_id: String,
-    kind: FolderMediaKind,
-    basename: String,
-}
 
 /// The DISTINCT sober basenames referenced by the descriptor with their
 /// slot kinds, in first-reference order — exactly what the application
@@ -129,69 +120,23 @@ pub fn analyze_structured_archive_components(
     let extraction = extract(&root);
     let mut findings = vec![RecognitionFinding::recognized(RecognitionAspect::Envelope)];
 
-    // Media walk — the exact folder-walk semantics: decide each REFERENCE,
+    // Media walk — the folder flow's own walk: decide each REFERENCE,
     // collect retained refs + discarded basenames. Evaluated only within
     // the anti-DoS reference bound (a bounds-breaking descriptor is a
     // `Structure` block whose media were never probed — no `Media` finding
     // may be asserted for work that was never done).
-    let mut media_missing = false;
-    let mut media_ambiguous = false;
-    let mut retained_media = Vec::new();
-    let mut discarded_media = Vec::new();
-    let mut discarded_seen = BTreeSet::new();
-    let mut retained_sizes: BTreeMap<&str, u64> = BTreeMap::new();
     let mut structure_blocked = extraction.structure_blocked;
     let raw_refs = raw_archive_media_refs(&root);
     let media_bound_exceeded = exceeds_media_file_bound(&raw_refs);
     if media_bound_exceeded {
         structure_blocked = true;
     }
-    let media_analyzed = !media_bound_exceeded;
-    if media_analyzed {
-        for reference in &raw_refs {
-            if !is_sober_media_basename(&reference.basename) {
-                media_ambiguous = true;
-                if discarded_seen.insert(reference.basename.clone()) {
-                    discarded_media.push(reference.basename.clone());
-                }
-                continue;
-            }
-            let probe = probes
-                .get(&reference.basename)
-                .copied()
-                .unwrap_or(MediaProbe::Absent);
-            match probe {
-                MediaProbe::Usable { kind, byte_size } if kind == reference.kind => {
-                    retained_sizes.insert(reference.basename.as_str(), byte_size);
-                    retained_media.push(RetainedMediaRef {
-                        node_id: reference.node_id.clone(),
-                        kind: reference.kind,
-                        basename: reference.basename.clone(),
-                    });
-                }
-                MediaProbe::Usable { .. } => {
-                    media_ambiguous = true;
-                    if discarded_seen.insert(reference.basename.clone()) {
-                        discarded_media.push(reference.basename.clone());
-                    }
-                }
-                MediaProbe::Absent => {
-                    media_missing = true;
-                    if discarded_seen.insert(reference.basename.clone()) {
-                        discarded_media.push(reference.basename.clone());
-                    }
-                }
-                MediaProbe::Unusable => {
-                    media_ambiguous = true;
-                    if discarded_seen.insert(reference.basename.clone()) {
-                        discarded_media.push(reference.basename.clone());
-                    }
-                }
-            }
-        }
-        if retained_sizes.values().sum::<u64>() > MAX_ARCHIVE_TOTAL_MEDIA_BYTES {
-            structure_blocked = true;
-        }
+    let media_walk = (!media_bound_exceeded).then(|| walk_media_references(&raw_refs, probes));
+    if media_walk
+        .as_ref()
+        .is_some_and(|walk| walk.retained_bytes > MAX_ARCHIVE_TOTAL_MEDIA_BYTES)
+    {
+        structure_blocked = true;
     }
 
     // Title: the descriptor's own title wins; the archive stem is the
@@ -244,19 +189,12 @@ pub fn analyze_structured_archive_components(
         RecognitionFinding::recognized(RecognitionAspect::Structure)
     });
 
-    if media_analyzed {
-        findings.push(if media_missing {
-            RecognitionFinding {
-                aspect: RecognitionAspect::Media,
-                category: RecognitionCategory::Missing,
-                message: None,
-            }
-        } else if media_ambiguous {
-            RecognitionFinding::ambiguous(RecognitionAspect::Media)
-        } else {
-            RecognitionFinding::recognized(RecognitionAspect::Media)
-        });
+    if let Some(walk) = &media_walk {
+        findings.push(walk.media_finding());
     }
+    let (retained_media, discarded_media) = media_walk
+        .map(|walk| (walk.retained, walk.discarded))
+        .unwrap_or_default();
 
     let quality = recognition_quality(&findings);
     let state = folder_import_state(&findings);
@@ -441,7 +379,9 @@ fn truncate_label(name: &str) -> String {
     name.chars().take(MAX_FOLDER_NODE_LABEL_CHARS).collect()
 }
 
-fn raw_archive_media_refs(root: &Value) -> Vec<ArchiveMediaReference> {
+/// Extract every media reference from the stage graph: which stage (the
+/// future canonical node), which slot, which bare basename.
+fn raw_archive_media_refs(root: &Value) -> Vec<MediaReference> {
     let mut refs = Vec::new();
     let Some(stages) = root.get("stageNodes").and_then(Value::as_array) else {
         return refs;
@@ -461,7 +401,7 @@ fn raw_archive_media_refs(root: &Value) -> Vec<ArchiveMediaReference> {
                     .strip_prefix(STRUCTURED_ARCHIVE_ASSETS_PREFIX)
                     .unwrap_or(raw);
                 if !basename.is_empty() {
-                    refs.push(ArchiveMediaReference {
+                    refs.push(MediaReference {
                         node_id: uuid.to_string(),
                         kind,
                         basename: basename.to_string(),
@@ -473,13 +413,14 @@ fn raw_archive_media_refs(root: &Value) -> Vec<ArchiveMediaReference> {
     refs
 }
 
-fn exceeds_media_file_bound(refs: &[ArchiveMediaReference]) -> bool {
+fn exceeds_media_file_bound(refs: &[MediaReference]) -> bool {
     let distinct: BTreeSet<&str> = refs.iter().map(|r| r.basename.as_str()).collect();
     distinct.len() > MAX_ARCHIVE_MEDIA_FILES
 }
 
 #[cfg(test)]
 mod tests {
+    use super::super::recognition::RecognitionCategory;
     use super::*;
 
     fn analyze_audio_total(total_bytes: u64) -> StructuredFolderAnalysis {

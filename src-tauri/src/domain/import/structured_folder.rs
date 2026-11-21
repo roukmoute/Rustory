@@ -210,23 +210,110 @@ pub fn referenced_media(manifest_bytes: &[u8]) -> Vec<String> {
 
 /// True iff the manifest references more DISTINCT basenames than the
 /// anti-DoS bound allows — the probe/promotion work is then never started.
-fn exceeds_media_file_bound(raw_refs: &[RawMediaRef]) -> bool {
+fn exceeds_media_file_bound(raw_refs: &[MediaReference]) -> bool {
     let distinct: BTreeSet<&str> = raw_refs.iter().map(|r| r.basename.as_str()).collect();
     distinct.len() > MAX_FOLDER_MEDIA_FILES
 }
 
-/// A raw media reference as written in the manifest (possibly non-sober).
-struct RawMediaRef {
-    node_id: String,
-    kind: FolderMediaKind,
-    basename: String,
+/// A media reference as written in an author manifest or a pack descriptor:
+/// which node, which slot, which basename — possibly non-sober (the walk
+/// discards such a name without ever probing it).
+pub(super) struct MediaReference {
+    pub(super) node_id: String,
+    pub(super) kind: FolderMediaKind,
+    pub(super) basename: String,
+}
+
+/// What walking the media references of a source decided: the references
+/// the creation keeps, the basenames it leaves out, and why. ONE walk for
+/// the folder and the archive flows, so the two can never disagree on what
+/// a probe means.
+pub(super) struct MediaWalk {
+    /// At least one referenced media is absent from the source.
+    pub(super) missing: bool,
+    /// At least one referenced media is there but unusable: bytes outside
+    /// the closed format set, wrong slot, irregular file, non-sober name.
+    pub(super) ambiguous: bool,
+    /// The references kept, in reference order.
+    pub(super) retained: Vec<RetainedMediaRef>,
+    /// The DISTINCT basenames left out, in first-reference order.
+    pub(super) discarded: Vec<String>,
+    /// Sum of the byte sizes of the DISTINCT retained basenames.
+    pub(super) retained_bytes: u64,
+}
+
+impl MediaWalk {
+    /// The single `Media` finding of a verdict: a missing media dominates an
+    /// unusable one (it drives the durable `partial` state).
+    pub(super) fn media_finding(&self) -> RecognitionFinding {
+        if self.missing {
+            RecognitionFinding {
+                aspect: RecognitionAspect::Media,
+                category: RecognitionCategory::Missing,
+                message: None,
+            }
+        } else if self.ambiguous {
+            RecognitionFinding::ambiguous(RecognitionAspect::Media)
+        } else {
+            RecognitionFinding::recognized(RecognitionAspect::Media)
+        }
+    }
+}
+
+/// Decide each media REFERENCE against the probe of its file (a probed file
+/// may match one slot and not another — the same basename referenced as
+/// image AND audio). A sober basename missing from the probe map is a caller
+/// bug — it fails safe as "absent" (the media is discarded, never invented).
+pub(super) fn walk_media_references(
+    references: &[MediaReference],
+    probes: &BTreeMap<String, MediaProbe>,
+) -> MediaWalk {
+    let mut walk = MediaWalk {
+        missing: false,
+        ambiguous: false,
+        retained: Vec::new(),
+        discarded: Vec::new(),
+        retained_bytes: 0,
+    };
+    let mut discarded_seen = BTreeSet::new();
+    let mut retained_sizes: BTreeMap<&str, u64> = BTreeMap::new();
+    for reference in references {
+        let probe = if is_sober_media_basename(&reference.basename) {
+            probes
+                .get(&reference.basename)
+                .copied()
+                .unwrap_or(MediaProbe::Absent)
+        } else {
+            // A non-sober name is never probed: discarded as unusable.
+            MediaProbe::Unusable
+        };
+        match probe {
+            MediaProbe::Usable { kind, byte_size } if kind == reference.kind => {
+                retained_sizes.insert(reference.basename.as_str(), byte_size);
+                walk.retained.push(RetainedMediaRef {
+                    node_id: reference.node_id.clone(),
+                    kind: reference.kind,
+                    basename: reference.basename.clone(),
+                });
+                continue;
+            }
+            // Wrong slot (e.g. a PNG referenced as audio), or unusable.
+            MediaProbe::Usable { .. } | MediaProbe::Unusable => walk.ambiguous = true,
+            MediaProbe::Absent => walk.missing = true,
+        }
+        if discarded_seen.insert(reference.basename.as_str()) {
+            walk.discarded.push(reference.basename.clone());
+        }
+    }
+    walk.retained_bytes = retained_sizes.values().sum();
+    walk
 }
 
 /// Extract every (node, slot, basename) media reference from the raw JSON,
 /// tolerantly: nodes that are not objects or ids that are not strings are
 /// skipped here (the structural extraction reports them; this walk only
 /// feeds the media probe list and the media findings).
-fn raw_media_refs(root: &Value) -> Vec<RawMediaRef> {
+fn raw_media_refs(root: &Value) -> Vec<MediaReference> {
     let mut refs = Vec::new();
     let Some(nodes) = root.get("nodes").and_then(Value::as_array) else {
         return refs;
@@ -250,7 +337,7 @@ fn raw_media_refs(root: &Value) -> Vec<RawMediaRef> {
                 if basename.is_empty() {
                     continue;
                 }
-                refs.push(RawMediaRef {
+                refs.push(MediaReference {
                     node_id: id.to_string(),
                     kind,
                     basename: basename.to_string(),
@@ -443,19 +530,11 @@ pub fn analyze_structured_folder_components(
         RecognitionFinding::blocking(RecognitionAspect::FormatVersion)
     });
 
-    // Media walk: decide each REFERENCE (a probed file may match one slot
-    // and not another — same basename referenced as image AND audio), and
-    // collect the retained refs + the discarded basenames. The whole media
-    // aspect is evaluated ONLY when the declared format is the LISTED one:
-    // an unlisted format is a `FormatVersion` block whose media were never
-    // read (AC2 — no implicit / partial support), so its verdict carries no
-    // `Media` finding at all.
-    let mut media_missing = false;
-    let mut media_ambiguous = false;
-    let mut retained_media = Vec::new();
-    let mut discarded_media = Vec::new();
-    let mut discarded_seen = BTreeSet::new();
-    let mut retained_sizes: BTreeMap<&str, u64> = BTreeMap::new();
+    // Media walk: decide each REFERENCE and collect the retained refs + the
+    // discarded basenames. The whole media aspect is evaluated ONLY when the
+    // declared format is the LISTED one: an unlisted format is a
+    // `FormatVersion` block whose media were never read (AC2 — no implicit /
+    // partial support), so its verdict carries no `Media` finding at all.
     let mut structure_blocked = extraction.structure_blocked;
     let raw_refs = raw_media_refs(&root);
     // More distinct referenced files than the anti-DoS bound: a Structure
@@ -466,58 +545,15 @@ pub fn analyze_structured_folder_components(
     if media_bound_exceeded {
         structure_blocked = true;
     }
-    let media_analyzed = extraction.format_version_ok && !media_bound_exceeded;
-    if media_analyzed {
-        for reference in &raw_refs {
-            if !is_sober_media_basename(&reference.basename) {
-                media_ambiguous = true;
-                if discarded_seen.insert(reference.basename.clone()) {
-                    discarded_media.push(reference.basename.clone());
-                }
-                continue;
-            }
-            // A sober basename missing from the probe map is a caller bug —
-            // fail safe as "absent" (the media is discarded, never invented).
-            let probe = probes
-                .get(&reference.basename)
-                .copied()
-                .unwrap_or(MediaProbe::Absent);
-            match probe {
-                MediaProbe::Usable { kind, byte_size } if kind == reference.kind => {
-                    retained_sizes.insert(reference.basename.as_str(), byte_size);
-                    retained_media.push(RetainedMediaRef {
-                        node_id: reference.node_id.clone(),
-                        kind: reference.kind,
-                        basename: reference.basename.clone(),
-                    });
-                }
-                MediaProbe::Usable { .. } => {
-                    // Wrong slot (e.g. a PNG referenced as audio): discarded.
-                    media_ambiguous = true;
-                    if discarded_seen.insert(reference.basename.clone()) {
-                        discarded_media.push(reference.basename.clone());
-                    }
-                }
-                MediaProbe::Absent => {
-                    media_missing = true;
-                    if discarded_seen.insert(reference.basename.clone()) {
-                        discarded_media.push(reference.basename.clone());
-                    }
-                }
-                MediaProbe::Unusable => {
-                    media_ambiguous = true;
-                    if discarded_seen.insert(reference.basename.clone()) {
-                        discarded_media.push(reference.basename.clone());
-                    }
-                }
-            }
-        }
-
-        // Anti-DoS total bound (Structure blocking, never a transport
-        // error): the sum of the retained media byte sizes.
-        if retained_sizes.values().sum::<u64>() > MAX_FOLDER_TOTAL_MEDIA_BYTES {
-            structure_blocked = true;
-        }
+    let media_walk = (extraction.format_version_ok && !media_bound_exceeded)
+        .then(|| walk_media_references(&raw_refs, probes));
+    // Anti-DoS total bound (Structure blocking, never a transport error):
+    // the sum of the retained media byte sizes.
+    if media_walk
+        .as_ref()
+        .is_some_and(|walk| walk.retained_bytes > MAX_FOLDER_TOTAL_MEDIA_BYTES)
+    {
+        structure_blocked = true;
     }
 
     // Canonical oracle over the transcoded structure — the same
@@ -574,19 +610,12 @@ pub fn analyze_structured_folder_components(
     // The `Media` aspect exists on the verdict ONLY when it was actually
     // analyzed (listed format, in-bounds reference count) — never asserted
     // for work that was never done.
-    if media_analyzed {
-        findings.push(if media_missing {
-            RecognitionFinding {
-                aspect: RecognitionAspect::Media,
-                category: RecognitionCategory::Missing,
-                message: None,
-            }
-        } else if media_ambiguous {
-            RecognitionFinding::ambiguous(RecognitionAspect::Media)
-        } else {
-            RecognitionFinding::recognized(RecognitionAspect::Media)
-        });
+    if let Some(walk) = &media_walk {
+        findings.push(walk.media_finding());
     }
+    let (retained_media, discarded_media) = media_walk
+        .map(|walk| (walk.retained, walk.discarded))
+        .unwrap_or_default();
 
     let quality = recognition_quality(&findings);
     let state = folder_import_state(&findings);
