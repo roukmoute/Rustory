@@ -106,13 +106,14 @@ pub fn send_archive_to_device(
         resolve_send_target(scanner, &request.device_identifier, budget, started)?;
 
     // Read + parse the archive descriptor.
-    let mut archive = open_archive(&request.archive_path)?;
-    let story_json = read_entry(&mut archive, STORY_JSON_NAME, MAX_STORY_JSON_BYTES)
+    let mut source = ArchiveSource::open(&request.archive_path)
+        .map_err(|failure| archive_error(failure.cause()))?;
+    let story_json = source
+        .read_descriptor()
         .ok_or_else(|| archive_error("descriptor_missing"))?;
     let pack: StudioStoryPack =
         serde_json::from_slice(&story_json).map_err(|_| archive_error("descriptor_invalid"))?;
 
-    let mut source = ArchiveSource { archive };
     send_pack(
         writer,
         &profile,
@@ -133,9 +134,7 @@ pub fn send_story_pack_to_device(
     let started = Instant::now();
     let (profile, mount_path) =
         resolve_send_target(scanner, &request.device_identifier, budget, started)?;
-    let mut source = MediaStoreSource {
-        media_dir: request.media_dir.clone(),
-    };
+    let mut source = MediaStoreSource::new(request.media_dir.clone());
     send_pack(
         writer,
         &profile,
@@ -183,16 +182,17 @@ fn resolve_send_target(
 }
 
 /// Where a pack's assets come from. Each source owns the copy of its
-/// "missing asset" refusal (an archive is a file the user holds, a media
-/// store is the library's own).
-trait PackAssetSource {
+/// "missing asset" SEND refusal (an archive is a file the user holds, a
+/// media store is the library's own). Shared with the story archive export,
+/// which reads the very same assets and words its own refusals.
+pub(crate) trait PackAssetSource {
     /// Byte size of the asset, without reading it. `None` = absent.
     fn asset_size(&mut self, name: &str) -> Option<u64>;
     /// Up to `max_bytes` leading bytes of the asset. `None` = absent.
     fn peek_asset(&mut self, name: &str, max_bytes: usize) -> Option<Vec<u8>>;
     /// The whole asset. `None` = absent or oversize.
     fn read_asset(&mut self, name: &str) -> Option<Vec<u8>>;
-    /// The refusal for an asset this source cannot provide.
+    /// The SEND refusal for an asset this source cannot provide.
     fn missing_asset_error(&self, name: &str) -> AppError;
 }
 
@@ -404,8 +404,55 @@ fn pack_entry_uuid(pack: &StudioStoryPack) -> Option<String> {
 
 // ===== Archive source =====
 
-struct ArchiveSource {
+/// The assets (and the descriptor) of a STUdio-format pack archive.
+pub(crate) struct ArchiveSource {
     archive: zip::ZipArchive<std::fs::File>,
+}
+
+/// Why a pack archive could not be opened. Closed set — the caller words
+/// the refusal for its own gesture.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ArchiveOpenFailure {
+    /// Not a regular readable file.
+    Open,
+    /// Not a zip archive.
+    NotAZip,
+    /// More entries than a pack may carry.
+    TooManyEntries,
+}
+
+impl ArchiveOpenFailure {
+    /// Stable diagnostic tag. Closed set.
+    pub(crate) const fn cause(self) -> &'static str {
+        match self {
+            Self::Open => "open",
+            Self::NotAZip => "not_a_zip",
+            Self::TooManyEntries => "too_many_entries",
+        }
+    }
+}
+
+impl ArchiveSource {
+    /// Open the pack archive at `path` (a regular file, a zip, within the
+    /// entry-count bound).
+    pub(crate) fn open(path: &Path) -> Result<Self, ArchiveOpenFailure> {
+        let meta = std::fs::symlink_metadata(path).map_err(|_| ArchiveOpenFailure::Open)?;
+        if !meta.is_file() {
+            return Err(ArchiveOpenFailure::Open);
+        }
+        let file = std::fs::File::open(path).map_err(|_| ArchiveOpenFailure::Open)?;
+        let archive = zip::ZipArchive::new(file).map_err(|_| ArchiveOpenFailure::NotAZip)?;
+        if archive.len() > MAX_ARCHIVE_ENTRIES {
+            return Err(ArchiveOpenFailure::TooManyEntries);
+        }
+        Ok(Self { archive })
+    }
+
+    /// The pack descriptor (`story.json`), bounded. `None` = absent or
+    /// oversize.
+    pub(crate) fn read_descriptor(&mut self) -> Option<Vec<u8>> {
+        read_entry(&mut self.archive, STORY_JSON_NAME, MAX_STORY_JSON_BYTES)
+    }
 }
 
 impl PackAssetSource for ArchiveSource {
@@ -443,19 +490,6 @@ impl PackAssetSource for ArchiveSource {
     fn missing_asset_error(&self, name: &str) -> AppError {
         archive_asset_error(name)
     }
-}
-
-fn open_archive(path: &Path) -> Result<zip::ZipArchive<std::fs::File>, AppError> {
-    let meta = std::fs::symlink_metadata(path).map_err(|_| archive_error("open"))?;
-    if !meta.is_file() {
-        return Err(archive_error("open"));
-    }
-    let file = std::fs::File::open(path).map_err(|_| archive_error("open"))?;
-    let archive = zip::ZipArchive::new(file).map_err(|_| archive_error("not_a_zip"))?;
-    if archive.len() > MAX_ARCHIVE_ENTRIES {
-        return Err(archive_error("too_many_entries"));
-    }
-    Ok(archive)
 }
 
 /// `story.json` lives at the root; assets under `assets/`. The plain name is
@@ -497,8 +531,15 @@ fn read_entry(
 /// Assets of a synthesized story pack: the node-media store's `<hash>.<ext>`
 /// files, read through the store's own guarded reader (bare-name check,
 /// re-sniff) — a crafted reference can never escape the store directory.
-struct MediaStoreSource {
+pub(crate) struct MediaStoreSource {
     media_dir: PathBuf,
+}
+
+impl MediaStoreSource {
+    /// The assets of the node-media store at `media_dir`.
+    pub(crate) fn new(media_dir: PathBuf) -> Self {
+        Self { media_dir }
+    }
 }
 
 impl PackAssetSource for MediaStoreSource {

@@ -163,6 +163,81 @@ pub fn linear_episodes(
     Ok(episodes)
 }
 
+/// Stage uuid of episode `index` (0-based) — the story stage that plays it.
+/// The ONE definition both layouts and [`stage_names`] share, so a name can
+/// never be keyed by an id the synthesis did not produce.
+fn episode_stage_uuid(pack_uuid: &str, index: usize) -> String {
+    format!("{pack_uuid}-episode-{}", index + 1)
+}
+
+/// Id of the single-option action node that makes episode `index` a
+/// transition target.
+fn episode_action_id(pack_uuid: &str, index: usize) -> String {
+    format!("{pack_uuid}-episode-{}-action", index + 1)
+}
+
+/// Stage uuid of the menu layout's spoken question.
+fn question_stage_uuid(pack_uuid: &str) -> String {
+    format!("{pack_uuid}-question")
+}
+
+/// Stage uuid of the menu layout's wheel entry for episode `index`.
+fn option_stage_uuid(pack_uuid: &str, index: usize) -> String {
+    format!("{pack_uuid}-option-{}", index + 1)
+}
+
+/// Name of the menu layout's question stage, as a shared archive shows it.
+pub const MENU_QUESTION_STAGE_NAME: &str = "Question";
+
+/// The name of episode `index`: its own label, or a numbered fallback when
+/// the story left it blank (an unnamed stage would read as a hole in every
+/// tool that lists the pack's stages).
+fn episode_stage_name(label: &str, index: usize) -> String {
+    let label = label.trim();
+    if label.is_empty() {
+        format!("Épisode {}", index + 1)
+    } else {
+        label.to_string()
+    }
+}
+
+/// Human-readable NAMES of the stages of a synthesized pack, keyed by stage
+/// uuid — what a shared archive carries next to the graph so another tool
+/// (or another library) lists the cover, the episodes and the menu entries
+/// by name instead of by opaque id. The device never reads them.
+///
+/// `episode_labels` are the episodes' labels in playback order (the order
+/// [`linear_episodes`] returns); `title` names the cover. Every stage the
+/// matching synthesis produces gets exactly one entry: the cover (the story
+/// title), each episode (its label, numbered when blank) and, for the menu
+/// layout, the question and one wheel entry per episode.
+pub fn stage_names(
+    layout: StoryLayout,
+    pack_uuid: &str,
+    title: &str,
+    episode_labels: &[&str],
+) -> std::collections::HashMap<String, String> {
+    let mut names = std::collections::HashMap::with_capacity(2 + 2 * episode_labels.len());
+    names.insert(pack_uuid.to_string(), title.to_string());
+    if layout == StoryLayout::Menu {
+        names.insert(
+            question_stage_uuid(pack_uuid),
+            MENU_QUESTION_STAGE_NAME.to_string(),
+        );
+    }
+    for (index, label) in episode_labels.iter().enumerate() {
+        let name = episode_stage_name(label, index);
+        if layout == StoryLayout::Menu {
+            names.insert(
+                option_stage_uuid(pack_uuid, index),
+                format!("Choix : {name}"),
+            );
+        }
+        names.insert(episode_stage_uuid(pack_uuid, index), name);
+    }
+    names
+}
+
 /// The media of one episode as PACK ASSET REFERENCES — the "filenames" the
 /// STUdio model carries (here the media store's `<hash>.<ext>` names, whose
 /// last 8 hex characters become the on-device basenames).
@@ -190,8 +265,8 @@ pub fn synthesize_sequential_pack(pack_uuid: &str, episodes: &[EpisodeAssets]) -
         pause: true,
         autoplay: true,
     };
-    let episode_uuid = |index: usize| format!("{pack_uuid}-episode-{}", index + 1);
-    let action_id = |index: usize| format!("{pack_uuid}-episode-{}-action", index + 1);
+    let episode_uuid = |index: usize| episode_stage_uuid(pack_uuid, index);
+    let action_id = |index: usize| episode_action_id(pack_uuid, index);
     let into_episode = |index: usize| {
         Some(StudioTransition {
             action_node: action_id(index),
@@ -308,12 +383,12 @@ pub fn synthesize_menu_pack(pack_uuid: &str, assets: &MenuPackAssets) -> StudioS
         pause: true,
         autoplay: true,
     };
-    let question_uuid = format!("{pack_uuid}-question");
+    let question_uuid = question_stage_uuid(pack_uuid);
     let question_action = format!("{pack_uuid}-question-action");
     let options_action = format!("{pack_uuid}-options-action");
-    let option_uuid = |index: usize| format!("{pack_uuid}-option-{}", index + 1);
-    let episode_uuid = |index: usize| format!("{pack_uuid}-episode-{}", index + 1);
-    let episode_action = |index: usize| format!("{pack_uuid}-episode-{}-action", index + 1);
+    let option_uuid = |index: usize| option_stage_uuid(pack_uuid, index);
+    let episode_uuid = |index: usize| episode_stage_uuid(pack_uuid, index);
+    let episode_action = |index: usize| episode_action_id(pack_uuid, index);
     let to = |action: &str, option_index: i32| {
         Some(StudioTransition {
             action_node: action.to_string(),
@@ -810,6 +885,47 @@ mod tests {
         let ok = pack.stage_nodes[3].ok_transition.as_ref().unwrap();
         assert_eq!(ok.action_node, pack.action_nodes[1].id);
         assert_eq!(ok.option_index, 0);
+    }
+
+    // ===== stage names =====
+
+    #[test]
+    fn every_stage_of_a_sequential_pack_is_named_and_nothing_else() {
+        let pack = synthesize_sequential_pack(PACK, &assets(3));
+        let names = stage_names(
+            StoryLayout::Sequential,
+            PACK,
+            "Les Bestioles",
+            &["Le loup", "  ", "La pie"],
+        );
+        let uuids: std::collections::BTreeSet<&str> =
+            pack.stage_nodes.iter().map(|s| s.uuid.as_str()).collect();
+        let named: std::collections::BTreeSet<&str> = names.keys().map(String::as_str).collect();
+        assert_eq!(named, uuids, "one name per synthesized stage");
+        assert_eq!(names[PACK], "Les Bestioles", "the cover carries the title");
+        assert_eq!(names[&pack.stage_nodes[1].uuid], "Le loup");
+        assert_eq!(
+            names[&pack.stage_nodes[2].uuid], "Épisode 2",
+            "a blank label falls back to its position"
+        );
+        assert_eq!(names[&pack.stage_nodes[3].uuid], "La pie");
+    }
+
+    #[test]
+    fn every_stage_of_a_menu_pack_is_named_and_nothing_else() {
+        let pack = synthesize_menu_pack(PACK, &menu_assets(2));
+        let names = stage_names(StoryLayout::Menu, PACK, "Série", &["Un", "Deux"]);
+        let uuids: std::collections::BTreeSet<&str> =
+            pack.stage_nodes.iter().map(|s| s.uuid.as_str()).collect();
+        let named: std::collections::BTreeSet<&str> = names.keys().map(String::as_str).collect();
+        assert_eq!(named, uuids, "one name per synthesized stage");
+        assert_eq!(names[PACK], "Série");
+        assert_eq!(names[&pack.stage_nodes[1].uuid], MENU_QUESTION_STAGE_NAME);
+        // Wheel entries are told apart from the episodes they lead to.
+        assert_eq!(names[&pack.stage_nodes[2].uuid], "Choix : Un");
+        assert_eq!(names[&pack.stage_nodes[3].uuid], "Choix : Deux");
+        assert_eq!(names[&pack.stage_nodes[4].uuid], "Un");
+        assert_eq!(names[&pack.stage_nodes[5].uuid], "Deux");
     }
 
     #[test]

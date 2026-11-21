@@ -1,35 +1,82 @@
 //! Plan the device pack of a LIBRARY story (one without a retained source
 //! archive) from the local database — the read side of
-//! [`send_story_pack_to_device`](super::send::send_story_pack_to_device).
+//! [`send_story_pack_to_device`](super::send::send_story_pack_to_device) and
+//! of the story archive export, which shares the very same pack.
 //!
 //! Runs UNDER the SQLite lock and does no other I/O: it reads the story's
 //! canonical structure, its presentation (layout + spoken announcements)
 //! and the stored file names of the media they reference, then hands the
 //! pure synthesis (`domain::device::story_pack`) the ordered episodes —
 //! chained in sequence, or behind a spoken menu. Every refusal is decided
-//! here, BEFORE any device is touched, with the same actionable copy the
-//! library card announces pre-click.
+//! here, BEFORE any device or destination is touched, as a typed
+//! [`StoryPackRefusal`]: the send words it with the copy the library card
+//! announces pre-click ([`plan_story_pack`]), the export with its own.
+
+use std::collections::HashMap;
 
 use crate::domain::device::{
-    linear_episodes, menu_blocker, synthesize_menu_pack, synthesize_sequential_pack, EpisodeAssets,
-    MenuEpisode, MenuPackAssets, StoryLayout, StoryPackBlocker, StudioStoryPack,
+    linear_episodes, menu_blocker, stage_names, synthesize_menu_pack, synthesize_sequential_pack,
+    EpisodeAssets, MenuEpisode, MenuPackAssets, StoryLayout, StoryPackBlocker, StudioStoryPack,
 };
 use crate::domain::shared::AppError;
 use crate::domain::story::CanonicalStructure;
 use crate::infrastructure::db::DbHandle;
 
-/// Build the device pack of `story_id` (per its layout), or refuse with the reason.
+/// Why a library story cannot be planned as a pack. A closed set carrying
+/// only what a caller needs to word the refusal for its own gesture — never
+/// a path, never a raw storage message.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StoryPackRefusal {
+    /// No story has this id.
+    NotFound,
+    /// The local database could not be read; the tag names the read.
+    Storage(&'static str),
+    /// A device-copied (V1/V2) pack: its content is the copied pack, which
+    /// this engine does not convert.
+    DevicePack,
+    /// The structure does not lay out as a pack (see [`StoryPackBlocker`]).
+    Blocked(StoryPackBlocker),
+    /// An episode's audio is referenced by the structure but no longer
+    /// backed by the library.
+    AssetMissing { node_id: String },
+    /// A spoken announcement is referenced but its asset is gone — the
+    /// question (`"question"`) or an episode's spoken title (its node id).
+    AnnouncementMissing { which: String },
+}
+
+/// A planned pack with what a shared archive carries beside the graph: the
+/// story's title and the names of its stages (keyed by stage uuid).
+#[derive(Debug, Clone)]
+pub struct PlannedStoryPack {
+    pub pack: StudioStoryPack,
+    pub title: String,
+    pub stage_names: HashMap<String, String>,
+}
+
+/// Build the device pack of `story_id` (per its layout), or refuse with the
+/// reason — worded for the SEND gesture.
 pub fn plan_story_pack(db: &DbHandle, story_id: &str) -> Result<StudioStoryPack, AppError> {
-    let structure_json: String = db
+    plan_named_story_pack(db, story_id)
+        .map(|planned| planned.pack)
+        .map_err(send_refusal_error)
+}
+
+/// Build the pack of `story_id` together with its title and stage names, or
+/// say why not as a typed refusal the caller words itself.
+pub fn plan_named_story_pack(
+    db: &DbHandle,
+    story_id: &str,
+) -> Result<PlannedStoryPack, StoryPackRefusal> {
+    let (title, structure_json): (String, String) = db
         .conn()
         .query_row(
-            "SELECT structure_json FROM stories WHERE id = ?1",
+            "SELECT title, structure_json FROM stories WHERE id = ?1",
             rusqlite::params![story_id],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .map_err(|err| match err {
-            rusqlite::Error::QueryReturnedNoRows => story_not_found_error(),
-            _ => storage_error("read_story"),
+            rusqlite::Error::QueryReturnedNoRows => StoryPackRefusal::NotFound,
+            _ => StoryPackRefusal::Storage("read_story"),
         })?;
 
     // A device-copied (V1/V2) pack: its content is the copied pack, which
@@ -41,19 +88,22 @@ pub fn plan_story_pack(db: &DbHandle, story_id: &str) -> Result<StudioStoryPack,
             rusqlite::params![story_id],
             |row| row.get(0),
         )
-        .map_err(|_| storage_error("read_provenance"))?;
+        .map_err(|_| StoryPackRefusal::Storage("read_provenance"))?;
     if device_pack {
-        return Err(device_pack_error());
+        return Err(StoryPackRefusal::DevicePack);
     }
 
     let structure: CanonicalStructure = serde_json::from_str(&structure_json)
-        .map_err(|_| blocker_error(StoryPackBlocker::Malformed))?;
-    let episodes = linear_episodes(&structure).map_err(blocker_error)?;
+        .map_err(|_| StoryPackRefusal::Blocked(StoryPackBlocker::Malformed))?;
+    let episodes = linear_episodes(&structure).map_err(StoryPackRefusal::Blocked)?;
+    let episode_labels: Vec<&str> = episodes.iter().map(|episode| episode.label).collect();
 
     let mut assets = Vec::with_capacity(episodes.len());
     for episode in &episodes {
         let audio_ref = stored_file_name(db, story_id, episode.audio_asset_id, "audio")?
-            .ok_or_else(|| asset_missing_error(episode.node_id))?;
+            .ok_or_else(|| StoryPackRefusal::AssetMissing {
+                node_id: episode.node_id.to_string(),
+            })?;
         let image_ref = match episode.image_asset_id {
             Some(id) => stored_file_name(db, story_id, id, "image")?,
             None => None,
@@ -65,8 +115,9 @@ pub fn plan_story_pack(db: &DbHandle, story_id: &str) -> Result<StudioStoryPack,
     }
 
     let presentation = read_presentation_rows(db, story_id)?;
-    match presentation.layout {
-        StoryLayout::Sequential => Ok(synthesize_sequential_pack(story_id, &assets)),
+    let names = stage_names(presentation.layout, story_id, &title, &episode_labels);
+    let pack = match presentation.layout {
+        StoryLayout::Sequential => synthesize_sequential_pack(story_id, &assets),
         StoryLayout::Menu => {
             // The spoken announcements: refused as a whole while any is
             // missing (the same rule the card projects).
@@ -76,14 +127,19 @@ pub fn plan_story_pack(db: &DbHandle, story_id: &str) -> Result<StudioStoryPack,
                 presentation.question_asset_id.is_some(),
                 has_prompt,
             ) {
-                return Err(blocker_error(blocker));
+                return Err(StoryPackRefusal::Blocked(blocker));
             }
-            let question_asset = presentation
-                .question_asset_id
-                .as_deref()
-                .ok_or_else(|| blocker_error(StoryPackBlocker::MissingAnnouncements))?;
+            let question_asset =
+                presentation
+                    .question_asset_id
+                    .as_deref()
+                    .ok_or(StoryPackRefusal::Blocked(
+                        StoryPackBlocker::MissingAnnouncements,
+                    ))?;
             let question_ref = stored_file_name(db, story_id, question_asset, "audio")?
-                .ok_or_else(|| announcement_missing_error("question"))?;
+                .ok_or_else(|| StoryPackRefusal::AnnouncementMissing {
+                    which: "question".to_string(),
+                })?;
             let title_ref = match presentation.title_asset_id.as_deref() {
                 Some(id) => stored_file_name(db, story_id, id, "audio")?,
                 None => None,
@@ -95,16 +151,20 @@ pub fn plan_story_pack(db: &DbHandle, story_id: &str) -> Result<StudioStoryPack,
                     .iter()
                     .find(|(n, _)| n == episode.node_id)
                     .map(|(_, asset)| asset.as_str())
-                    .ok_or_else(|| blocker_error(StoryPackBlocker::MissingAnnouncements))?;
+                    .ok_or(StoryPackRefusal::Blocked(
+                        StoryPackBlocker::MissingAnnouncements,
+                    ))?;
                 let prompt_ref = stored_file_name(db, story_id, prompt_asset, "audio")?
-                    .ok_or_else(|| announcement_missing_error(episode.node_id))?;
+                    .ok_or_else(|| StoryPackRefusal::AnnouncementMissing {
+                        which: episode.node_id.to_string(),
+                    })?;
                 menu_episodes.push(MenuEpisode {
                     audio_ref: media.audio_ref,
                     image_ref: media.image_ref,
                     prompt_ref,
                 });
             }
-            Ok(synthesize_menu_pack(
+            synthesize_menu_pack(
                 story_id,
                 &MenuPackAssets {
                     title_ref,
@@ -112,9 +172,14 @@ pub fn plan_story_pack(db: &DbHandle, story_id: &str) -> Result<StudioStoryPack,
                     episodes: menu_episodes,
                     auto_continue: presentation.auto_continue,
                 },
-            ))
+            )
         }
-    }
+    };
+    Ok(PlannedStoryPack {
+        pack,
+        title,
+        stage_names: names,
+    })
 }
 
 /// The presentation rows a plan needs: the layout, the spoken title and
@@ -127,7 +192,10 @@ struct PresentationRows {
     prompts: Vec<(String, String)>,
 }
 
-fn read_presentation_rows(db: &DbHandle, story_id: &str) -> Result<PresentationRows, AppError> {
+fn read_presentation_rows(
+    db: &DbHandle,
+    story_id: &str,
+) -> Result<PresentationRows, StoryPackRefusal> {
     use rusqlite::OptionalExtension;
     let layout_row: Option<(String, bool, Option<String>, Option<String>)> = db
         .conn()
@@ -138,7 +206,7 @@ fn read_presentation_rows(db: &DbHandle, story_id: &str) -> Result<PresentationR
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
         )
         .optional()
-        .map_err(|_| storage_error("read_layout"))?;
+        .map_err(|_| StoryPackRefusal::Storage("read_layout"))?;
     let (layout, auto_continue, title_asset_id, question_asset_id) = match layout_row {
         Some((tag, auto_continue, title, question)) => (
             StoryLayout::parse(&tag).unwrap_or_default(),
@@ -151,12 +219,12 @@ fn read_presentation_rows(db: &DbHandle, story_id: &str) -> Result<PresentationR
     let mut stmt = db
         .conn()
         .prepare("SELECT node_id, audio_asset_id FROM story_node_prompts WHERE story_id = ?1")
-        .map_err(|_| storage_error("read_prompts"))?;
+        .map_err(|_| StoryPackRefusal::Storage("read_prompts"))?;
     let prompts = stmt
         .query_map(rusqlite::params![story_id], |r| Ok((r.get(0)?, r.get(1)?)))
-        .map_err(|_| storage_error("read_prompts"))?
+        .map_err(|_| StoryPackRefusal::Storage("read_prompts"))?
         .collect::<Result<Vec<(String, String)>, _>>()
-        .map_err(|_| storage_error("read_prompts"))?;
+        .map_err(|_| StoryPackRefusal::Storage("read_prompts"))?;
     Ok(PresentationRows {
         layout,
         auto_continue,
@@ -174,7 +242,7 @@ fn stored_file_name(
     story_id: &str,
     asset_id: &str,
     media_type: &str,
-) -> Result<Option<String>, AppError> {
+) -> Result<Option<String>, StoryPackRefusal> {
     db.conn()
         .query_row(
             "SELECT file_name FROM assets WHERE id = ?1 AND story_id = ?2 AND media_type = ?3",
@@ -184,8 +252,21 @@ fn stored_file_name(
         .map(Some)
         .or_else(|err| match err {
             rusqlite::Error::QueryReturnedNoRows => Ok(None),
-            _ => Err(storage_error("read_asset")),
+            _ => Err(StoryPackRefusal::Storage("read_asset")),
         })
+}
+
+/// The refusal worded for the SEND gesture — the copy the library card
+/// announces pre-click, with its actionable next step.
+fn send_refusal_error(refusal: StoryPackRefusal) -> AppError {
+    match refusal {
+        StoryPackRefusal::NotFound => story_not_found_error(),
+        StoryPackRefusal::Storage(stage) => storage_error(stage),
+        StoryPackRefusal::DevicePack => device_pack_error(),
+        StoryPackRefusal::Blocked(blocker) => blocker_error(blocker),
+        StoryPackRefusal::AssetMissing { node_id } => asset_missing_error(&node_id),
+        StoryPackRefusal::AnnouncementMissing { which } => announcement_missing_error(&which),
+    }
 }
 
 /// The story could not be laid out as a device pack — the same closed
@@ -507,5 +588,95 @@ mod tests {
         let v = serde_json::to_value(&err).unwrap();
         assert_eq!(v["details"]["cause"], "missing_announcements");
         assert!(!err.user_action.as_deref().unwrap_or("").is_empty());
+    }
+
+    #[test]
+    fn the_named_plan_carries_the_title_and_one_name_per_stage() {
+        let mut db = fresh_db();
+        let id = story(&mut db);
+        set_structure(
+            &db,
+            &id,
+            &[
+                ("n1", Some("aud-1"), Some("img-1")),
+                ("n2", Some("aud-2"), None),
+            ],
+        );
+        insert_asset(&db, &id, "aud-1", "audio", "aaaa1111.mp3");
+        insert_asset(&db, &id, "aud-2", "audio", "aaaa2222.mp3");
+        insert_asset(&db, &id, "img-1", "image", "bbbb1111.png");
+
+        let planned = plan_named_story_pack(&db, &id).expect("plan");
+        assert_eq!(planned.title, "Série");
+        assert_eq!(planned.stage_names.len(), planned.pack.stage_nodes.len());
+        // The cover is named after the story, the episodes after their labels
+        // (`set_structure` labels each node with its id).
+        assert_eq!(
+            planned.stage_names[&planned.pack.stage_nodes[0].uuid],
+            "Série"
+        );
+        assert_eq!(planned.stage_names[&planned.pack.stage_nodes[1].uuid], "n1");
+        assert_eq!(planned.stage_names[&planned.pack.stage_nodes[2].uuid], "n2");
+        // The send plan is the very same pack.
+        let pack = plan_story_pack(&db, &id).expect("send plan");
+        assert_eq!(
+            pack.stage_nodes.iter().map(|s| &s.uuid).collect::<Vec<_>>(),
+            planned
+                .pack
+                .stage_nodes
+                .iter()
+                .map(|s| &s.uuid)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn the_named_plan_of_a_menu_story_names_the_question_and_the_wheel_entries() {
+        let mut db = fresh_db();
+        let id = story(&mut db);
+        set_structure(&db, &id, &[("n1", Some("aud-1"), None)]);
+        insert_asset(&db, &id, "aud-1", "audio", "aaaa1111.mp3");
+        insert_asset(&db, &id, "q-1", "audio", "cccc0001.wav");
+        insert_asset(&db, &id, "p-1", "audio", "cccc1111.wav");
+        set_menu(&db, &id, Some("q-1"), &[("n1", "p-1")]);
+
+        let planned = plan_named_story_pack(&db, &id).expect("plan");
+        let names: Vec<&str> = planned
+            .pack
+            .stage_nodes
+            .iter()
+            .map(|stage| planned.stage_names[&stage.uuid].as_str())
+            .collect();
+        assert_eq!(names, vec!["Série", "Question", "Choix : n1", "n1"]);
+    }
+
+    #[test]
+    fn refusals_are_typed_so_each_gesture_words_its_own() {
+        let mut db = fresh_db();
+        assert_eq!(
+            plan_named_story_pack(&db, "nope").unwrap_err(),
+            StoryPackRefusal::NotFound
+        );
+        let id = story(&mut db);
+        assert_eq!(
+            plan_named_story_pack(&db, &id).unwrap_err(),
+            StoryPackRefusal::Blocked(StoryPackBlocker::MissingAudio)
+        );
+        set_structure(&db, &id, &[("n1", Some("aud-gone"), None)]);
+        assert_eq!(
+            plan_named_story_pack(&db, &id).unwrap_err(),
+            StoryPackRefusal::AssetMissing {
+                node_id: "n1".into()
+            }
+        );
+        insert_asset(&db, &id, "aud-gone", "audio", "aaaa1111.mp3");
+        set_menu(&db, &id, Some("q-gone"), &[("n1", "p-1")]);
+        insert_asset(&db, &id, "p-1", "audio", "cccc1111.wav");
+        assert_eq!(
+            plan_named_story_pack(&db, &id).unwrap_err(),
+            StoryPackRefusal::AnnouncementMissing {
+                which: "question".into()
+            }
+        );
     }
 }
