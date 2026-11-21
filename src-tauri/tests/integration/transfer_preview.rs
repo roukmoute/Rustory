@@ -1,6 +1,8 @@
 //! End-to-end integration of the pre-transfer comparison: the REAL system
 //! scanner + REAL filesystem reader against a temp mount, composed with a
-//! real on-disk SQLite store seeded with a `story_imports` provenance row.
+//! real on-disk SQLite store seeded with the story's pack link — its
+//! `story_imports` provenance row, or the `story_device_packs` send link a
+//! settled send records.
 //! Proves the whole `read_transfer_preview` pipeline (authoritative re-scan →
 //! inventory read → scoped DB lock → local↔device membership) on actual I/O,
 //! which the unit tests with mocks cannot.
@@ -14,6 +16,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use rustory_lib::application::device::title::record_sent_pack;
 use rustory_lib::application::device::transfer::{read_transfer_preview, TransferPreviewOutcome};
 use rustory_lib::domain::device::{format_pack_uuid, pack_short_id, DeviceLibrary};
 use rustory_lib::domain::shared::AppError;
@@ -165,6 +168,72 @@ fn reports_replace_and_excludes_the_matched_pack_from_unchanged_count() {
             assert_eq!(unchanged_count, 2, "3 packs minus the matched one");
         }
         other => panic!("expected Ready(replace), got {other:?}"),
+    }
+}
+
+#[test]
+fn reports_replace_for_a_story_the_pack_engine_sent_then_new_once_the_pack_is_gone() {
+    // A library story sent to a V3 by the pack engine: no import provenance,
+    // only the send link a settled send records — and the pack it names in
+    // the device's `.pi`.
+    let db_tmp = tempfile::tempdir().expect("db tempdir");
+    let db = Mutex::new(open_db(&db_tmp));
+    let sent_pack = uuid([7, 7, 7, 7]);
+    insert_story(&db, "s1", "Envoyée sur la Lunii");
+    record_sent_pack(&db.lock().unwrap(), "s1", &format_pack_uuid(&sent_pack))
+        .expect("record the sent pack");
+
+    let others = [(uuid([2, 2, 2, 2]), true), (uuid([3, 3, 3, 3]), true)];
+    let with_sent_pack = [(sent_pack, true), others[0], others[1]];
+    let (_guard, root, identifier) = build_mount(7, &with_sent_pack);
+    let scanner = SystemDeviceScanner::with_explicit_mount_roots(vec![root]);
+
+    let outcome = read_transfer_preview(
+        &db,
+        &scanner,
+        &SystemDeviceLibraryReader,
+        "s1",
+        &identifier,
+        budget(),
+    )
+    .expect("preview");
+    match outcome {
+        TransferPreviewOutcome::Ready {
+            on_device,
+            unchanged_count,
+            ..
+        } => {
+            assert!(on_device, "the sent pack is in the inventory");
+            assert_eq!(unchanged_count, 2, "3 packs minus the story's own");
+        }
+        other => panic!("expected Ready(replace), got {other:?}"),
+    }
+
+    // The same story against a device that no longer lists the pack (it was
+    // deleted there, or another Lunii is plugged in): the link alone never
+    // makes the story "déjà présente".
+    let (_guard, root, identifier) = build_mount(7, &others);
+    let scanner = SystemDeviceScanner::with_explicit_mount_roots(vec![root]);
+
+    let outcome = read_transfer_preview(
+        &db,
+        &scanner,
+        &SystemDeviceLibraryReader,
+        "s1",
+        &identifier,
+        budget(),
+    )
+    .expect("preview");
+    match outcome {
+        TransferPreviewOutcome::Ready {
+            on_device,
+            unchanged_count,
+            ..
+        } => {
+            assert!(!on_device, "the sent pack is not on this device");
+            assert_eq!(unchanged_count, 2);
+        }
+        other => panic!("expected Ready(new), got {other:?}"),
     }
 }
 

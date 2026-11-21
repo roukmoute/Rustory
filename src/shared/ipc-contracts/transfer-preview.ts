@@ -5,9 +5,11 @@
  * Shape: tagged enum on `kind` ∈ `"noDevice" | "unsupported" | "ready"`.
  * Every payload field is camelCase. The comparison (`onDevice`,
  * `unchangedCount`) is composed by RUST from the live device inventory and
- * the `story_imports` join — the frontend only PRESENTS it. No size metric is
- * carried (no decisional volume before media preparation). Cross-stack
- * contract tests keep the wire shape symmetric.
+ * the packs the local library ties to the story (its `story_imports`
+ * provenance, its `story_device_packs` send link, its own id) — the frontend
+ * only PRESENTS it. No size metric is carried (no decisional volume before
+ * media preparation). Cross-stack contract tests keep the wire shape
+ * symmetric.
  */
 
 import type { UnsupportedReasonDto } from "./device";
@@ -30,7 +32,8 @@ export type TransferPreviewDto =
       /** The selected story's pack already lives on the device — a send would
        *  REPLACE it. `false` ⇒ a send would ADD it. */
       onDevice: boolean;
-      /** How many other device stories a send would leave untouched. */
+      /** How many other device stories a send would leave untouched (the
+       *  story's own pack is never one of them). */
       unchangedCount: number;
       /** Whether a transfer is allowed (`WriteStory`). Always `false` in MVP
        *  Phase 1 — the preview is read-only. */

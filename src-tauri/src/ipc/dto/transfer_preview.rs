@@ -36,9 +36,11 @@ pub struct TransferPreviewStoryDto {
 /// runtime guard `isTransferPreviewDto`.
 ///
 /// Scope reminder: `onDevice` / `unchangedCount` are composed by RUST from the
-/// live device inventory and the `story_imports` join — the frontend never
-/// recomputes them. No size metric is carried (no decisional volume before
-/// media preparation). The OS mount path is never part of this DTO.
+/// live device inventory and the packs the local library ties to the story
+/// (its `story_imports` provenance, its `story_device_packs` send link, its
+/// own id) — the frontend never recomputes them. No size metric is carried
+/// (no decisional volume before media preparation). The OS mount path is
+/// never part of this DTO.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum TransferPreviewDto {
@@ -54,7 +56,8 @@ pub enum TransferPreviewDto {
         /// The selected story's pack already lives on the device — a send
         /// would replace it. `false` ⇒ a send would add it.
         on_device: bool,
-        /// How many other device stories a send would leave untouched.
+        /// How many other device stories a send would leave untouched (the
+        /// story's own pack is never one of them).
         unchanged_count: u32,
         /// Whether a transfer is allowed (the `WriteStory` capability). Always
         /// `false` in MVP Phase 1 — the preview is read-only.
