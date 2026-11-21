@@ -670,8 +670,8 @@ cannot tell a selection gap from a missing device apart):
 | no comparison — multi selection | More than one local story selected (multi-transfer is out of scope) | `Sélectionne une seule histoire locale pour comparer (le transfert multiple n'est pas encore disponible).` |
 | no comparison — no readable device | Exactly one story selected, but no read-authorized device is connected | `Branche une Lunii lisible pour comparer l'histoire sélectionnée avant l'envoi.` |
 | loading | The preview read is in flight | `ProgressIndicator` (calm) + `Comparaison en cours…` |
-| ready — new | The selected story's pack is NOT on the device (no `pack_uuid`, or `pack_uuid` absent from the inventory) | `Nouvelle sur l'appareil` chip + `Cette histoire serait ajoutée à l'appareil.` + the unchanged-count line |
-| ready — replace | The selected story's pack IS on the device (`pack_uuid` present in the inventory) | `Déjà présente sur l'appareil` chip + `Déjà présente sur l'appareil — un envoi la remplacerait.` + the unchanged-count line |
+| ready — new | The selected story's pack is NOT on the device (no device pack is tied to the story, or none of the packs tied to it is in the inventory) | `Nouvelle sur l'appareil` chip + `Cette histoire serait ajoutée à l'appareil.` + the unchanged-count line |
+| ready — replace | The selected story's pack IS on the device (a pack tied to the story is in the inventory) | `Déjà présente sur l'appareil` chip + `Déjà présente sur l'appareil — un envoi la remplacerait.` + the unchanged-count line |
 | device changed during comparison | A readable device WAS detected, but the authoritative re-read no longer resolves to it (unplugged / swapped, or the `ready` payload's identifiers don't match the request) | Recoverable `role="alert"` — `L'appareil a changé pendant la comparaison.` + next gesture + a `Réessayer` CTA. NOT the "branche une Lunii" hint, which would contradict the just-detected device. |
 | error | The preview read failed (FS error, timeout, local store unavailable, selected story vanished) | In-context message (cause + impact + next gesture), `role="alert"` + `Réessayer`, **never a toast**. The local library and the device inventory stay intact. |
 
@@ -679,12 +679,36 @@ The unchanged-count line states what stays untouched:
 `Aucune autre histoire de l'appareil ne sera modifiée.` (0),
 `1 autre histoire de l'appareil restera inchangée.` (1), or
 `{n} autres histoires de l'appareil resteront inchangées.` (n > 1).
+It counts the OTHER stories of the device: the inventory minus every entry
+that is the selected story's own pack (a pack listed twice, or a story tied
+to two listed packs, is excluded as many times).
 
 Rules:
 
-- The comparison is keyed on the pack identity (`pack_uuid`, the
-  `story_imports` join key), never on the title or the device identifier — the
-  same pack seen from another Lunii resolves to the same identity.
+- The comparison is keyed on the pack identity (`pack_uuid`), never on the
+  title or the device identifier — the same pack seen from another Lunii
+  resolves to the same identity. "The story's pack" is every pack the local
+  library ties to the story, the three links the device inventory already
+  names a pack's local story by (`localStoryId`, see `Device Library
+  Contract`), read from the story's side: its import provenance
+  (`story_imports` — a story copied from a device, which the round-trip
+  writes back under that identity), its send link (`story_device_packs` —
+  the pack the pack engine last wrote it as, recorded at every successful
+  send), and its own id (a synthesized pack is named by its story id — the
+  case of a story sent before the send link existed). A story sent to the
+  connected device therefore reads `Déjà présente sur l'appareil` as soon as
+  its send settled, whichever engine wrote it; a link whose pack the
+  inventory does not list (deleted from the device since, or sent to
+  another Lunii) leaves the story `Nouvelle sur l'appareil`.
+- A send changes what the comparison says, so the route re-reads it once the
+  send settled — the pre-send verdict never stays beside the send report.
+  When the send REPLACED a pack, the device identifier holds and that
+  re-read answers directly. When it ADDED one, the identifier — derived from
+  the index content — is another one: the re-read still carries the pre-send
+  identifier and Rust refuses it with `device_changed`. That refusal is
+  expected there, so the re-read never turns it into an alert about the
+  user's own send: the comparison stays `loading`, then reads again by
+  itself, keyed on the fresh identifier, once the detection delivers it.
 - It shows ONLY what changes the decision. **No size / volume metric** is
   shown in this contract (UX-DR37 — there is no decisional volume before the
   media-preparation step). A useful size reappears later, when preparation
@@ -1310,7 +1334,11 @@ is nothing to compare against); the stamps follow every re-read of the
 inventory (a send, a delete, a re-plug). The stamp says presence, not
 identity of content: a story edited since its send still reads `Sur la
 Lunii` — the decision panel's comparison (`Déjà présente sur l'appareil` →
-a send REPLACES it) stays the authority on what a send would do.
+a send REPLACES it) stays the authority on what a send would do. The two
+never contradict each other: the comparison reads the same three local
+links from the story's side (see `Transfer Decision / Comparison
+Contract`), so a stamped story always compares as `Déjà présente sur
+l'appareil`.
 
 ## Library Routing Contract
 
