@@ -4,14 +4,14 @@
 //! V3 through the proven send engine (`transcode_pack` → device
 //! normalization → assembly → write).
 //!
-//! Two PURE steps, both free of I/O:
+//! PURE steps, all free of I/O:
 //!
 //! 1. [`linear_episodes`] — reads the canonical structure as an ORDERED
 //!    episode list (the start node first, then the others in node order)
 //!    and decides whether the story can be sent at all: every node must
-//!    carry an audio (the device plays nothing else) and none may branch
-//!    (a story with choices needs a menu layout this synthesis does not
-//!    produce yet). The refusal reasons are a closed set
+//!    carry an audio (the device plays nothing else) and none may offer
+//!    an option (a story with choices is not an episode list — it has its
+//!    own layout, step 4). The refusal reasons are a closed set
 //!    ([`StoryPackBlocker`]) the library card surfaces BEFORE any click.
 //! 2. [`synthesize_sequential_pack`] — lays the episodes out as SEQUENTIAL
 //!    PLAYBACK, mirroring the STUdio writer conventions validated on real
@@ -41,13 +41,34 @@
 //!    spoken announcements are audio assets the application synthesizes
 //!    beforehand — [`menu_blocker`] refuses the layout while any is missing.
 //!
+//! 4. [`synthesize_choice_pack`] — a story WITH CHOICES (any node offering
+//!    an option, read by [`choice_nodes`]) is laid out by its OWN GRAPH, the
+//!    exact inverse of the reading the structured-archive creation makes of
+//!    a pack: every node is a stage, and the options of a node are the
+//!    action node its OK transition enters — one option, its destination
+//!    comes next; several, they are the entries of a WHEEL. What the
+//!    canonical graph does not carry is settled by the same STUdio
+//!    conventions as above: the start node is the cover; an entry of a wheel
+//!    waits for the listener (wheel + OK + home); every other node plays
+//!    through (autoplay, pause + home); a wheel is entered ON THE ENTRY THE
+//!    LISTENER CAME THROUGH when that entry is one of its own (a story that
+//!    returns to its wheel lands on its own title); HOME steps back to the
+//!    last wheel the listener chose from — one level up from a wheel entry —
+//!    and is the device's "back to the pack selection" when there is none.
+//!    Nodes that offer the same options share one action node. A menu pack
+//!    exported by step 3 and read back as a story lays out as that very
+//!    graph again.
+//!
 //! The pack UUID is the cover stage's uuid (see the send engine's
 //! `pack_entry_uuid`): the caller passes the STORY id, a canonical lowercase
 //! UUID, so re-sending a story REPLACES its pack on the device rather than
 //! adding a copy.
 
+use std::collections::{HashMap, HashSet};
+
 use crate::domain::story::CanonicalStructure;
 
+use super::library::is_canonical_pack_uuid;
 use super::pack_transcode::{
     StudioActionNode, StudioControlSettings, StudioStageNode, StudioStoryPack, StudioTransition,
 };
@@ -60,7 +81,9 @@ pub enum StoryPackBlocker {
     Empty,
     /// The structure's start node is not among its nodes.
     Malformed,
-    /// A node offers choices — a menu layout, not produced by this synthesis.
+    /// A node offers an option: the story is not an episode list. Its own
+    /// layout is [`synthesize_choice_pack`], which the caller may not use
+    /// (the device send does not, the archive export does).
     Branching,
     /// A node has no audio: the device has nothing to play for it.
     MissingAudio,
@@ -216,8 +239,8 @@ pub fn stage_names(
     pack_uuid: &str,
     title: &str,
     episode_labels: &[&str],
-) -> std::collections::HashMap<String, String> {
-    let mut names = std::collections::HashMap::with_capacity(2 + 2 * episode_labels.len());
+) -> HashMap<String, String> {
+    let mut names = HashMap::with_capacity(2 + 2 * episode_labels.len());
     names.insert(pack_uuid.to_string(), title.to_string());
     if layout == StoryLayout::Menu {
         names.insert(
@@ -468,6 +491,341 @@ pub fn synthesize_menu_pack(pack_uuid: &str, assets: &MenuPackAssets) -> StudioS
         id: episode_action(index),
         options: vec![episode_uuid(index)],
     }));
+
+    StudioStoryPack {
+        version: 1,
+        night_mode_available: false,
+        stage_nodes,
+        action_nodes,
+    }
+}
+
+// ===== Stories with choices =====
+
+/// One node of a story WITH CHOICES as the pack layout reads it: the node it
+/// comes from, its media ASSET IDS (the application layer resolves them to
+/// stored files) and the nodes its options lead to, in option order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChoiceNode<'a> {
+    pub node_id: &'a str,
+    pub label: &'a str,
+    pub audio_asset_id: Option<&'a str>,
+    pub image_asset_id: Option<&'a str>,
+    /// Destination node ids of the node's options, in option order.
+    pub destinations: Vec<&'a str>,
+}
+
+/// Why a story with choices cannot be laid out as a pack.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChoiceLayoutBlocker {
+    /// The structure itself is unusable — [`StoryPackBlocker::Empty`] or
+    /// [`StoryPackBlocker::Malformed`], the reasons every layout shares.
+    Structure(StoryPackBlocker),
+    /// An option of node `node_id` leads nowhere: it is not linked yet, or
+    /// its destination is not a node of the story. A wheel entry must be a
+    /// stage, so the pack cannot carry it.
+    OptionWithoutDestination { node_id: String },
+}
+
+/// Whether any node of `structure` offers an option. Such a story is laid
+/// out by its own graph ([`choice_nodes`]), never as an episode list.
+pub fn offers_choices(structure: &CanonicalStructure) -> bool {
+    structure.nodes.iter().any(|node| !node.options.is_empty())
+}
+
+/// Read `structure` as the node graph of a story with choices — the start
+/// node first, then the others in their node order — or say why it does not
+/// lay out as a pack.
+///
+/// Unlike [`linear_episodes`], a node may carry no audio: a pack stage may
+/// be a picture alone (or nothing at all), and a story created from a pack
+/// keeps exactly the media its stages had.
+pub fn choice_nodes(
+    structure: &CanonicalStructure,
+) -> Result<Vec<ChoiceNode<'_>>, ChoiceLayoutBlocker> {
+    if structure.nodes.is_empty() {
+        return Err(ChoiceLayoutBlocker::Structure(StoryPackBlocker::Empty));
+    }
+    let start = structure
+        .nodes
+        .iter()
+        .position(|node| node.id == structure.start_node_id)
+        .ok_or(ChoiceLayoutBlocker::Structure(StoryPackBlocker::Malformed))?;
+    // Every node becomes a stage and a stage is found by its id: a blank id,
+    // or two ids a reader would take for the same one, is not a graph.
+    let mut folded_ids: HashSet<String> = HashSet::with_capacity(structure.nodes.len());
+    let mut ids: HashSet<&str> = HashSet::with_capacity(structure.nodes.len());
+    for node in &structure.nodes {
+        if node.id.trim().is_empty() || !folded_ids.insert(node.id.to_ascii_lowercase()) {
+            return Err(ChoiceLayoutBlocker::Structure(StoryPackBlocker::Malformed));
+        }
+        ids.insert(node.id.as_str());
+    }
+    // The start node first, then the others in their node order.
+    let ordered = std::iter::once(&structure.nodes[start]).chain(
+        structure
+            .nodes
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| *i != start)
+            .map(|(_, node)| node),
+    );
+    let mut nodes = Vec::with_capacity(structure.nodes.len());
+    for node in ordered {
+        let mut destinations = Vec::with_capacity(node.options.len());
+        for option in &node.options {
+            match option.target.as_deref() {
+                Some(target) if ids.contains(target) => destinations.push(target),
+                _ => {
+                    return Err(ChoiceLayoutBlocker::OptionWithoutDestination {
+                        node_id: node.id.clone(),
+                    })
+                }
+            }
+        }
+        nodes.push(ChoiceNode {
+            node_id: &node.id,
+            label: &node.label,
+            audio_asset_id: node.audio_asset_id.as_deref().filter(|id| !id.is_empty()),
+            image_asset_id: node.image_asset_id.as_deref().filter(|id| !id.is_empty()),
+            destinations,
+        });
+    }
+    Ok(nodes)
+}
+
+/// The identity of the pack a story with choices lays out as (the uuid of
+/// its entry stage), given its nodes in [`choice_nodes`] order.
+///
+/// A start node whose own id is a well-formed pack UUID keeps it: a story
+/// created from a pack is laid out as THAT pack again, under the identity
+/// its source archive carried. Any other story is filed under its story id,
+/// like the other layouts. `None` when the story id is needed but another
+/// node already carries it — two stages cannot share an identity.
+pub fn choice_pack_uuid(story_id: &str, nodes: &[ChoiceNode<'_>]) -> Option<String> {
+    let start = nodes.first()?;
+    if is_canonical_pack_uuid(&start.node_id.to_ascii_lowercase()) {
+        return Some(start.node_id.to_string());
+    }
+    if nodes
+        .iter()
+        .skip(1)
+        .any(|node| node.node_id.eq_ignore_ascii_case(story_id))
+    {
+        return None;
+    }
+    Some(story_id.to_string())
+}
+
+/// Stage uuid of node `index` of a story with choices: the pack identity for
+/// the start node, the node's own id for every other one. The ONE definition
+/// [`synthesize_choice_pack`] and [`choice_stage_names`] share.
+fn choice_stage_uuid(pack_uuid: &str, nodes: &[ChoiceNode<'_>], index: usize) -> String {
+    if index == 0 {
+        pack_uuid.to_string()
+    } else {
+        nodes[index].node_id.to_string()
+    }
+}
+
+/// Human-readable NAMES of the stages [`synthesize_choice_pack`] produces,
+/// keyed by stage uuid: each node's own label, else the story `title` for
+/// the start node and a numbered `Nœud N` for any other (an unnamed stage
+/// would read as a hole in every tool that lists the pack's stages).
+pub fn choice_stage_names(
+    pack_uuid: &str,
+    title: &str,
+    nodes: &[ChoiceNode<'_>],
+) -> HashMap<String, String> {
+    let mut names = HashMap::with_capacity(nodes.len());
+    for (index, node) in nodes.iter().enumerate() {
+        let label = node.label.trim();
+        let name = if !label.is_empty() {
+            label.to_string()
+        } else if index == 0 {
+            title.to_string()
+        } else {
+            format!("Nœud {}", index + 1)
+        };
+        names.insert(choice_stage_uuid(pack_uuid, nodes, index), name);
+    }
+    names
+}
+
+/// The media of one node of a story with choices, as PACK ASSET REFERENCES.
+/// Either may be absent: the stage then shows, or plays, nothing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChoiceNodeAssets {
+    pub audio_ref: Option<String>,
+    pub image_ref: Option<String>,
+}
+
+/// Lay a story with choices out as a STUdio pack whose entry uuid is
+/// `pack_uuid`: `nodes` in [`choice_nodes`] order, `assets` alongside (one
+/// per node). See the module doc for the stage/action layout.
+pub fn synthesize_choice_pack(
+    pack_uuid: &str,
+    nodes: &[ChoiceNode<'_>],
+    assets: &[ChoiceNodeAssets],
+) -> StudioStoryPack {
+    let cover_controls = StudioControlSettings {
+        wheel: true,
+        ok: true,
+        home: false,
+        pause: false,
+        autoplay: false,
+    };
+    let wheel_entry_controls = StudioControlSettings {
+        wheel: true,
+        ok: true,
+        home: true,
+        pause: false,
+        autoplay: false,
+    };
+    let played_controls = StudioControlSettings {
+        wheel: false,
+        ok: false,
+        home: true,
+        pause: true,
+        autoplay: true,
+    };
+
+    // The options of every node as node indices. `choice_nodes` only lets
+    // existing destinations through; anything else is dropped, never trusted.
+    let index_of: HashMap<&str, usize> = nodes
+        .iter()
+        .enumerate()
+        .map(|(index, node)| (node.node_id, index))
+        .collect();
+    let destinations: Vec<Vec<usize>> = nodes
+        .iter()
+        .map(|node| {
+            node.destinations
+                .iter()
+                .filter_map(|destination| index_of.get(destination).copied())
+                .collect()
+        })
+        .collect();
+
+    // One action node per DISTINCT option list, in first-use order: nodes
+    // that offer the same options share the list, as the tools that write
+    // the format do (every story returning to one wheel points at it).
+    let mut action_of: HashMap<&[usize], usize> = HashMap::new();
+    let mut action_lists: Vec<&[usize]> = Vec::new();
+    for list in destinations.iter().filter(|list| !list.is_empty()) {
+        action_of.entry(list.as_slice()).or_insert_with(|| {
+            action_lists.push(list.as_slice());
+            action_lists.len() - 1
+        });
+    }
+    let action_id = |action: usize| format!("{pack_uuid}-options-{}", action + 1);
+    let transition = |action: usize, option_index: usize| StudioTransition {
+        action_node: action_id(action),
+        option_index: option_index as i32,
+    };
+
+    // A node offered beside at least one other is an entry of a WHEEL.
+    let mut on_wheel = vec![false; nodes.len()];
+    for list in destinations.iter().filter(|list| list.len() >= 2) {
+        for &destination in list {
+            on_wheel[destination] = true;
+        }
+    }
+
+    // How the listener first reaches each node: a breadth-first walk from
+    // the start node, options in their order.
+    let mut parent: Vec<Option<usize>> = vec![None; nodes.len()];
+    let mut reached = vec![false; nodes.len()];
+    let mut walk: Vec<usize> = Vec::with_capacity(nodes.len());
+    if !nodes.is_empty() {
+        reached[0] = true;
+        walk.push(0);
+    }
+    let mut head = 0;
+    while head < walk.len() {
+        let current = walk[head];
+        head += 1;
+        for &destination in &destinations[current] {
+            if !reached[destination] {
+                reached[destination] = true;
+                parent[destination] = Some(current);
+                walk.push(destination);
+            }
+        }
+    }
+
+    // The wheel spot each node was reached THROUGH: the last wheel the
+    // listener chose from on the way, positioned on the entry chosen. A node
+    // reached without a choice inherits its parent's spot.
+    let mut wheel_spot: Vec<Option<(usize, usize)>> = vec![None; nodes.len()];
+    for &node in walk.iter().skip(1) {
+        let Some(from) = parent[node] else { continue };
+        let list = destinations[from].as_slice();
+        wheel_spot[node] = if list.len() >= 2 {
+            let position = list.iter().position(|&d| d == node).unwrap_or(0);
+            action_of.get(list).map(|&action| (action, position))
+        } else {
+            wheel_spot[from]
+        };
+    }
+
+    let stage_nodes = (0..nodes.len())
+        .map(|node| {
+            let list = destinations[node].as_slice();
+            // OK (or the end of an autoplayed sound) enters the node's own
+            // options. A wheel is entered ON THE ENTRY THE LISTENER CAME
+            // THROUGH when it is one of them — a story that returns to its
+            // wheel lands on its own title, not on the first one.
+            let ok_transition = action_of.get(list).map(|&action| {
+                let mut option_index = 0;
+                if list.len() >= 2 {
+                    let mut ancestor = parent[node];
+                    while let Some(through) = ancestor {
+                        if let Some(position) = list.iter().position(|&d| d == through) {
+                            option_index = position;
+                            break;
+                        }
+                        ancestor = parent[through];
+                    }
+                }
+                transition(action, option_index)
+            });
+            // HOME steps back to the wheel spot the node's PARENT was
+            // reached through: from a story, the wheel it was picked on;
+            // from a wheel entry, one level up. No spot above = the
+            // device's own "back to the pack selection".
+            let home_transition = parent[node]
+                .and_then(|from| wheel_spot[from])
+                .map(|(action, option_index)| transition(action, option_index));
+            let media = assets.get(node);
+            StudioStageNode {
+                uuid: choice_stage_uuid(pack_uuid, nodes, node),
+                square_one: node == 0,
+                image: media.and_then(|m| m.image_ref.clone()),
+                audio: media.and_then(|m| m.audio_ref.clone()),
+                ok_transition,
+                home_transition,
+                control_settings: if node == 0 {
+                    cover_controls
+                } else if on_wheel[node] {
+                    wheel_entry_controls
+                } else {
+                    played_controls
+                },
+            }
+        })
+        .collect();
+    let action_nodes = action_lists
+        .iter()
+        .enumerate()
+        .map(|(action, list)| StudioActionNode {
+            id: action_id(action),
+            options: list
+                .iter()
+                .map(|&destination| choice_stage_uuid(pack_uuid, nodes, destination))
+                .collect(),
+        })
+        .collect();
 
     StudioStoryPack {
         version: 1,
@@ -938,5 +1296,505 @@ mod tests {
             Some(assets.episodes[0].prompt_ref.as_str())
         );
         assert!(transcode_pack(&pack).is_ok());
+    }
+
+    // ===== stories with choices =====
+
+    /// `node` offering one option per destination, in order.
+    fn offering(mut node: CanonicalNode, destinations: &[&str]) -> CanonicalNode {
+        for destination in destinations {
+            node.options.push(CanonicalOption {
+                label: format!("vers {destination}"),
+                target: Some((*destination).to_string()),
+            });
+        }
+        node
+    }
+
+    /// One stage with its transitions RESOLVED to the option lists they
+    /// enter — what two packs must agree on to be the same graph, whatever
+    /// ids their action nodes carry.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct ResolvedStage {
+        uuid: String,
+        image: Option<String>,
+        audio: Option<String>,
+        ok: Option<(Vec<String>, i32)>,
+        home: Option<(Vec<String>, i32)>,
+        /// wheel, ok, home, pause, autoplay.
+        controls: (bool, bool, bool, bool, bool),
+    }
+
+    fn resolved(pack: &StudioStoryPack) -> Vec<ResolvedStage> {
+        let entered = |transition: &Option<StudioTransition>| {
+            transition.as_ref().map(|t| {
+                let action = pack
+                    .action_nodes
+                    .iter()
+                    .find(|action| action.id == t.action_node)
+                    .expect("the action exists");
+                (action.options.clone(), t.option_index)
+            })
+        };
+        pack.stage_nodes
+            .iter()
+            .map(|stage| {
+                let cs = stage.control_settings;
+                ResolvedStage {
+                    uuid: stage.uuid.clone(),
+                    image: stage.image.clone(),
+                    audio: stage.audio.clone(),
+                    ok: entered(&stage.ok_transition),
+                    home: entered(&stage.home_transition),
+                    controls: (cs.wheel, cs.ok, cs.home, cs.pause, cs.autoplay),
+                }
+            })
+            .collect()
+    }
+
+    /// The story the structured-archive creation makes of `pack`: one node
+    /// per stage, in stage order, offering the targets of the stage's OK
+    /// action. The media ids ARE the pack's references, so the same pack can
+    /// be laid out again from the story alone.
+    fn story_of_pack(pack: &StudioStoryPack) -> CanonicalStructure {
+        let nodes = pack
+            .stage_nodes
+            .iter()
+            .map(|stage| {
+                let destinations: Vec<String> = stage
+                    .ok_transition
+                    .as_ref()
+                    .map(|t| {
+                        pack.action_nodes
+                            .iter()
+                            .find(|action| action.id == t.action_node)
+                            .expect("the action exists")
+                            .options
+                            .clone()
+                    })
+                    .unwrap_or_default();
+                CanonicalNode {
+                    id: stage.uuid.clone(),
+                    text: String::new(),
+                    label: String::new(),
+                    image_asset_id: stage.image.clone(),
+                    audio_asset_id: stage.audio.clone(),
+                    options: destinations
+                        .into_iter()
+                        .map(|target| CanonicalOption {
+                            label: String::new(),
+                            target: Some(target),
+                        })
+                        .collect(),
+                }
+            })
+            .collect();
+        structure(&pack.stage_nodes[0].uuid, nodes)
+    }
+
+    /// Lay `story` out as a pack for the story `story_id`, every media
+    /// reference being the node's own asset id.
+    fn laid_out(story_id: &str, story: &CanonicalStructure) -> StudioStoryPack {
+        let nodes = choice_nodes(story).expect("a story with choices");
+        let media: Vec<ChoiceNodeAssets> = nodes
+            .iter()
+            .map(|node| ChoiceNodeAssets {
+                audio_ref: node.audio_asset_id.map(str::to_string),
+                image_ref: node.image_asset_id.map(str::to_string),
+            })
+            .collect();
+        let pack_uuid = choice_pack_uuid(story_id, &nodes).expect("an identity");
+        synthesize_choice_pack(&pack_uuid, &nodes, &media)
+    }
+
+    const COVER: (bool, bool, bool, bool, bool) = (true, true, false, false, false);
+    const WHEEL_ENTRY: (bool, bool, bool, bool, bool) = (true, true, true, false, false);
+    const PLAYED: (bool, bool, bool, bool, bool) = (false, false, true, true, true);
+
+    #[test]
+    fn a_story_offers_choices_as_soon_as_one_node_has_an_option() {
+        let plain = structure(
+            "n1",
+            vec![node("n1", Some("a1"), None), node("n2", Some("a2"), None)],
+        );
+        assert!(!offers_choices(&plain));
+        let chained = structure(
+            "n1",
+            vec![
+                offering(node("n1", Some("a1"), None), &["n2"]),
+                node("n2", Some("a2"), None),
+            ],
+        );
+        assert!(offers_choices(&chained));
+        // An option that is not linked yet is an option all the same.
+        let mut unlinked = node("n1", Some("a1"), None);
+        unlinked.options.push(CanonicalOption {
+            label: "plus tard".into(),
+            target: None,
+        });
+        assert!(offers_choices(&structure("n1", vec![unlinked])));
+    }
+
+    #[test]
+    fn choice_nodes_come_start_first_with_their_destinations_in_option_order() {
+        let s = structure(
+            "n2",
+            vec![
+                offering(node("n1", Some("a1"), Some("i1")), &["n3"]),
+                offering(node("n2", None, Some("")), &["n3", "n1", "n3"]),
+                node("n3", Some(""), None),
+            ],
+        );
+        let nodes = choice_nodes(&s).expect("laid out");
+        assert_eq!(
+            nodes.iter().map(|n| n.node_id).collect::<Vec<_>>(),
+            vec!["n2", "n1", "n3"]
+        );
+        assert_eq!(nodes[0].destinations, vec!["n3", "n1", "n3"]);
+        assert_eq!(nodes[1].destinations, vec!["n3"]);
+        assert!(nodes[2].destinations.is_empty());
+        // A node may carry no sound, and a blank reference is no reference.
+        assert_eq!(
+            (nodes[0].audio_asset_id, nodes[0].image_asset_id),
+            (None, None)
+        );
+        assert_eq!(
+            (nodes[1].audio_asset_id, nodes[1].image_asset_id),
+            (Some("a1"), Some("i1"))
+        );
+        assert_eq!(nodes[2].audio_asset_id, None);
+        assert_eq!(nodes[1].label, "label n1");
+    }
+
+    #[test]
+    fn an_option_that_leads_nowhere_blocks_the_layout_and_names_its_node() {
+        // Not linked yet.
+        let mut unlinked = node("n2", Some("a2"), None);
+        unlinked.options.push(CanonicalOption {
+            label: "plus tard".into(),
+            target: None,
+        });
+        let s = structure(
+            "n1",
+            vec![offering(node("n1", Some("a1"), None), &["n2"]), unlinked],
+        );
+        assert_eq!(
+            choice_nodes(&s),
+            Err(ChoiceLayoutBlocker::OptionWithoutDestination {
+                node_id: "n2".into()
+            })
+        );
+        // Linked to a node that is gone.
+        let s = structure(
+            "n1",
+            vec![offering(node("n1", Some("a1"), None), &["ghost"])],
+        );
+        assert_eq!(
+            choice_nodes(&s),
+            Err(ChoiceLayoutBlocker::OptionWithoutDestination {
+                node_id: "n1".into()
+            })
+        );
+    }
+
+    #[test]
+    fn a_structure_that_is_not_a_graph_blocks_the_layout() {
+        assert_eq!(
+            choice_nodes(&structure("n1", vec![])),
+            Err(ChoiceLayoutBlocker::Structure(StoryPackBlocker::Empty))
+        );
+        let no_start = structure("nope", vec![offering(node("n1", None, None), &["n1"])]);
+        assert_eq!(
+            choice_nodes(&no_start),
+            Err(ChoiceLayoutBlocker::Structure(StoryPackBlocker::Malformed))
+        );
+        // Two nodes a reader would take for the same stage.
+        let twins = structure(
+            "n1",
+            vec![
+                offering(node("n1", None, None), &["N1"]),
+                node("N1", None, None),
+            ],
+        );
+        assert_eq!(
+            choice_nodes(&twins),
+            Err(ChoiceLayoutBlocker::Structure(StoryPackBlocker::Malformed))
+        );
+        let blank = structure(
+            "n1",
+            vec![
+                offering(node("n1", None, None), &["n1"]),
+                node(" ", None, None),
+            ],
+        );
+        assert_eq!(
+            choice_nodes(&blank),
+            Err(ChoiceLayoutBlocker::Structure(StoryPackBlocker::Malformed))
+        );
+    }
+
+    #[test]
+    fn a_story_created_from_a_pack_keeps_its_identity_and_any_other_takes_the_story_id() {
+        const STORY: &str = "0197a5d0-1111-7222-8333-444455556666";
+        let two_nodes = |start: &str| {
+            structure(
+                start,
+                vec![
+                    offering(node(start, None, None), &["n2"]),
+                    node("n2", None, None),
+                ],
+            )
+        };
+        let from_pack = two_nodes(PACK);
+        let nodes = choice_nodes(&from_pack).expect("nodes");
+        assert_eq!(choice_pack_uuid(STORY, &nodes).as_deref(), Some(PACK));
+        // Whatever its case, a well-formed id is the pack's own.
+        let upper = PACK.to_ascii_uppercase();
+        let shouted = two_nodes(&upper);
+        let nodes = choice_nodes(&shouted).expect("nodes");
+        assert_eq!(
+            choice_pack_uuid(STORY, &nodes).as_deref(),
+            Some(upper.as_str())
+        );
+        // Written in the editor: the story id, like the other layouts.
+        let authored = two_nodes("n1");
+        let nodes = choice_nodes(&authored).expect("nodes");
+        assert_eq!(choice_pack_uuid(STORY, &nodes).as_deref(), Some(STORY));
+        // The story id cannot name two stages.
+        let clash = structure(
+            "n1",
+            vec![
+                offering(node("n1", None, None), &[STORY]),
+                node(STORY, None, None),
+            ],
+        );
+        let nodes = choice_nodes(&clash).expect("nodes");
+        assert_eq!(choice_pack_uuid(STORY, &nodes), None);
+    }
+
+    #[test]
+    fn a_sequential_pack_read_back_as_a_story_lays_out_as_the_same_graph() {
+        let pack = synthesize_sequential_pack(PACK, &assets(3));
+        let again = laid_out("another-story", &story_of_pack(&pack));
+        assert_eq!(resolved(&again), resolved(&pack));
+        assert!(transcode_pack(&again).is_ok());
+    }
+
+    #[test]
+    fn a_menu_pack_read_back_as_a_story_lays_out_as_the_same_graph() {
+        for auto_continue in [false, true] {
+            let mut menu = menu_assets(3);
+            menu.auto_continue = auto_continue;
+            let pack = synthesize_menu_pack(PACK, &menu);
+            let again = laid_out("another-story", &story_of_pack(&pack));
+            let mut expected = resolved(&pack);
+            // The one thing the story does not carry: the question played
+            // with every control off. Read back it is a node that plays
+            // through like any other — pause and home on, which takes
+            // nothing away from the listener.
+            assert_eq!(expected[1].controls, (false, false, false, false, true));
+            expected[1].controls = PLAYED;
+            assert_eq!(
+                resolved(&again),
+                expected,
+                "auto_continue = {auto_continue}"
+            );
+            assert!(transcode_pack(&again).is_ok());
+        }
+    }
+
+    #[test]
+    fn home_steps_back_one_wheel_at_a_time_and_a_wheel_is_entered_where_it_was_left() {
+        // cover → wheel A [a1, a2]. a1 → a question → wheel B [b1, b2].
+        // b1 → story1 → back to wheel B. b2 → story2 → back to wheel A.
+        // a2 → a tale that ends the pack.
+        let s = structure(
+            "cover",
+            vec![
+                offering(node("cover", Some("c"), Some("ci")), &["a1", "a2"]),
+                offering(node("a1", Some("a1s"), None), &["q"]),
+                offering(node("a2", Some("a2s"), None), &["tale"]),
+                offering(node("q", Some("qs"), None), &["b1", "b2"]),
+                offering(node("b1", Some("b1s"), None), &["story1"]),
+                offering(node("b2", Some("b2s"), None), &["story2"]),
+                offering(node("story1", Some("s1"), None), &["b1", "b2"]),
+                offering(node("story2", Some("s2"), None), &["a1", "a2"]),
+                node("tale", Some("t"), None),
+            ],
+        );
+        let pack = laid_out(PACK, &s);
+        let stages = resolved(&pack);
+        let stage = |id: &str| {
+            stages
+                .iter()
+                .find(|stage| stage.uuid == id)
+                .unwrap_or_else(|| panic!("stage {id}"))
+                .clone()
+        };
+        let wheel_a = vec!["a1".to_string(), "a2".to_string()];
+        let wheel_b = vec!["b1".to_string(), "b2".to_string()];
+
+        // The start node is the cover, filed under the story id.
+        let cover = stage(PACK);
+        assert_eq!(cover.controls, COVER);
+        assert_eq!(cover.ok, Some((wheel_a.clone(), 0)));
+        assert_eq!(cover.home, None);
+
+        // An entry of a wheel waits for the listener.
+        for id in ["a1", "a2", "b1", "b2"] {
+            assert_eq!(stage(id).controls, WHEEL_ENTRY, "{id}");
+        }
+        // Every other node plays through.
+        for id in ["q", "story1", "story2", "tale"] {
+            assert_eq!(stage(id).controls, PLAYED, "{id}");
+        }
+
+        // First-level entries: nothing above, home leaves the pack.
+        assert_eq!(stage("a1").home, None);
+        assert_eq!(stage("a2").home, None);
+        // The question between the two wheels homes to the first one, on
+        // the entry that led to it — and so do the second-level entries:
+        // one level up, not out of the pack.
+        assert_eq!(stage("q").ok, Some((wheel_b.clone(), 0)));
+        assert_eq!(stage("q").home, Some((wheel_a.clone(), 0)));
+        assert_eq!(stage("b1").home, Some((wheel_a.clone(), 0)));
+        assert_eq!(stage("b2").home, Some((wheel_a.clone(), 0)));
+
+        // A story picked on a wheel homes to that wheel, on its own entry.
+        assert_eq!(stage("story1").home, Some((wheel_b.clone(), 0)));
+        assert_eq!(stage("story2").home, Some((wheel_b.clone(), 1)));
+        assert_eq!(stage("tale").home, Some((wheel_a.clone(), 1)));
+        // …and its end enters the wheel it offers ON THE ENTRY THE LISTENER
+        // CAME THROUGH: story1 returns to wheel B on b1, story2 to wheel A
+        // on a1 (the entry that opened the second menu).
+        assert_eq!(stage("story1").ok, Some((wheel_b, 0)));
+        assert_eq!(stage("story2").ok, Some((wheel_a, 0)));
+        // A node without options ends the pack.
+        assert_eq!(stage("tale").ok, None);
+
+        assert!(transcode_pack(&pack).is_ok());
+    }
+
+    #[test]
+    fn a_story_returns_to_its_wheel_on_its_own_entry_not_on_the_first_one() {
+        // cover → wheel [o1, o2, o3]; each entry leads to its story, each
+        // story back to the wheel.
+        let wheel = ["o1", "o2", "o3"];
+        let mut nodes = vec![offering(node("cover", Some("c"), None), &wheel)];
+        for i in 1..=3 {
+            let story = format!("s{i}");
+            nodes.push(offering(
+                node(&format!("o{i}"), Some("p"), None),
+                &[story.as_str()],
+            ));
+        }
+        for i in 1..=3 {
+            nodes.push(offering(node(&format!("s{i}"), Some("a"), None), &wheel));
+        }
+        let pack = laid_out(PACK, &structure("cover", nodes));
+        let stages = resolved(&pack);
+        for i in 1..=3 {
+            let story = stages
+                .iter()
+                .find(|stage| stage.uuid == format!("s{i}"))
+                .expect("story stage");
+            let entries: Vec<String> = wheel.iter().map(|id| id.to_string()).collect();
+            assert_eq!(story.ok, Some((entries.clone(), i - 1)), "story {i}");
+            assert_eq!(story.home, Some((entries, i - 1)), "story {i}");
+        }
+    }
+
+    #[test]
+    fn nodes_offering_the_same_options_share_one_action_node() {
+        let s = structure(
+            "n1",
+            vec![
+                offering(node("n1", Some("a1"), None), &["n2", "n3"]),
+                offering(node("n2", Some("a2"), None), &["n4"]),
+                offering(node("n3", Some("a3"), None), &["n4"]),
+                offering(node("n4", Some("a4"), None), &["n2", "n3"]),
+                // Never reached from the start: a stage all the same, with
+                // nothing above it.
+                offering(node("n5", None, None), &["n5"]),
+            ],
+        );
+        let pack = laid_out(PACK, &s);
+        assert_eq!(pack.stage_nodes.len(), 5);
+        let lists: Vec<Vec<&str>> = pack
+            .action_nodes
+            .iter()
+            .map(|action| action.options.iter().map(String::as_str).collect())
+            .collect();
+        assert_eq!(lists, vec![vec!["n2", "n3"], vec!["n4"], vec!["n5"]]);
+        assert_eq!(
+            pack.action_nodes
+                .iter()
+                .map(|action| action.id.clone())
+                .collect::<Vec<_>>(),
+            vec![
+                format!("{PACK}-options-1"),
+                format!("{PACK}-options-2"),
+                format!("{PACK}-options-3"),
+            ]
+        );
+        let ok_action = |index: usize| {
+            pack.stage_nodes[index]
+                .ok_transition
+                .as_ref()
+                .map(|t| t.action_node.clone())
+        };
+        assert_eq!(ok_action(0), ok_action(3), "n1 and n4 offer the same wheel");
+        assert_eq!(
+            ok_action(1),
+            ok_action(2),
+            "n2 and n3 lead to the same node"
+        );
+
+        let lost = &pack.stage_nodes[4];
+        assert!(lost.home_transition.is_none());
+        assert_eq!(lost.ok_transition.as_ref().map(|t| t.option_index), Some(0));
+        // A node with neither picture nor sound is a stage all the same.
+        assert_eq!((lost.image.as_deref(), lost.audio.as_deref()), (None, None));
+        assert!(transcode_pack(&pack).is_ok());
+    }
+
+    #[test]
+    fn an_option_back_to_the_start_node_points_at_the_pack_entry() {
+        let s = structure(
+            "n1",
+            vec![
+                offering(node("n1", Some("a1"), Some("i1")), &["n2"]),
+                offering(node("n2", Some("a2"), None), &["n1"]),
+            ],
+        );
+        let pack = laid_out(PACK, &s);
+        assert_eq!(pack.stage_nodes[0].uuid, PACK);
+        assert!(pack.stage_nodes[0].square_one && !pack.stage_nodes[1].square_one);
+        assert_eq!(pack.stage_nodes[0].image.as_deref(), Some("i1"));
+        assert_eq!(pack.stage_nodes[1].uuid, "n2");
+        assert_eq!(pack.action_nodes[1].options, vec![PACK.to_string()]);
+        assert!(transcode_pack(&pack).is_ok());
+    }
+
+    #[test]
+    fn every_stage_of_a_story_with_choices_is_named_and_nothing_else() {
+        let mut cover = offering(node("n1", Some("a1"), None), &["n2", "n3"]);
+        cover.label = String::new();
+        let mut unnamed = node("n3", Some("a3"), None);
+        unnamed.label = "  ".into();
+        let s = structure("n1", vec![cover, node("n2", Some("a2"), None), unnamed]);
+        let nodes = choice_nodes(&s).expect("nodes");
+        let pack = laid_out(PACK, &s);
+        let names = choice_stage_names(PACK, "Série", &nodes);
+        let uuids: std::collections::BTreeSet<&str> =
+            pack.stage_nodes.iter().map(|s| s.uuid.as_str()).collect();
+        let named: std::collections::BTreeSet<&str> = names.keys().map(String::as_str).collect();
+        assert_eq!(named, uuids, "one name per stage");
+        assert_eq!(
+            names[PACK], "Série",
+            "an unnamed start node takes the story title"
+        );
+        assert_eq!(names["n2"], "label n2");
+        assert_eq!(names["n3"], "Nœud 3");
     }
 }
