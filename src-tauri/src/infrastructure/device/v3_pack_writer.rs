@@ -4,7 +4,9 @@
 //! Same atomic discipline as the round-trip [`writer`](super::writer), and the
 //! same shared per-mount lock (a send and a delete never race the `.pi`):
 //!   1. stage every file under a temp dir ON the volume (so the promote
-//!      `rename` is same-filesystem/atomic), creating `rf/000` / `sf/000`;
+//!      `rename` is same-filesystem/atomic), creating `rf/000` / `sf/000`.
+//!      Each file is created EXCLUSIVELY: one file of a pack never replaces
+//!      another, whatever names the volume holds for one;
 //!   2. fsync the staged tree;
 //!   3. if `.content/<SHORTID>` already exists, `rename` it aside (FR23-style),
 //!      then promote the staging by `rename`, fsync `.content`, remove the old;
@@ -17,6 +19,7 @@
 //! [`assemble_v3_pack`]: super::pack_assembly::assemble_v3_pack
 
 use std::fs;
+use std::io::Write;
 use std::path::Path;
 
 use tempfile::Builder;
@@ -109,7 +112,17 @@ impl DeviceV3PackWriter for SystemDeviceV3PackWriter {
             if let Some(parent) = path.parent() {
                 fs::create_dir_all(parent).map_err(|_| TransferFailureCause::WriteRejected)?;
             }
-            fs::write(&path, &file.bytes).map_err(|_| TransferFailureCause::WriteRejected)?;
+            // EXCLUSIVE create. The staging tree is new, so a file already
+            // there is another file of THIS pack: the same path handed
+            // twice, or two names the volume holds for one. Written over
+            // it, a stage would show or play another stage's media without
+            // an error anywhere — the volume has the last word, and the
+            // send is refused instead.
+            let mut staged =
+                fs::File::create_new(&path).map_err(|_| TransferFailureCause::WriteRejected)?;
+            staged
+                .write_all(&file.bytes)
+                .map_err(|_| TransferFailureCause::WriteRejected)?;
             // Honest progress: report ONLY the measurable content copy (staging),
             // monotone and bounded by the total — like the round-trip writer.
             bytes_done = bytes_done.saturating_add(file.bytes.len() as u64);
@@ -267,6 +280,50 @@ mod tests {
             .iter()
             .any(|u| u == &pack_uuid_bytes(&uuid).unwrap()));
         eprintln!("[v3write-smoke] {checked} files written to scratch match the device ✓");
+    }
+
+    #[test]
+    fn two_files_bound_for_one_path_are_refused_and_the_device_keeps_what_it_held() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join(LUNII_DEVICE_ID_MARKER), []).unwrap();
+        // The pack is already on the device.
+        SystemDeviceV3PackWriter
+            .write_pack(dir.path(), UUID, &files(), &noop_progress)
+            .expect("first write");
+        let index_before = fs::read(dir.path().join(LUNII_DEVICE_ID_MARKER)).unwrap();
+
+        // A new version of it in which two files are bound for one path:
+        // the second would replace the first.
+        let clashing = vec![
+            AssembledFile {
+                rel_path: "ni".into(),
+                bytes: vec![4, 5, 6],
+            },
+            AssembledFile {
+                rel_path: "rf/000/AAAA1234".into(),
+                bytes: vec![1; 10],
+            },
+            AssembledFile {
+                rel_path: "rf/000/AAAA1234".into(),
+                bytes: vec![2; 10],
+            },
+        ];
+        let refusal = SystemDeviceV3PackWriter
+            .write_pack(dir.path(), UUID, &clashing, &noop_progress)
+            .expect_err("one file never replaces another");
+        assert_eq!(refusal, TransferFailureCause::WriteRejected);
+
+        // The device still holds the pack it held, whole, and its index.
+        let content = dir.path().join(LUNII_CONTENT_DIR).join(SHORT);
+        assert_eq!(fs::read(content.join("ni")).unwrap(), vec![1, 2, 3]);
+        assert_eq!(
+            fs::read(content.join("rf/000/AAAA1234")).unwrap(),
+            vec![9; 10]
+        );
+        assert_eq!(
+            fs::read(dir.path().join(LUNII_DEVICE_ID_MARKER)).unwrap(),
+            index_before
+        );
     }
 
     #[test]
