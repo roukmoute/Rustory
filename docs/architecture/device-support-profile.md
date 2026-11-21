@@ -88,7 +88,7 @@ is the longest prefix of the mount path) and refuses before writing:
 | Check | When | What it compares | Wording |
 | --- | --- | --- | --- |
 | Lower bound | after each asset is normalized, inside the asset loop | the device-ready bytes produced so far, which the assembled pack necessarily carries | `Envoi impossible: il manque au moins {taille} d'espace libre sur l'appareil.` |
-| Exact | after the assembly, before the first device byte | the assembled files, deduplicated by relative path (a repeated asset lands on one path, so it costs its bytes once) | `Envoi impossible: il manque {taille} d'espace libre sur l'appareil.` |
+| Exact | after the assembly, before the first device byte | the assembled files, summed — each one has a path of its own (a media referenced by several stages is one file, and no two media share a file: see "One file per media on the device" below) | `Envoi impossible: il manque {taille} d'espace libre sur l'appareil.` |
 
 Both carry `details.source = "device_space"`, `cause = "not_enough_space"`, the
 `exact` flag and the raw `required_bytes` / `available_bytes` /
@@ -105,6 +105,50 @@ refuse a send they cannot justify. The V1/V2 round-trip write keeps its
 reactive terminal (`write_rejected`, whose next gesture already names the
 device's free space): it rewrites a pack the device held before, so the case
 barely arises there.
+
+**One file per media on the device** (the V3 pack engine). A device pack keeps
+its pictures under `rf/000/` and its sounds under `sf/000/`, one file per
+media, and its two asset indices — `ri` for the pictures, `si` for the sounds
+— list those files as fixed 12-byte entries `000\XXXXXXXX`, in the order the
+node index counts them. The name of each file is settled ONCE, when the
+pack's graph is transcoded, and everything downstream reads that one answer:
+the `ri` / `si` entry, the assembled file, the room check.
+
+| The media | Its file name on the device |
+| --- | --- |
+| The first picture — or the first sound — of the pack to bear a name | Its NATURAL name: the last 8 characters of the stem of its source file name, uppercased. For a hash-named file (the tools that write the format, the library's media store, an archive Rustory exported) that is its last 8 hexadecimal characters — the name a device pack has always been written with. |
+| A later picture whose natural name another picture of the pack already bears — and likewise among the sounds | A DERIVED name: 8 uppercase hexadecimal characters taken from a SHA-256 of the media's kind and source reference, drawn again (a salt) for as long as the name drawn is taken. The same pack always gets the same names. |
+
+"First" is the index order — the order in which the stages first reference
+their media. Names are unique WITHIN a kind: pictures and sounds live in two
+folders and two indices, so a picture and a sound may bear the same 8
+characters, as they always could. The natural names are settled before any
+name is derived, so a derived name never takes the natural name of another
+media, wherever that media stands in the pack.
+
+What it guarantees, for a pack sent from its retained archive and for a pack
+laid out from the library alike:
+
+- **Two different media never land on one device file.** Named by their last
+  8 characters alone, two media whose names end alike were assembled onto the
+  same path: the second replaced the first without an error, and a stage
+  showed or played another stage's media. The odds are small for one pack but
+  grow with the square of its media count — a collection of thousands of
+  media is where they stop being negligible.
+- **A pack without a clash is written byte for byte as before**: every one of
+  its media keeps its natural name, so the format proven against real
+  hardware is untouched. Beside the hardware ground-truth tests (which need a
+  capture of a real device), a test freezes the assembled files of a
+  clash-free pack — their paths, their order, their bytes.
+- **The cover of the device panel follows the name.** It is read back through
+  the same index (the `ri` entry of the entry stage, then `rf/000/<name>`),
+  so a derived name reads exactly like a natural one.
+- **The writer never lets one file of a pack replace another.** It stages
+  every file with an exclusive create, on the device volume itself — so the
+  volume, the only authority on which names it holds for one file, has the
+  last word. A file bound for a path that is already taken refuses the send
+  (`write_rejected`) while the device still holds what it held before; it is
+  never written over the first.
 
 ## Detection Strategy
 
@@ -1358,7 +1402,10 @@ side:
 - **Every asset reference is a bare `<40 hex>.<ext>` name** carrying the
   device format's extension (readers pick the media type from it). A device
   keeps only the LAST 8 characters of the stem as the on-device file name:
-  those 8 characters are unique across the archive by construction.
+  those 8 characters are unique across the archive by construction. Rustory's
+  own send does not depend on it (it gives every media a device file of its
+  own whatever the names end with, see "One file per media on the device");
+  a tool that names the device files by those 8 characters alone does.
 - **The pack metadata is always present**: `format` (`v1`), `version`, `title`
   (the story's CURRENT library title — a story renamed after its import is
   shared under its new name), `description`, `nightModeAvailable`. Whatever
