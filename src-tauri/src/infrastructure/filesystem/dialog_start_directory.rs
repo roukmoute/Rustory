@@ -17,6 +17,7 @@
 
 use std::env;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, MutexGuard};
 
 /// What the process knows about the way it was launched — the inputs of
 /// [`select_start_directory`]. Kept apart from the environment so the rule
@@ -27,6 +28,8 @@ pub struct LaunchContext<'a> {
     pub app_dir: Option<&'a Path>,
     /// Working directory of the process.
     pub working_dir: Option<&'a Path>,
+    /// Directory of the last choice made in a file dialog of this session.
+    pub last_used_dir: Option<&'a Path>,
     /// `$OWD`: the directory the AppImage was launched from, saved by the
     /// AppImage runtime before the launcher moved the process.
     pub launch_dir: Option<&'a Path>,
@@ -42,16 +45,17 @@ pub struct LaunchContext<'a> {
 /// image's own mount. An `APPDIR` merely inherited from another program
 /// leaves the working directory alone, and so does this rule.
 ///
-/// The candidates are tried in order — the directory the AppImage was
-/// launched from, then the home directory — and the first usable one wins
-/// (see [`is_usable_outside`]). Without any, nothing is imposed.
+/// The candidates are tried in order — the directory last used in this
+/// session, the directory the AppImage was launched from, the home
+/// directory — and the first usable one wins (see [`is_usable_outside`]).
+/// Without any, nothing is imposed.
 pub fn select_start_directory(context: &LaunchContext<'_>) -> Option<PathBuf> {
     let app_dir = context.app_dir?.canonicalize().ok()?;
     let working_dir = context.working_dir?.canonicalize().ok()?;
     if !working_dir.starts_with(&app_dir) {
         return None;
     }
-    [context.launch_dir, context.home_dir]
+    [context.last_used_dir, context.launch_dir, context.home_dir]
         .into_iter()
         .flatten()
         .find(|candidate| is_usable_outside(candidate, &app_dir))
@@ -73,6 +77,56 @@ fn is_usable_outside(candidate: &Path, app_dir: &Path) -> bool {
         .is_ok_and(|resolved| resolved.is_dir() && !resolved.starts_with(app_dir))
 }
 
+/// Session memory of the directory where the user last chose a file or a
+/// folder in a native dialog.
+///
+/// Imposing the same directory on every dialog would send the user back to
+/// it each time; this memory lets the next dialog reopen where the previous
+/// one ended. It lives and dies with the process: nothing is written to
+/// disk, and it is read only where a directory is imposed.
+///
+/// Instantiable so unit tests work on local instances — the process-wide
+/// [`LAST_USED_DIRECTORY`] is consumed only by the commands.
+#[derive(Debug, Default)]
+pub struct LastUsedDirectory {
+    directory: Mutex<Option<PathBuf>>,
+}
+
+/// Process-wide memory consumed by the commands that open a file dialog.
+pub static LAST_USED_DIRECTORY: LastUsedDirectory = LastUsedDirectory::new();
+
+impl LastUsedDirectory {
+    pub const fn new() -> Self {
+        Self {
+            directory: Mutex::new(None),
+        }
+    }
+
+    /// Remember the directory that holds `chosen`, the file or the folder
+    /// the user just picked or saved. A choice without a parent directory
+    /// (a filesystem root) keeps the previous memory.
+    pub fn remember(&self, chosen: &Path) {
+        let Some(directory) = chosen.parent().filter(|dir| !dir.as_os_str().is_empty()) else {
+            return;
+        };
+        *self.lock() = Some(directory.to_path_buf());
+    }
+
+    /// The remembered directory, if any. It may have vanished since: the
+    /// selection checks it again before every use.
+    pub fn get(&self) -> Option<PathBuf> {
+        self.lock().clone()
+    }
+
+    fn lock(&self) -> MutexGuard<'_, Option<PathBuf>> {
+        // The protected value is a plain slot swap, always left coherent:
+        // recover the guard of a poisoned mutex.
+        self.directory
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
+
 /// The directory the next native file dialog of this process must start
 /// in, or `None` when the toolkit decides — always the case outside a
 /// Linux AppImage.
@@ -85,11 +139,13 @@ pub fn start_directory() -> Option<PathBuf> {
     }
     let app_dir = env::var_os("APPDIR").map(PathBuf::from);
     let working_dir = env::current_dir().ok();
+    let last_used_dir = LAST_USED_DIRECTORY.get();
     let launch_dir = env::var_os("OWD").map(PathBuf::from);
     let home_dir = env::var_os("HOME").map(PathBuf::from);
     select_start_directory(&LaunchContext {
         app_dir: app_dir.as_deref(),
         working_dir: working_dir.as_deref(),
+        last_used_dir: last_used_dir.as_deref(),
         launch_dir: launch_dir.as_deref(),
         home_dir: home_dir.as_deref(),
     })
@@ -134,6 +190,7 @@ mod tests {
             LaunchContext {
                 app_dir: Some(&self.app_dir),
                 working_dir: Some(&self.working_dir),
+                last_used_dir: None,
                 launch_dir: Some(&self.launch_dir),
                 home_dir: Some(&self.home_dir),
             }
@@ -261,9 +318,58 @@ mod tests {
     #[test]
     fn imposes_nothing_when_no_candidate_is_usable() {
         let app = Launched::new();
+        let vanished = app.root.path().join("vanished");
         let context = LaunchContext {
+            last_used_dir: Some(&vanished),
             launch_dir: Some(&app.working_dir),
             home_dir: None,
+            ..app.context()
+        };
+        assert_eq!(select_start_directory(&context), None);
+    }
+
+    #[test]
+    fn prefers_the_directory_last_used_in_the_session() {
+        let app = Launched::new();
+        let documents = app.directory("documents");
+        let context = LaunchContext {
+            last_used_dir: Some(&documents),
+            ..app.context()
+        };
+        assert_eq!(select_start_directory(&context), Some(documents));
+    }
+
+    #[test]
+    fn a_last_used_directory_is_checked_again_before_every_use() {
+        let app = Launched::new();
+        // An unplugged volume, a deleted folder.
+        let unplugged = app.root.path().join("unplugged");
+        let vanished = LaunchContext {
+            last_used_dir: Some(&unplugged),
+            ..app.context()
+        };
+        assert_eq!(
+            select_start_directory(&vanished),
+            Some(app.launch_dir.clone())
+        );
+        // The user browsed into the image and picked a file there.
+        let inside = LaunchContext {
+            last_used_dir: Some(&app.working_dir),
+            ..app.context()
+        };
+        assert_eq!(
+            select_start_directory(&inside),
+            Some(app.launch_dir.clone())
+        );
+    }
+
+    #[test]
+    fn the_session_memory_never_imposes_a_directory_by_itself() {
+        let app = Launched::new();
+        let documents = app.directory("documents");
+        let context = LaunchContext {
+            app_dir: None,
+            last_used_dir: Some(&documents),
             ..app.context()
         };
         assert_eq!(select_start_directory(&context), None);
@@ -328,5 +434,33 @@ mod tests {
             ..app.context()
         };
         assert_eq!(select_start_directory(&context), Some(app.home_dir.clone()));
+    }
+
+    #[test]
+    fn remembers_the_directory_holding_the_choice() {
+        let memory = LastUsedDirectory::new();
+        assert_eq!(memory.get(), None);
+
+        memory.remember(Path::new("/home/ana/Documents/histoire.zip"));
+        assert_eq!(memory.get(), Some(PathBuf::from("/home/ana/Documents")));
+
+        // A picked folder is remembered through the directory that lists
+        // it, where its neighbours are.
+        memory.remember(Path::new("/media/ana/cle/packs/le-loup"));
+        assert_eq!(memory.get(), Some(PathBuf::from("/media/ana/cle/packs")));
+    }
+
+    #[test]
+    fn a_choice_without_a_parent_directory_keeps_the_previous_memory() {
+        let memory = LastUsedDirectory::new();
+        memory.remember(Path::new("/home/ana/histoire.zip"));
+        for rootless in ["/", "histoire.zip", ""] {
+            memory.remember(Path::new(rootless));
+            assert_eq!(
+                memory.get(),
+                Some(PathBuf::from("/home/ana")),
+                "choice {rootless:?}"
+            );
+        }
     }
 }

@@ -115,10 +115,11 @@ donc construites par `file_dialog`
 ([`src-tauri/src/commands/file_dialog.rs`](../src-tauri/src/commands/file_dialog.rs)),
 qui leur fournit un dossier de départ dans ce seul cas : `APPDIR` défini et
 dossier de travail à l'intérieur. Les candidats sont essayés dans l'ordre :
-le dossier de lancement (`OWD`, posé par le runtime AppImage quand l'image
-est montée, absent avec `APPIMAGE_EXTRACT_AND_RUN=1`), puis le dossier
-personnel (`HOME`). Un candidat n'est retenu que s'il est absolu, existe, est
-un dossier et se trouve hors de l'AppDir
+le dernier dossier utilisé pendant la session, le dossier de lancement (`OWD`,
+posé par le runtime AppImage quand l'image est montée, absent avec
+`APPIMAGE_EXTRACT_AND_RUN=1`), puis le dossier personnel (`HOME`). Un candidat
+n'est retenu que s'il est absolu, existe, est un dossier et se trouve hors de
+l'AppDir
 ([`dialog_start_directory.rs`](../src-tauri/src/infrastructure/filesystem/dialog_start_directory.rs)).
 Sans candidat retenu, hors AppImage, sous Windows et sous macOS, rien n'est
 imposé : la fenêtre native garde son comportement. Un test refuse toute
@@ -127,6 +128,13 @@ une fenêtre d'ouverture démarre ainsi dans ce dossier plutôt que sur la liste
 « Récents », qui reste accessible dans le panneau latéral ; le raccourci `usr`
 que GTK y ajoute pour le dossier de travail reste visible lui aussi, sans être
 le dossier ouvert.
+
+Le dernier dossier utilisé est mémorisé : sans cela, chaque fenêtre
+renverrait au dossier de lancement, même juste après un export rangé
+ailleurs. Cette mémoire reste dans le processus — jamais écrite sur disque,
+perdue à la fermeture — et retient le dossier du dernier fichier ou dossier
+choisi ; pour un export, seulement une fois le fichier écrit, afin qu'une
+destination refusée ne soit pas reproposée.
 
 Le job Linux exécute deux contrôles sur l'AppImage signée avant de pouvoir
 réussir : `bash tools/check-appimage-media.sh <AppImage>` remplace seulement
@@ -144,7 +152,8 @@ de l'artefact construit sur Ubuntu 24.04. Aucun de ces deux contrôles n'ouvre
 de fenêtre de fichier : après un changement du lanceur, du runtime AppImage ou
 du plugin de fenêtres, vérifier à la main sur l'artefact final que `Exporter
 en archive` s'ouvre dans le dossier de lancement et écrit l'archive quand on
-valide sans changer de dossier.
+valide sans changer de dossier, puis qu'un second export rouvre la fenêtre
+dans le dossier du premier.
 
 ## Local persistence footprint
 

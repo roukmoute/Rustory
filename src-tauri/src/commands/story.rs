@@ -9,7 +9,7 @@ use crate::application::story::recovery::{
 };
 use crate::application::story::structure::{self, MoveDirection};
 use crate::application::story::{self, CreateStoryInput, UpdateStoryInput};
-use crate::commands::file_dialog::file_dialog;
+use crate::commands::file_dialog::{file_dialog, remember_dialog_choice};
 use crate::commands::shared::{base64_encode, parse_media_slot, validate_story_id};
 use crate::domain::shared::AppError;
 use crate::domain::story::RecoveryDraftDelta;
@@ -489,6 +489,7 @@ pub async fn attach_node_media(
                 serde_json::json!({ "source": "media_invalid", "stage": "non_filesystem_path" }),
             )
         })?;
+    remember_dialog_choice(&path);
 
     let db = state.db.clone();
     let story_id = input.story_id.clone();

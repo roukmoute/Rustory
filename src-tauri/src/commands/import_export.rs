@@ -11,7 +11,7 @@ use crate::application::import_export::{
     ExportStoryInput, ImportAnalysis, RssAcceptPhase, RssCreationOutcome, WebCreationOutcome,
 };
 use crate::application::story::get_story_detail;
-use crate::commands::file_dialog::file_dialog;
+use crate::commands::file_dialog::{file_dialog, remember_dialog_choice};
 use crate::commands::shared::validate_story_id;
 use crate::domain::export::{RUSTORY_ARTIFACT_EXTENSION, STORY_ARCHIVE_EXTENSION};
 use crate::domain::import::{feed_url_host, official_content_sources};
@@ -141,6 +141,7 @@ pub async fn export_story_with_save_dialog(
         detail,
         destination_path: destination.clone(),
     })?;
+    remember_dialog_choice(&destination);
 
     // Intentionally echo the dialog-selected (post-normalization) path
     // rather than `fs::canonicalize(destination)` — canonicalization
@@ -263,6 +264,7 @@ pub async fn export_story_archive_with_save_dialog(
         )
         .with_details(serde_json::json!({ "source": "spawn_blocking_join" }))
     })??;
+    remember_dialog_choice(&destination);
 
     // Echo the dialog-selected (post-normalization) path, never a
     // canonicalized one — same rule as the `.rustory` export.
@@ -507,6 +509,7 @@ pub async fn analyze_artifact_for_import(
         .as_path()
         .map(|p| p.to_path_buf())
         .ok_or_else(|| import::file_read_error("non_filesystem_path"))?;
+    remember_dialog_choice(&path);
     // Carry the BASENAME only across the boundary — never the absolute path
     // (PII). Falls back to a sober placeholder for an unnameable path.
     let source_name = path
@@ -665,6 +668,7 @@ pub async fn analyze_structured_folder_for_creation(
         .as_path()
         .map(|p| p.to_path_buf())
         .ok_or_else(structured_creation::non_filesystem_path_error)?;
+    remember_dialog_choice(&path);
     // The wire is UTF-8 JSON: a non-UTF-8 path cannot round-trip VERBATIM
     // to the accept phase (a lossy conversion would re-analyze a DIFFERENT
     // folder). Refused at the boundary rather than silently altered.
@@ -773,6 +777,7 @@ pub async fn analyze_structured_archive_for_creation(
         .as_path()
         .map(|p| p.to_path_buf())
         .ok_or_else(structured_creation::non_filesystem_path_error)?;
+    remember_dialog_choice(&path);
     // Same UTF-8 wire discipline as the folder flow: a non-UTF-8 path
     // cannot round-trip verbatim to the accept phase.
     let archive_path = path

@@ -5,23 +5,34 @@
 //! [`dialog_start_directory`] holds for all of them — and for the next one
 //! (a test below refuses a dialog opened any other way).
 
+use std::path::Path;
+
 use tauri::{AppHandle, Runtime};
 use tauri_plugin_dialog::{DialogExt, FileDialogBuilder};
 
-use crate::infrastructure::filesystem::dialog_start_directory;
+use crate::infrastructure::filesystem::dialog_start_directory::{self, LAST_USED_DIRECTORY};
 
 /// Start building a native file dialog.
 ///
-/// From an AppImage the dialog opens in the directory the AppImage was
-/// launched from, else in the home directory — never in the image's own
-/// mount. Everywhere else the builder is returned untouched and the native
-/// dialog decides.
+/// From an AppImage the dialog opens where the user last chose a file in
+/// this session, else in the directory the AppImage was launched from,
+/// else in the home directory — never in the image's own mount. Everywhere
+/// else the builder is returned untouched and the native dialog decides.
 pub fn file_dialog<R: Runtime>(app: &AppHandle<R>) -> FileDialogBuilder<R> {
     let dialog = app.dialog().file();
     match dialog_start_directory::start_directory() {
         Some(directory) => dialog.set_directory(directory),
         None => dialog,
     }
+}
+
+/// Remember where the user's choice lives so the next dialog of this
+/// session reopens there. Call it with the file or folder a dialog
+/// returned once the choice is worth returning to: right after a pick,
+/// and after the write for a save (a destination that could not be
+/// written must not be proposed again).
+pub fn remember_dialog_choice(chosen: &Path) {
+    LAST_USED_DIRECTORY.remember(chosen);
 }
 
 #[cfg(test)]

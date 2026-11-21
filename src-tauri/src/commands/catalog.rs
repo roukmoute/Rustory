@@ -21,7 +21,7 @@ use crate::application::device::catalog::{
     self, import_official_catalog_from_bytes, DEFAULT_CATALOG_LOCALE, MAX_CATALOG_BYTES,
 };
 use crate::application::device::title::count_official_catalog;
-use crate::commands::file_dialog::file_dialog;
+use crate::commands::file_dialog::{file_dialog, remember_dialog_choice};
 use crate::commands::shared::base64_encode;
 use crate::domain::device::is_canonical_pack_uuid;
 use crate::domain::shared::AppError;
@@ -198,6 +198,7 @@ pub async fn import_official_catalog(
             )
             .with_details(serde_json::json!({ "source": "import", "stage": "non_filesystem_path" }))
         })?;
+    remember_dialog_choice(&path);
 
     let db = state.db.clone();
     let count = async_runtime::spawn_blocking(move || -> Result<u32, AppError> {
