@@ -1765,20 +1765,21 @@ it no authority: everything is re-derived from the disk; a forged path is
 equivalent to "the user picked this folder" and opens no new capability.
 
 Recognition model (typed verdict, NEVER an `AppError`): the folder flow
-analyzes `Envelope`, `FormatVersion`, `Title`, `Structure` and `Media` — its
-OWN aspect set (no `SchemaVersion` / `Integrity` / `Timestamps`: an author
-manifest has no declared schema, no checksum, no timestamps). The `Media`
-aspect is analyzed ONLY when the declared `formatVersion` is the listed one:
-an unlisted format never triggers a single media read (AC2 — no implicit /
-partial support) and its verdict carries no `Media` finding. The full
-aspect × category matrix, the named bounds and the manifest schema live in the
-support profile contract. State derivation (folder flow):
+analyzes `Envelope`, `FormatVersion`, `Title`, `Structure`, `Media` and
+`MediaSize` — its OWN aspect set (no `SchemaVersion` / `Integrity` /
+`Timestamps`: an author manifest has no declared schema, no checksum, no
+timestamps). The `Media` and `MediaSize` aspects are analyzed TOGETHER, and
+ONLY when the declared `formatVersion` is the listed one: an unlisted format
+never triggers a single media read (no implicit / partial support) and its
+verdict carries neither finding. The full aspect × category matrix, the
+named bounds and the manifest schema live in the support profile contract.
+State derivation (folder flow):
 
 | Findings | Quality | Durable state |
 | --- | --- | --- |
-| any `Blocking` | `Inexploitable` | `blocked` — nothing created, never persisted |
+| any `Blocking` (the media too large TOGETHER included — `MediaSize`) | `Inexploitable` | `blocked` — nothing created, never persisted |
 | else any `Missing` (a referenced media absent) | `Partiellement exploitable` | `partial` — the FIRST real emitter of this state |
-| else any `Ambiguous` | `Partiellement exploitable` | `needs_review` |
+| else any `Ambiguous` (a media left out for its size included — `MediaSize`) | `Partiellement exploitable` | `needs_review` |
 | none of the above | `Propre` | `recognized` (no report, no marker) |
 
 A discarded media (`Missing` / `Ambiguous`) never blocks the creation: the node
@@ -1787,16 +1788,44 @@ is born with the empty slot, visible in the editor (node-media controls) — tha
 pairs (per-file detail is deferred); the report names the groups, the editor
 shows the empty slots.
 
+**A size reason reads as a size reason.** The review never leaves the size to
+be guessed among other causes, and never files it under an aspect that is
+sound:
+
+| Case | What the review shows |
+| --- | --- |
+| A referenced media over the per-media bound | `Partiellement exploitable`; under `Points d'attention`, the `MediaSize` line with the `ambiguïté` chip and the bound in decimal units (`… dépassent la taille autorisée (34 Mo par fichier). …`); the file listed under `Médias écartés`; `Créer l'histoire` stays the CTA. The `Media` line keeps its own verdict (a file both too large and of an unknown format shows on both lines) |
+| The retained media over the aggregate bound | `Inexploitable`, `role="alert"`; ONE `blocage réel` chip, on the `MediaSize` line (`… dépassent ensemble la taille autorisée (268 Mo). …`); the `Structure` and `Media` lines stay under `Ce que Rustory a reconnu`; no summary, `Abandonner` only |
+
+The surface adds no logic for it: a finding's message is Rust-authoritative
+and rendered verbatim, the surface never words a size.
+
+**The structured-archive creation follows this contract** (surface `Création
+depuis une archive de pack`, `use-archive-creation`, commands
+`analyze_structured_archive_for_creation` / `accept_structured_archive_creation`,
+`source_format = 'structured-archive'`): same phases, same state derivation,
+same review — on the archive aspect set (`Envelope`, `Title`, `Structure`,
+`Media`, `MediaSize`; no `FormatVersion`), with the archive's own copies and
+bounds (`134 Mo par fichier`, `34,4 Go`), and its media summarized as counts
+(a long discarded list collapses to a count). Its bounds and its matrix live
+in
+[device-support-profile.md#Structured archive v1 format contract](./device-support-profile.md).
+
 Per-pair FR copy: the folder flow owns the FR message of every pair of its
 matrix (fixed in `product-language.md#Change Control`). Every `Envelope`,
 `FormatVersion`, `Title` and `Structure` pair carries a FOLDER wording (the
 folder speaks of a manifest and a creation, not of an artifact and an import)
 — except the shared `Title × reconnu` line, whose copy is identical to the
-`.rustory` one. The folder wording renders everywhere the folder flow appears,
-INCLUDING the durable card report (the projection branches on the provenance's
-`source_format`); the `Media` pairs exist only in this flow. Every BLOCKING
-copy of the matrix names the corrective gesture (fix the folder/manifest, then
-re-run the analysis) — the blocked surface itself only offers `Abandonner`.
+`.rustory` one; every `MediaSize` pair names the folder's own bound. The
+wording of a flow renders everywhere that flow appears: the review, the card
+returned at creation AND the durable card report (the projection branches on
+the provenance's `source_format` — `structured-folder`, `structured-archive`,
+`rss`). Every BLOCKING copy of the matrix names the corrective gesture (fix or
+lighten the folder/manifest, then re-run the analysis) — the blocked surface
+itself only offers `Abandonner`. A report persisted before the `MediaSize`
+aspect existed keeps, for its `Media` ambiguity, the copy it was written under
+(see the support profile contract): that line of an older story's card says
+what it said.
 
 UI state machine (owned by `use-structured-creation`, mounted in the library):
 
@@ -1847,8 +1876,9 @@ Error taxonomy: transport failures reuse the `IMPORT_FAILED` closed set of the
 Local Artifact Import Contract (`file_read`, `db_commit`, `spawn_blocking_join`,
 `app_data_unavailable`, `dialog_failed`, `other`) — the functional verdict is
 the typed DTO, never an error. A folder whose CONTENT exceeds a bound is a
-`Blocking` FINDING (typed verdict), never a transport error. The folder flow
-ADDS these documented sub-values to the reused set:
+FINDING (typed verdict), never a transport error — on the `MediaSize` line
+when the bound is a media byte bound. The folder flow ADDS these documented
+sub-values to the reused set:
 
 - `file_read.stage` gains `folder_name` (the chosen folder's name cannot be
   carried as a provenance source — no real UTF-8 basename, or outside the

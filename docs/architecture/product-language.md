@@ -71,6 +71,7 @@ It exists to keep the same product concepts named the same way across:
 | Send refused — the device lacks room (message) | `Envoi impossible: il manque {taille} d'espace libre sur l'appareil.` (`il manque au moins {taille}` when the send stops early, during the transcoding, on what it can already prove) | The pre-write room check: the connected device cannot hold the pack, refused before a single device byte. Sizes are spelled in decimal units with a French comma (`250 Mo`, `1,4 Go`, `moins de 1 Mo`), like the voice-download line | `espace insuffisant` alone, `disque plein`, `erreur d'écriture`, binary units (`Gio`), a raw byte count |
 | Send refused — the device lacks room (next gesture) | `Supprime une histoire de l'appareil puis relance l'envoi.` | The real gesture: free room on the device, then send again | `libère de l'espace` (vague), `formate l'appareil`, `réessaie` alone |
 | Send or archive export refused — a media too large to be read (message) | `Envoi impossible: un média du pack dépasse la taille autorisée ({taille}).` / `Export impossible: un média du pack dépasse la taille autorisée ({taille}).` (`un média de l'histoire` when the media is the library's own) | A media that is THERE but over the per-media bound is named for what it is, with the bound in decimal units (`134 Mo`) — the editor's own `dépasse la taille autorisée`. Its next gesture replaces the media (`… remplace ce média par un fichier plus léger …`), where a missing media asks to check or re-import | `introuvable`, `manquant` (the media is present), `corrompu`, binary units (`128 Mio`), a raw byte count |
+| Creation review — media too large (finding copy) | `… dépassent la taille autorisée ({taille} par fichier). …` (a media left out) / `… dépassent ensemble la taille autorisée ({taille}). …` (media blocking together) | The review of a structured folder or archive names a SIZE reason on its own line (`MediaSize`), with the bound of the flow in decimal units: `34 Mo par fichier` / `268 Mo` for a folder, `134 Mo par fichier` / `34,4 Go` for an archive. `par fichier` and `ensemble` keep the two bounds apart. Frozen copies: the two recognition tables below | `fichier trop volumineux` without the bound, `introuvable` (the media is there), `structure … incohérente` for a size reason, binary units (`128 Mio`, `32 Gio`), a raw byte count |
 | Archive export refused — a sound too long for an archive (message) | `Export impossible: un son de l'histoire est trop long pour une archive (plus de {durée} environ).` | The sound, once converted to the device format, would cross the per-media bound of an archive. `{durée}` is that bound in listening time (`2 h 20`) — the figure a parent can act on; the next gesture asks for shorter episodes (or shorter sounds in the archive the story came from) | a size alone for a sound (`134 Mo`), `trop volumineux`, `introuvable` |
 | Unprovable device pack — refusal (message) | `Envoi interrompu : la copie présente sur l'appareil est dans un état que Rustory ne reconnaît pas, rien n'a été modifié.` | The dedicated `devicePackUnprovable` refusal: RUSTORY protects the present content (fail-closed) — never worded as the device refusing | `la Lunii a refusé…` (reserved for the pure write-I/O `writeRejected`), `corrompu`, technical jargon |
 | Unprovable device pack — refusal (next gesture) | `Vérifie l'appareil, débranche-le puis rebranche-le, puis relance l'envoi.` | The real gesture for an unprovable on-device state | `Vérifie l'espace disponible…` (the `writeRejected` gesture), `nettoie l'appareil` |
@@ -482,9 +483,11 @@ The UI branches on the discriminants, never on this text; the folder flow owns
 the wording of EVERY `Envelope`, `FormatVersion`, `Title` and `Structure` pair
 of its matrix (they speak of a manifest and a creation — the `.rustory` copy
 keeps speaking of an artifact and an import), except the shared
-`Title × reconnu` line whose copy is identical; the `Media` pairs exist only in
-this flow. Every `blocage réel` copy names the corrective gesture (fix the
-folder/manifest, re-run the analysis). Quality labels are reused verbatim
+`Title × reconnu` line whose copy is identical; the `Media` pairs are shared
+with the structured archive; the `MediaSize` pairs name the folder's OWN
+bounds, spelled from the constants the analysis applies. Every `blocage réel`
+copy names the corrective gesture (fix or lighten the folder/manifest, re-run
+the analysis). Quality labels are reused verbatim
 (`Propre` / `Partiellement exploitable` / `Inexploitable`), as are the report
 headers and the per-category chips (`reconnu` / `ambiguïté` /
 `information manquante` / `blocage réel`).
@@ -502,8 +505,63 @@ headers and the per-category chips (`reconnu` / `ambiguïté` /
 | Structure | ambiguïté | `La structure contient un champ inattendu ou un lien d'option vers un nœud inconnu ; l'histoire sera créée telle quelle et tu pourras corriger dans l'éditeur.` |
 | Structure | blocage réel | `La structure du manifest est incomplète ou incohérente. Corrige le manifest puis relance l'analyse.` |
 | Media | reconnu | `Tous les fichiers audio et image référencés par le dossier sont présents et reconnus.` |
-| Media | ambiguïté | `Certains fichiers audio ou image référencés ne sont pas utilisables (format non reconnu, fichier trop volumineux ou nom invalide). L'histoire sera créée sans eux ; tu pourras les ajouter dans l'éditeur.` |
+| Media | ambiguïté | `Certains fichiers audio ou image référencés ne sont pas utilisables (format non reconnu ou nom invalide). L'histoire sera créée sans eux ; tu pourras les ajouter dans l'éditeur.` |
 | Media | information manquante | `Certains fichiers audio ou image référencés par le dossier sont introuvables. L'histoire sera créée sans eux ; tu pourras les ajouter dans l'éditeur.` |
+| MediaSize | reconnu | `Aucun fichier audio ou image référencé ne dépasse la taille autorisée.` |
+| MediaSize | ambiguïté | `Certains fichiers audio ou image référencés dépassent la taille autorisée (34 Mo par fichier). L'histoire sera créée sans eux ; tu pourras ajouter des fichiers plus légers dans l'éditeur.` |
+| MediaSize | blocage réel | `Les fichiers audio et image référencés dépassent ensemble la taille autorisée (268 Mo). Allège le dossier (moins de médias ou des fichiers plus légers) puis relance l'analyse.` |
+
+The size is never one cause among others: a media left out for its size is
+named on the `MediaSize` line, with the bound (`par fichier` for one media,
+`ensemble` for the aggregate bound) — the `Media × ambiguïté` copy speaks of
+format and name only. Its next gesture is its own: the editor's attach has the
+folder's bound, so `tu pourras ajouter des fichiers plus légers dans
+l'éditeur` (never `tu pourras les ajouter` — the file itself would be refused
+there too).
+
+**Copy of the reports written before `MediaSize` existed** (kept VERBATIM, for
+those summaries only — see
+[device-support-profile.md#Size has its own line](./device-support-profile.md)):
+`Certains fichiers audio ou image référencés ne sont pas utilisables (format
+non reconnu, fichier trop volumineux ou nom invalide). L'histoire sera créée
+sans eux ; tu pourras les ajouter dans l'éditeur.` Nobody recorded which of
+the three causes applied, so the report of such a story keeps saying what it
+said. It is also the defensive `Media × ambiguïté` copy of the flows that
+judge no size.
+
+### Structured-archive recognition copy (per-pair, frozen)
+
+One canonical FR message per `(aspect, catégorie)` pair of the
+structured-archive matrix (see
+[device-support-profile.md#Structured archive v1 format contract](./device-support-profile.md)).
+The archive flow owns the wording of its `Envelope`, `Title` and `Structure`
+pairs (they speak of a descriptor and a pack) and of the `MediaSize` pairs
+that name ITS bounds; it analyzes no `FormatVersion`. The other `Media` pairs
+are the folder table's, verbatim. These copies render in the review, on the
+card returned at creation and in the durable card report alike.
+
+| Aspect | Catégorie | Message figé |
+| --- | --- | --- |
+| Envelope | reconnu | `Le descripteur story.json est présent et lisible.` |
+| Envelope | blocage réel | `L'archive ne contient pas de descripteur story.json lisible. Corrige l'archive puis relance l'analyse.` |
+| Title | reconnu | `Le titre de l'histoire est valide.` |
+| Title | ambiguïté | `Le titre a été complété ou normalisé à la création (titre absent du descripteur ou espaces ajustés).` |
+| Title | blocage réel | `Le titre du descripteur est manquant ou n'est pas valide. Corrige l'archive puis relance l'analyse.` |
+| Structure | reconnu | `La structure du pack est reconnue et convertie en histoire.` |
+| Structure | ambiguïté | `La structure du pack contient des références incomplètes ; l'histoire sera créée telle quelle et tu pourras corriger dans l'éditeur.` |
+| Structure | blocage réel | `La structure du descripteur est incomplète ou incohérente. Corrige l'archive puis relance l'analyse.` |
+| Media | ambiguïté | `Certains fichiers audio ou image référencés ne sont pas utilisables (format non reconnu ou nom invalide). L'histoire sera créée sans eux ; tu pourras les ajouter dans l'éditeur.` |
+| MediaSize | reconnu | `Aucun fichier audio ou image référencé ne dépasse la taille autorisée.` |
+| MediaSize | ambiguïté | `Certains fichiers audio ou image référencés dépassent la taille autorisée (134 Mo par fichier). L'histoire sera créée sans eux ; pour les garder, remplace-les dans l'archive par des fichiers plus légers puis relance l'analyse.` |
+| MediaSize | blocage réel | `Les fichiers audio et image référencés dépassent ensemble la taille autorisée (34,4 Go). Allège l'archive (moins de médias ou des fichiers plus légers) puis relance l'analyse.` |
+
+The archive's `MediaSize × ambiguïté` gesture is NOT the folder's: an archive
+story is sent from the archive it retained, so the media is replaced IN the
+archive (`remplace-les dans l'archive … puis relance l'analyse`) — adding a
+lighter file in the editor would not reach the device. It is the review-time
+twin of the send and export refusals (`… un média du pack dépasse la taille
+autorisée (134 Mo).` / `Dans l'archive d'origine, remplace ce média par un
+fichier plus léger …`): same words for the bound, same gesture.
 
 No new card provenance label (the existing `Importée` marker is honest — the
 content comes from outside Rustory) and no label for a settled review

@@ -909,17 +909,41 @@ one matrix cell = one test:
 | `Envelope` | `histoire.json` present, readable as a regular file, valid JSON | — | — | manifest absent, unreadable, or malformed JSON |
 | `FormatVersion` | `formatVersion == 1` | — | — | absent or `!= 1` |
 | `Title` | valid as-is | normalizable (`value != normalize_title(value)`) | — | absent, empty after normalization, or invalid |
-| `Structure` | transcodable and canonically valid | unknown manifest field; an option `target` pointing at an unknown node (preserved broken — `BrokenOptionLink` is `Fixable`, repairable in the editor) | — | `nodes` absent/empty, duplicate `id`, `startNodeId` given but unknown, anti-DoS bounds exceeded, untranscodable structure |
-| `Media` (new `RecognitionAspect::Media`) | every referenced media present, regular, sniffed inside the closed set, within bounds | a media present but unusable (magic bytes outside the set, wrong slot, oversize, symlink/irregular, non-sober basename) — the media is discarded | a referenced media ABSENT from the folder — the media is discarded | — |
+| `Structure` | transcodable and canonically valid | unknown manifest field; an option `target` pointing at an unknown node (preserved broken — `BrokenOptionLink` is `Fixable`, repairable in the editor) | — | `nodes` absent/empty, duplicate `id`, `startNodeId` given but unknown, a node text or label over its bound, more distinct referenced media than `MAX_FOLDER_MEDIA_FILES` (decided without reading a single media), untranscodable structure |
+| `Media` (`RecognitionAspect::Media`) | every referenced media present, regular, sniffed inside the closed set, in the right slot | a media present but unusable (magic bytes outside the set, wrong slot, symlink/irregular, non-sober basename) — the media is discarded | a referenced media ABSENT from the folder — the media is discarded | — |
+| `MediaSize` (`RecognitionAspect::MediaSize`) | no referenced media over the per-media bound, and the retained media together within the aggregate bound | a media present but over the per-media bound — the media is discarded, never loaded | — | the retained media together over the aggregate bound — nothing is created |
 
 No `SchemaVersion` / `Integrity` / `Timestamps` aspects: an author manifest has
 no declared canonical schema, no checksum and no timestamps (the story is BORN
-at acceptance — see provenance below). The `Media` aspect is analyzed ONLY when
-the declared `formatVersion` is the listed one: an unlisted format never
-triggers a single media read and its verdict carries no `Media` finding (no
-implicit / partial support). A discarded media (`Ambiguous` or
-`Missing`) never prevents the creation: the node is born with the empty slot,
+at acceptance — see provenance below). The `Media` and `MediaSize` aspects are
+analyzed TOGETHER, and ONLY when the declared `formatVersion` is the listed one
+and the reference count is within its bound: an unlisted format never triggers
+a single media read and its verdict carries neither finding (no implicit /
+partial support). A discarded media (`Ambiguous` or `Missing`, on either
+aspect) never prevents the creation: the node is born with the empty slot,
 repairable in the editor.
+
+**The size of the media is an aspect of its own.** The weight of a media is a
+fact independent of its presence, of its format and of the story's structure,
+so it is judged — and worded — on its own line (see
+[Size has its own line](#size-has-its-own-line) below for the rule shared with
+the structured archive):
+
+- a media over the per-media bound is THERE: it is left out under
+  `MediaSize × Ambiguous`, never under `Media × Missing` (the file exists) nor
+  under a `Media × Ambiguous` that would leave the cause to be guessed;
+- `Media` and `MediaSize` never hide each other. Only the header of a
+  too-large file is read, and that is enough for `Media` to judge its format
+  and its slot like any other file's: a file both too large and of an unknown
+  format is reported on BOTH lines, so one pass of the report says everything
+  there is to fix. A missing file and a too-large one are each named too;
+- the aggregate bound blocks on `MediaSize`, and on it alone: the manifest and
+  its structure are sound and their lines say so. `Structure × Blocking` keeps
+  meaning that the manifest itself has to be corrected.
+
+One finding per aspect still holds: when the retained media block together,
+that is what the `MediaSize` line says (a media also left out for its own size
+shows once the folder is lightened and analyzed again).
 
 State derivation (folder flow — extends the shared derivation without changing
 the `.rustory` one): any `Blocking` → `Unusable` → nothing is created (the
@@ -929,14 +953,20 @@ else any `Ambiguous` → quality `Partial` → `needs_review`; else `Clean` →
 `recognized` (no report, no marker).
 
 Named bounds (anti-DoS, tested): `MAX_MANIFEST_BYTES` = 1 MiB;
-`MAX_FOLDER_MEDIA_FILES` = 64 referenced media; per-media bound = the node-media
-store's local-attach ceiling (`MAX_MEDIA_BYTES`, 32 MiB — the bound of a media
-added by hand in the editor, deliberately NOT the wider one of a story archive
-below); `MAX_FOLDER_TOTAL_MEDIA_BYTES` =
-256 MiB. Only `histoire.json` and the files it references are ever read — the
-folder is NEVER listed (no recursive walk); unreferenced files are ignored by
-construction (never opened). Referenced basenames are validated for sobriety
-BEFORE any path join; a symlink or non-regular file is refused at probe time.
+`MAX_FOLDER_MEDIA_FILES` = 64 referenced media; per-media bound =
+`MAX_FOLDER_MEDIA_BYTES`, 32 MiB — the node-media store's local-attach ceiling
+(`MAX_MEDIA_BYTES`, the bound of a media added by hand in the editor,
+deliberately NOT the wider one of a story archive below; the domain names the
+bound for the verdict and its copy, and the equality with the store's ceiling
+is asserted at compile time); `MAX_FOLDER_TOTAL_MEDIA_BYTES` = 256 MiB,
+inclusive, summed over the DISTINCT retained media (a file referenced twice
+weighs once; a media left out weighs nothing). Crossing one of the two byte
+bounds is a `MediaSize` finding whose copy names the bound in decimal units
+(`34 Mo par fichier`, `268 Mo`). Only `histoire.json` and the files it
+references are ever read — the folder is NEVER listed (no recursive walk);
+unreferenced files are ignored by construction (never opened). Referenced
+basenames are validated for sobriety BEFORE any path join; a symlink or
+non-regular file is refused at probe time.
 
 Provenance: acceptance records a `story_local_imports` row with
 `source_format = 'structured-folder'`, `source_format_version = 1`,
@@ -979,8 +1009,12 @@ failure leaves the previous library state intact, media files compensated).
 The community `.zip` pack (a `story.json` stage/action graph plus an
 `assets/` directory) is the creation entry point for the files users actually
 hold. It rides the folder flow's analysis, findings and commit discipline —
-only the bounds below are its own, and for each of them ONE constant governs
-both the analysis verdict and the promotion, so the two can never disagree.
+the SAME media walk decides what each probe means — on its own aspect set:
+`Envelope`, `Title`, `Structure`, `Media` and `MediaSize` (the pack format
+declares no format version, so `FormatVersion` is never asserted). Only the
+bounds below are its own, and for each of them ONE constant governs the
+analysis verdict, the promotion and the copy that names it, so the three can
+never disagree.
 
 | Bound | Value | Why |
 | --- | --- | --- |
@@ -996,7 +1030,7 @@ read whole — and to every media Rustory writes into one:
 
 | Where | What the bound does |
 | --- | --- |
-| Creation — probe | An entry whose declared size is over the bound is present but unusable: discarded, never extracted. |
+| Creation — probe | An entry whose declared size is over the bound is present but too large: left out under the `MediaSize` aspect, never extracted (its first header bytes alone are read, to judge its format). |
 | Creation — extraction and promotion | Re-applied to the bytes actually read (a lying header gains nothing). A media the probe retained is never refused further down for its size alone. |
 | Device send and archive export of a story that RETAINED its archive | The same bound reads the archive back: every media the creation admitted can be sent and exported again. |
 | Archive export — what it writes | No media over the bound is ever written (see [Structured archive export contract](#structured-archive-export-contract)), so an archive Rustory exported is always one Rustory imports whole. |
@@ -1013,19 +1047,29 @@ export work on one media at a time (the media and, for the export, its
 converted form — a few times the bound in memory at the very most); the send
 keeps every device-ready asset of the pack until the write.
 
-A media over the bound is THERE, and is never reported as absent:
+A media over the bound is THERE, and is named for its size from the review to
+the send:
 
-- the creation discards it under the `Media` ambiguity (`… format non reconnu,
-  fichier trop volumineux ou nom invalide …`) — not under `information
-  manquante`, which stays the copy of a referenced file that is not in the
-  archive — and creates the story without it;
+- the creation leaves it out under `MediaSize × Ambiguous`, whose copy names
+  the size and the bound — `Certains fichiers audio ou image référencés
+  dépassent la taille autorisée (134 Mo par fichier). …` — and creates the
+  story without it. Never under `information manquante`, which stays the copy
+  of a referenced file that is not in the archive, and never under the `Media`
+  ambiguity, which now speaks of format and name only;
 - the retained archive still carries it, so a send or an export from that
   archive refuses on it with the size as the stated reason:
   `details.cause = "asset_oversize"` (with `max_bytes`), `Envoi impossible: un
   média du pack dépasse la taille autorisée (134 Mo).` — distinct from
   `asset_missing` / `… est introuvable dans l'archive.`, whose next gesture is
   not the same. The refusal lands when the pack's assets are sized, before
-  any conversion and before any device or destination byte.
+  any conversion and before any device or destination byte. The review's copy
+  already gives the gesture that avoids it: replace the media IN the archive
+  (the story is sent from its archive, so adding a lighter file in the editor
+  would not reach the device).
+
+The review and the refusals of the send and of the export speak the editor's
+own words — `dépasse la taille autorisée` — and name the bound in decimal
+units.
 
 The folder creation and the media added by hand in the editor keep their own
 32 MiB bound (`MAX_MEDIA_BYTES`): a media picked one at a time is a narration
@@ -1040,16 +1084,79 @@ capacity is a separate constraint, checked at send time (see "Room on the
 device, checked before any byte"), and so are the device-pack import bounds
 (`MAX_IMPORT_PACK_BYTES`, 2 GiB) and the free space of the user's own disk.
 
-KNOWN ROUGH EDGE: an archive over the aggregate bound blocks on the
-`Structure` aspect, so the user reads `La structure interne de l'histoire est
-illisible ou incohérente.` — the generic structure copy, not a size reason.
-Saying it honestly needs a new aspect in the finding matrix, which is shared
-by every import flow (domain enum, DTO, TS contract, per-flow message
-matrices, contract tests); it is deliberately NOT bundled with a bound change.
-For the same reason the creation's review words a media over the PER-MEDIA
-bound through the shared `Media` ambiguity copy, which lists three possible
-causes (format, size, name) without saying which one applies: only the send
-and the export — plain refusals, outside the matrix — name the size alone.
+An archive over the AGGREGATE bound blocks on `MediaSize × Blocking`, with the
+size as the stated reason — `Les fichiers audio et image référencés dépassent
+ensemble la taille autorisée (34,4 Go). Allège l'archive (moins de médias ou
+des fichiers plus légers) puis relance l'analyse.` — and on that line alone:
+the descriptor's structure and the media themselves read as recognized.
+Nothing is created, nothing is extracted (the acceptance re-analyzes and
+refuses first).
+
+#### Size has its own line
+
+How the finding matrix carries a size reason, for the two flows that read
+media from a source the user prepared (structured folder, structured
+archive). The matrix is shared by every import flow, so the choice was made
+against the three ways it could have been extended:
+
+| Candidate | Verdict |
+| --- | --- |
+| A new CATEGORY (`too large`) | Rejected. A category is a SEVERITY: it drives the quality, the durable state and the chip of every flow. A size reason has two severities (a media left out, media blocking together) — it is not a severity. |
+| A CAUSE attached to the existing finding | Rejected. A verdict carries ONE finding per aspect, so one `Media` line would have to tell several simultaneous reasons apart (a file missing, another too large, a third of an unknown format): either one reason hides the others — the very defect to fix — or the copy becomes a combinatorial table. And the aggregate block would still be filed under an aspect that is in fact sound. |
+| A new ASPECT, `MediaSize` | Retained. An aspect is "what part of the input the finding is about", and the weight of the media is such a part: independent of their presence, of their format and of the structure, with a severity of its own in each case. It composes with every other line without a rule of precedence, and it gives `Structure` and `Media` back their exact meaning. |
+
+What the choice costs and what it leaves untouched:
+
+- **`.rustory`, RSS and web flows: nothing changes.** They never emit the
+  aspect (a `.rustory` artifact embeds no media — a negative test locks it),
+  their wire and their stored summaries are byte-identical to before. Their
+  message tables only gain figure-less defensive copies, so a foreign pair
+  stays renderable without naming a bound that is not theirs.
+- **Folder and archive verdicts gain one line.** A verdict whose media were
+  analyzed carries `Media` AND `MediaSize` — both or neither, a rule the
+  TypeScript guards enforce (six aspects on a creatable folder verdict, five
+  on an archive one). The recognized copy is one more line under `Ce que
+  Rustory a reconnu`.
+- **The message stays Rust-authoritative.** The wire finding keeps its
+  `{ aspect, category, message }` shape; the bound is spelled inside the
+  message, from the very constant the analysis applies
+  (`format_device_bytes`, decimal units, French comma). The UI renders it
+  verbatim and never words a size.
+- **Each flow names ITS bound, everywhere its report renders.** The folder
+  and the archive each own their `MediaSize` copies. The card returned at
+  creation and the durable card report use the same table as the review
+  (the projection branches on the provenance's `source_format`, the archive
+  included): an archive story never reads the folder's bound, nor a copy
+  about a manifest it does not have.
+
+**Stored summaries stay readable.** `story_local_imports.findings_summary`
+keeps its shape — a JSON array of `{ aspect, category }` codes, never a copy
+— and only gains the `mediaSize` code. A summary persisted BEFORE the aspect
+existed is recognizable: it carries a `media` pair and no `mediaSize` pair
+(the two are always stored together since). Back then `Media × Ambiguous`
+could stand for a media left out for its size, and nobody recorded which
+cause applied, so such a summary keeps the copy it was written under — `…
+(format non reconnu, fichier trop volumineux ou nom invalide) …` — instead of
+the present `Media × Ambiguous` copy, which would deny a size reason that may
+have been the real one. Nothing is rewritten in the database, nothing is
+invented at read time, and that line of an older story's report says exactly
+what it said. (Read by a version older than the aspect, a newer summary
+degrades to an empty report — the marker still shows from the state column.)
+
+STILL GENERIC — bounds that are not media-size reasons, and whose refusal
+does not name them: a descriptor (or a manifest) over its byte bound and an
+archive over its entry count block on `Envelope` (`… ne contient pas de
+descripteur story.json lisible …`); more distinct referenced media than the
+reference bound block on `Structure`. For an archive these are anti-runaway
+guards honest content does not reach (8192 media, 32 768 entries, a 4 MiB
+descriptor).
+
+KNOWN ROUGH EDGE: the FOLDER's reference bound is 64 media, which an honest
+long story can reach (33 nodes with a picture and a sound each). It still
+reads `La structure du manifest est incomplète ou incohérente.` — a COUNT
+reason worded as a structure one. It is not a size reason and `MediaSize`
+does not cover it (no media is read once the count is exceeded); naming it is
+a separate change.
 
 The `.rustory` artifact is unaffected: it stays a JSON document that embeds NO
 media (see its contract above), so a portable story WITH its images and sounds
