@@ -43,7 +43,8 @@ use super::structured_folder::{
 pub const MAX_ARCHIVE_MEDIA_FILES: usize = 8192;
 
 /// Ceiling on ONE media of a story archive — a memory guard: every reader
-/// loads a media whole. ONE constant for every place an archive media is
+/// loads a media whole. A media over it is present but left out of the
+/// creation: a `MediaSize` ambiguity that names the size. ONE constant for every place an archive media is
 /// read (the creation's probe, extraction and promotion; the device send and
 /// the archive export of a story that retained its archive) AND for every
 /// media the export writes, so an archive Rustory exported is always an
@@ -59,7 +60,8 @@ pub const MAX_ARCHIVE_MEDIA_BYTES: u64 = 128 * 1024 * 1024;
 /// Complete audio collections can exceed 4 GiB even though each individual
 /// media remains within [`MAX_ARCHIVE_MEDIA_BYTES`]. ZIP64 archives support
 /// these collections; retain a finite aggregate bound without forcing users
-/// to split a collection or lower its audio quality.
+/// to split a collection or lower its audio quality. Exceeding it is a
+/// `MediaSize` blocking finding — a typed verdict that names the size.
 pub const MAX_ARCHIVE_TOTAL_MEDIA_BYTES: u64 = 32 * 1024 * 1024 * 1024;
 
 /// The exact descriptor entry name inside the archive — ONE listed name,
@@ -132,12 +134,6 @@ pub fn analyze_structured_archive_components(
         structure_blocked = true;
     }
     let media_walk = (!media_bound_exceeded).then(|| walk_media_references(&raw_refs, probes));
-    if media_walk
-        .as_ref()
-        .is_some_and(|walk| walk.retained_bytes > MAX_ARCHIVE_TOTAL_MEDIA_BYTES)
-    {
-        structure_blocked = true;
-    }
 
     // Title: the descriptor's own title wins; the archive stem is the
     // HONEST fallback (flagged, never clean). No title at all blocks.
@@ -189,8 +185,11 @@ pub fn analyze_structured_archive_components(
         RecognitionFinding::recognized(RecognitionAspect::Structure)
     });
 
+    // The aggregate byte bound is a SIZE verdict of its own (`MediaSize`
+    // blocking), never filed under a structure that is in fact sound.
     if let Some(walk) = &media_walk {
         findings.push(walk.media_finding());
+        findings.push(walk.media_size_finding(MAX_ARCHIVE_TOTAL_MEDIA_BYTES));
     }
     let (retained_media, discarded_media) = media_walk
         .map(|walk| (walk.retained, walk.discarded))
@@ -469,14 +468,125 @@ mod tests {
     }
 
     #[test]
-    fn one_byte_above_the_aggregate_media_limit_is_blocked() {
+    fn one_byte_above_the_aggregate_media_limit_blocks_on_the_media_size() {
+        // The block is a SIZE verdict: the structure and the media of the
+        // collection are sound, and their own lines say so.
         let analysis = analyze_audio_total(MAX_ARCHIVE_TOTAL_MEDIA_BYTES + 1);
         assert_eq!(analysis.quality, RecognitionQuality::Unusable);
         assert!(analysis.creatable.is_none());
         assert_eq!(
+            category_of(&analysis, RecognitionAspect::MediaSize),
+            RecognitionCategory::Blocking
+        );
+        assert_eq!(
+            category_of(&analysis, RecognitionAspect::Structure),
+            RecognitionCategory::Recognized
+        );
+        assert_eq!(
+            category_of(&analysis, RecognitionAspect::Media),
+            RecognitionCategory::Recognized
+        );
+    }
+
+    #[test]
+    fn a_media_over_the_per_media_bound_is_left_out_for_its_size_alone() {
+        // The sound is in the archive and is a sound: only its SIZE keeps
+        // it out. An ambiguity — never a missing media, never a format one.
+        let pack = r#"{
+            "title": "T",
+            "stageNodes": [
+                { "uuid": "s1", "squareOne": true, "image": "cover.png", "audio": "long.mp3",
+                  "okTransition": null, "controlSettings": {} }
+            ],
+            "actionNodes": []
+        }"#;
+        let analysis = analyze(
+            pack,
+            &[
+                (
+                    "cover.png",
+                    MediaProbe::Usable {
+                        kind: FolderMediaKind::Image,
+                        byte_size: 10,
+                    },
+                ),
+                (
+                    "long.mp3",
+                    MediaProbe::Oversize {
+                        kind: Some(FolderMediaKind::Audio),
+                    },
+                ),
+            ],
+            None,
+        );
+        assert_eq!(
+            category_of(&analysis, RecognitionAspect::MediaSize),
+            RecognitionCategory::Ambiguous
+        );
+        assert_eq!(
+            category_of(&analysis, RecognitionAspect::Media),
+            RecognitionCategory::Recognized
+        );
+        assert_eq!(
+            analysis.state,
+            crate::domain::import::ImportState::NeedsReview
+        );
+        assert_eq!(analysis.discarded_media, vec!["long.mp3".to_string()]);
+        let creatable = analysis.creatable.expect("created without the long sound");
+        assert_eq!(creatable.retained_media.len(), 1);
+        assert_eq!(creatable.retained_media[0].basename, "cover.png");
+    }
+
+    #[test]
+    fn an_oversize_media_of_an_unknown_format_is_reported_for_both_reasons() {
+        let pack = r#"{
+            "title": "T",
+            "stageNodes": [
+                { "uuid": "s1", "squareOne": true, "image": null, "audio": "long.flac",
+                  "okTransition": null, "controlSettings": {} }
+            ],
+            "actionNodes": []
+        }"#;
+        let analysis = analyze(
+            pack,
+            &[("long.flac", MediaProbe::Oversize { kind: None })],
+            None,
+        );
+        assert_eq!(
+            category_of(&analysis, RecognitionAspect::MediaSize),
+            RecognitionCategory::Ambiguous
+        );
+        assert_eq!(
+            category_of(&analysis, RecognitionAspect::Media),
+            RecognitionCategory::Ambiguous
+        );
+    }
+
+    #[test]
+    fn a_bounds_breaking_descriptor_asserts_no_media_finding_at_all() {
+        // More distinct references than the anti-runaway bound: the media
+        // were never probed, so neither `Media` nor `MediaSize` is asserted.
+        let stages: Vec<String> = (0..=MAX_ARCHIVE_MEDIA_FILES)
+            .map(|i| {
+                format!(
+                    r#"{{"uuid":"s{i}","squareOne":{sq},"image":"img{i}.png","audio":null,"okTransition":null,"controlSettings":{{}}}}"#,
+                    sq = i == 0,
+                )
+            })
+            .collect();
+        let pack = format!(
+            r#"{{"title":"Trop","stageNodes":[{}],"actionNodes":[]}}"#,
+            stages.join(",")
+        );
+        let analysis = analyze(&pack, &[], None);
+        assert_eq!(
             category_of(&analysis, RecognitionAspect::Structure),
             RecognitionCategory::Blocking
         );
+        assert!(!analysis.findings.iter().any(|f| matches!(
+            f.aspect,
+            RecognitionAspect::Media | RecognitionAspect::MediaSize
+        )));
     }
 
     fn analyze(
@@ -574,6 +684,12 @@ mod tests {
             category_of(&analysis, RecognitionAspect::Media),
             RecognitionCategory::Recognized
         );
+        assert_eq!(
+            category_of(&analysis, RecognitionAspect::MediaSize),
+            RecognitionCategory::Recognized
+        );
+        // Exactly one finding per aspect of the archive matrix.
+        assert_eq!(analysis.findings.len(), 5);
 
         let creatable = analysis.creatable.expect("creatable");
         assert_eq!(creatable.title, "Le voyage de Nour");

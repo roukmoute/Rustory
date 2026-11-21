@@ -614,6 +614,12 @@ describe("useStoryImport", () => {
         message:
           "Tous les fichiers audio et image référencés par le dossier sont présents et reconnus.",
       },
+      {
+        aspect: "mediaSize" as const,
+        category: "recognized" as const,
+        message:
+          "Aucun fichier audio ou image référencé ne dépasse la taille autorisée.",
+      },
     ],
     creatableSummary: {
       title: "Le voyage de Nour",

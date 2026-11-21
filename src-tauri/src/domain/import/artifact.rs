@@ -790,6 +790,13 @@ mod tests {
                 ImportState::Resolved,
                 "the .rustory flow never emits the Resolved state"
             );
+            assert!(
+                analysis.findings.iter().all(|f| !matches!(
+                    f.aspect,
+                    RecognitionAspect::Media | RecognitionAspect::MediaSize
+                )),
+                "a .rustory artifact embeds no media: the flow never judges one, nor its size"
+            );
         }
     }
 

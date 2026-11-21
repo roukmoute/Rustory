@@ -1,9 +1,15 @@
+use rustory_lib::domain::import::{FolderMediaKind, MediaProbe, StructuredFolderAnalysis};
 use rustory_lib::domain::shared::AppError;
+use rustory_lib::ipc::dto::import_export::{
+    archive_import_findings_from_summary, folder_import_findings_from_summary,
+    import_findings_from_summary, rss_import_findings_from_summary,
+};
 use rustory_lib::ipc::dto::{
-    AcceptArtifactImportInputDto, AcceptStructuredCreationInputDto, ExportStoryArchiveOutcomeDto,
-    ExportStoryDialogInputDto, ExportStoryDialogOutcomeDto, ImportArtifactAnalysisDto,
-    ImportAspectDto, ImportCategoryDto, ImportFindingDto, ImportQualityDto, ImportStateDto,
-    ImportableContentDto, StructuredCreationAnalysisDto,
+    AcceptArtifactImportInputDto, AcceptStructuredCreationInputDto, ArchiveCreationAnalysisDto,
+    DropAnalysisDto, ExportStoryArchiveOutcomeDto, ExportStoryDialogInputDto,
+    ExportStoryDialogOutcomeDto, ImportArtifactAnalysisDto, ImportAspectDto, ImportCategoryDto,
+    ImportFindingDto, ImportQualityDto, ImportStateDto, ImportableContentDto, OsOpenAnalysisDto,
+    StructuredCreationAnalysisDto,
 };
 
 #[test]
@@ -352,10 +358,23 @@ fn structured_creation_analyzed_wire_shape_is_tagged_camel_case() {
         .as_array()
         .expect("array")
         .is_empty());
+    let aspects: Vec<&str> = v["findings"]
+        .as_array()
+        .expect("findings")
+        .iter()
+        .map(|finding| finding["aspect"].as_str().expect("aspect"))
+        .collect();
     assert_eq!(
-        v["findings"].as_array().expect("findings").len(),
-        5,
-        "exactly one finding per folder aspect"
+        aspects,
+        [
+            "envelope",
+            "formatVersion",
+            "title",
+            "structure",
+            "media",
+            "mediaSize"
+        ],
+        "exactly one finding per folder aspect, in this order"
     );
     for snake in [
         "folder_name",
@@ -453,4 +472,342 @@ fn accept_structured_creation_input_rejects_snake_case_and_unknown_field() {
 
     let missing = serde_json::from_value::<AcceptStructuredCreationInputDto>(serde_json::json!({}));
     assert!(missing.is_err(), "missing folderPath must be refused");
+}
+
+// ===== Media size (structured folder + structured archive) =====
+//
+// The size of the media is an aspect of its own on the wire: `mediaSize`.
+// Its message is Rust-authoritative and names the bound of the flow that
+// emits it, in decimal units.
+
+/// Analyze a folder manifest against the given probes, through the REAL
+/// domain pipeline.
+fn folder_analysis_with(manifest: &str, probes: &[(&str, MediaProbe)]) -> StructuredFolderAnalysis {
+    rustory_lib::domain::import::analyze_structured_folder_components(
+        manifest.as_bytes(),
+        &probes
+            .iter()
+            .map(|(name, probe)| (name.to_string(), *probe))
+            .collect(),
+    )
+}
+
+/// Analyze a pack descriptor against the given probes, through the REAL
+/// domain pipeline.
+fn archive_analysis_with(
+    descriptor: &str,
+    probes: &[(&str, MediaProbe)],
+) -> StructuredFolderAnalysis {
+    rustory_lib::domain::import::analyze_structured_archive_components(
+        Some(descriptor.as_bytes()),
+        &probes
+            .iter()
+            .map(|(name, probe)| (name.to_string(), *probe))
+            .collect(),
+        None,
+    )
+}
+
+const ONE_SOUND_MANIFEST: &str = r#"{ "formatVersion": 1, "title": "Un son", "nodes": [ { "id": "n1", "audio": "long.wav" } ] }"#;
+
+const ONE_SOUND_PACK: &str = r#"{
+    "title": "Un son",
+    "stageNodes": [
+        { "uuid": "s1", "squareOne": true, "image": null, "audio": "long.mp3",
+          "okTransition": null, "controlSettings": {} }
+    ],
+    "actionNodes": []
+}"#;
+
+const OVERSIZE_SOUND: MediaProbe = MediaProbe::Oversize {
+    kind: Some(FolderMediaKind::Audio),
+};
+
+fn finding_of<'a>(wire: &'a serde_json::Value, aspect: &str) -> &'a serde_json::Value {
+    wire["findings"]
+        .as_array()
+        .expect("findings")
+        .iter()
+        .find(|finding| finding["aspect"] == aspect)
+        .unwrap_or_else(|| panic!("a `{aspect}` finding"))
+}
+
+#[test]
+fn archive_creation_analyzed_wire_shape_carries_one_finding_per_archive_aspect() {
+    let analysis = archive_analysis_with(ONE_SOUND_PACK, &[]);
+    let dto = ArchiveCreationAnalysisDto::analyzed(
+        &analysis,
+        "Un son.zip".into(),
+        "/home/user/Un son.zip".into(),
+    );
+    let v = serde_json::to_value(&dto).expect("serialize");
+    assert_eq!(v["kind"], "analyzed");
+    assert_eq!(v["archiveName"], "Un son.zip");
+    assert_eq!(v["archivePath"], "/home/user/Un son.zip");
+    let aspects: Vec<&str> = v["findings"]
+        .as_array()
+        .expect("findings")
+        .iter()
+        .map(|finding| finding["aspect"].as_str().expect("aspect"))
+        .collect();
+    assert_eq!(
+        aspects,
+        ["envelope", "title", "structure", "media", "mediaSize"],
+        "the pack format declares no format version — never asserted"
+    );
+    for snake in [
+        "archive_name",
+        "archive_path",
+        "creatable_summary",
+        "media_size",
+    ] {
+        assert!(v.get(snake).is_none(), "{snake} must be camelCase");
+    }
+}
+
+#[test]
+fn an_archive_media_over_the_per_media_bound_is_named_for_its_size_on_the_wire() {
+    let analysis = archive_analysis_with(ONE_SOUND_PACK, &[("long.mp3", OVERSIZE_SOUND)]);
+    let dto = ArchiveCreationAnalysisDto::analyzed(&analysis, "p.zip".into(), "/tmp/p.zip".into());
+    let v = serde_json::to_value(&dto).expect("serialize");
+    // Left out, never blocking: the story is created without it.
+    assert_eq!(v["quality"], "partial");
+    assert_eq!(v["state"], "needsReview");
+    assert_eq!(
+        finding_of(&v, "mediaSize"),
+        &serde_json::json!({
+            "aspect": "mediaSize",
+            "category": "ambiguous",
+            "message": "Certains fichiers audio ou image référencés dépassent la taille autorisée (134 Mo par fichier). L'histoire sera créée sans eux ; pour les garder, remplace-les dans l'archive par des fichiers plus légers puis relance l'analyse.",
+        })
+    );
+    // The media itself is neither missing nor of an unknown format.
+    assert_eq!(finding_of(&v, "media")["category"], "recognized");
+    assert_eq!(
+        v["creatableSummary"]["discardedMedia"],
+        serde_json::json!(["long.mp3"])
+    );
+}
+
+#[test]
+fn archive_media_over_the_aggregate_bound_block_on_their_size_on_the_wire() {
+    // Sounds within the per-media bound whose sum crosses the 32 GiB bound.
+    let per_media: u64 = 128 * 1024 * 1024;
+    let count = 257;
+    let stages: Vec<serde_json::Value> = (0..count)
+        .map(|i| {
+            serde_json::json!({
+                "uuid": format!("s{i}"), "squareOne": i == 0, "image": null,
+                "audio": format!("son-{i}.mp3"), "okTransition": null, "controlSettings": {}
+            })
+        })
+        .collect();
+    let descriptor =
+        serde_json::json!({ "title": "Collection", "stageNodes": stages, "actionNodes": [] })
+            .to_string();
+    let names: Vec<String> = (0..count).map(|i| format!("son-{i}.mp3")).collect();
+    let probes: Vec<(&str, MediaProbe)> = names
+        .iter()
+        .map(|name| {
+            (
+                name.as_str(),
+                MediaProbe::Usable {
+                    kind: FolderMediaKind::Audio,
+                    byte_size: per_media,
+                },
+            )
+        })
+        .collect();
+    let analysis = archive_analysis_with(&descriptor, &probes);
+    let dto = ArchiveCreationAnalysisDto::analyzed(&analysis, "c.zip".into(), "/tmp/c.zip".into());
+    let v = serde_json::to_value(&dto).expect("serialize");
+    assert_eq!(v["quality"], "unusable");
+    assert_eq!(v["state"], "blocked");
+    assert!(v.get("creatableSummary").is_none());
+    assert_eq!(
+        finding_of(&v, "mediaSize"),
+        &serde_json::json!({
+            "aspect": "mediaSize",
+            "category": "blocking",
+            "message": "Les fichiers audio et image référencés dépassent ensemble la taille autorisée (34,4 Go). Allège l'archive (moins de médias ou des fichiers plus légers) puis relance l'analyse.",
+        })
+    );
+    // The size is the stated reason — the structure is not blamed for it.
+    assert_eq!(finding_of(&v, "structure")["category"], "recognized");
+}
+
+#[test]
+fn a_folder_media_over_its_bounds_is_named_for_its_size_on_the_wire() {
+    // Per media: 32 MiB, spelled in decimal units.
+    let analysis = folder_analysis_with(ONE_SOUND_MANIFEST, &[("long.wav", OVERSIZE_SOUND)]);
+    let dto = StructuredCreationAnalysisDto::analyzed(&analysis, "d".into(), "/tmp/d".into());
+    let v = serde_json::to_value(&dto).expect("serialize");
+    assert_eq!(v["state"], "needsReview");
+    assert_eq!(
+        finding_of(&v, "mediaSize"),
+        &serde_json::json!({
+            "aspect": "mediaSize",
+            "category": "ambiguous",
+            "message": "Certains fichiers audio ou image référencés dépassent la taille autorisée (34 Mo par fichier). L'histoire sera créée sans eux ; tu pourras ajouter des fichiers plus légers dans l'éditeur.",
+        })
+    );
+
+    // Together: 256 MiB — nine sounds of exactly the per-media bound cross it.
+    let names: Vec<String> = (0..9).map(|i| format!("son-{i}.mp3")).collect();
+    let nodes: Vec<serde_json::Value> = names
+        .iter()
+        .enumerate()
+        .map(|(i, name)| serde_json::json!({ "id": format!("n{i}"), "audio": name }))
+        .collect();
+    let manifest =
+        serde_json::json!({ "formatVersion": 1, "title": "Total", "nodes": nodes }).to_string();
+    let probes: Vec<(&str, MediaProbe)> = names
+        .iter()
+        .map(|name| {
+            (
+                name.as_str(),
+                MediaProbe::Usable {
+                    kind: FolderMediaKind::Audio,
+                    byte_size: 32 * 1024 * 1024,
+                },
+            )
+        })
+        .collect();
+    let analysis = folder_analysis_with(&manifest, &probes);
+    let dto = StructuredCreationAnalysisDto::analyzed(&analysis, "d".into(), "/tmp/d".into());
+    let v = serde_json::to_value(&dto).expect("serialize");
+    assert_eq!(v["state"], "blocked");
+    assert_eq!(
+        finding_of(&v, "mediaSize"),
+        &serde_json::json!({
+            "aspect": "mediaSize",
+            "category": "blocking",
+            "message": "Les fichiers audio et image référencés dépassent ensemble la taille autorisée (268 Mo). Allège le dossier (moins de médias ou des fichiers plus légers) puis relance l'analyse.",
+        })
+    );
+}
+
+#[test]
+fn the_drop_and_os_open_channels_carry_the_media_size_finding_unchanged() {
+    // The two channels re-tag the picker verdicts: same findings, same copy.
+    let analysis = archive_analysis_with(ONE_SOUND_PACK, &[("long.mp3", OVERSIZE_SOUND)]);
+    let picker = serde_json::to_value(ArchiveCreationAnalysisDto::analyzed(
+        &analysis,
+        "p.zip".into(),
+        "/tmp/p.zip".into(),
+    ))
+    .expect("serialize");
+    let dropped = serde_json::to_value(DropAnalysisDto::archive(
+        &analysis,
+        "p.zip".into(),
+        "/tmp/p.zip".into(),
+    ))
+    .expect("serialize");
+    let opened = serde_json::to_value(OsOpenAnalysisDto::archive(
+        &analysis,
+        "p.zip".into(),
+        "/tmp/p.zip".into(),
+    ))
+    .expect("serialize");
+    assert_eq!(dropped["kind"], "archive");
+    assert_eq!(opened["kind"], "archive");
+    assert_eq!(dropped["findings"], picker["findings"]);
+    assert_eq!(opened["findings"], picker["findings"]);
+
+    let folder = folder_analysis_with(ONE_SOUND_MANIFEST, &[("long.wav", OVERSIZE_SOUND)]);
+    let picker = serde_json::to_value(StructuredCreationAnalysisDto::analyzed(
+        &folder,
+        "d".into(),
+        "/tmp/d".into(),
+    ))
+    .expect("serialize");
+    let dropped = serde_json::to_value(DropAnalysisDto::folder(
+        &folder,
+        "d".into(),
+        "/tmp/d".into(),
+    ))
+    .expect("serialize");
+    assert_eq!(dropped["kind"], "folder");
+    assert_eq!(dropped["findings"], picker["findings"]);
+}
+
+#[test]
+fn the_media_size_aspect_never_reaches_the_flows_that_judge_no_media() {
+    // A `.rustory` artifact embeds no media: its verdict never carries the
+    // aspect (its wire is untouched by it).
+    let dto = ImportArtifactAnalysisDto::Analyzed {
+        quality: ImportQualityDto::Clean,
+        state: ImportStateDto::Recognized,
+        findings: vec![ImportFindingDto {
+            aspect: ImportAspectDto::Envelope,
+            category: ImportCategoryDto::Recognized,
+            message: "L'enveloppe de l'artefact est valide.".into(),
+        }],
+        importable_content: None,
+        source_name: "histoire.rustory".into(),
+        artifact_checksum: "b".repeat(64),
+    };
+    let v = serde_json::to_value(&dto).expect("serialize");
+    assert!(!v.to_string().contains("mediaSize"));
+    // The wire tag itself is camelCase, like every aspect.
+    assert_eq!(
+        serde_json::to_value(ImportAspectDto::MediaSize).expect("serialize"),
+        "mediaSize"
+    );
+}
+
+// ===== Persisted findings summaries =====
+
+#[test]
+fn summaries_persisted_before_the_media_size_aspect_stay_readable() {
+    // What a structured-folder creation stored before the size had its own
+    // aspect: five `(aspect, category)` pairs, the media ambiguity possibly
+    // standing for a media left out for its size.
+    let folder = r#"[{"aspect":"envelope","category":"recognized"},{"aspect":"formatVersion","category":"recognized"},{"aspect":"title","category":"recognized"},{"aspect":"structure","category":"recognized"},{"aspect":"media","category":"ambiguous"}]"#;
+    // Same for a structured-archive creation: four pairs.
+    let archive = r#"[{"aspect":"envelope","category":"recognized"},{"aspect":"title","category":"recognized"},{"aspect":"structure","category":"recognized"},{"aspect":"media","category":"ambiguous"}]"#;
+    const AS_WRITTEN: &str = "Certains fichiers audio ou image référencés ne sont pas utilisables (format non reconnu, fichier trop volumineux ou nom invalide). L'histoire sera créée sans eux ; tu pourras les ajouter dans l'éditeur.";
+
+    for (report, pairs) in [
+        (folder_import_findings_from_summary(folder), 5),
+        (archive_import_findings_from_summary(archive), 4),
+    ] {
+        assert_eq!(report.len(), pairs, "every stored pair still renders");
+        let media = report
+            .iter()
+            .find(|finding| finding.aspect == ImportAspectDto::Media)
+            .expect("the media finding");
+        assert_eq!(
+            media.message, AS_WRITTEN,
+            "the copy it was written under — the size may have been its cause"
+        );
+        assert!(report
+            .iter()
+            .all(|finding| finding.aspect != ImportAspectDto::MediaSize));
+    }
+
+    // The summaries of the other flows are untouched by the new aspect.
+    let rustory = r#"[{"aspect":"envelope","category":"recognized"},{"aspect":"title","category":"ambiguous"}]"#;
+    assert_eq!(import_findings_from_summary(rustory).len(), 2);
+    let rss = r#"[{"aspect":"envelope","category":"recognized"},{"aspect":"source","category":"ambiguous"},{"aspect":"media","category":"missing"}]"#;
+    assert_eq!(rss_import_findings_from_summary(rss).len(), 3);
+}
+
+#[test]
+fn a_summary_carrying_the_media_size_aspect_names_the_bound_of_its_flow() {
+    let summary = r#"[{"aspect":"media","category":"recognized"},{"aspect":"mediaSize","category":"ambiguous"}]"#;
+    let size_of = |report: Vec<ImportFindingDto>| {
+        report
+            .into_iter()
+            .find(|finding| finding.aspect == ImportAspectDto::MediaSize)
+            .expect("the size finding")
+            .message
+    };
+    assert!(size_of(archive_import_findings_from_summary(summary)).contains("(134 Mo par fichier)"));
+    assert!(size_of(folder_import_findings_from_summary(summary)).contains("(34 Mo par fichier)"));
+    // A flow with no bound of its own names none.
+    assert_eq!(
+        size_of(import_findings_from_summary(summary)),
+        "Certains fichiers audio ou image référencés dépassent la taille autorisée. L'histoire sera créée sans eux."
+    );
 }

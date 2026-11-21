@@ -34,7 +34,7 @@ use crate::application::story::now_iso_ms;
 use crate::domain::import::{
     analyze_structured_folder_components, is_artifact_checksum, is_supported_folder_source_name,
     referenced_media, FolderMediaKind, MediaProbe, RetainedMediaRef, StructuredFolderAnalysis,
-    MAX_FOLDER_TOTAL_MEDIA_BYTES, STRUCTURED_FOLDER_FORMAT_VERSION,
+    MAX_FOLDER_MEDIA_BYTES, MAX_FOLDER_TOTAL_MEDIA_BYTES, STRUCTURED_FOLDER_FORMAT_VERSION,
     STRUCTURED_FOLDER_MANIFEST_NAME,
 };
 use crate::domain::shared::AppError;
@@ -51,6 +51,12 @@ use crate::ipc::dto::import_export::{
     folder_import_report_dto, serialize_findings_summary, state_db_tag, state_dto, ImportFindingDto,
 };
 use crate::ipc::dto::StoryCardDto;
+
+// The folder's per-media bound IS the local-attach ceiling of the node-media
+// store: a folder media is a media added by hand. The domain names it for
+// the verdict and its copy; the store owns the ceiling — refused at compile
+// time if the two ever part.
+const _: () = assert!(MAX_FOLDER_MEDIA_BYTES == MAX_MEDIA_BYTES as u64);
 
 /// Hard ceiling on the manifest bytes. An author manifest is a few kB; a
 /// bigger file is refused as an unreadable envelope (typed verdict).
@@ -276,7 +282,7 @@ pub fn prepare_structured_creation(
         // The folder's own bounds: each media within the local-attach
         // ceiling of the node-media store, the very bound its probe applies.
         MediaBounds {
-            per_media: MAX_MEDIA_BYTES as u64,
+            per_media: MAX_FOLDER_MEDIA_BYTES,
             total: MAX_FOLDER_TOTAL_MEDIA_BYTES,
         },
         // No extraction step for a folder — promotion fills the whole bar.
@@ -731,30 +737,42 @@ fn read_manifest_bounded(path: &Path) -> Option<Vec<u8>> {
 /// Probe ONE referenced media without loading it: the no-follow open gates
 /// symlinks / irregular files / oversize (TOCTOU-checked), and a bounded
 /// header read feeds the magic-byte sniff. All failures are folder STATES
-/// (`Absent` / `Unusable`), never errors.
+/// (`Absent` / `Oversize` / `Unusable`), never errors.
+///
+/// A file over [`MAX_FOLDER_MEDIA_BYTES`] is named for what keeps it out —
+/// its size — and its header is sniffed all the same (never more than the
+/// header), so a media both too large and of an unknown format is reported
+/// for both.
 fn probe_media(path: &Path) -> MediaProbe {
-    let (file, byte_size) = match open_bounded_regular(path, MAX_MEDIA_BYTES as u64) {
-        RegularOpen::Open(file, byte_size) => (file, byte_size),
-        RegularOpen::Absent => return MediaProbe::Absent,
-        // Functionally the same discarded state; the DISTINCT variant only
-        // matters to the promotion-path diagnostics.
-        RegularOpen::Oversize | RegularOpen::Unusable => return MediaProbe::Unusable,
-    };
-    let mut header = Vec::with_capacity(MEDIA_SNIFF_BYTES);
-    if file
-        .take(MEDIA_SNIFF_BYTES as u64)
-        .read_to_end(&mut header)
-        .is_err()
-    {
-        return MediaProbe::Unusable;
-    }
-    match sniff_media(&header) {
-        Some(sniffed) => MediaProbe::Usable {
-            kind: folder_kind(sniffed.kind),
-            byte_size,
+    match open_bounded_regular(path, MAX_FOLDER_MEDIA_BYTES) {
+        RegularOpen::Open(file, byte_size) => match sniff_header(file) {
+            Some(kind) => MediaProbe::Usable { kind, byte_size },
+            None => MediaProbe::Unusable,
         },
-        None => MediaProbe::Unusable,
+        RegularOpen::Absent => MediaProbe::Absent,
+        // Same no-follow, TOCTOU-checked open, without the byte bound: only
+        // the header is ever read from it.
+        RegularOpen::Oversize => match open_bounded_regular(path, u64::MAX) {
+            RegularOpen::Open(file, _) => MediaProbe::Oversize {
+                kind: sniff_header(file),
+            },
+            // The entry moved between the two opens: it is whatever the
+            // second look says, never a size verdict on a file that is gone.
+            RegularOpen::Absent => MediaProbe::Absent,
+            RegularOpen::Oversize | RegularOpen::Unusable => MediaProbe::Unusable,
+        },
+        RegularOpen::Unusable => MediaProbe::Unusable,
     }
+}
+
+/// What the magic bytes at the head of an opened media say — `None` when
+/// they are outside the closed format set, or unreadable.
+fn sniff_header(file: std::fs::File) -> Option<FolderMediaKind> {
+    let mut header = Vec::with_capacity(MEDIA_SNIFF_BYTES);
+    file.take(MEDIA_SNIFF_BYTES as u64)
+        .read_to_end(&mut header)
+        .ok()?;
+    sniff_media(&header).map(|sniffed| folder_kind(sniffed.kind))
 }
 
 /// Read + validate + PROMOTE one retained media into the store (prepare
@@ -970,6 +988,10 @@ mod tests {
     use crate::domain::import::{ImportState, RecognitionQuality};
     use crate::domain::shared::AppErrorCode;
     use crate::infrastructure::db;
+    use crate::ipc::dto::import_export::{
+        folder_import_findings_from_summary, ImportAspectDto, ImportCategoryDto, ImportQualityDto,
+        ImportStateDto, StructuredCreationAnalysisDto,
+    };
     use tempfile::TempDir;
 
     // A REAL, decodable image: the store transcodes images to a display PNG,
@@ -1718,29 +1740,231 @@ mod tests {
         assert_eq!(store_file_count(app_data.path()), 1);
     }
 
+    /// Grow an existing file to EXACTLY `byte_size` bytes — sparse (instant,
+    /// no real I/O), its first bytes (the signature a probe sniffs) kept.
+    fn grow_sparse(path: &Path, byte_size: u64) {
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .expect("open");
+        file.set_len(byte_size).expect("set_len");
+    }
+
+    fn category_of(
+        outcome: &StructuredCreationOutcome,
+        aspect: crate::domain::import::RecognitionAspect,
+    ) -> crate::domain::import::RecognitionCategory {
+        outcome
+            .analysis
+            .findings
+            .iter()
+            .find(|finding| finding.aspect == aspect)
+            .expect("a finding for the aspect")
+            .category
+    }
+
+    /// The `mediaSize` line of a report, as the surface renders it.
+    fn media_size_line(report: &[ImportFindingDto]) -> (ImportCategoryDto, &str) {
+        let finding = report
+            .iter()
+            .find(|finding| finding.aspect == ImportAspectDto::MediaSize)
+            .expect("a media-size finding");
+        (finding.category, finding.message.as_str())
+    }
+
     #[test]
     fn a_folder_media_over_the_local_attach_ceiling_is_still_discarded() {
         // The folder flow keeps the node-media store's local-attach ceiling:
         // a media one byte over it is discarded at the analysis, whatever a
-        // story archive admits. A sparse file (instant, no real I/O) carrying
-        // a genuine audio signature.
+        // story archive admits — and discarded for its SIZE: it is there,
+        // and it is a sound.
+        use crate::domain::import::{RecognitionAspect, RecognitionCategory};
         let tmp = TempDir::new().expect("tmp");
         let folder = clean_folder(&tmp);
-        let path = folder.join("intro.mp3");
-        let file = std::fs::OpenOptions::new()
-            .write(true)
-            .open(&path)
-            .expect("open");
-        file.set_len(MAX_MEDIA_BYTES as u64 + 1).expect("set_len");
-        drop(file);
+        grow_sparse(&folder.join("intro.mp3"), MAX_FOLDER_MEDIA_BYTES + 1);
 
         let outcome = analyze_structured_folder(&folder).expect("analyze");
         assert_eq!(
             outcome.analysis.discarded_media,
             vec!["intro.mp3".to_string()]
         );
+        assert_eq!(
+            category_of(&outcome, RecognitionAspect::MediaSize),
+            RecognitionCategory::Ambiguous
+        );
+        assert_eq!(
+            category_of(&outcome, RecognitionAspect::Media),
+            RecognitionCategory::Recognized
+        );
+        assert_eq!(outcome.analysis.state, ImportState::NeedsReview);
         let creatable = outcome.analysis.creatable.expect("still creatable");
         assert_eq!(creatable.retained_media.len(), 1, "the picture is retained");
+    }
+
+    #[test]
+    fn a_folder_media_of_exactly_the_bound_is_retained() {
+        // The per-media bound is inclusive at the probe too.
+        let tmp = TempDir::new().expect("tmp");
+        let folder = clean_folder(&tmp);
+        grow_sparse(&folder.join("intro.mp3"), MAX_FOLDER_MEDIA_BYTES);
+
+        let outcome = analyze_structured_folder(&folder).expect("analyze");
+        assert_eq!(outcome.analysis.quality, RecognitionQuality::Clean);
+        assert!(outcome.analysis.discarded_media.is_empty());
+    }
+
+    #[test]
+    fn a_folder_media_one_byte_over_the_bound_is_named_for_its_size_from_the_review_to_the_card() {
+        // The whole way of ONE too-large sound: the review names the size
+        // with the folder's own bound in decimal units, the created card
+        // says the same, and so does the summary re-read after a restart.
+        const NAMED: &str = "Certains fichiers audio ou image référencés dépassent la taille autorisée (34 Mo par fichier). L'histoire sera créée sans eux ; tu pourras ajouter des fichiers plus légers dans l'éditeur.";
+        let tmp = TempDir::new().expect("tmp");
+        let app_data = TempDir::new().expect("app data");
+        let folder = clean_folder(&tmp);
+        grow_sparse(&folder.join("intro.mp3"), MAX_FOLDER_MEDIA_BYTES + 1);
+
+        let outcome = analyze_structured_folder(&folder).expect("analyze");
+        let StructuredCreationAnalysisDto::Analyzed {
+            state,
+            findings,
+            creatable_summary,
+            ..
+        } = StructuredCreationAnalysisDto::analyzed(
+            &outcome.analysis,
+            outcome.folder_name.clone(),
+            folder.to_string_lossy().into_owned(),
+        )
+        else {
+            unreachable!("an analysis always maps to the analyzed verdict");
+        };
+        assert_eq!(state, ImportStateDto::NeedsReview);
+        assert_eq!(
+            media_size_line(&findings),
+            (ImportCategoryDto::Ambiguous, NAMED)
+        );
+        assert_eq!(
+            creatable_summary.expect("creatable").discarded_media,
+            vec!["intro.mp3".to_string()]
+        );
+
+        let mut db = fresh_db();
+        let card = accept_structured_creation(&mut db, app_data.path(), &folder)
+            .expect("the story is created without the too-large sound");
+        let report = card
+            .import_report
+            .expect("a pending review carries a report");
+        assert_eq!(
+            media_size_line(&report),
+            (ImportCategoryDto::Ambiguous, NAMED)
+        );
+
+        let summary: String = db
+            .conn()
+            .query_row(
+                "SELECT findings_summary FROM story_local_imports WHERE story_id = ?1",
+                rusqlite::params![&card.id],
+                |row| row.get(0),
+            )
+            .expect("findings summary");
+        assert_eq!(folder_import_findings_from_summary(&summary), report);
+    }
+
+    #[test]
+    fn a_too_large_folder_media_of_an_unknown_format_is_named_for_both_reasons() {
+        // Only the header of a too-large file is read — enough to say that
+        // lightening it would not make it a media Rustory reads.
+        use crate::domain::import::{RecognitionAspect, RecognitionCategory};
+        let tmp = TempDir::new().expect("tmp");
+        let folder = tmp.path().join("lourd-et-inconnu");
+        std::fs::create_dir(&folder).expect("mkdir");
+        write_manifest(
+            &folder,
+            r#"{ "formatVersion": 1, "title": "Lourd", "nodes": [ { "id": "n1", "audio": "long.flac" } ] }"#,
+        );
+        std::fs::write(folder.join("long.flac"), b"fLaC\0\0\0\x22").expect("flac");
+        grow_sparse(&folder.join("long.flac"), MAX_FOLDER_MEDIA_BYTES + 1);
+
+        let outcome = analyze_structured_folder(&folder).expect("analyze");
+        assert_eq!(
+            category_of(&outcome, RecognitionAspect::MediaSize),
+            RecognitionCategory::Ambiguous
+        );
+        assert_eq!(
+            category_of(&outcome, RecognitionAspect::Media),
+            RecognitionCategory::Ambiguous
+        );
+        assert_eq!(
+            outcome.analysis.discarded_media,
+            vec!["long.flac".to_string()]
+        );
+    }
+
+    #[test]
+    fn folder_media_over_the_aggregate_bound_block_with_the_size_as_the_stated_reason() {
+        // Nine sounds of exactly the per-media bound: 288 MiB of referenced
+        // media for a 256 MiB aggregate bound. The review blocks, and what
+        // it names is the size — the manifest and its structure are sound.
+        const NAMED: &str = "Les fichiers audio et image référencés dépassent ensemble la taille autorisée (268 Mo). Allège le dossier (moins de médias ou des fichiers plus légers) puis relance l'analyse.";
+        let tmp = TempDir::new().expect("tmp");
+        let app_data = TempDir::new().expect("app data");
+        let folder = tmp.path().join("trop-lourd");
+        std::fs::create_dir(&folder).expect("mkdir");
+        let sound_count = (MAX_FOLDER_TOTAL_MEDIA_BYTES / MAX_FOLDER_MEDIA_BYTES) as usize + 1;
+        let nodes: Vec<serde_json::Value> = (0..sound_count)
+            .map(|i| serde_json::json!({ "id": format!("n{i}"), "audio": format!("son-{i}.mp3") }))
+            .collect();
+        write_manifest(
+            &folder,
+            &serde_json::json!({ "formatVersion": 1, "title": "Trop lourd", "nodes": nodes })
+                .to_string(),
+        );
+        for i in 0..sound_count {
+            let path = folder.join(format!("son-{i}.mp3"));
+            std::fs::write(&path, MP3).expect("mp3");
+            grow_sparse(&path, MAX_FOLDER_MEDIA_BYTES);
+        }
+
+        let outcome = analyze_structured_folder(&folder).expect("analyze");
+        let StructuredCreationAnalysisDto::Analyzed {
+            quality,
+            state,
+            findings,
+            creatable_summary,
+            ..
+        } = StructuredCreationAnalysisDto::analyzed(
+            &outcome.analysis,
+            outcome.folder_name.clone(),
+            folder.to_string_lossy().into_owned(),
+        )
+        else {
+            unreachable!("an analysis always maps to the analyzed verdict");
+        };
+        assert_eq!(quality, ImportQualityDto::Unusable);
+        assert_eq!(state, ImportStateDto::Blocked);
+        assert!(creatable_summary.is_none(), "nothing will be created");
+        assert_eq!(
+            media_size_line(&findings),
+            (ImportCategoryDto::Blocking, NAMED)
+        );
+        let blockers: Vec<ImportAspectDto> = findings
+            .iter()
+            .filter(|finding| finding.category == ImportCategoryDto::Blocking)
+            .map(|finding| finding.aspect)
+            .collect();
+        assert_eq!(
+            blockers,
+            vec![ImportAspectDto::MediaSize],
+            "the size is the only blocker: the structure is not blamed"
+        );
+
+        // The acceptance re-analyzes and refuses before promoting a byte.
+        let mut db = fresh_db();
+        let err = accept_structured_creation(&mut db, app_data.path(), &folder)
+            .expect_err("a blocked folder must refuse");
+        assert_eq!(err.code, AppErrorCode::ImportFailed);
+        assert_eq!(count(&db, "stories"), 0);
+        assert_eq!(store_file_count(app_data.path()), 0);
     }
 
     #[test]

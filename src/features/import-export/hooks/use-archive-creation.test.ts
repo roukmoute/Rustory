@@ -45,6 +45,12 @@ const ARCHIVE_ANALYZED_CLEAN = {
       message:
         "Tous les fichiers audio et image référencés sont présents et reconnus.",
     },
+    {
+      aspect: "mediaSize" as const,
+      category: "recognized" as const,
+      message:
+        "Aucun fichier audio ou image référencé ne dépasse la taille autorisée.",
+    },
   ],
   creatableSummary: {
     title: "Le pack du soir",

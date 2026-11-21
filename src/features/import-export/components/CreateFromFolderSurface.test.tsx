@@ -1,11 +1,11 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
 import { CreateFromFolderSurface } from "./CreateFromFolderSurface";
 import type { StructuredCreationStatus } from "../hooks/use-structured-creation";
 
-// The REAL wire shapes (exactly the five folder aspects on a creatable
+// The REAL wire shapes (exactly the six folder aspects on a creatable
 // verdict — what the facade guard lets through).
 const CLEAN_FINDINGS = [
   {
@@ -33,6 +33,12 @@ const CLEAN_FINDINGS = [
     category: "recognized",
     message:
       "Tous les fichiers audio et image référencés par le dossier sont présents et reconnus.",
+  },
+  {
+    aspect: "mediaSize",
+    category: "recognized",
+    message:
+      "Aucun fichier audio ou image référencé ne dépasse la taille autorisée.",
   },
 ] as const;
 
@@ -71,6 +77,7 @@ const REVIEW_PARTIAL: StructuredCreationStatus = {
         message:
           "Certains fichiers audio ou image référencés par le dossier sont introuvables. L'histoire sera créée sans eux ; tu pourras les ajouter dans l'éditeur.",
       },
+      CLEAN_FINDINGS[5],
     ],
     creatableSummary: {
       title: "Sans image",
@@ -100,6 +107,56 @@ const REVIEW_BLOCKED: StructuredCreationStatus = {
     folderPath: "/home/user/casse",
   },
 };
+
+// The size copies below are the ones Rust sends (the surface renders a
+// finding's message verbatim — it never words a size itself).
+const SIZE_LEFT_OUT =
+  "Certains fichiers audio ou image référencés dépassent la taille autorisée (34 Mo par fichier). L'histoire sera créée sans eux ; tu pourras ajouter des fichiers plus légers dans l'éditeur.";
+const SIZE_BLOCKED =
+  "Les fichiers audio et image référencés dépassent ensemble la taille autorisée (268 Mo). Allège le dossier (moins de médias ou des fichiers plus légers) puis relance l'analyse.";
+
+const REVIEW_SIZE_LEFT_OUT: StructuredCreationStatus = {
+  kind: "review",
+  verdict: {
+    kind: "analyzed",
+    quality: "partial",
+    state: "needsReview",
+    findings: [
+      ...CLEAN_FINDINGS.slice(0, 5),
+      { aspect: "mediaSize", category: "ambiguous", message: SIZE_LEFT_OUT },
+    ],
+    creatableSummary: {
+      title: "Un long son",
+      nodeCount: 1,
+      retainedMedia: ["couverture.png"],
+      discardedMedia: ["long.wav"],
+    },
+    folderName: "long-son",
+    folderPath: "/home/user/long-son",
+  },
+};
+
+const REVIEW_SIZE_BLOCKED: StructuredCreationStatus = {
+  kind: "review",
+  verdict: {
+    kind: "analyzed",
+    quality: "unusable",
+    state: "blocked",
+    findings: [
+      ...CLEAN_FINDINGS.slice(0, 5),
+      { aspect: "mediaSize", category: "blocking", message: SIZE_BLOCKED },
+    ],
+    folderName: "trop-lourd",
+    folderPath: "/home/user/trop-lourd",
+  },
+};
+
+/** The list item of the report that carries `message`. */
+function findingRow(message: string): HTMLElement {
+  const row = screen.getByText(message).closest("li");
+  if (!row) throw new Error("the finding is not rendered as a list item");
+  return row;
+}
 
 function noop(): void {}
 
@@ -206,6 +263,50 @@ describe("CreateFromFolderSurface", () => {
     const abandon = screen.getByRole("button", { name: "Abandonner" });
     await userEvent.click(abandon);
     expect(onAbandon).toHaveBeenCalledTimes(1);
+  });
+
+  it("names the size of a media left out, as a point of attention of a creatable folder", () => {
+    renderSurface(REVIEW_SIZE_LEFT_OUT);
+    expect(screen.getByText("Partiellement exploitable")).toBeInTheDocument();
+    expect(screen.getByText("Points d'attention")).toBeInTheDocument();
+    // The size has its own line, with the folder's bound — a media that is
+    // there but left out, never `information manquante`.
+    expect(
+      within(findingRow(SIZE_LEFT_OUT)).getByText("ambiguïté"),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("information manquante")).not.toBeInTheDocument();
+    // The media line keeps saying what it knows: present and recognized.
+    expect(
+      within(findingRow(CLEAN_FINDINGS[4].message)).getByText("reconnu"),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Médias écartés : long.wav")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Créer l'histoire" }),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("blocks on the size with the size as the stated reason — the manifest is not blamed", () => {
+    renderSurface(REVIEW_SIZE_BLOCKED);
+    const alert = screen.getByRole("alert");
+    expect(alert).toHaveTextContent("Inexploitable");
+    expect(alert).toHaveTextContent(SIZE_BLOCKED);
+    // ONE blocker, on the size line; the structure reads as recognized.
+    expect(screen.getAllByText("blocage réel")).toHaveLength(1);
+    expect(
+      within(findingRow(SIZE_BLOCKED)).getByText("blocage réel"),
+    ).toBeInTheDocument();
+    expect(
+      within(findingRow(CLEAN_FINDINGS[3].message)).getByText("reconnu"),
+    ).toBeInTheDocument();
+    // Nothing will be created: no summary, no accept — only `Abandonner`.
+    expect(screen.queryByText("Ce qui sera créé")).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Créer l'histoire" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Abandonner" }),
+    ).toBeInTheDocument();
   });
 
   it("shows the creating progress", () => {

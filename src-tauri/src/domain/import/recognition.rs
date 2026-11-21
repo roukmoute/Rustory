@@ -16,9 +16,15 @@
 //! declared-but-unemitted axis in `preflight.rs`. [`Resolved`] is emitted
 //! by the write-path review resolution only, never at analysis time.
 //!
+//! A SIZE reason is an aspect of its own ([`MediaSize`]), never a shade of
+//! another one: the weight of the media is a fact independent of their
+//! presence, of their format and of the story's structure, so it is judged
+//! — and worded — on its own line, whatever the other aspects say.
+//!
 //! [`Missing`]: RecognitionCategory::Missing
 //! [`Partial`]: ImportState::Partial
 //! [`Resolved`]: ImportState::Resolved
+//! [`MediaSize`]: RecognitionAspect::MediaSize
 
 /// Global recognition quality of an analyzed artifact (UI: `Propre` /
 /// `Partiellement exploitable` / `Inexploitable`).
@@ -37,8 +43,10 @@ pub enum RecognitionQuality {
 /// `.rustory` flow analyzes `Envelope` / `FormatVersion` / `SchemaVersion`
 /// / `Structure` / `Integrity` / `Title` / `Timestamps`; the
 /// structured-folder flow analyzes `Envelope` / `FormatVersion` / `Title`
-/// / `Structure` / `Media` (an author manifest has no declared schema, no
-/// checksum, no timestamps); the RSS ingestion flow analyzes `Envelope` /
+/// / `Structure` / `Media` / `MediaSize` (an author manifest has no
+/// declared schema, no checksum, no timestamps); the structured-archive
+/// flow analyzes the same set minus `FormatVersion` (the pack format
+/// declares none); the RSS ingestion flow analyzes `Envelope` /
 /// `FormatVersion` / `Source` / `Title` / `Structure` (+ `Media` when the
 /// chosen item references an enclosure).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -50,10 +58,21 @@ pub enum RecognitionAspect {
     Integrity,
     Title,
     Timestamps,
-    /// The referenced media files of a structured folder, or the remote
-    /// enclosure of an ingested RSS item (never downloaded — `Missing`).
-    /// Never emitted by the `.rustory` flow.
+    /// The referenced media files of a structured folder or archive —
+    /// their presence, their format, their slot and their name —, or the
+    /// remote enclosure of an ingested RSS item (never downloaded —
+    /// `Missing`). Never emitted by the `.rustory` flow. Their WEIGHT is
+    /// not judged here: see [`MediaSize`](RecognitionAspect::MediaSize).
     Media,
+    /// The byte size of the referenced media, against the bounds of their
+    /// source. Emitted by the structured-folder and structured-archive
+    /// flows ONLY, alongside `Media` (never for media that were not
+    /// analyzed): `Recognized` when nothing crosses a bound; `Ambiguous`
+    /// when a media is there but over the per-media bound (it is left out,
+    /// the story is created without it); `Blocking` when the retained media
+    /// together cross the aggregate bound (nothing is created). Never
+    /// `Missing`.
+    MediaSize,
     /// The external source an ingestion came from (an RSS feed). Emitted
     /// by the RSS ingestion flow ONLY, and always as `Ambiguous`: external
     /// content that was not reread by a human is never "clean", so this
@@ -301,6 +320,29 @@ mod tests {
             missing(RecognitionAspect::Media),
             RecognitionFinding::blocking(RecognitionAspect::Structure),
         ];
+        assert_eq!(folder_import_state(&findings), ImportState::Blocked);
+    }
+
+    #[test]
+    fn folder_state_maps_a_media_left_out_for_its_size_to_needs_review() {
+        // A media over the per-media bound is THERE: an ambiguity (the
+        // review is pending), never the `partial` state of a missing one.
+        let findings = [
+            RecognitionFinding::recognized(RecognitionAspect::Media),
+            RecognitionFinding::ambiguous(RecognitionAspect::MediaSize),
+        ];
+        assert_eq!(recognition_quality(&findings), RecognitionQuality::Partial);
+        assert_eq!(folder_import_state(&findings), ImportState::NeedsReview);
+    }
+
+    #[test]
+    fn folder_state_blocks_on_the_media_size_like_on_any_other_aspect() {
+        let findings = [
+            RecognitionFinding::recognized(RecognitionAspect::Structure),
+            RecognitionFinding::recognized(RecognitionAspect::Media),
+            RecognitionFinding::blocking(RecognitionAspect::MediaSize),
+        ];
+        assert_eq!(recognition_quality(&findings), RecognitionQuality::Unusable);
         assert_eq!(folder_import_state(&findings), ImportState::Blocked);
     }
 

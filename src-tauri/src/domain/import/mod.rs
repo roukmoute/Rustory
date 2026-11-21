@@ -47,6 +47,7 @@ pub use structured_archive::{
 pub use structured_folder::{
     analyze_structured_folder_components, is_sober_media_basename, is_supported_folder_source_name,
     referenced_media, CreatableStory, FolderMediaKind, MediaProbe, RetainedMediaRef,
-    StructuredFolderAnalysis, MAX_FOLDER_MEDIA_FILES, MAX_FOLDER_TOTAL_MEDIA_BYTES,
-    STRUCTURED_FOLDER_FORMAT_VERSION, STRUCTURED_FOLDER_MANIFEST_NAME,
+    StructuredFolderAnalysis, MAX_FOLDER_MEDIA_BYTES, MAX_FOLDER_MEDIA_FILES,
+    MAX_FOLDER_TOTAL_MEDIA_BYTES, STRUCTURED_FOLDER_FORMAT_VERSION,
+    STRUCTURED_FOLDER_MANIFEST_NAME,
 };

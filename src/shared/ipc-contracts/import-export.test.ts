@@ -232,6 +232,23 @@ describe("isImportFinding", () => {
     ).toBe(true);
   });
 
+  it("accepts the media-size aspect in the closed finding set", () => {
+    expect(
+      isImportFinding({
+        aspect: "mediaSize",
+        category: "ambiguous",
+        message:
+          "Certains fichiers audio ou image référencés dépassent la taille autorisée (134 Mo par fichier).",
+      }),
+    ).toBe(true);
+    // The wire tag is camelCase — never the Rust variant nor snake_case.
+    for (const drifted of ["MediaSize", "media_size", "size"]) {
+      expect(
+        isImportFinding({ aspect: drifted, category: "ambiguous", message: "x" }),
+      ).toBe(false);
+    }
+  });
+
   it("rejects an unknown aspect or category", () => {
     expect(
       isImportFinding({ aspect: "weird", category: "ambiguous", message: "x" }),
@@ -426,6 +443,11 @@ const FOLDER_FINDINGS_CLEAN = [
     message: "Structure reconnue.",
   },
   { aspect: "media", category: "recognized", message: "Médias présents." },
+  {
+    aspect: "mediaSize",
+    category: "recognized",
+    message: "Aucun fichier ne dépasse la taille autorisée.",
+  },
 ] as const;
 
 type AnalyzedFolderVerdict = Extract<
@@ -462,6 +484,7 @@ const FOLDER_ANALYZED_PARTIAL: AnalyzedFolderVerdict = {
       category: "missing",
       message: "Des fichiers sont introuvables.",
     },
+    FOLDER_FINDINGS_CLEAN[5],
   ],
   creatableSummary: {
     title: "Sans image",
@@ -618,6 +641,7 @@ describe("isStructuredCreationAnalysis", () => {
             message: "Champ inattendu.",
           },
           FOLDER_FINDINGS_CLEAN[4],
+          FOLDER_FINDINGS_CLEAN[5],
         ],
       }),
     ).toBe(false);
@@ -639,7 +663,7 @@ describe("isStructuredCreationAnalysis", () => {
       isStructuredCreationAnalysis({
         ...FOLDER_ANALYZED_CLEAN,
         findings: [
-          ...FOLDER_FINDINGS_CLEAN.slice(0, 4),
+          ...FOLDER_FINDINGS_CLEAN,
           {
             aspect: "timestamps",
             category: "recognized",
@@ -654,21 +678,99 @@ describe("isStructuredCreationAnalysis", () => {
     expect(
       isStructuredCreationAnalysis({
         ...FOLDER_ANALYZED_CLEAN,
-        findings: [
-          ...FOLDER_FINDINGS_CLEAN.slice(0, 4),
-          FOLDER_FINDINGS_CLEAN[3],
-        ],
+        findings: [...FOLDER_FINDINGS_CLEAN, FOLDER_FINDINGS_CLEAN[3]],
       }),
     ).toBe(false);
   });
 
-  it("rejects a creatable verdict missing one of the five folder aspects", () => {
+  it("rejects a creatable verdict missing one of the six folder aspects", () => {
+    for (const dropped of FOLDER_FINDINGS_CLEAN) {
+      expect(
+        isStructuredCreationAnalysis({
+          ...FOLDER_ANALYZED_CLEAN,
+          findings: FOLDER_FINDINGS_CLEAN.filter(
+            (finding) => finding.aspect !== dropped.aspect,
+          ),
+        }),
+      ).toBe(false);
+    }
+  });
+
+  it("accepts a media left out for its size: an ambiguity, the review is pending", () => {
+    // The file is THERE — never the `partial` state of a missing media.
+    const verdict = {
+      ...FOLDER_ANALYZED_CLEAN,
+      quality: "partial",
+      state: "needsReview",
+      findings: [
+        ...FOLDER_FINDINGS_CLEAN.slice(0, 5),
+        {
+          aspect: "mediaSize",
+          category: "ambiguous",
+          message:
+            "Certains fichiers audio ou image référencés dépassent la taille autorisée (34 Mo par fichier). L'histoire sera créée sans eux ; tu pourras ajouter des fichiers plus légers dans l'éditeur.",
+        },
+      ],
+    };
+    expect(isStructuredCreationAnalysis(verdict)).toBe(true);
+    expect(isStructuredCreationAnalysis({ ...verdict, state: "partial" })).toBe(
+      false,
+    );
+  });
+
+  it("accepts a verdict blocked on the media size, every aspect judged and nothing to create", () => {
+    const { creatableSummary: _dropped, ...rest } = FOLDER_ANALYZED_CLEAN;
+    const blocked = {
+      ...rest,
+      quality: "unusable",
+      state: "blocked",
+      findings: [
+        ...FOLDER_FINDINGS_CLEAN.slice(0, 5),
+        {
+          aspect: "mediaSize",
+          category: "blocking",
+          message:
+            "Les fichiers audio et image référencés dépassent ensemble la taille autorisée (268 Mo). Allège le dossier (moins de médias ou des fichiers plus légers) puis relance l'analyse.",
+        },
+      ],
+    };
+    expect(isStructuredCreationAnalysis(blocked)).toBe(true);
+    // A size block creates nothing: a summary on it is a drift.
     expect(
       isStructuredCreationAnalysis({
-        ...FOLDER_ANALYZED_CLEAN,
-        quality: "clean",
-        state: "recognized",
-        findings: FOLDER_FINDINGS_CLEAN.slice(0, 4),
+        ...blocked,
+        creatableSummary: FOLDER_ANALYZED_CLEAN.creatableSummary,
+      }),
+    ).toBe(false);
+  });
+
+  it("rejects a verdict judging the media without their size, or the reverse", () => {
+    // The two are judged together or not at all (an unlisted format never
+    // reads a single media) — even on a blocked verdict.
+    const blockedOnFormat = {
+      ...FOLDER_ANALYZED_BLOCKED,
+      findings: [
+        FOLDER_FINDINGS_CLEAN[0],
+        {
+          aspect: "formatVersion",
+          category: "blocking",
+          message: "Version non prise en charge.",
+        },
+        FOLDER_FINDINGS_CLEAN[2],
+        FOLDER_FINDINGS_CLEAN[3],
+      ],
+    };
+    expect(isStructuredCreationAnalysis(blockedOnFormat)).toBe(true);
+    expect(
+      isStructuredCreationAnalysis({
+        ...blockedOnFormat,
+        findings: [...blockedOnFormat.findings, FOLDER_FINDINGS_CLEAN[4]],
+      }),
+    ).toBe(false);
+    expect(
+      isStructuredCreationAnalysis({
+        ...blockedOnFormat,
+        findings: [...blockedOnFormat.findings, FOLDER_FINDINGS_CLEAN[5]],
       }),
     ).toBe(false);
   });
@@ -747,6 +849,12 @@ const ARCHIVE_FINDINGS_CLEAN = [
     category: "recognized",
     message: "Tous les fichiers référencés sont présents et reconnus.",
   },
+  {
+    aspect: "mediaSize",
+    category: "recognized",
+    message:
+      "Aucun fichier audio ou image référencé ne dépasse la taille autorisée.",
+  },
 ] as const;
 
 const ARCHIVE_ANALYZED_CLEAN = {
@@ -819,11 +927,99 @@ describe("isArchiveCreationAnalysis", () => {
     ).toBe(false);
   });
 
-  it("rejects a creatable verdict missing one of the four archive aspects", () => {
+  it("rejects a creatable verdict missing one of the five archive aspects", () => {
+    for (const dropped of ARCHIVE_FINDINGS_CLEAN) {
+      expect(
+        isArchiveCreationAnalysis({
+          ...ARCHIVE_ANALYZED_CLEAN,
+          findings: ARCHIVE_FINDINGS_CLEAN.filter(
+            (finding) => finding.aspect !== dropped.aspect,
+          ),
+        }),
+      ).toBe(false);
+    }
+  });
+
+  it("accepts a media left out for its size: an ambiguity, the review is pending", () => {
+    const verdict = {
+      ...ARCHIVE_ANALYZED_CLEAN,
+      quality: "partial",
+      state: "needsReview",
+      findings: [
+        ...ARCHIVE_FINDINGS_CLEAN.slice(0, 4),
+        {
+          aspect: "mediaSize",
+          category: "ambiguous",
+          message:
+            "Certains fichiers audio ou image référencés dépassent la taille autorisée (134 Mo par fichier). L'histoire sera créée sans eux ; pour les garder, remplace-les dans l'archive par des fichiers plus légers puis relance l'analyse.",
+        },
+      ],
+      creatableSummary: {
+        ...ARCHIVE_ANALYZED_CLEAN.creatableSummary,
+        discardedMedia: ["trop.mp3"],
+      },
+    };
+    expect(isArchiveCreationAnalysis(verdict)).toBe(true);
+    // Present but too large is never the `partial` state of a missing media.
+    expect(isArchiveCreationAnalysis({ ...verdict, state: "partial" })).toBe(
+      false,
+    );
+  });
+
+  it("accepts a verdict blocked on the media size, every aspect judged and nothing to create", () => {
+    const { creatableSummary: _dropped, ...rest } = ARCHIVE_ANALYZED_CLEAN;
+    const blocked = {
+      ...rest,
+      quality: "unusable",
+      state: "blocked",
+      findings: [
+        ...ARCHIVE_FINDINGS_CLEAN.slice(0, 4),
+        {
+          aspect: "mediaSize",
+          category: "blocking",
+          message:
+            "Les fichiers audio et image référencés dépassent ensemble la taille autorisée (34,4 Go). Allège l'archive (moins de médias ou des fichiers plus légers) puis relance l'analyse.",
+        },
+      ],
+    };
+    expect(isArchiveCreationAnalysis(blocked)).toBe(true);
     expect(
       isArchiveCreationAnalysis({
-        ...ARCHIVE_ANALYZED_CLEAN,
-        findings: ARCHIVE_FINDINGS_CLEAN.slice(0, 3),
+        ...blocked,
+        creatableSummary: ARCHIVE_ANALYZED_CLEAN.creatableSummary,
+      }),
+    ).toBe(false);
+    // The same verdict settles the drop and the OS-open channels.
+    expect(isDropAnalysis({ ...blocked, kind: "archive" })).toBe(true);
+    expect(isOsOpenAnalysis({ ...blocked, kind: "archive" })).toBe(true);
+  });
+
+  it("rejects a verdict judging the media without their size, or the reverse", () => {
+    // A descriptor referencing more files than the reference bound blocks
+    // on the structure WITHOUT a single media read: neither line exists.
+    const blockedOnStructure = {
+      ...ARCHIVE_ANALYZED_BLOCKED,
+      findings: [
+        ARCHIVE_FINDINGS_CLEAN[0],
+        ARCHIVE_FINDINGS_CLEAN[1],
+        {
+          aspect: "structure",
+          category: "blocking",
+          message: "La structure du descripteur est incomplète ou incohérente.",
+        },
+      ],
+    };
+    expect(isArchiveCreationAnalysis(blockedOnStructure)).toBe(true);
+    expect(
+      isArchiveCreationAnalysis({
+        ...blockedOnStructure,
+        findings: [...blockedOnStructure.findings, ARCHIVE_FINDINGS_CLEAN[3]],
+      }),
+    ).toBe(false);
+    expect(
+      isArchiveCreationAnalysis({
+        ...blockedOnStructure,
+        findings: [...blockedOnStructure.findings, ARCHIVE_FINDINGS_CLEAN[4]],
       }),
     ).toBe(false);
   });

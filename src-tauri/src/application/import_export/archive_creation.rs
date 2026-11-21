@@ -321,8 +321,11 @@ fn read_entry_bounded(
 
 /// Probe one referenced basename straight from the archive: presence,
 /// declared size bound, magic-byte sniff on the first header bytes. An
-/// entry over [`MAX_ARCHIVE_MEDIA_BYTES`] is PRESENT but unusable — never
-/// reported absent.
+/// entry over [`MAX_ARCHIVE_MEDIA_BYTES`] is PRESENT and named for what
+/// keeps it out — its size ([`MediaProbe::Oversize`]) —, never reported
+/// absent nor merely "unusable". Its header is sniffed all the same (the
+/// first bytes only — the entry is never extracted), so a media both too
+/// large and of an unknown format is reported for both.
 fn probe_archive_entry(archive: &mut zip::ZipArchive<std::fs::File>, basename: &str) -> MediaProbe {
     let prefixed = format!("{STRUCTURED_ARCHIVE_ASSETS_PREFIX}{basename}");
     let name = if archive.by_name(&prefixed).is_ok() {
@@ -336,22 +339,19 @@ fn probe_archive_entry(archive: &mut zip::ZipArchive<std::fs::File>, basename: &
         return MediaProbe::Absent;
     };
     let byte_size = entry.size();
-    if byte_size > MAX_ARCHIVE_MEDIA_BYTES {
-        return MediaProbe::Unusable;
-    }
     let mut header = Vec::with_capacity(MEDIA_SNIFF_BYTES);
-    if entry
+    let kind = match entry
         .take(MEDIA_SNIFF_BYTES as u64)
         .read_to_end(&mut header)
-        .is_err()
     {
-        return MediaProbe::Unusable;
+        Ok(_) => sniff_media(&header).map(|sniffed| folder_kind(sniffed.kind)),
+        Err(_) => None,
+    };
+    if byte_size > MAX_ARCHIVE_MEDIA_BYTES {
+        return MediaProbe::Oversize { kind };
     }
-    match sniff_media(&header) {
-        Some(sniffed) => MediaProbe::Usable {
-            kind: folder_kind(sniffed.kind),
-            byte_size,
-        },
+    match kind {
+        Some(kind) => MediaProbe::Usable { kind, byte_size },
         None => MediaProbe::Unusable,
     }
 }
@@ -441,36 +441,102 @@ pub(crate) mod test_support {
     /// (the very shape a per-media bound exists for). Streamed in chunks:
     /// the writer never holds a whole sound.
     pub fn write_pack_archive(path: &Path, descriptor: Option<&str>, sounds: &[(&str, u64)]) {
+        let assets: Vec<(&str, &[u8], u64)> = sounds
+            .iter()
+            .map(|(name, byte_size)| (*name, DEVICE_SOUND_HEADER.as_slice(), *byte_size))
+            .collect();
+        write_pack_archive_with_assets(path, descriptor, &assets);
+    }
+
+    /// The same harness for ANY asset: each `(name, header, byte_size)` entry
+    /// is written as `assets/<name>`, EXACTLY `byte_size` bytes long — its
+    /// `header` (what a reader sniffs) followed by zeros.
+    pub fn write_pack_archive_with_assets(
+        path: &Path,
+        descriptor: Option<&str>,
+        assets: &[(&str, &[u8], u64)],
+    ) {
         let file = std::fs::File::create(path).expect("create pack archive");
         let mut writer = zip::ZipWriter::new(file);
-        let options = zip::write::SimpleFileOptions::default()
-            .compression_method(zip::CompressionMethod::Deflated);
+        write_descriptor(&mut writer, descriptor);
+        for (name, header, byte_size) in assets {
+            write_sized_asset(&mut writer, name, header, *byte_size);
+        }
+        writer.finish().expect("finish pack archive");
+    }
+
+    /// Write a pack archive whose `names.len()` sounds each weigh EXACTLY
+    /// `byte_size` bytes. The first one is deflated; every other one is a
+    /// raw copy of its compressed bytes under its own name — so a pack whose
+    /// sounds add up to tens of gigabytes costs ONE compression and a few
+    /// megabytes on disk, while every entry declares its full size.
+    pub fn write_pack_archive_of_identical_sounds(
+        path: &Path,
+        descriptor: &str,
+        names: &[String],
+        byte_size: u64,
+    ) {
+        // `deep_copy_file` reads the archive back: the handle is read-write.
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(path)
+            .expect("create pack archive");
+        let mut writer = zip::ZipWriter::new(file);
+        write_descriptor(&mut writer, Some(descriptor));
+        let Some((first, others)) = names.split_first() else {
+            writer.finish().expect("finish pack archive");
+            return;
+        };
+        write_sized_asset(&mut writer, first, &DEVICE_SOUND_HEADER, byte_size);
+        for name in others {
+            writer
+                .deep_copy_file(&format!("assets/{first}"), &format!("assets/{name}"))
+                .expect("copy the sound entry");
+        }
+        writer.finish().expect("finish pack archive");
+    }
+
+    fn deflated() -> zip::write::SimpleFileOptions {
+        zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated)
+    }
+
+    fn write_descriptor<W: Write + std::io::Seek>(
+        writer: &mut zip::ZipWriter<W>,
+        descriptor: Option<&str>,
+    ) {
         if let Some(descriptor) = descriptor {
             writer
-                .start_file("story.json", options)
+                .start_file("story.json", deflated())
                 .expect("descriptor entry");
             writer
                 .write_all(descriptor.as_bytes())
                 .expect("descriptor bytes");
         }
+    }
+
+    fn write_sized_asset<W: Write + std::io::Seek>(
+        writer: &mut zip::ZipWriter<W>,
+        name: &str,
+        header: &[u8],
+        byte_size: u64,
+    ) {
+        writer
+            .start_file(format!("assets/{name}"), deflated())
+            .expect("asset entry");
+        writer.write_all(header).expect("asset header");
+        let mut remaining = byte_size
+            .checked_sub(header.len() as u64)
+            .expect("an asset holds at least its header");
         let filler = vec![0u8; 1024 * 1024];
-        for (name, byte_size) in sounds {
-            writer
-                .start_file(format!("assets/{name}"), options)
-                .expect("sound entry");
-            writer
-                .write_all(&DEVICE_SOUND_HEADER)
-                .expect("sound header");
-            let mut remaining = byte_size
-                .checked_sub(DEVICE_SOUND_HEADER.len() as u64)
-                .expect("a sound holds at least its header");
-            while remaining > 0 {
-                let chunk = remaining.min(filler.len() as u64) as usize;
-                writer.write_all(&filler[..chunk]).expect("sound filler");
-                remaining -= chunk as u64;
-            }
+        while remaining > 0 {
+            let chunk = remaining.min(filler.len() as u64) as usize;
+            writer.write_all(&filler[..chunk]).expect("asset filler");
+            remaining -= chunk as u64;
         }
-        writer.finish().expect("finish pack archive");
     }
 }
 
@@ -478,8 +544,14 @@ pub(crate) mod test_support {
 mod tests {
     use super::test_support::write_pack_archive;
     use super::*;
-    use crate::domain::import::{RecognitionAspect, RecognitionCategory};
+    use crate::domain::import::{
+        ImportState, RecognitionAspect, RecognitionCategory, RecognitionQuality,
+    };
     use crate::infrastructure::db;
+    use crate::ipc::dto::import_export::{
+        archive_import_findings_from_summary, ArchiveCreationAnalysisDto, ImportAspectDto,
+        ImportCategoryDto, ImportFindingDto, ImportQualityDto, ImportStateDto,
+    };
     use std::io::Write;
 
     const CLEAN_STORY_JSON: &str = r#"{
@@ -847,9 +919,9 @@ mod tests {
         // The bound is inclusive, and the probe, the extraction and the
         // promotion all apply the same one: the sound of exactly
         // MAX_ARCHIVE_MEDIA_BYTES goes all the way to the store. The sound
-        // one byte larger is PRESENT but unusable: discarded, flagged as an
-        // ambiguity (never as a missing file), and the story is created
-        // without it.
+        // one byte larger is PRESENT but too large: discarded, flagged as a
+        // SIZE ambiguity (never as a missing file, never as an unreadable
+        // one), and the story is created without it.
         let dir = tempfile::tempdir().expect("tempdir");
         let app_data_dir = dir.path().join("appdata");
         std::fs::create_dir_all(&app_data_dir).expect("appdata");
@@ -868,17 +940,26 @@ mod tests {
             outcome.analysis.discarded_media,
             vec!["trop.mp3".to_string()]
         );
-        let media_finding = outcome
-            .analysis
-            .findings
-            .iter()
-            .find(|finding| finding.aspect == RecognitionAspect::Media)
-            .expect("a media finding");
+        let category_of = |aspect: RecognitionAspect| {
+            outcome
+                .analysis
+                .findings
+                .iter()
+                .find(|finding| finding.aspect == aspect)
+                .expect("a finding for the aspect")
+                .category
+        };
         assert_eq!(
-            media_finding.category,
+            category_of(RecognitionAspect::MediaSize),
             RecognitionCategory::Ambiguous,
-            "a media that is there but too large is never reported missing"
+            "a media that is there but too large is named for its size"
         );
+        assert_eq!(
+            category_of(RecognitionAspect::Media),
+            RecognitionCategory::Recognized,
+            "it is neither missing nor of an unknown format"
+        );
+        assert_eq!(outcome.analysis.state, ImportState::NeedsReview);
         let creatable = outcome.analysis.creatable.as_ref().expect("creatable");
         assert_eq!(creatable.retained_media.len(), 1);
         assert_eq!(creatable.retained_media[0].basename, "limite.mp3");
@@ -900,6 +981,261 @@ mod tests {
             vec![MAX_ARCHIVE_MEDIA_BYTES],
             "the sound at the bound is stored whole, the larger one never is"
         );
+    }
+
+    /// The `mediaSize` line of a report, as the surface renders it.
+    fn media_size_line(report: &[ImportFindingDto]) -> (ImportCategoryDto, &str) {
+        let finding = report
+            .iter()
+            .find(|finding| finding.aspect == ImportAspectDto::MediaSize)
+            .expect("a media-size finding");
+        (finding.category, finding.message.as_str())
+    }
+
+    #[test]
+    fn a_media_one_byte_over_the_bound_is_named_for_its_size_from_the_review_to_the_card() {
+        // The whole way of ONE too-large sound (128 MiB + 1 byte): the
+        // review names the size with the bound in decimal units, the card
+        // returned at creation says the same, and so does the summary the
+        // library re-reads after a restart.
+        const NAMED: &str = "Certains fichiers audio ou image référencés dépassent la taille autorisée (134 Mo par fichier). L'histoire sera créée sans eux ; pour les garder, remplace-les dans l'archive par des fichiers plus légers puis relance l'analyse.";
+        let dir = tempfile::tempdir().expect("tempdir");
+        let app_data_dir = dir.path().join("appdata");
+        std::fs::create_dir_all(&app_data_dir).expect("appdata");
+        let zip_path = dir.path().join("un-long-son.zip");
+        write_pack_archive(
+            &zip_path,
+            Some(TWO_SOUNDS_STORY_JSON),
+            &[
+                ("limite.mp3", 4096),
+                ("trop.mp3", MAX_ARCHIVE_MEDIA_BYTES + 1),
+            ],
+        );
+
+        // The review, as the command serializes it.
+        let outcome = analyze_structured_archive(&zip_path).expect("analyze");
+        let ArchiveCreationAnalysisDto::Analyzed {
+            quality,
+            state,
+            findings,
+            creatable_summary,
+            ..
+        } = ArchiveCreationAnalysisDto::analyzed(
+            &outcome.analysis,
+            outcome.archive_name.clone(),
+            zip_path.to_string_lossy().into_owned(),
+        )
+        else {
+            unreachable!("an analysis always maps to the analyzed verdict");
+        };
+        assert_eq!(quality, ImportQualityDto::Partial);
+        assert_eq!(state, ImportStateDto::NeedsReview);
+        assert_eq!(
+            media_size_line(&findings),
+            (ImportCategoryDto::Ambiguous, NAMED)
+        );
+        // The format and the presence of the media are not in question.
+        let media = findings
+            .iter()
+            .find(|finding| finding.aspect == ImportAspectDto::Media)
+            .expect("a media finding");
+        assert_eq!(media.category, ImportCategoryDto::Recognized);
+        assert_eq!(
+            creatable_summary.expect("creatable").discarded_media,
+            vec!["trop.mp3".to_string()]
+        );
+
+        // The card returned at creation.
+        let mut handle = fresh_db();
+        let card = accept_structured_archive_creation(&mut handle, &app_data_dir, &zip_path)
+            .expect("the story is created without the too-large sound");
+        assert_eq!(card.import_state, Some(ImportStateDto::NeedsReview));
+        let report = card
+            .import_report
+            .expect("a pending review carries a report");
+        assert_eq!(
+            media_size_line(&report),
+            (ImportCategoryDto::Ambiguous, NAMED)
+        );
+
+        // The durable summary: codes only, re-worded at read time.
+        let summary: String = handle
+            .conn()
+            .query_row(
+                "SELECT findings_summary FROM story_local_imports WHERE story_id = ?1",
+                rusqlite::params![&card.id],
+                |row| row.get(0),
+            )
+            .expect("findings summary");
+        assert!(summary.contains(r#"{"aspect":"mediaSize","category":"ambiguous"}"#));
+        assert!(!summary.contains("134"), "no copy is ever persisted");
+        assert_eq!(archive_import_findings_from_summary(&summary), report);
+    }
+
+    #[test]
+    fn a_too_large_media_of_an_unknown_format_is_named_for_both_reasons() {
+        // The header of a too-large entry is still sniffed (its first bytes
+        // only): lightening this file would not be enough, and the review
+        // says so in the same pass.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let zip_path = dir.path().join("lourd-et-inconnu.zip");
+        test_support::write_pack_archive_with_assets(
+            &zip_path,
+            Some(TWO_SOUNDS_STORY_JSON),
+            &[
+                ("limite.mp3", &test_support::DEVICE_SOUND_HEADER, 4096),
+                ("trop.mp3", b"fLaC\0\0\0\x22", MAX_ARCHIVE_MEDIA_BYTES + 1),
+            ],
+        );
+
+        let outcome = analyze_structured_archive(&zip_path).expect("analyze");
+        let category_of = |aspect: RecognitionAspect| {
+            outcome
+                .analysis
+                .findings
+                .iter()
+                .find(|finding| finding.aspect == aspect)
+                .expect("a finding for the aspect")
+                .category
+        };
+        assert_eq!(
+            category_of(RecognitionAspect::MediaSize),
+            RecognitionCategory::Ambiguous
+        );
+        assert_eq!(
+            category_of(RecognitionAspect::Media),
+            RecognitionCategory::Ambiguous
+        );
+        assert_eq!(
+            outcome.analysis.discarded_media,
+            vec!["trop.mp3".to_string()]
+        );
+    }
+
+    /// A pack of `count` stages, each playing its own `son-<i>.mp3`.
+    fn many_sounds_descriptor(count: usize) -> (String, Vec<String>) {
+        let names: Vec<String> = (0..count).map(|i| format!("son-{i}.mp3")).collect();
+        let stages: Vec<serde_json::Value> = names
+            .iter()
+            .enumerate()
+            .map(|(i, name)| {
+                serde_json::json!({
+                    "uuid": format!("stage-{i}"),
+                    "squareOne": i == 0,
+                    "name": format!("Épisode {}", i + 1),
+                    "image": null,
+                    "audio": name,
+                    "okTransition": null,
+                    "controlSettings": {}
+                })
+            })
+            .collect();
+        let descriptor = serde_json::json!({
+            "format": "v1",
+            "version": 1,
+            "title": "Collection complète",
+            "stageNodes": stages,
+            "actionNodes": []
+        })
+        .to_string();
+        (descriptor, names)
+    }
+
+    /// How many sounds of exactly the per-media bound fill the aggregate
+    /// bound to the byte.
+    const SOUNDS_AT_THE_AGGREGATE_BOUND: usize =
+        (MAX_ARCHIVE_TOTAL_MEDIA_BYTES / MAX_ARCHIVE_MEDIA_BYTES) as usize;
+
+    #[test]
+    fn media_of_exactly_the_aggregate_bound_stay_creatable() {
+        // 256 sounds of 128 MiB: 32 GiB to the byte — the bound is inclusive.
+        // (Analysis only: nothing is extracted before the acceptance.)
+        let dir = tempfile::tempdir().expect("tempdir");
+        let zip_path = dir.path().join("collection-limite.zip");
+        let (descriptor, names) = many_sounds_descriptor(SOUNDS_AT_THE_AGGREGATE_BOUND);
+        test_support::write_pack_archive_of_identical_sounds(
+            &zip_path,
+            &descriptor,
+            &names,
+            MAX_ARCHIVE_MEDIA_BYTES,
+        );
+
+        let outcome = analyze_structured_archive(&zip_path).expect("analyze");
+        assert_eq!(outcome.analysis.quality, RecognitionQuality::Clean);
+        let creatable = outcome.analysis.creatable.expect("creatable");
+        assert_eq!(
+            creatable.retained_media.len(),
+            SOUNDS_AT_THE_AGGREGATE_BOUND
+        );
+    }
+
+    #[test]
+    fn media_over_the_aggregate_bound_block_with_the_size_as_the_stated_reason() {
+        // One sound more: 32 GiB + 128 MiB of REFERENCED media. The review
+        // blocks, and what it names is the size — with the bound in decimal
+        // units — while the structure and the media read as what they are:
+        // sound. Nothing is created.
+        const NAMED: &str = "Les fichiers audio et image référencés dépassent ensemble la taille autorisée (34,4 Go). Allège l'archive (moins de médias ou des fichiers plus légers) puis relance l'analyse.";
+        let dir = tempfile::tempdir().expect("tempdir");
+        let app_data_dir = dir.path().join("appdata");
+        std::fs::create_dir_all(&app_data_dir).expect("appdata");
+        let zip_path = dir.path().join("collection-trop-lourde.zip");
+        let (descriptor, names) = many_sounds_descriptor(SOUNDS_AT_THE_AGGREGATE_BOUND + 1);
+        test_support::write_pack_archive_of_identical_sounds(
+            &zip_path,
+            &descriptor,
+            &names,
+            MAX_ARCHIVE_MEDIA_BYTES,
+        );
+
+        let outcome = analyze_structured_archive(&zip_path).expect("analyze");
+        let ArchiveCreationAnalysisDto::Analyzed {
+            quality,
+            state,
+            findings,
+            creatable_summary,
+            ..
+        } = ArchiveCreationAnalysisDto::analyzed(
+            &outcome.analysis,
+            outcome.archive_name.clone(),
+            zip_path.to_string_lossy().into_owned(),
+        )
+        else {
+            unreachable!("an analysis always maps to the analyzed verdict");
+        };
+        assert_eq!(quality, ImportQualityDto::Unusable);
+        assert_eq!(state, ImportStateDto::Blocked);
+        assert!(creatable_summary.is_none(), "nothing will be created");
+        assert_eq!(
+            media_size_line(&findings),
+            (ImportCategoryDto::Blocking, NAMED)
+        );
+        // The size is the ONLY blocker: no other line carries the blame.
+        let blockers: Vec<ImportAspectDto> = findings
+            .iter()
+            .filter(|finding| finding.category == ImportCategoryDto::Blocking)
+            .map(|finding| finding.aspect)
+            .collect();
+        assert_eq!(blockers, vec![ImportAspectDto::MediaSize]);
+        let structure = findings
+            .iter()
+            .find(|finding| finding.aspect == ImportAspectDto::Structure)
+            .expect("a structure finding");
+        assert_eq!(
+            structure.message,
+            "La structure du pack est reconnue et convertie en histoire."
+        );
+
+        // The acceptance re-analyzes and refuses before extracting a byte.
+        let mut handle = fresh_db();
+        let err = accept_structured_archive_creation(&mut handle, &app_data_dir, &zip_path)
+            .expect_err("a blocked pack must refuse acceptance");
+        assert_eq!(err.code, crate::domain::shared::AppErrorCode::ImportFailed);
+        let count: i64 = handle
+            .conn()
+            .query_row("SELECT COUNT(*) FROM stories", [], |r| r.get(0))
+            .expect("count");
+        assert_eq!(count, 0);
     }
 
     #[test]

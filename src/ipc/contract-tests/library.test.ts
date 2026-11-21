@@ -229,4 +229,89 @@ describe("isLibraryOverviewDto guard", () => {
       }),
     ).toBe(true);
   });
+
+  it("accepts a structured-archive card whose report names a media left out for its size", () => {
+    // Symmetric twin of the Rust producer tests
+    // (`read_stories_projects_a_structured_archive_creation_with_the_archive_copy`,
+    // `a_media_one_byte_over_the_bound_is_named_for_its_size_from_the_review_to_the_card`):
+    // the `mediaSize` aspect belongs to the closed finding set of a card
+    // report, so the durable marker of such a story never drift-errors.
+    expect(
+      isLibraryOverviewDto({
+        stories: [
+          {
+            id: "a",
+            title: "Depuis une archive",
+            importState: "needsReview",
+            sendable: true,
+            importReport: [
+              {
+                aspect: "envelope",
+                category: "recognized",
+                message: "Le descripteur story.json est présent et lisible.",
+              },
+              {
+                aspect: "media",
+                category: "recognized",
+                message:
+                  "Tous les fichiers audio et image référencés par le dossier sont présents et reconnus.",
+              },
+              {
+                aspect: "mediaSize",
+                category: "ambiguous",
+                message:
+                  "Certains fichiers audio ou image référencés dépassent la taille autorisée (134 Mo par fichier). L'histoire sera créée sans eux ; pour les garder, remplace-les dans l'archive par des fichiers plus légers puis relance l'analyse.",
+              },
+            ],
+          },
+        ],
+      }),
+    ).toBe(true);
+  });
+
+  it("still accepts a report persisted before the media-size aspect existed", () => {
+    // A summary stored by an earlier version carries no `mediaSize` pair:
+    // the card guard never requires one (a report is whatever was stored).
+    expect(
+      isLibraryOverviewDto({
+        stories: [
+          {
+            id: "a",
+            title: "Créée avant",
+            importState: "needsReview",
+            importReport: [
+              {
+                aspect: "envelope",
+                category: "recognized",
+                message: "Le descripteur story.json est présent et lisible.",
+              },
+              {
+                aspect: "media",
+                category: "ambiguous",
+                message:
+                  "Certains fichiers audio ou image référencés ne sont pas utilisables (format non reconnu, fichier trop volumineux ou nom invalide). L'histoire sera créée sans eux ; tu pourras les ajouter dans l'éditeur.",
+              },
+            ],
+          },
+        ],
+      }),
+    ).toBe(true);
+  });
+
+  it("refuses a report whose aspect drifted from the closed set", () => {
+    expect(
+      isLibraryOverviewDto({
+        stories: [
+          {
+            id: "a",
+            title: "Dérive",
+            importState: "needsReview",
+            importReport: [
+              { aspect: "media_size", category: "ambiguous", message: "x" },
+            ],
+          },
+        ],
+      }),
+    ).toBe(false);
+  });
 });

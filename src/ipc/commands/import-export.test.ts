@@ -27,6 +27,7 @@ import {
   analyzeArtifactForImport,
   analyzeDropRequest,
   analyzeOsOpenRequest,
+  analyzeStructuredArchiveForCreation,
   analyzeStructuredFolderForCreation,
   discardDropRequest,
   discardOsOpenRequest,
@@ -518,6 +519,11 @@ const FOLDER_ANALYZED = {
       message: "Structure reconnue.",
     },
     { aspect: "media", category: "recognized", message: "Médias présents." },
+    {
+      aspect: "mediaSize",
+      category: "recognized",
+      message: "Aucun fichier ne dépasse la taille autorisée.",
+    },
   ],
   creatableSummary: {
     title: "Le voyage de Nour",
@@ -550,6 +556,28 @@ describe("analyzeStructuredFolderForCreation", () => {
     });
   });
 
+  it("resolves a verdict blocked on the media size as a typed value, never a drift", async () => {
+    // Media too large together: a content verdict the surface renders —
+    // every aspect judged, the block on the `mediaSize` line, no summary.
+    const { creatableSummary: _dropped, ...rest } = FOLDER_ANALYZED;
+    const blocked = {
+      ...rest,
+      quality: "unusable",
+      state: "blocked",
+      findings: [
+        ...FOLDER_ANALYZED.findings.slice(0, 5),
+        {
+          aspect: "mediaSize",
+          category: "blocking",
+          message:
+            "Les fichiers audio et image référencés dépassent ensemble la taille autorisée (268 Mo). Allège le dossier (moins de médias ou des fichiers plus légers) puis relance l'analyse.",
+        },
+      ],
+    };
+    vi.mocked(invoke).mockResolvedValueOnce(blocked);
+    await expect(analyzeStructuredFolderForCreation()).resolves.toEqual(blocked);
+  });
+
   it("rejects with a drift error when the verdict lacks folderPath", async () => {
     const { folderPath: _dropped, ...raw } = FOLDER_ANALYZED;
     vi.mocked(invoke).mockResolvedValueOnce(raw);
@@ -576,6 +604,101 @@ describe("analyzeStructuredFolderForCreation", () => {
     await expect(analyzeStructuredFolderForCreation()).rejects.toEqual(
       rustError,
     );
+  });
+});
+
+// ===== Structured-archive creation facade =====
+
+const ARCHIVE_ANALYZED_SIZE_LEFT_OUT = {
+  kind: "analyzed",
+  quality: "partial",
+  state: "needsReview",
+  findings: [
+    {
+      aspect: "envelope",
+      category: "recognized",
+      message: "Le descripteur story.json est présent et lisible.",
+    },
+    { aspect: "title", category: "recognized", message: "Titre valide." },
+    {
+      aspect: "structure",
+      category: "recognized",
+      message: "La structure du pack est reconnue et convertie en histoire.",
+    },
+    { aspect: "media", category: "recognized", message: "Médias présents." },
+    {
+      aspect: "mediaSize",
+      category: "ambiguous",
+      message:
+        "Certains fichiers audio ou image référencés dépassent la taille autorisée (134 Mo par fichier). L'histoire sera créée sans eux ; pour les garder, remplace-les dans l'archive par des fichiers plus légers puis relance l'analyse.",
+    },
+  ],
+  creatableSummary: {
+    title: "Un long son",
+    nodeCount: 2,
+    retainedMedia: ["a.mp3"],
+    discardedMedia: ["trop.mp3"],
+  },
+  archiveName: "un-long-son.zip",
+  archivePath: "/home/user/un-long-son.zip",
+};
+
+describe("analyzeStructuredArchiveForCreation", () => {
+  beforeEach(() => {
+    vi.mocked(invoke).mockReset();
+  });
+
+  it("resolves a verdict whose media was left out for its size, message verbatim", async () => {
+    vi.mocked(invoke).mockResolvedValueOnce(ARCHIVE_ANALYZED_SIZE_LEFT_OUT);
+    const result = await analyzeStructuredArchiveForCreation();
+    expect(invoke).toHaveBeenCalledWith(
+      "analyze_structured_archive_for_creation",
+    );
+    expect(result).toEqual(ARCHIVE_ANALYZED_SIZE_LEFT_OUT);
+  });
+
+  it("resolves a verdict blocked on the media size as a typed value, never a drift", async () => {
+    const { creatableSummary: _dropped, ...rest } =
+      ARCHIVE_ANALYZED_SIZE_LEFT_OUT;
+    const blocked = {
+      ...rest,
+      quality: "unusable",
+      state: "blocked",
+      findings: [
+        ...ARCHIVE_ANALYZED_SIZE_LEFT_OUT.findings.slice(0, 4),
+        {
+          aspect: "mediaSize",
+          category: "blocking",
+          message:
+            "Les fichiers audio et image référencés dépassent ensemble la taille autorisée (34,4 Go). Allège l'archive (moins de médias ou des fichiers plus légers) puis relance l'analyse.",
+        },
+      ],
+    };
+    vi.mocked(invoke).mockResolvedValueOnce(blocked);
+    await expect(analyzeStructuredArchiveForCreation()).resolves.toEqual(
+      blocked,
+    );
+  });
+
+  it("rejects a creatable verdict that judged the media without their size as a drift", async () => {
+    // What a backend older than the `mediaSize` aspect would send: the
+    // four former archive aspects. The facade refuses it — a review must
+    // never render with the size line silently missing.
+    const drifted = {
+      ...ARCHIVE_ANALYZED_SIZE_LEFT_OUT,
+      quality: "clean",
+      state: "recognized",
+      findings: ARCHIVE_ANALYZED_SIZE_LEFT_OUT.findings.slice(0, 4),
+    };
+    vi.mocked(invoke).mockResolvedValueOnce(drifted);
+    const err = (await analyzeStructuredArchiveForCreation().then(
+      () => {
+        throw new Error("expected rejection");
+      },
+      (e: unknown) => e,
+    )) as StructuredCreationContractDriftError;
+    expect(err).toBeInstanceOf(StructuredCreationContractDriftError);
+    expect(err.raw).toEqual(drifted);
   });
 });
 

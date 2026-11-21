@@ -39,8 +39,16 @@ pub const STRUCTURED_FOLDER_FORMAT_VERSION: u64 = 1;
 /// finding — a typed verdict, never a transport error.
 pub const MAX_FOLDER_MEDIA_FILES: usize = 64;
 
+/// Ceiling on ONE media file of a structured folder: the local-attach
+/// ceiling of the node-media store — the bound of a media added by hand in
+/// the editor — re-declared here because the domain never imports the
+/// infrastructure layer (the folder flow asserts the equality at compile
+/// time). A media over it is present but left out: a `MediaSize` ambiguity.
+pub const MAX_FOLDER_MEDIA_BYTES: u64 = 32 * 1024 * 1024;
+
 /// Ceiling on the SUM of the retained media byte sizes (anti-DoS: bounds
-/// the total acceptance I/O). Exceeding it is a `Structure` blocking finding.
+/// the total acceptance I/O). Exceeding it is a `MediaSize` blocking
+/// finding — a typed verdict that names the size, never a transport error.
 pub const MAX_FOLDER_TOTAL_MEDIA_BYTES: u64 = 256 * 1024 * 1024;
 
 /// Per-node text/label ceilings — mirrors of the editor's write-path bounds
@@ -70,8 +78,15 @@ pub enum MediaProbe {
     },
     /// Referenced but absent from the folder → `Missing` (discarded).
     Absent,
-    /// Present but unusable: symlink / irregular file / oversize / bytes
-    /// outside the closed format set → `Ambiguous` (discarded).
+    /// Present and regular, but over the per-file bound: never loaded, and
+    /// discarded for its SIZE (`MediaSize`). `kind` is what its magic bytes
+    /// say (`None`: outside the closed set) — only the header is read, so
+    /// the `Media` aspect still judges its format and its slot like any
+    /// other file's: a file both too large and of an unknown format is
+    /// reported for both.
+    Oversize { kind: Option<FolderMediaKind> },
+    /// Present but unusable: symlink / irregular file / bytes outside the
+    /// closed format set → `Ambiguous` (discarded).
     Unusable,
 }
 
@@ -106,9 +121,10 @@ pub struct StructuredFolderAnalysis {
     pub quality: RecognitionQuality,
     pub state: ImportState,
     pub creatable: Option<CreatableStory>,
-    /// Distinct referenced basenames discarded by the analysis (absent or
-    /// unusable), in first-reference order. Feeds the analysis surface's
-    /// summary; the persisted findings stay aggregated pairs.
+    /// Distinct referenced basenames discarded by the analysis (absent,
+    /// unusable or over the per-file bound), in first-reference order.
+    /// Feeds the analysis surface's summary; the persisted findings stay
+    /// aggregated pairs.
     pub discarded_media: Vec<String>,
 }
 
@@ -234,6 +250,8 @@ pub(super) struct MediaWalk {
     /// At least one referenced media is there but unusable: bytes outside
     /// the closed format set, wrong slot, irregular file, non-sober name.
     pub(super) ambiguous: bool,
+    /// At least one referenced media is there but over the per-file bound.
+    pub(super) oversize: bool,
     /// The references kept, in reference order.
     pub(super) retained: Vec<RetainedMediaRef>,
     /// The DISTINCT basenames left out, in first-reference order.
@@ -258,12 +276,30 @@ impl MediaWalk {
             RecognitionFinding::recognized(RecognitionAspect::Media)
         }
     }
+
+    /// The single `MediaSize` finding of a verdict, against the source's
+    /// aggregate bound: the retained media together over it block (nothing
+    /// is created — and that dominates); else a media left out for its own
+    /// size is an ambiguity; else the sizes are recognized.
+    pub(super) fn media_size_finding(&self, max_total_bytes: u64) -> RecognitionFinding {
+        if self.retained_bytes > max_total_bytes {
+            RecognitionFinding::blocking(RecognitionAspect::MediaSize)
+        } else if self.oversize {
+            RecognitionFinding::ambiguous(RecognitionAspect::MediaSize)
+        } else {
+            RecognitionFinding::recognized(RecognitionAspect::MediaSize)
+        }
+    }
 }
 
 /// Decide each media REFERENCE against the probe of its file (a probed file
 /// may match one slot and not another — the same basename referenced as
 /// image AND audio). A sober basename missing from the probe map is a caller
 /// bug — it fails safe as "absent" (the media is discarded, never invented).
+///
+/// Size and format are judged INDEPENDENTLY: a file over the per-file bound
+/// is left out for its size, and its format and slot are still held against
+/// it when they are wrong — neither reason hides the other.
 pub(super) fn walk_media_references(
     references: &[MediaReference],
     probes: &BTreeMap<String, MediaProbe>,
@@ -271,6 +307,7 @@ pub(super) fn walk_media_references(
     let mut walk = MediaWalk {
         missing: false,
         ambiguous: false,
+        oversize: false,
         retained: Vec::new(),
         discarded: Vec::new(),
         retained_bytes: 0,
@@ -300,6 +337,12 @@ pub(super) fn walk_media_references(
             // Wrong slot (e.g. a PNG referenced as audio), or unusable.
             MediaProbe::Usable { .. } | MediaProbe::Unusable => walk.ambiguous = true,
             MediaProbe::Absent => walk.missing = true,
+            MediaProbe::Oversize { kind } => {
+                walk.oversize = true;
+                if kind != Some(reference.kind) {
+                    walk.ambiguous = true;
+                }
+            }
         }
         if discarded_seen.insert(reference.basename.as_str()) {
             walk.discarded.push(reference.basename.clone());
@@ -511,8 +554,8 @@ fn optional_string(value: Option<&Value>) -> Result<String, ()> {
 /// (all I/O done by the caller — see [`referenced_media`] for what to
 /// probe). Pure and deterministic. Produces exactly one finding per aspect
 /// of the folder matrix (`Envelope`, `FormatVersion`, `Title`, `Structure`,
-/// `Media`) when the manifest parses; a malformed manifest is the single
-/// `Envelope` blocking verdict (calque of the `.rustory` flow).
+/// `Media`, `MediaSize`) when the manifest parses; a malformed manifest is
+/// the single `Envelope` blocking verdict (calque of the `.rustory` flow).
 pub fn analyze_structured_folder_components(
     manifest_bytes: &[u8],
     probes: &BTreeMap<String, MediaProbe>,
@@ -531,10 +574,10 @@ pub fn analyze_structured_folder_components(
     });
 
     // Media walk: decide each REFERENCE and collect the retained refs + the
-    // discarded basenames. The whole media aspect is evaluated ONLY when the
-    // declared format is the LISTED one: an unlisted format is a
-    // `FormatVersion` block whose media were never read (AC2 — no implicit /
-    // partial support), so its verdict carries no `Media` finding at all.
+    // discarded basenames. The media are evaluated ONLY when the declared
+    // format is the LISTED one: an unlisted format is a `FormatVersion`
+    // block whose media were never read (no implicit / partial support), so
+    // its verdict carries neither a `Media` nor a `MediaSize` finding.
     let mut structure_blocked = extraction.structure_blocked;
     let raw_refs = raw_media_refs(&root);
     // More distinct referenced files than the anti-DoS bound: a Structure
@@ -547,14 +590,6 @@ pub fn analyze_structured_folder_components(
     }
     let media_walk = (extraction.format_version_ok && !media_bound_exceeded)
         .then(|| walk_media_references(&raw_refs, probes));
-    // Anti-DoS total bound (Structure blocking, never a transport error):
-    // the sum of the retained media byte sizes.
-    if media_walk
-        .as_ref()
-        .is_some_and(|walk| walk.retained_bytes > MAX_FOLDER_TOTAL_MEDIA_BYTES)
-    {
-        structure_blocked = true;
-    }
 
     // Canonical oracle over the transcoded structure — the same
     // `validate_canonical` a transfer and the editor run. Only meaningful
@@ -607,11 +642,14 @@ pub fn analyze_structured_folder_components(
         RecognitionFinding::recognized(RecognitionAspect::Structure)
     });
 
-    // The `Media` aspect exists on the verdict ONLY when it was actually
-    // analyzed (listed format, in-bounds reference count) — never asserted
-    // for work that was never done.
+    // The `Media` and `MediaSize` aspects exist on the verdict ONLY when
+    // the media were actually analyzed (listed format, in-bounds reference
+    // count) — never asserted for work that was never done. The aggregate
+    // byte bound is a SIZE verdict of its own (`MediaSize` blocking): the
+    // structure it leaves alone is judged for what it is.
     if let Some(walk) = &media_walk {
         findings.push(walk.media_finding());
+        findings.push(walk.media_size_finding(MAX_FOLDER_TOTAL_MEDIA_BYTES));
     }
     let (retained_media, discarded_media) = media_walk
         .map(|walk| (walk.retained, walk.discarded))
@@ -724,6 +762,7 @@ mod tests {
             RecognitionAspect::Title,
             RecognitionAspect::Structure,
             RecognitionAspect::Media,
+            RecognitionAspect::MediaSize,
         ] {
             let count = analysis
                 .findings
@@ -732,7 +771,7 @@ mod tests {
                 .count();
             assert_eq!(count, 1, "exactly one finding for {aspect:?}");
         }
-        assert_eq!(analysis.findings.len(), 5);
+        assert_eq!(analysis.findings.len(), 6);
     }
 
     #[test]
@@ -1066,11 +1105,11 @@ mod tests {
             "a bounds-breaking manifest exposes nothing to probe"
         );
         assert!(
-            !analysis
-                .findings
-                .iter()
-                .any(|f| f.aspect == RecognitionAspect::Media),
-            "no Media finding may be asserted for unprobed references"
+            !analysis.findings.iter().any(|f| matches!(
+                f.aspect,
+                RecognitionAspect::Media | RecognitionAspect::MediaSize
+            )),
+            "no media finding may be asserted for unprobed references"
         );
         assert!(analysis.discarded_media.is_empty());
     }
@@ -1098,27 +1137,267 @@ mod tests {
         assert!(referenced_media(manifest.as_bytes()).is_empty());
     }
 
+    // ---- Media size --------------------------------------------------------
+
+    const TWO_IMAGES_MANIFEST: &str = r#"{
+        "formatVersion": 1,
+        "title": "Total",
+        "nodes": [
+            { "id": "n1", "image": "a.png" },
+            { "id": "n2", "image": "b.png" }
+        ]
+    }"#;
+
+    fn image_of(byte_size: u64) -> MediaProbe {
+        MediaProbe::Usable {
+            kind: FolderMediaKind::Image,
+            byte_size,
+        }
+    }
+
     #[test]
-    fn an_oversize_media_total_blocks() {
+    fn media_over_the_aggregate_bound_block_on_their_size_not_on_the_structure() {
+        // The retained total beyond MAX_FOLDER_TOTAL_MEDIA_BYTES blocks —
+        // and the blocked aspect is the SIZE of the media: the structure
+        // and the media themselves are sound and say so.
+        let half = MAX_FOLDER_TOTAL_MEDIA_BYTES / 2 + 1;
+        let analysis = analyze(
+            TWO_IMAGES_MANIFEST,
+            &[("a.png", image_of(half)), ("b.png", image_of(half))],
+        );
+        assert_eq!(
+            category_of(&analysis, RecognitionAspect::MediaSize),
+            RecognitionCategory::Blocking
+        );
+        assert_eq!(
+            category_of(&analysis, RecognitionAspect::Structure),
+            RecognitionCategory::Recognized
+        );
+        assert_eq!(
+            category_of(&analysis, RecognitionAspect::Media),
+            RecognitionCategory::Recognized
+        );
+        assert_eq!(analysis.quality, RecognitionQuality::Unusable);
+        assert_eq!(analysis.state, ImportState::Blocked);
+        assert!(analysis.creatable.is_none());
+    }
+
+    #[test]
+    fn the_aggregate_media_bound_is_inclusive() {
+        let half = MAX_FOLDER_TOTAL_MEDIA_BYTES / 2;
+        let analysis = analyze(
+            TWO_IMAGES_MANIFEST,
+            &[("a.png", image_of(half)), ("b.png", image_of(half))],
+        );
+        assert_eq!(
+            category_of(&analysis, RecognitionAspect::MediaSize),
+            RecognitionCategory::Recognized
+        );
+        assert_eq!(analysis.quality, RecognitionQuality::Clean);
+        assert!(analysis.creatable.is_some());
+    }
+
+    #[test]
+    fn a_media_referenced_twice_counts_once_in_the_aggregate() {
+        // The SAME file on two nodes is one file to promote: it weighs once.
+        let manifest = r#"{
+            "formatVersion": 1,
+            "title": "Deux fois",
+            "nodes": [
+                { "id": "n1", "image": "a.png" },
+                { "id": "n2", "image": "a.png" }
+            ]
+        }"#;
+        let analysis = analyze(
+            manifest,
+            &[("a.png", image_of(MAX_FOLDER_TOTAL_MEDIA_BYTES))],
+        );
+        assert_eq!(
+            category_of(&analysis, RecognitionAspect::MediaSize),
+            RecognitionCategory::Recognized
+        );
+    }
+
+    #[test]
+    fn a_media_over_the_per_file_bound_is_left_out_for_its_size_alone() {
+        // The file is THERE and its format is fine: the `Media` aspect has
+        // nothing to say, the `MediaSize` aspect names the only reason. An
+        // ambiguity (the review is pending) — never a missing media.
+        let manifest = r#"{
+            "formatVersion": 1,
+            "title": "Un long son",
+            "nodes": [ { "id": "n1", "image": "couverture.png", "audio": "long.wav" } ]
+        }"#;
+        let analysis = analyze(
+            manifest,
+            &[
+                ("couverture.png", usable_image()),
+                (
+                    "long.wav",
+                    MediaProbe::Oversize {
+                        kind: Some(FolderMediaKind::Audio),
+                    },
+                ),
+            ],
+        );
+        assert_eq!(
+            category_of(&analysis, RecognitionAspect::MediaSize),
+            RecognitionCategory::Ambiguous
+        );
+        assert_eq!(
+            category_of(&analysis, RecognitionAspect::Media),
+            RecognitionCategory::Recognized
+        );
+        assert_eq!(analysis.quality, RecognitionQuality::Partial);
+        assert_eq!(analysis.state, ImportState::NeedsReview);
+        assert_eq!(analysis.discarded_media, vec!["long.wav".to_string()]);
+        let creatable = analysis.creatable.expect("created without the long sound");
+        assert_eq!(creatable.retained_media.len(), 1);
+        assert_eq!(creatable.retained_media[0].basename, "couverture.png");
+    }
+
+    #[test]
+    fn an_oversize_media_of_an_unknown_format_is_reported_for_both_reasons() {
+        // Lightening the file would not be enough: its format is not one
+        // Rustory reads either, and the report says so in the same pass.
+        let manifest = r#"{
+            "formatVersion": 1,
+            "title": "Trop lourd et inconnu",
+            "nodes": [ { "id": "n1", "audio": "long.flac" } ]
+        }"#;
+        let analysis = analyze(
+            manifest,
+            &[("long.flac", MediaProbe::Oversize { kind: None })],
+        );
+        assert_eq!(
+            category_of(&analysis, RecognitionAspect::MediaSize),
+            RecognitionCategory::Ambiguous
+        );
+        assert_eq!(
+            category_of(&analysis, RecognitionAspect::Media),
+            RecognitionCategory::Ambiguous
+        );
+        assert_eq!(analysis.discarded_media, vec!["long.flac".to_string()]);
+    }
+
+    #[test]
+    fn an_oversize_media_in_the_wrong_slot_is_reported_for_both_reasons() {
+        let manifest = r#"{
+            "formatVersion": 1,
+            "title": "Trop lourd et mal placé",
+            "nodes": [ { "id": "n1", "audio": "affiche.png" } ]
+        }"#;
+        let analysis = analyze(
+            manifest,
+            &[(
+                "affiche.png",
+                MediaProbe::Oversize {
+                    kind: Some(FolderMediaKind::Image),
+                },
+            )],
+        );
+        assert_eq!(
+            category_of(&analysis, RecognitionAspect::MediaSize),
+            RecognitionCategory::Ambiguous
+        );
+        assert_eq!(
+            category_of(&analysis, RecognitionAspect::Media),
+            RecognitionCategory::Ambiguous
+        );
+    }
+
+    #[test]
+    fn a_missing_media_and_an_oversize_one_are_each_named() {
+        // Two files left out for two different reasons: one finding each —
+        // the size never hides behind the missing file, nor the reverse.
+        let manifest = r#"{
+            "formatVersion": 1,
+            "title": "Absent et trop lourd",
+            "nodes": [ { "id": "n1", "image": "absente.png", "audio": "long.wav" } ]
+        }"#;
+        let analysis = analyze(
+            manifest,
+            &[
+                ("absente.png", MediaProbe::Absent),
+                (
+                    "long.wav",
+                    MediaProbe::Oversize {
+                        kind: Some(FolderMediaKind::Audio),
+                    },
+                ),
+            ],
+        );
+        assert_eq!(
+            category_of(&analysis, RecognitionAspect::Media),
+            RecognitionCategory::Missing
+        );
+        assert_eq!(
+            category_of(&analysis, RecognitionAspect::MediaSize),
+            RecognitionCategory::Ambiguous
+        );
+        // The missing media still drives the durable state.
+        assert_eq!(analysis.state, ImportState::Partial);
+        assert_eq!(analysis.discarded_media.len(), 2);
+    }
+
+    #[test]
+    fn the_aggregate_block_dominates_a_media_left_out_for_its_size() {
+        // One finding per aspect: when the retained media block together,
+        // that is what the `MediaSize` line says (nothing is created).
         let half = MAX_FOLDER_TOTAL_MEDIA_BYTES / 2 + 1;
         let manifest = r#"{
             "formatVersion": 1,
-            "title": "Total",
+            "title": "Tout est trop lourd",
             "nodes": [
-                { "id": "n1", "image": "a.png" },
+                { "id": "n1", "image": "a.png", "audio": "long.wav" },
                 { "id": "n2", "image": "b.png" }
             ]
         }"#;
-        let probe = MediaProbe::Usable {
-            kind: FolderMediaKind::Image,
-            byte_size: half,
-        };
-        let analysis = analyze(manifest, &[("a.png", probe), ("b.png", probe)]);
-        assert_eq!(
-            category_of(&analysis, RecognitionAspect::Structure),
-            RecognitionCategory::Blocking,
-            "the retained total beyond MAX_FOLDER_TOTAL_MEDIA_BYTES is an anti-DoS block"
+        let analysis = analyze(
+            manifest,
+            &[
+                ("a.png", image_of(half)),
+                ("b.png", image_of(half)),
+                (
+                    "long.wav",
+                    MediaProbe::Oversize {
+                        kind: Some(FolderMediaKind::Audio),
+                    },
+                ),
+            ],
         );
+        assert_eq!(
+            category_of(&analysis, RecognitionAspect::MediaSize),
+            RecognitionCategory::Blocking
+        );
+        assert!(analysis.creatable.is_none());
+    }
+
+    #[test]
+    fn a_media_left_out_for_its_size_never_weighs_in_the_aggregate() {
+        // Only RETAINED media are summed: a file left out is never promoted.
+        let manifest = r#"{
+            "formatVersion": 1,
+            "title": "Écarté, donc non compté",
+            "nodes": [ { "id": "n1", "image": "a.png", "audio": "long.wav" } ]
+        }"#;
+        let analysis = analyze(
+            manifest,
+            &[
+                ("a.png", image_of(MAX_FOLDER_TOTAL_MEDIA_BYTES)),
+                (
+                    "long.wav",
+                    MediaProbe::Oversize {
+                        kind: Some(FolderMediaKind::Audio),
+                    },
+                ),
+            ],
+        );
+        assert_eq!(
+            category_of(&analysis, RecognitionAspect::MediaSize),
+            RecognitionCategory::Ambiguous
+        );
+        assert!(analysis.creatable.is_some());
     }
 
     // ---- Media ------------------------------------------------------------
@@ -1334,11 +1613,11 @@ mod tests {
             RecognitionCategory::Blocking
         );
         assert!(
-            !analysis
-                .findings
-                .iter()
-                .any(|f| f.aspect == RecognitionAspect::Media),
-            "no Media finding may be asserted for an unanalyzed aspect"
+            !analysis.findings.iter().any(|f| matches!(
+                f.aspect,
+                RecognitionAspect::Media | RecognitionAspect::MediaSize
+            )),
+            "no media finding may be asserted for an unanalyzed aspect"
         );
         assert!(analysis.discarded_media.is_empty());
     }

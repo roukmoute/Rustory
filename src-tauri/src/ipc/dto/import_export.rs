@@ -1,10 +1,14 @@
+use std::sync::LazyLock;
+
 use serde::{Deserialize, Serialize};
 
 use crate::application::import_export::WebEpisode;
+use crate::domain::device::format_device_bytes;
 use crate::domain::import::{
     ArtifactAnalysis, ContentSourceActivation, ContentSourceKind, ContentSourceLine, ImportState,
     ImportableContent, RecognitionAspect, RecognitionCategory, RecognitionFinding,
-    RecognitionQuality, RssItemRef, StructuredFolderAnalysis,
+    RecognitionQuality, RssItemRef, StructuredFolderAnalysis, MAX_ARCHIVE_MEDIA_BYTES,
+    MAX_ARCHIVE_TOTAL_MEDIA_BYTES, MAX_FOLDER_MEDIA_BYTES, MAX_FOLDER_TOTAL_MEDIA_BYTES,
 };
 use crate::domain::story::normalize_title;
 /// `deny_unknown_fields` fails the deserialization if the UI ever adds a
@@ -106,8 +110,10 @@ impl ImportStateDto {
 }
 
 /// The aspect of the analyzed input a finding refers to. Mirror of the
-/// domain [`RecognitionAspect`] (`media` belongs to the structured-folder
-/// and RSS flows, `source` to the RSS ingestion flow only).
+/// domain [`RecognitionAspect`] (`media` belongs to the structured-folder,
+/// structured-archive and RSS flows, `mediaSize` to the structured-folder
+/// and structured-archive flows only, `source` to the RSS ingestion flow
+/// only).
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum ImportAspectDto {
@@ -119,6 +125,7 @@ pub enum ImportAspectDto {
     Title,
     Timestamps,
     Media,
+    MediaSize,
     Source,
 }
 
@@ -983,6 +990,7 @@ pub fn aspect_dto(aspect: RecognitionAspect) -> ImportAspectDto {
         RecognitionAspect::Title => ImportAspectDto::Title,
         RecognitionAspect::Timestamps => ImportAspectDto::Timestamps,
         RecognitionAspect::Media => ImportAspectDto::Media,
+        RecognitionAspect::MediaSize => ImportAspectDto::MediaSize,
         RecognitionAspect::Source => ImportAspectDto::Source,
     }
 }
@@ -1046,12 +1054,65 @@ impl ImportFindingDto {
     }
 }
 
+/// The `(media, ambiguous)` copy as it was written while the size of a media
+/// was one of its possible causes — kept VERBATIM for the summaries
+/// persisted back then: nobody recorded which of the three causes applied,
+/// so the report of such a story keeps saying exactly what it said.
+pub const LEGACY_MEDIA_UNUSABLE_COPY: &str = "Certains fichiers audio ou image référencés ne sont pas utilisables (format non reconnu, fichier trop volumineux ou nom invalide). L'histoire sera créée sans eux ; tu pourras les ajouter dans l'éditeur.";
+
+/// The `(media, ambiguous)` copy of the flows that judge the size on its
+/// own line (structured folder, structured archive): a media left out HERE
+/// is never left out for its size.
+pub const MEDIA_UNUSABLE_COPY: &str = "Certains fichiers audio ou image référencés ne sont pas utilisables (format non reconnu ou nom invalide). L'histoire sera créée sans eux ; tu pourras les ajouter dans l'éditeur.";
+
+// The size-aware copies carry their bound, spelled from the very constant
+// the analysis applies and in the decimal units of the send and export
+// refusals (`134 Mo`, `34,4 Go`): a bound that moves takes its copy with it.
+
+/// Structured folder — a media over the per-file bound, left out. The
+/// editor's attach has the same bound: a lighter file can be added there.
+static FOLDER_MEDIA_OVERSIZE_COPY: LazyLock<String> = LazyLock::new(|| {
+    format!(
+        "Certains fichiers audio ou image référencés dépassent la taille autorisée ({} par fichier). L'histoire sera créée sans eux ; tu pourras ajouter des fichiers plus légers dans l'éditeur.",
+        format_device_bytes(MAX_FOLDER_MEDIA_BYTES)
+    )
+});
+
+/// Structured folder — the retained media together over the aggregate
+/// bound: nothing is created.
+static FOLDER_MEDIA_TOTAL_OVERSIZE_COPY: LazyLock<String> = LazyLock::new(|| {
+    format!(
+        "Les fichiers audio et image référencés dépassent ensemble la taille autorisée ({}). Allège le dossier (moins de médias ou des fichiers plus légers) puis relance l'analyse.",
+        format_device_bytes(MAX_FOLDER_TOTAL_MEDIA_BYTES)
+    )
+});
+
+/// Structured archive — a media over the per-media bound, left out. The
+/// story keeps its archive (it is sent from it): the gesture that keeps the
+/// media is to replace it IN the archive, not in the editor.
+static ARCHIVE_MEDIA_OVERSIZE_COPY: LazyLock<String> = LazyLock::new(|| {
+    format!(
+        "Certains fichiers audio ou image référencés dépassent la taille autorisée ({} par fichier). L'histoire sera créée sans eux ; pour les garder, remplace-les dans l'archive par des fichiers plus légers puis relance l'analyse.",
+        format_device_bytes(MAX_ARCHIVE_MEDIA_BYTES)
+    )
+});
+
+/// Structured archive — the retained media together over the aggregate
+/// bound: nothing is created.
+static ARCHIVE_MEDIA_TOTAL_OVERSIZE_COPY: LazyLock<String> = LazyLock::new(|| {
+    format!(
+        "Les fichiers audio et image référencés dépassent ensemble la taille autorisée ({}). Allège l'archive (moins de médias ou des fichiers plus légers) puis relance l'analyse.",
+        format_device_bytes(MAX_ARCHIVE_TOTAL_MEDIA_BYTES)
+    )
+});
+
 /// Single canonical FR copy per `(aspect, category)` — never two wordings
 /// for one pair WITHIN a flow. Mirrors `docs/architecture/ui-states.md#Local
-/// Artifact Import Contract`; the `media` pairs (folder flow only) mirror
+/// Artifact Import Contract`; the `media` pairs mirror
 /// `product-language.md#Structured-folder recognition copy`. The folder
-/// flow overrides the shared-aspect pairs whose wording differs through
-/// [`structured_folder_finding_message`].
+/// and the archive flows override the pairs whose wording is their own
+/// through [`structured_folder_finding_message`] and
+/// [`structured_archive_finding_message`].
 pub fn finding_message(aspect: ImportAspectDto, category: ImportCategoryDto) -> &'static str {
     use ImportAspectDto as A;
     use ImportCategoryDto as C;
@@ -1081,9 +1142,10 @@ pub fn finding_message(aspect: ImportAspectDto, category: ImportCategoryDto) -> 
         (A::Timestamps, _) => {
             "Une date de l'histoire n'a pas le format attendu ; elle a été conservée telle quelle."
         }
-        // `media` pairs — emitted by the structured-folder flow only; the
-        // copy lives here too so a persisted `(media, …)` pair re-rendered
-        // through the shared path never panics nor falls back empty.
+        // `media` pairs — emitted by the structured-folder and archive
+        // flows; the copy lives here too so a persisted `(media, …)` pair
+        // re-rendered through the shared path never panics nor falls back
+        // empty.
         (A::Media, C::Recognized) => {
             "Tous les fichiers audio et image référencés par le dossier sont présents et reconnus."
         }
@@ -1094,8 +1156,30 @@ pub fn finding_message(aspect: ImportAspectDto, category: ImportCategoryDto) -> 
         // COHERENT with its chip (a real block promises no creation) in
         // case a persisted/forged summary carries the pair.
         (A::Media, C::Blocking) => "Un média référencé par le dossier bloque la création.",
-        (A::Media, C::Ambiguous) => {
-            "Certains fichiers audio ou image référencés ne sont pas utilisables (format non reconnu, fichier trop volumineux ou nom invalide). L'histoire sera créée sans eux ; tu pourras les ajouter dans l'éditeur."
+        // The copy of a report written BEFORE the size had an aspect of its
+        // own: it lists the size among its possible causes because, back
+        // then, it could be one. The folder and the archive flows override
+        // it for what they analyze today (the size is named on the
+        // `mediaSize` line); it stays the copy of the summaries persisted
+        // before ([`LEGACY_MEDIA_UNUSABLE_COPY`]).
+        (A::Media, C::Ambiguous) => LEGACY_MEDIA_UNUSABLE_COPY,
+        // `mediaSize` pairs — the folder and the archive flows own the
+        // living copies, each with ITS bounds
+        // ([`structured_folder_finding_message`],
+        // [`structured_archive_finding_message`]). The copies below name no
+        // figure: they keep a pair renderable through a flow that has no
+        // bound to name, without a panic and without promising anything.
+        (A::MediaSize, C::Recognized) => {
+            "Aucun fichier audio ou image référencé ne dépasse la taille autorisée."
+        }
+        (A::MediaSize, C::Ambiguous) => {
+            "Certains fichiers audio ou image référencés dépassent la taille autorisée. L'histoire sera créée sans eux."
+        }
+        (A::MediaSize, C::Missing) => {
+            "La taille des fichiers audio et image référencés n'a pas pu être vérifiée."
+        }
+        (A::MediaSize, C::Blocking) => {
+            "Les fichiers audio et image référencés dépassent ensemble la taille autorisée."
         }
         // `source` pairs — the RSS ingestion flow owns the living copy
         // ([`rss_finding_message`]); only its `(source, ambiguous)` pair is
@@ -1153,9 +1237,11 @@ pub fn rss_finding_message(aspect: ImportAspectDto, category: ImportCategoryDto)
 /// flow owns the wording of the shared-aspect pairs that speak of a
 /// manifest and a creation (`Envelope`, `FormatVersion`, `Title`,
 /// `Structure`) — the `.rustory` copy keeps speaking of an artifact and an
-/// import; every other pair (including `media`) delegates to the shared
-/// table. Used by the folder analysis DTO AND by the durable card report
-/// when the provenance's `source_format` is `structured-folder`.
+/// import —, of the `mediaSize` pairs that name ITS bounds, and of the
+/// `media` ambiguity (never a size reason here); every other pair
+/// delegates to the shared table. Used by the folder analysis DTO AND by
+/// the durable card report when the provenance's `source_format` is
+/// `structured-folder`.
 pub fn structured_folder_finding_message(
     aspect: ImportAspectDto,
     category: ImportCategoryDto,
@@ -1184,13 +1270,18 @@ pub fn structured_folder_finding_message(
         (A::Structure, C::Missing | C::Blocking) => {
             "La structure du manifest est incomplète ou incohérente. Corrige le manifest puis relance l'analyse."
         }
+        (A::Media, C::Ambiguous) => MEDIA_UNUSABLE_COPY,
+        (A::MediaSize, C::Ambiguous) => FOLDER_MEDIA_OVERSIZE_COPY.as_str(),
+        (A::MediaSize, C::Blocking) => FOLDER_MEDIA_TOTAL_OVERSIZE_COPY.as_str(),
         _ => finding_message(aspect, category),
     }
 }
 
 /// The structured-ARCHIVE per-pair FR copy: the community pack's
-/// `story.json` descriptor wording. Media pairs fall back to the shared
-/// [`finding_message`] copy (identical semantics: referenced files). Used by
+/// `story.json` descriptor wording, the `mediaSize` pairs that name ITS
+/// bounds, and the `media` ambiguity (never a size reason here). The other
+/// media pairs fall back to the shared [`finding_message`] copy (identical
+/// semantics: referenced files). Used by
 /// the archive analysis DTO AND by the card report of an archive story —
 /// the one returned at creation and the durable one, picked by the
 /// provenance's `source_format = 'structured-archive'`.
@@ -1220,6 +1311,9 @@ pub fn structured_archive_finding_message(
         (A::Structure, C::Missing | C::Blocking) => {
             "La structure du descripteur est incomplète ou incohérente. Corrige l'archive puis relance l'analyse."
         }
+        (A::Media, C::Ambiguous) => MEDIA_UNUSABLE_COPY,
+        (A::MediaSize, C::Ambiguous) => ARCHIVE_MEDIA_OVERSIZE_COPY.as_str(),
+        (A::MediaSize, C::Blocking) => ARCHIVE_MEDIA_TOTAL_OVERSIZE_COPY.as_str(),
         _ => finding_message(aspect, category),
     }
 }
@@ -1262,17 +1356,52 @@ pub fn import_findings_from_summary(summary: &str) -> Vec<ImportFindingDto> {
 /// same stored pairs, re-rendered with the FOLDER per-pair copy. The
 /// projection picks it by the provenance's `source_format` so a folder
 /// story's durable card report speaks of a manifest, never of an artifact.
+/// A summary persisted before the size had its own aspect keeps its copy
+/// ([`size_aware_findings_from_summary`]).
 pub fn folder_import_findings_from_summary(summary: &str) -> Vec<ImportFindingDto> {
-    findings_from_summary_with(summary, structured_folder_finding_message)
+    size_aware_findings_from_summary(summary, structured_folder_finding_message)
 }
 
 /// The structured-archive variant of [`import_findings_from_summary`]: the
 /// same stored pairs, re-rendered with the ARCHIVE per-pair copy. Picked by
 /// the provenance's `source_format = 'structured-archive'` so an archive
 /// story's durable card report speaks of its descriptor — never of a
-/// manifest it does not have, nor of an artifact.
+/// manifest it does not have, nor of an artifact. A summary persisted
+/// before the size had its own aspect keeps its copy
+/// ([`size_aware_findings_from_summary`]).
 pub fn archive_import_findings_from_summary(summary: &str) -> Vec<ImportFindingDto> {
-    findings_from_summary_with(summary, structured_archive_finding_message)
+    size_aware_findings_from_summary(summary, structured_archive_finding_message)
+}
+
+/// Re-render the stored summary of a flow that judges the media size on its
+/// own line (structured folder, structured archive).
+///
+/// Such a flow stores a `mediaSize` pair in EVERY summary that carries a
+/// `media` pair — the two findings are emitted together. A summary with a
+/// `media` pair and NO `mediaSize` pair was therefore persisted before the
+/// size had its aspect: its `(media, ambiguous)` pair could then mean a
+/// media left out for its size, and nobody recorded which cause applied.
+/// It keeps the copy it was written under ([`LEGACY_MEDIA_UNUSABLE_COPY`]),
+/// which still lists the size among the possible causes — the summary stays
+/// as readable, and as true, as the day it was stored.
+fn size_aware_findings_from_summary(
+    summary: &str,
+    message: fn(ImportAspectDto, ImportCategoryDto) -> &'static str,
+) -> Vec<ImportFindingDto> {
+    let mut findings = findings_from_summary_with(summary, message);
+    let judged_the_size = findings
+        .iter()
+        .any(|finding| finding.aspect == ImportAspectDto::MediaSize);
+    if !judged_the_size {
+        for finding in &mut findings {
+            if (finding.aspect, finding.category)
+                == (ImportAspectDto::Media, ImportCategoryDto::Ambiguous)
+            {
+                finding.message = LEGACY_MEDIA_UNUSABLE_COPY.to_string();
+            }
+        }
+    }
+    findings
 }
 
 /// The RSS variant of [`import_findings_from_summary`]: the same stored
@@ -1648,6 +1777,7 @@ mod tests {
             Title,
             Timestamps,
             Media,
+            MediaSize,
             Source,
         ];
         let categories = [Recognized, Ambiguous, Missing, Blocking];
@@ -1662,6 +1792,11 @@ mod tests {
                 assert!(
                     !structured_folder_finding_message(aspect, category).is_empty(),
                     "folder {aspect:?}/{category:?} message empty"
+                );
+                // So does the archive copy.
+                assert!(
+                    !structured_archive_finding_message(aspect, category).is_empty(),
+                    "archive {aspect:?}/{category:?} message empty"
                 );
                 // The RSS copy covers every pair too.
                 assert!(
@@ -1690,10 +1825,10 @@ mod tests {
             finding_message(ImportAspectDto::Envelope, ImportCategoryDto::Blocking),
             "the .rustory copy keeps speaking of an artifact"
         );
-        // …and the `media` pairs are ONE copy, shared by construction.
+        // …the `media` pairs that speak of presence are ONE copy, shared by
+        // construction…
         for category in [
             ImportCategoryDto::Recognized,
-            ImportCategoryDto::Ambiguous,
             ImportCategoryDto::Missing,
             ImportCategoryDto::Blocking,
         ] {
@@ -1701,7 +1836,118 @@ mod tests {
                 structured_folder_finding_message(ImportAspectDto::Media, category),
                 finding_message(ImportAspectDto::Media, category)
             );
+            assert_eq!(
+                structured_archive_finding_message(ImportAspectDto::Media, category),
+                finding_message(ImportAspectDto::Media, category)
+            );
         }
+        // …and the `media` ambiguity of the two flows that judge the size on
+        // its own line no longer lists the size among its causes.
+        for copy in [
+            structured_folder_finding_message(ImportAspectDto::Media, ImportCategoryDto::Ambiguous),
+            structured_archive_finding_message(
+                ImportAspectDto::Media,
+                ImportCategoryDto::Ambiguous,
+            ),
+        ] {
+            assert_eq!(
+                copy,
+                "Certains fichiers audio ou image référencés ne sont pas utilisables (format non reconnu ou nom invalide). L'histoire sera créée sans eux ; tu pourras les ajouter dans l'éditeur."
+            );
+            assert!(!copy.contains("volumineux"), "the size has its own line");
+        }
+    }
+
+    #[test]
+    fn the_media_size_copies_name_the_bound_in_decimal_units() {
+        use ImportAspectDto::MediaSize;
+        use ImportCategoryDto::{Ambiguous, Blocking, Recognized};
+        // A structured archive: 128 MiB per media, 32 GiB together.
+        assert_eq!(
+            structured_archive_finding_message(MediaSize, Ambiguous),
+            "Certains fichiers audio ou image référencés dépassent la taille autorisée (134 Mo par fichier). L'histoire sera créée sans eux ; pour les garder, remplace-les dans l'archive par des fichiers plus légers puis relance l'analyse."
+        );
+        assert_eq!(
+            structured_archive_finding_message(MediaSize, Blocking),
+            "Les fichiers audio et image référencés dépassent ensemble la taille autorisée (34,4 Go). Allège l'archive (moins de médias ou des fichiers plus légers) puis relance l'analyse."
+        );
+        // A structured folder: 32 MiB per media, 256 MiB together.
+        assert_eq!(
+            structured_folder_finding_message(MediaSize, Ambiguous),
+            "Certains fichiers audio ou image référencés dépassent la taille autorisée (34 Mo par fichier). L'histoire sera créée sans eux ; tu pourras ajouter des fichiers plus légers dans l'éditeur."
+        );
+        assert_eq!(
+            structured_folder_finding_message(MediaSize, Blocking),
+            "Les fichiers audio et image référencés dépassent ensemble la taille autorisée (268 Mo). Allège le dossier (moins de médias ou des fichiers plus légers) puis relance l'analyse."
+        );
+        // Within the bounds: one copy, no figure to name.
+        for copy in [
+            structured_archive_finding_message(MediaSize, Recognized),
+            structured_folder_finding_message(MediaSize, Recognized),
+        ] {
+            assert_eq!(
+                copy,
+                "Aucun fichier audio ou image référencé ne dépasse la taille autorisée."
+            );
+        }
+    }
+
+    #[test]
+    fn the_media_size_copies_follow_the_bounds_the_analysis_applies() {
+        // Each figure is spelled from the constant the analysis applies —
+        // never typed twice: a bound that moves takes its copy with it.
+        use ImportAspectDto::MediaSize;
+        use ImportCategoryDto::{Ambiguous, Blocking};
+        for (copy, bound) in [
+            (
+                structured_archive_finding_message(MediaSize, Ambiguous),
+                MAX_ARCHIVE_MEDIA_BYTES,
+            ),
+            (
+                structured_archive_finding_message(MediaSize, Blocking),
+                MAX_ARCHIVE_TOTAL_MEDIA_BYTES,
+            ),
+            (
+                structured_folder_finding_message(MediaSize, Ambiguous),
+                MAX_FOLDER_MEDIA_BYTES,
+            ),
+            (
+                structured_folder_finding_message(MediaSize, Blocking),
+                MAX_FOLDER_TOTAL_MEDIA_BYTES,
+            ),
+        ] {
+            let figure = format!("({}", format_device_bytes(bound));
+            assert!(copy.contains(&figure), "{copy} must name {figure}");
+            // Decimal units only, like the send and export refusals.
+            assert!(!copy.contains("Mio") && !copy.contains("Gio"), "{copy}");
+        }
+    }
+
+    #[test]
+    fn a_flow_without_a_bound_to_name_words_the_media_size_without_a_figure() {
+        // The `.rustory` and RSS flows never emit `mediaSize`; a forged or
+        // foreign pair re-rendered through them names no bound of theirs.
+        for category in [
+            ImportCategoryDto::Recognized,
+            ImportCategoryDto::Ambiguous,
+            ImportCategoryDto::Missing,
+            ImportCategoryDto::Blocking,
+        ] {
+            let shared = finding_message(ImportAspectDto::MediaSize, category);
+            assert!(
+                !shared.chars().any(|c| c.is_ascii_digit()),
+                "no figure in the defensive copy: {shared}"
+            );
+            assert_eq!(
+                rss_finding_message(ImportAspectDto::MediaSize, category),
+                shared
+            );
+        }
+        // The dead blocking pair never promises a creation.
+        assert!(
+            !finding_message(ImportAspectDto::MediaSize, ImportCategoryDto::Blocking)
+                .contains("sera créée")
+        );
     }
 
     #[test]
@@ -1724,8 +1970,26 @@ mod tests {
             ImportAspectDto::FormatVersion,
             ImportAspectDto::Title,
             ImportAspectDto::Structure,
+            ImportAspectDto::MediaSize,
         ] {
             let copy = structured_folder_finding_message(aspect, ImportCategoryDto::Blocking);
+            assert!(
+                copy.contains("relance l'analyse"),
+                "{aspect:?} blocking copy must name the gesture: {copy}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_archive_blocking_copy_names_the_corrective_gesture() {
+        // Same rule for the archive matrix (it analyzes no format version).
+        for aspect in [
+            ImportAspectDto::Envelope,
+            ImportAspectDto::Title,
+            ImportAspectDto::Structure,
+            ImportAspectDto::MediaSize,
+        ] {
+            let copy = structured_archive_finding_message(aspect, ImportCategoryDto::Blocking);
             assert!(
                 copy.contains("relance l'analyse"),
                 "{aspect:?} blocking copy must name the gesture: {copy}"
@@ -1793,6 +2057,114 @@ mod tests {
     fn a_malformed_summary_degrades_to_an_empty_report() {
         assert!(import_findings_from_summary("not json").is_empty());
         assert!(import_findings_from_summary("[]").is_empty());
+    }
+
+    #[test]
+    fn a_media_size_finding_round_trips_through_its_flow_renderer() {
+        // What a creation stores today: `media` AND `mediaSize`, as bare
+        // `(aspect, category)` codes — the bound is re-spelled at read time.
+        let findings = [
+            RecognitionFinding::recognized(RecognitionAspect::Envelope),
+            RecognitionFinding::recognized(RecognitionAspect::Media),
+            RecognitionFinding::ambiguous(RecognitionAspect::MediaSize),
+        ];
+        let summary = serialize_findings_summary(&findings).expect("an attention finding exists");
+        assert_eq!(
+            summary,
+            r#"[{"aspect":"envelope","category":"recognized"},{"aspect":"media","category":"recognized"},{"aspect":"mediaSize","category":"ambiguous"}]"#
+        );
+
+        let size_of = |report: Vec<ImportFindingDto>| {
+            report
+                .into_iter()
+                .find(|f| f.aspect == ImportAspectDto::MediaSize)
+                .expect("the size finding")
+                .message
+        };
+        assert!(size_of(archive_import_findings_from_summary(&summary))
+            .contains("(134 Mo par fichier)"));
+        assert!(
+            size_of(folder_import_findings_from_summary(&summary)).contains("(34 Mo par fichier)")
+        );
+        // The same wording as the report of the freshly created card.
+        assert_eq!(
+            archive_import_findings_from_summary(&summary),
+            archive_import_report_dto(&findings)
+        );
+        assert_eq!(
+            folder_import_findings_from_summary(&summary),
+            folder_import_report_dto(&findings)
+        );
+    }
+
+    /// A summary as the folder flow stored it BEFORE the size had an aspect:
+    /// five pairs, no `mediaSize`.
+    const LEGACY_FOLDER_SUMMARY: &str = r#"[{"aspect":"envelope","category":"recognized"},{"aspect":"formatVersion","category":"recognized"},{"aspect":"title","category":"recognized"},{"aspect":"structure","category":"recognized"},{"aspect":"media","category":"ambiguous"}]"#;
+
+    /// Same, as the archive flow stored it: four pairs.
+    const LEGACY_ARCHIVE_SUMMARY: &str = r#"[{"aspect":"envelope","category":"recognized"},{"aspect":"title","category":"ambiguous"},{"aspect":"structure","category":"recognized"},{"aspect":"media","category":"ambiguous"}]"#;
+
+    #[test]
+    fn a_summary_persisted_before_the_size_aspect_stays_readable_and_keeps_its_copy() {
+        // Back then `(media, ambiguous)` could mean a media left out for its
+        // size, and nobody recorded which cause applied: the report keeps
+        // the copy that says so — never the newer one, which would deny it.
+        for (report, expected_len) in [
+            (
+                folder_import_findings_from_summary(LEGACY_FOLDER_SUMMARY),
+                5,
+            ),
+            (
+                archive_import_findings_from_summary(LEGACY_ARCHIVE_SUMMARY),
+                4,
+            ),
+        ] {
+            assert_eq!(report.len(), expected_len, "every stored pair renders");
+            assert!(report.iter().all(|f| !f.message.is_empty()));
+            let media = report
+                .iter()
+                .find(|f| f.aspect == ImportAspectDto::Media)
+                .expect("the media finding");
+            assert_eq!(media.category, ImportCategoryDto::Ambiguous);
+            assert_eq!(
+                media.message,
+                "Certains fichiers audio ou image référencés ne sont pas utilisables (format non reconnu, fichier trop volumineux ou nom invalide). L'histoire sera créée sans eux ; tu pourras les ajouter dans l'éditeur."
+            );
+            assert!(
+                !report
+                    .iter()
+                    .any(|f| f.aspect == ImportAspectDto::MediaSize),
+                "nothing is invented for a summary that never judged the size"
+            );
+        }
+        // The other pairs speak their flow's own wording, as before.
+        assert!(
+            folder_import_findings_from_summary(LEGACY_FOLDER_SUMMARY)[0]
+                .message
+                .contains("manifest")
+        );
+        assert!(
+            archive_import_findings_from_summary(LEGACY_ARCHIVE_SUMMARY)[0]
+                .message
+                .contains("descripteur")
+        );
+    }
+
+    #[test]
+    fn a_summary_that_judged_the_size_words_the_media_ambiguity_without_it() {
+        // `mediaSize` is stored alongside `media` by a size-aware analysis:
+        // the media ambiguity of such a summary is never a size reason.
+        let summary = r#"[{"aspect":"media","category":"ambiguous"},{"aspect":"mediaSize","category":"recognized"}]"#;
+        for report in [
+            folder_import_findings_from_summary(summary),
+            archive_import_findings_from_summary(summary),
+        ] {
+            assert_eq!(report[0].message, MEDIA_UNUSABLE_COPY);
+            assert_eq!(
+                report[1].message,
+                "Aucun fichier audio ou image référencé ne dépasse la taille autorisée."
+            );
+        }
     }
 
     // ===== RSS external-source DTOs =====
