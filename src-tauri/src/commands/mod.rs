@@ -1,5 +1,6 @@
 pub mod catalog;
 pub mod device;
+pub mod file_dialog;
 pub mod import_export;
 pub mod library;
 pub mod onboarding;

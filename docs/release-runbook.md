@@ -101,6 +101,33 @@ d'une distribution plus récente. Vérifier sur l'artefact final que les modules
 GIO et GStreamer chargés proviennent du bundle ; la compilation et les tests
 unitaires seuls ne couvrent pas ce contrôle de distribution.
 
+Le lanceur de l'AppImage (`AppRun.wrapped`) place le dossier de travail du
+processus dans `$APPDIR/usr` : le montage en lecture seule de l'image ou, avec
+`APPIMAGE_EXTRACT_AND_RUN=1`, le dossier temporaire où elle est extraite.
+La `libwebkit2gtk` embarquée est patchée avec des chemins relatifs à ce
+dossier (`././/lib/…/webkit2gtk-4.1`) et s'en sert pendant toute la vie du
+processus pour lancer ses processus auxiliaires : ne jamais déplacer ce
+dossier de travail par un `chdir`, au démarrage ou plus tard. Or GTK ouvre
+une fenêtre d'enregistrement dans le dossier de travail quand l'application
+n'en fournit aucun, et une fenêtre d'ouverture aussi dès que la liste des
+fichiers récents est désactivée. Toutes les fenêtres de fichiers natives sont
+donc construites par `file_dialog`
+([`src-tauri/src/commands/file_dialog.rs`](../src-tauri/src/commands/file_dialog.rs)),
+qui leur fournit un dossier de départ dans ce seul cas : `APPDIR` défini et
+dossier de travail à l'intérieur. Les candidats sont essayés dans l'ordre :
+le dossier de lancement (`OWD`, posé par le runtime AppImage quand l'image
+est montée, absent avec `APPIMAGE_EXTRACT_AND_RUN=1`), puis le dossier
+personnel (`HOME`). Un candidat n'est retenu que s'il est absolu, existe, est
+un dossier et se trouve hors de l'AppDir
+([`dialog_start_directory.rs`](../src-tauri/src/infrastructure/filesystem/dialog_start_directory.rs)).
+Sans candidat retenu, hors AppImage, sous Windows et sous macOS, rien n'est
+imposé : la fenêtre native garde son comportement. Un test refuse toute
+fenêtre de fichier ouverte sans passer par `file_dialog`. Dans l'AppImage,
+une fenêtre d'ouverture démarre ainsi dans ce dossier plutôt que sur la liste
+« Récents », qui reste accessible dans le panneau latéral ; le raccourci `usr`
+que GTK y ajoute pour le dossier de travail reste visible lui aussi, sans être
+le dossier ouvert.
+
 Le job Linux exécute deux contrôles sur l'AppImage signée avant de pouvoir
 réussir : `bash tools/check-appimage-media.sh <AppImage>` remplace seulement
 le binaire d'une extraction jetable par une sonde, puis utilise le vrai
@@ -113,7 +140,11 @@ chargement et les modules GIO provenant de l'hôte. Ces contrôles demandent
 et `dbus-x11`. En CI, `APPIMAGE_EXTRACT_AND_RUN=1` évite de dépendre de FUSE.
 Avant promotion, répéter le contrôle de démarrage sur Debian 13 avec
 l'AppImage finale, sans cette variable, pour vérifier le lancement normal
-de l'artefact construit sur Ubuntu 24.04.
+de l'artefact construit sur Ubuntu 24.04. Aucun de ces deux contrôles n'ouvre
+de fenêtre de fichier : après un changement du lanceur, du runtime AppImage ou
+du plugin de fenêtres, vérifier à la main sur l'artefact final que `Exporter
+en archive` s'ouvre dans le dossier de lancement et écrit l'archive quand on
+valide sans changer de dossier.
 
 ## Local persistence footprint
 

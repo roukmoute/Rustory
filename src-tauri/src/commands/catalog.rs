@@ -15,12 +15,13 @@
 use std::time::Duration;
 
 use tauri::{async_runtime, AppHandle, Manager, State};
-use tauri_plugin_dialog::{DialogExt, FilePath};
+use tauri_plugin_dialog::FilePath;
 
 use crate::application::device::catalog::{
     self, import_official_catalog_from_bytes, DEFAULT_CATALOG_LOCALE, MAX_CATALOG_BYTES,
 };
 use crate::application::device::title::count_official_catalog;
+use crate::commands::file_dialog::file_dialog;
 use crate::commands::shared::base64_encode;
 use crate::domain::device::is_canonical_pack_uuid;
 use crate::domain::shared::AppError;
@@ -164,8 +165,7 @@ pub async fn import_official_catalog(
     // Non-blocking dialog + channel (same reason as the export flow: the
     // native GTK dialog must run on the main thread).
     let (tx, mut rx) = async_runtime::channel::<Option<FilePath>>(1);
-    app.dialog()
-        .file()
+    file_dialog(&app)
         .add_filter(CATALOG_DIALOG_FILTER_NAME, &["json"])
         .pick_file(move |path| {
             let _ = tx.try_send(path);

@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use tauri::ipc::Channel;
 use tauri::{async_runtime, AppHandle, Manager, State};
-use tauri_plugin_dialog::{DialogExt, FilePath};
+use tauri_plugin_dialog::FilePath;
 
 use crate::application::import_export::import::read_artifact_bounded;
 use crate::application::import_export::{
@@ -11,6 +11,7 @@ use crate::application::import_export::{
     ExportStoryInput, ImportAnalysis, RssAcceptPhase, RssCreationOutcome, WebCreationOutcome,
 };
 use crate::application::story::get_story_detail;
+use crate::commands::file_dialog::file_dialog;
 use crate::commands::shared::validate_story_id;
 use crate::domain::export::{RUSTORY_ARTIFACT_EXTENSION, STORY_ARCHIVE_EXTENSION};
 use crate::domain::import::{feed_url_host, official_content_sources};
@@ -111,8 +112,7 @@ pub async fn export_story_with_save_dialog(
     // dialog settles, without ever blocking the thread that GTK needs
     // to process events.
     let (tx, mut rx) = async_runtime::channel::<Option<FilePath>>(1);
-    app.dialog()
-        .file()
+    file_dialog(&app)
         .set_file_name(&input.suggested_filename)
         .add_filter(EXPORT_DIALOG_FILTER_NAME, &[RUSTORY_ARTIFACT_EXTENSION])
         .save_file(move |path| {
@@ -219,8 +219,7 @@ pub async fn export_story_archive_with_save_dialog(
     };
 
     let (tx, mut rx) = async_runtime::channel::<Option<FilePath>>(1);
-    app.dialog()
-        .file()
+    file_dialog(&app)
         .set_file_name(&input.suggested_filename)
         .add_filter(
             ARCHIVE_EXPORT_DIALOG_FILTER_NAME,
@@ -491,8 +490,7 @@ pub async fn analyze_artifact_for_import(
     app: AppHandle,
 ) -> Result<ImportArtifactAnalysisDto, AppError> {
     let (tx, mut rx) = async_runtime::channel::<Option<FilePath>>(1);
-    app.dialog()
-        .file()
+    file_dialog(&app)
         .add_filter(IMPORT_DIALOG_FILTER_NAME, &[RUSTORY_ARTIFACT_EXTENSION])
         .pick_file(move |path| {
             let _ = tx.try_send(path);
@@ -652,7 +650,7 @@ pub async fn analyze_structured_folder_for_creation(
     app: AppHandle,
 ) -> Result<StructuredCreationAnalysisDto, AppError> {
     let (tx, mut rx) = async_runtime::channel::<Option<FilePath>>(1);
-    app.dialog().file().pick_folder(move |path| {
+    file_dialog(&app).pick_folder(move |path| {
         let _ = tx.try_send(path);
     });
 
@@ -758,8 +756,7 @@ pub async fn analyze_structured_archive_for_creation(
     app: AppHandle,
 ) -> Result<ArchiveCreationAnalysisDto, AppError> {
     let (tx, mut rx) = async_runtime::channel::<Option<FilePath>>(1);
-    app.dialog()
-        .file()
+    file_dialog(&app)
         .add_filter(ARCHIVE_DIALOG_FILTER_NAME, &["zip"])
         .pick_file(move |path| {
             let _ = tx.try_send(path);

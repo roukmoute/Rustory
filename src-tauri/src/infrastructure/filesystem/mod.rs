@@ -1,5 +1,6 @@
 pub mod app_paths;
 pub mod catalog_covers;
+pub mod dialog_start_directory;
 pub mod import_store;
 pub mod node_media;
 pub mod source_archive_store;

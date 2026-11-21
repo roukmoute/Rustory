@@ -1,5 +1,5 @@
 use tauri::{async_runtime, AppHandle, Manager, State};
-use tauri_plugin_dialog::{DialogExt, FilePath};
+use tauri_plugin_dialog::FilePath;
 
 use crate::application::story::node::{
     self, RecordNodeDraftInput, RemoveNodeMediaInput, SaveNodeContentInput,
@@ -9,6 +9,7 @@ use crate::application::story::recovery::{
 };
 use crate::application::story::structure::{self, MoveDirection};
 use crate::application::story::{self, CreateStoryInput, UpdateStoryInput};
+use crate::commands::file_dialog::file_dialog;
 use crate::commands::shared::{base64_encode, parse_media_slot, validate_story_id};
 use crate::domain::shared::AppError;
 use crate::domain::story::RecoveryDraftDelta;
@@ -463,8 +464,7 @@ pub async fn attach_node_media(
         MediaKind::Audio => ("Audio (MP3, WAV, OGG)", &["mp3", "wav", "ogg"]),
     };
     let (tx, mut rx) = async_runtime::channel::<Option<FilePath>>(1);
-    app.dialog()
-        .file()
+    file_dialog(&app)
         .add_filter(filter_name, exts)
         .pick_file(move |path| {
             let _ = tx.try_send(path);
