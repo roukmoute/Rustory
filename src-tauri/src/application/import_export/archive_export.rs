@@ -12,11 +12,13 @@
 //!   — the same plan, the same refusals (an episode without audio, a
 //!   device-copied pack), worded for the export.
 //!
-//! One layout goes beyond the send: a story WITH CHOICES is exported by its
-//! own graph — every node a stage, the options of a node the wheel that
-//! follows it — where the send still refuses it. A story created from a
-//! pack whose archive was not retained is such a story: its stages, its
-//! media and its navigation go back out as the pack they came from.
+//! A story WITH CHOICES is laid out by its own graph — every node a stage,
+//! the options of a node the wheel that follows it — exactly as the send
+//! lays it out. A story created from a pack whose archive was not retained
+//! is such a story: its stages, its media and its navigation go back out
+//! as the pack they came from. ONE difference with the send: a node without
+//! sound is carried as a silent stage (an archive may hold a picture alone)
+//! where a device, which plays nothing else, has it refused.
 //!
 //! Every asset goes through the send engine's own DEVICE NORMALIZATION
 //! ([`to_device_image`] / [`to_device_audio`]): what lands in the archive is
@@ -53,11 +55,9 @@ use serde_json::Value;
 use crate::application::device::send::{
     ArchiveSource, AssetUnavailable, MediaStoreSource, PackAssetSource,
 };
-use crate::application::device::story_pack::{
-    plan_named_story_pack, ChoiceStories, StoryPackRefusal,
-};
+use crate::application::device::story_pack::{plan_named_story_pack, StoryPackRefusal};
 use crate::domain::device::pack_transcode::device_asset_basename;
-use crate::domain::device::{format_device_bytes, StoryPackBlocker};
+use crate::domain::device::{format_device_bytes, SilentNodes, StoryPackBlocker};
 use crate::domain::export::{
     prepare_story_archive_descriptor, studio_pack_descriptor, StoryArchiveAsset,
     StoryArchiveAssetKind, StoryArchiveDescriptorError, STORY_ARCHIVE_ASSETS_PREFIX,
@@ -138,8 +138,8 @@ pub fn plan_story_archive_export(
             PackSource::RetainedArchive(path),
         ),
         None => {
-            let planned = plan_named_story_pack(db, story_id, ChoiceStories::LaidOut)
-                .map_err(refusal_error)?;
+            let planned =
+                plan_named_story_pack(db, story_id, SilentNodes::Carried).map_err(refusal_error)?;
             let descriptor = studio_pack_descriptor(&planned.pack, &planned.stage_names);
             (planned.title, PackSource::Synthesized(descriptor))
         }
@@ -523,6 +523,11 @@ fn refusal_error(refusal: StoryPackRefusal) -> AppError {
             "cause": "option_without_destination",
             "node": node_id,
         })),
+        // The export carries a silent node as a silent stage: its plan
+        // never refuses one. Should it ever, the reason is a missing audio.
+        StoryPackRefusal::NodeWithoutAudio { .. } => {
+            blocker_error(StoryPackBlocker::MissingAudio)
+        }
     }
 }
 

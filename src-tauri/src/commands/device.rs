@@ -679,16 +679,18 @@ enum PackSource {
 /// - a story that RETAINED its source archive (`source-archives/<storyId>.zip`,
 ///   kept at import) is sent from that archive;
 /// - any other story (created from a web page, an RSS feed, a folder or the
-///   editor) has its pack SYNTHESIZED from its structure and node media
-///   (sequential playback of its episodes) — planned under the SQLite lock,
-///   which is RELEASED before any file or device I/O.
+///   editor) has its pack SYNTHESIZED from its structure and node media —
+///   its episodes in sequence or behind a spoken menu, or its own graph when
+///   it has choices — planned under the SQLite lock, which is RELEASED
+///   before any file or device I/O.
 ///
 /// The gate is the DEDICATED `send_archive` capability, distinct from
 /// `write_story`: a V3 receives packs through this engine (transcode +
 /// re-cipher for the target `.md`) while the library round-trip stays closed.
-/// A story that cannot become a pack (an episode without audio, a story with
-/// choices, a device-copied pack) is refused with an actionable message BEFORE
-/// any device touch — the same reason its library card announces.
+/// A story that cannot become a pack (an episode or a node without audio, an
+/// option that leads nowhere, a device-copied pack) is refused with an
+/// actionable message BEFORE any device touch — the same reason its library
+/// card announces.
 #[tauri::command]
 pub async fn send_pack_to_device(
     app: AppHandle,
@@ -718,7 +720,8 @@ pub async fn send_pack_to_device(
     } else {
         // No retained archive: plan the synthesized pack from the library,
         // under the lock and without any other I/O; every refusal (no audio,
-        // choices, device-copied pack) lands here, before any device touch.
+        // an option that leads nowhere, device-copied pack) lands here,
+        // before any device touch.
         let pack = {
             let db = state
                 .db

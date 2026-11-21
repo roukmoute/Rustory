@@ -43,11 +43,10 @@ pub use profile::{
     classify_flam, classify_lunii, DeviceProfile, DeviceProfileClassification, UnsupportedReason,
 };
 pub use story_pack::{
-    choice_nodes, choice_pack_uuid, choice_stage_names, linear_episodes, menu_blocker,
-    offers_choices, stage_names, synthesize_choice_pack, synthesize_menu_pack,
-    synthesize_sequential_pack, ChoiceLayoutBlocker, ChoiceNode, ChoiceNodeAssets, EpisodeAssets,
-    LinearEpisode, MenuEpisode, MenuPackAssets, StoryLayout, StoryPackBlocker,
-    MENU_QUESTION_STAGE_NAME,
+    choice_layout, choice_stage_names, linear_episodes, menu_blocker, offers_choices, stage_names,
+    synthesize_choice_pack, synthesize_menu_pack, synthesize_sequential_pack, ChoiceLayout,
+    ChoiceLayoutBlocker, ChoiceNode, ChoiceNodeAssets, EpisodeAssets, LinearEpisode, MenuEpisode,
+    MenuPackAssets, SilentNodes, StoryLayout, StoryPackBlocker, MENU_QUESTION_STAGE_NAME,
 };
 pub use support_matrix::{
     official_device_support_matrix, supported_operations_for, supported_operations_in,

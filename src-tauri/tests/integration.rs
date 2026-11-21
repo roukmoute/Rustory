@@ -12,6 +12,9 @@ mod story_export;
 #[path = "integration/story_archive_export.rs"]
 mod story_archive_export;
 
+#[path = "integration/story_choice_send.rs"]
+mod story_choice_send;
+
 #[path = "integration/story_drafts_migration.rs"]
 mod story_drafts_migration;
 
