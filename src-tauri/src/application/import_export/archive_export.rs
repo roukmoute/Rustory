@@ -37,15 +37,18 @@ use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
-use crate::application::device::send::{ArchiveSource, MediaStoreSource, PackAssetSource};
+use crate::application::device::send::{
+    ArchiveSource, AssetUnavailable, MediaStoreSource, PackAssetSource,
+};
 use crate::application::device::story_pack::{plan_named_story_pack, StoryPackRefusal};
 use crate::domain::device::pack_transcode::device_asset_basename;
-use crate::domain::device::StoryPackBlocker;
+use crate::domain::device::{format_device_bytes, StoryPackBlocker};
 use crate::domain::export::{
     prepare_story_archive_descriptor, studio_pack_descriptor, StoryArchiveAsset,
     StoryArchiveAssetKind, StoryArchiveDescriptorError, STORY_ARCHIVE_ASSETS_PREFIX,
     STORY_ARCHIVE_DESCRIPTOR_NAME, STORY_ARCHIVE_THUMBNAIL_NAME,
 };
+use crate::domain::import::MAX_ARCHIVE_MEDIA_BYTES;
 use crate::domain::shared::AppError;
 use crate::domain::story::CanonicalStructure;
 use crate::infrastructure::db::DbHandle;
@@ -177,7 +180,8 @@ pub fn export_story_archive(
         .map_err(|err| descriptor_error(origin, err))?;
 
     // Every asset is located (and weighed) BEFORE anything is staged: a
-    // pack missing a media is refused without touching the destination.
+    // pack missing a media — or carrying one too large to be read — is
+    // refused without touching the destination.
     let work = WorkPlan::new(&descriptor.assets, source.as_mut(), origin)?;
     let report = |done: f64| {
         let pct = (done / work.total * f64::from(PROGRESS_END)).round() as u8;
@@ -220,7 +224,7 @@ pub fn export_story_archive(
         for asset in &descriptor.assets {
             let bytes = source
                 .read_asset(&asset.source_ref)
-                .ok_or_else(|| missing_asset_error(origin, &asset.source_ref))?;
+                .map_err(|reason| unavailable_asset_error(origin, &asset.source_ref, reason))?;
             let (device_ready, method) = match asset.kind {
                 StoryArchiveAssetKind::Image => (
                     to_device_image(&bytes).map_err(|err| convert_error(&asset.source_ref, err))?,
@@ -306,7 +310,7 @@ impl WorkPlan {
         for asset in assets {
             let size = source
                 .asset_size(&asset.source_ref)
-                .ok_or_else(|| missing_asset_error(origin, &asset.source_ref))?
+                .map_err(|reason| unavailable_asset_error(origin, &asset.source_ref, reason))?
                 as f64;
             let cost = match asset.kind {
                 StoryArchiveAssetKind::Image => size * READ_COST + IMAGE_COST_BYTES,
@@ -543,6 +547,44 @@ fn missing_asset_error(origin: AssetOrigin, source_ref: &str) -> AppError {
     }))
 }
 
+/// A media the pack references IS where the pack says, but weighs more than
+/// a single media may — never loaded, and never worded as an absence.
+fn oversize_asset_error(origin: AssetOrigin, source_ref: &str) -> AppError {
+    let limit = format_device_bytes(MAX_ARCHIVE_MEDIA_BYTES);
+    let (message, action) = match origin {
+        AssetOrigin::SourceArchive => (
+            format!("Export impossible: un média du pack dépasse la taille autorisée ({limit})."),
+            "Dans l'archive d'origine, remplace ce média par un fichier plus léger, réimporte l'archive dans Rustory, puis réessaie l'export.",
+        ),
+        AssetOrigin::MediaStore => (
+            format!(
+                "Export impossible: un média de l'histoire dépasse la taille autorisée ({limit})."
+            ),
+            "Rouvre l'histoire pour remplacer ce média par un fichier plus léger, puis réessaie l'export.",
+        ),
+    };
+    AppError::export_failed(message, action).with_details(serde_json::json!({
+        "source": origin.tag(),
+        "cause": "asset_oversize",
+        "max_bytes": MAX_ARCHIVE_MEDIA_BYTES,
+        // Only the device basename (8 characters), never a path.
+        "asset": device_asset_basename(source_ref),
+    }))
+}
+
+/// The refusal for a media its source cannot hand out — the two reasons
+/// keep their own copy and their own `details.cause`.
+fn unavailable_asset_error(
+    origin: AssetOrigin,
+    source_ref: &str,
+    reason: AssetUnavailable,
+) -> AppError {
+    match reason {
+        AssetUnavailable::Missing => missing_asset_error(origin, source_ref),
+        AssetUnavailable::Oversize => oversize_asset_error(origin, source_ref),
+    }
+}
+
 /// A media exists but cannot be converted to the format a device plays (an
 /// undecodable image, or audio no decoder recognizes). Shipped as is it
 /// would fail wherever the archive is opened — refused instead.
@@ -579,6 +621,9 @@ fn storage_error(stage: &'static str) -> AppError {
 mod tests {
     use super::*;
     use crate::application::import_export::archive_creation::accept_structured_archive_creation;
+    use crate::application::import_export::archive_creation::test_support::{
+        write_pack_archive, DEVICE_SOUND_HEADER,
+    };
     use crate::application::story::{create_story, CreateStoryInput};
     use crate::domain::device::{is_canonical_pack_uuid, transcode_pack, StudioStoryPack};
     use crate::domain::shared::AppErrorCode;
@@ -967,6 +1012,168 @@ mod tests {
                 "stage {stage} {field} is carried byte for byte"
             );
         }
+    }
+
+    // ===== Per-media bound: what is exported is always imported whole =====
+
+    /// A device-ready sound of `len` bytes: a conformant first frame header
+    /// and filler. It passes the device normalization byte for byte — its
+    /// SIZE is what the tests using it are about.
+    fn device_ready_sound(len: usize) -> Vec<u8> {
+        let mut bytes = vec![0u8; len];
+        bytes[..DEVICE_SOUND_HEADER.len()].copy_from_slice(&DEVICE_SOUND_HEADER);
+        bytes
+    }
+
+    /// The pack identity of the archive at `path` and the sound its stage
+    /// `stage` plays — that one entry only (these archives carry sounds of
+    /// tens of megabytes).
+    fn stage_sound(path: &Path, stage: usize) -> (String, Vec<u8>) {
+        let mut archive = zip::ZipArchive::new(std::fs::File::open(path).expect("open zip"))
+            .expect("a zip archive");
+        let mut descriptor = Vec::new();
+        archive
+            .by_name("story.json")
+            .expect("descriptor")
+            .read_to_end(&mut descriptor)
+            .expect("read descriptor");
+        let root: Value = serde_json::from_slice(&descriptor).expect("descriptor json");
+        let pack = root["stageNodes"][0]["uuid"]
+            .as_str()
+            .expect("pack identity")
+            .to_string();
+        let name = root["stageNodes"][stage]["audio"]
+            .as_str()
+            .expect("sound reference");
+        let mut sound = Vec::new();
+        archive
+            .by_name(&format!("assets/{name}"))
+            .expect("sound entry")
+            .read_to_end(&mut sound)
+            .expect("read sound");
+        (pack, sound)
+    }
+
+    /// Byte sizes of the sounds the story `story_id` holds in `library`.
+    fn stored_sound_sizes(library: &Library, story_id: &str) -> Vec<u64> {
+        let mut statement = library
+            .db
+            .conn()
+            .prepare("SELECT byte_size FROM assets WHERE story_id = ?1 AND media_type = 'audio'")
+            .expect("prepare");
+        let rows = statement
+            .query_map(rusqlite::params![story_id], |row| row.get(0))
+            .expect("query");
+        rows.collect::<Result<Vec<u64>, _>>().expect("rows")
+    }
+
+    /// A one-episode story whose only media is `sound`, stored as `ext`.
+    fn one_sound_story(library: &mut Library, title: &str, ext: &str, sound: &[u8]) -> String {
+        let id = library.story(title);
+        let audio = format!("{}.{ext}", "a".repeat(56) + "1234abcd");
+        library.asset(&id, "aud-1", "audio", &audio, sound);
+        library.structure(&id, &[("n1", title, Some("aud-1"), None)]);
+        id
+    }
+
+    #[test]
+    fn a_sound_of_exactly_the_per_media_bound_travels_from_library_to_library() {
+        // ONE bound on both sides of the round trip, and it is inclusive:
+        // the largest sound a library holds is exported whole, imported
+        // whole (nothing flagged, nothing left out), still sendable, and
+        // exported again byte for byte.
+        let mut library = Library::new();
+        let id = one_sound_story(
+            &mut library,
+            "Longue veillée",
+            "mp3",
+            &device_ready_sound(MAX_ARCHIVE_MEDIA_BYTES as usize),
+        );
+        let out_dir = TempDir::new().expect("out");
+        let shared = out_dir.path().join("veillee.zip");
+        library
+            .export(&id, &shared)
+            .expect("a sound of exactly the bound exports");
+        let (pack, exported) = stage_sound(&shared, 0);
+        assert_eq!(pack, id);
+        assert_eq!(exported.len() as u64, MAX_ARCHIVE_MEDIA_BYTES);
+
+        let mut other = Library::new();
+        let card =
+            accept_structured_archive_creation(&mut other.db, other.app_data.path(), &shared)
+                .expect("the shared archive imports");
+        assert!(
+            card.import_report.is_none(),
+            "a clean import: no media was left out"
+        );
+        assert!(card.sendable, "the imported story can be sent to a device");
+        let stored = stored_sound_sizes(&other, &card.id);
+        assert!(!stored.is_empty());
+        assert!(
+            stored.iter().all(|size| *size == MAX_ARCHIVE_MEDIA_BYTES),
+            "the sound is stored whole: {stored:?}"
+        );
+
+        let back = out_dir.path().join("retour.zip");
+        other.export(&card.id, &back).expect("export back");
+        let (pack_back, exported_back) = stage_sound(&back, 0);
+        assert_eq!(pack_back, id, "the pack keeps its identity");
+        assert!(
+            exported_back == exported,
+            "the sound is carried byte for byte"
+        );
+    }
+
+    #[test]
+    fn a_retained_pack_media_over_the_bound_is_refused_as_too_large_and_a_missing_one_as_missing() {
+        let mut library = Library::new();
+        let id = library.story("Importée");
+        let audio = format!("{}.mp3", "d".repeat(32) + "0badf00d");
+        let descriptor = format!(
+            r#"{{"format":"v1","version":1,"title":"Importée","nightModeAvailable":false,"actionNodes":[],
+            "stageNodes":[{{"uuid":"{id}","squareOne":true,"image":null,"audio":"{audio}",
+              "okTransition":null,"homeTransition":null,
+              "controlSettings":{{"wheel":true,"ok":true,"home":false,"pause":false,"autoplay":false}}}}]}}"#
+        );
+        let retained = resolve_source_archive_path(library.app_data.path(), &id);
+        std::fs::create_dir_all(retained.parent().expect("parent")).expect("dir");
+        let out_dir = TempDir::new().expect("out");
+        let destination = out_dir.path().join("histoire.zip");
+
+        // The media IS in the retained pack, one byte over the bound: named
+        // for what it is, before anything is staged.
+        write_pack_archive(
+            &retained,
+            Some(&descriptor),
+            &[(audio.as_str(), MAX_ARCHIVE_MEDIA_BYTES + 1)],
+        );
+        let err = library.export(&id, &destination).expect_err("refused");
+        assert_eq!(err.code, AppErrorCode::ExportFailed);
+        assert_eq!(details(&err)["source"], "source_archive");
+        assert_eq!(details(&err)["cause"], "asset_oversize");
+        assert_eq!(details(&err)["max_bytes"], MAX_ARCHIVE_MEDIA_BYTES);
+        assert_eq!(details(&err)["asset"], "0BADF00D");
+        assert_eq!(
+            err.message,
+            "Export impossible: un média du pack dépasse la taille autorisée (134 Mo)."
+        );
+        assert!(!destination.exists());
+        assert_eq!(
+            std::fs::read_dir(out_dir.path()).expect("out dir").count(),
+            0,
+            "nothing is staged"
+        );
+
+        // The media is NOT in the retained pack: the absence keeps its own
+        // words.
+        write_pack_archive(&retained, Some(&descriptor), &[]);
+        let err = library.export(&id, &destination).expect_err("refused");
+        assert_eq!(details(&err)["source"], "source_archive");
+        assert_eq!(details(&err)["cause"], "asset_missing");
+        assert_eq!(
+            err.message,
+            "Export impossible: un média du pack est introuvable dans son archive source."
+        );
     }
 
     #[test]

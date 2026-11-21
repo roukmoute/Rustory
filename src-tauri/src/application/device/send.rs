@@ -25,13 +25,14 @@ use crate::domain::device::{
     check_device_space, format_device_bytes, transcode_pack, DeviceFamily, DeviceProfile,
     DeviceSpaceVerdict, FirmwareCohort, StudioStoryPack, SupportedOperation, LUNII_PRIMARY_MARKER,
 };
+use crate::domain::import::MAX_ARCHIVE_MEDIA_BYTES;
 use crate::domain::shared::AppError;
 use crate::domain::transfer::short_id_from_pack_uuid;
 use crate::infrastructure::device::{
     assemble_v3_pack, audio_is_device_ready, to_device_audio, to_device_image, AssembleError,
     AssetConvertError, DeviceScanner, DeviceV3PackWriter, WriteProgress,
 };
-use crate::infrastructure::filesystem::read_media;
+use crate::infrastructure::filesystem::{read_media, NodeMediaError, WEB_MAX_MEDIA_BYTES};
 
 use super::{check_operation_allowed, resolve_connected_lunii, ConnectedLuniiOutcome};
 
@@ -39,9 +40,11 @@ use super::{check_operation_allowed, resolve_connected_lunii, ConnectedLuniiOutc
 const STORY_JSON_NAME: &str = "story.json";
 /// Assets live under this prefix (bare basename is a hand-made-zip fallback).
 const ASSETS_PREFIX: &str = "assets/";
-/// Byte bound on the descriptor and on a single asset (defensive, generous).
+/// Byte bound on the descriptor (defensive, generous). A single ASSET is
+/// bounded by [`MAX_ARCHIVE_MEDIA_BYTES`] — the very bound the creation flow
+/// applied when it admitted the archive, so every media it retained can be
+/// read back here.
 const MAX_STORY_JSON_BYTES: u64 = 64 * 1024 * 1024;
-const MAX_ASSET_BYTES: u64 = 64 * 1024 * 1024;
 /// Bound on the archive's entry count.
 const MAX_ARCHIVE_ENTRIES: usize = 200_000;
 /// Bytes peeked from an audio asset to decide whether it needs transcoding
@@ -181,19 +184,32 @@ fn resolve_send_target(
     Ok((profile, mount_path))
 }
 
+/// Why a source cannot hand out one of the pack's assets. Closed set — the
+/// two reasons are never folded together: a media that is THERE but too
+/// large is not "missing", and the user's next gesture differs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AssetUnavailable {
+    /// Not there, or there but unreadable.
+    Missing,
+    /// There, but over the byte bound of a single media — never loaded.
+    Oversize,
+}
+
 /// Where a pack's assets come from. Each source owns the copy of its
-/// "missing asset" SEND refusal (an archive is a file the user holds, a
+/// "unavailable asset" SEND refusals (an archive is a file the user holds, a
 /// media store is the library's own). Shared with the story archive export,
 /// which reads the very same assets and words its own refusals.
 pub(crate) trait PackAssetSource {
-    /// Byte size of the asset, without reading it. `None` = absent.
-    fn asset_size(&mut self, name: &str) -> Option<u64>;
+    /// Byte size of the asset, without reading it. An asset over the
+    /// source's per-media bound is refused HERE already — before any work —
+    /// exactly as its read would be.
+    fn asset_size(&mut self, name: &str) -> Result<u64, AssetUnavailable>;
     /// Up to `max_bytes` leading bytes of the asset. `None` = absent.
     fn peek_asset(&mut self, name: &str, max_bytes: usize) -> Option<Vec<u8>>;
-    /// The whole asset. `None` = absent or oversize.
-    fn read_asset(&mut self, name: &str) -> Option<Vec<u8>>;
+    /// The whole asset, bounded on the bytes actually read.
+    fn read_asset(&mut self, name: &str) -> Result<Vec<u8>, AssetUnavailable>;
     /// The SEND refusal for an asset this source cannot provide.
-    fn missing_asset_error(&self, name: &str) -> AppError;
+    fn unavailable_asset_error(&self, name: &str, reason: AssetUnavailable) -> AppError;
 }
 
 /// The engine proper, from a parsed pack + its asset source to the device.
@@ -246,7 +262,7 @@ fn send_pack(
         if !assets.contains_key(filename) {
             let bytes = source
                 .read_asset(filename)
-                .ok_or_else(|| source.missing_asset_error(filename))?;
+                .map_err(|reason| source.unavailable_asset_error(filename, reason))?;
             let device_ready =
                 to_device_image(&bytes).map_err(|e| asset_convert_error(filename, e))?;
             device_ready_bytes += device_ready.len() as u64;
@@ -260,7 +276,7 @@ fn send_pack(
         if !assets.contains_key(filename) {
             let bytes = source
                 .read_asset(filename)
-                .ok_or_else(|| source.missing_asset_error(filename))?;
+                .map_err(|reason| source.unavailable_asset_error(filename, reason))?;
             let device_ready =
                 to_device_audio(&bytes).map_err(|e| asset_convert_error(filename, e))?;
             device_ready_bytes += device_ready.len() as u64;
@@ -281,7 +297,9 @@ fn send_pack(
     let files =
         assemble_v3_pack(&transcoded, &md, &|f| assets.get(f).cloned()).map_err(|e| match e {
             AssembleError::UnreadableDeviceMetadata => device_write_error("md_unreadable"),
-            AssembleError::MissingAsset(f) => source.missing_asset_error(&f),
+            AssembleError::MissingAsset(f) => {
+                source.unavailable_asset_error(&f, AssetUnavailable::Missing)
+            }
         })?;
 
     // The EXACT room check, on the bytes actually about to be written and
@@ -349,7 +367,8 @@ impl ProgressPlan {
             }
             let size = source
                 .asset_size(filename)
-                .ok_or_else(|| source.missing_asset_error(filename))? as f64;
+                .map_err(|reason| source.unavailable_asset_error(filename, reason))?
+                as f64;
             let cost = size * READ_COST + IMAGE_COST_BYTES;
             costs.insert(filename.clone(), cost);
             asset_cost += cost;
@@ -361,7 +380,8 @@ impl ProgressPlan {
             }
             let size = source
                 .asset_size(filename)
-                .ok_or_else(|| source.missing_asset_error(filename))? as f64;
+                .map_err(|reason| source.unavailable_asset_error(filename, reason))?
+                as f64;
             let device_ready = source
                 .peek_asset(filename, AUDIO_PEEK_BYTES)
                 .is_some_and(|head| audio_is_device_ready(&head));
@@ -451,18 +471,26 @@ impl ArchiveSource {
     /// The pack descriptor (`story.json`), bounded. `None` = absent or
     /// oversize.
     pub(crate) fn read_descriptor(&mut self) -> Option<Vec<u8>> {
-        read_entry(&mut self.archive, STORY_JSON_NAME, MAX_STORY_JSON_BYTES)
+        read_entry(&mut self.archive, STORY_JSON_NAME, MAX_STORY_JSON_BYTES).ok()
     }
 }
 
 impl PackAssetSource for ArchiveSource {
-    fn asset_size(&mut self, name: &str) -> Option<u64> {
+    fn asset_size(&mut self, name: &str) -> Result<u64, AssetUnavailable> {
         for candidate in entry_candidates(name) {
             if let Ok(entry) = self.archive.by_name(&candidate) {
-                return entry.is_file().then(|| entry.size());
+                if !entry.is_file() {
+                    return Err(AssetUnavailable::Missing);
+                }
+                let size = entry.size();
+                return if size > MAX_ARCHIVE_MEDIA_BYTES {
+                    Err(AssetUnavailable::Oversize)
+                } else {
+                    Ok(size)
+                };
             }
         }
-        None
+        Err(AssetUnavailable::Missing)
     }
 
     fn peek_asset(&mut self, name: &str, max_bytes: usize) -> Option<Vec<u8>> {
@@ -483,12 +511,15 @@ impl PackAssetSource for ArchiveSource {
         None
     }
 
-    fn read_asset(&mut self, name: &str) -> Option<Vec<u8>> {
-        read_entry(&mut self.archive, name, MAX_ASSET_BYTES)
+    fn read_asset(&mut self, name: &str) -> Result<Vec<u8>, AssetUnavailable> {
+        read_entry(&mut self.archive, name, MAX_ARCHIVE_MEDIA_BYTES)
     }
 
-    fn missing_asset_error(&self, name: &str) -> AppError {
-        archive_asset_error(name)
+    fn unavailable_asset_error(&self, name: &str, reason: AssetUnavailable) -> AppError {
+        match reason {
+            AssetUnavailable::Missing => archive_asset_error(name),
+            AssetUnavailable::Oversize => archive_asset_oversize_error(name),
+        }
     }
 }
 
@@ -498,32 +529,37 @@ fn entry_candidates(name: &str) -> [String; 2] {
     [name.to_string(), format!("{ASSETS_PREFIX}{name}")]
 }
 
-/// Read one entry (`assets/<name>` first, bare `<name>` fallback), bounded by
-/// `max_bytes` on the bytes actually read. `None` = absent / oversize.
+/// Read one entry (bare `<name>` first, then `assets/<name>`), bounded by
+/// `max_bytes` (inclusive). The DECLARED size refuses an honest oversize
+/// entry before a single byte of it is inflated; the bound is then
+/// re-applied to the bytes actually read, so a lying header gains nothing.
 fn read_entry(
     archive: &mut zip::ZipArchive<std::fs::File>,
     name: &str,
     max_bytes: u64,
-) -> Option<Vec<u8>> {
+) -> Result<Vec<u8>, AssetUnavailable> {
     for candidate in entry_candidates(name) {
-        if archive.by_name(&candidate).is_ok() {
-            let mut entry = archive.by_name(&candidate).ok()?;
-            if !entry.is_file() {
-                return None;
-            }
-            let mut buf = Vec::new();
-            entry
-                .by_ref()
-                .take(max_bytes + 1)
-                .read_to_end(&mut buf)
-                .ok()?;
-            if buf.len() as u64 > max_bytes {
-                return None;
-            }
-            return Some(buf);
+        let Ok(mut entry) = archive.by_name(&candidate) else {
+            continue;
+        };
+        if !entry.is_file() {
+            return Err(AssetUnavailable::Missing);
         }
+        if entry.size() > max_bytes {
+            return Err(AssetUnavailable::Oversize);
+        }
+        let mut buf = Vec::new();
+        entry
+            .by_ref()
+            .take(max_bytes.saturating_add(1))
+            .read_to_end(&mut buf)
+            .map_err(|_| AssetUnavailable::Missing)?;
+        if buf.len() as u64 > max_bytes {
+            return Err(AssetUnavailable::Oversize);
+        }
+        return Ok(buf);
     }
-    None
+    Err(AssetUnavailable::Missing)
 }
 
 // ===== Media-store source =====
@@ -543,14 +579,21 @@ impl MediaStoreSource {
 }
 
 impl PackAssetSource for MediaStoreSource {
-    fn asset_size(&mut self, name: &str) -> Option<u64> {
+    fn asset_size(&mut self, name: &str) -> Result<u64, AssetUnavailable> {
         if !is_bare_file_name(name) {
-            return None;
+            return Err(AssetUnavailable::Missing);
         }
-        std::fs::metadata(self.media_dir.join(name))
+        let size = std::fs::metadata(self.media_dir.join(name))
             .ok()
             .filter(|m| m.is_file())
             .map(|m| m.len())
+            .ok_or(AssetUnavailable::Missing)?;
+        // The store's own read-back ceiling: nothing it admitted is larger,
+        // so only a file altered behind its back lands here.
+        if size > WEB_MAX_MEDIA_BYTES as u64 {
+            return Err(AssetUnavailable::Oversize);
+        }
+        Ok(size)
     }
 
     fn peek_asset(&mut self, name: &str, max_bytes: usize) -> Option<Vec<u8>> {
@@ -563,14 +606,19 @@ impl PackAssetSource for MediaStoreSource {
         Some(buf)
     }
 
-    fn read_asset(&mut self, name: &str) -> Option<Vec<u8>> {
-        read_media(&self.media_dir, name)
-            .ok()
-            .map(|(bytes, _)| bytes)
+    fn read_asset(&mut self, name: &str) -> Result<Vec<u8>, AssetUnavailable> {
+        match read_media(&self.media_dir, name) {
+            Ok((bytes, _)) => Ok(bytes),
+            Err(NodeMediaError::Oversize) => Err(AssetUnavailable::Oversize),
+            Err(_) => Err(AssetUnavailable::Missing),
+        }
     }
 
-    fn missing_asset_error(&self, name: &str) -> AppError {
-        media_asset_error(name)
+    fn unavailable_asset_error(&self, name: &str, reason: AssetUnavailable) -> AppError {
+        match reason {
+            AssetUnavailable::Missing => media_asset_error(name),
+            AssetUnavailable::Oversize => media_asset_oversize_error(name),
+        }
     }
 }
 
@@ -618,6 +666,26 @@ fn archive_asset_error(filename: &str) -> AppError {
     }))
 }
 
+/// A media of the pack IS in the archive but weighs more than a single
+/// media may ([`MAX_ARCHIVE_MEDIA_BYTES`]) — never loaded, and never worded
+/// as an absence: the archive is intact, one of its files is too large.
+fn archive_asset_oversize_error(filename: &str) -> AppError {
+    AppError::device_write_failed(
+        format!(
+            "Envoi impossible: un média du pack dépasse la taille autorisée ({}).",
+            format_device_bytes(MAX_ARCHIVE_MEDIA_BYTES)
+        ),
+        "Dans l'archive d'origine, remplace ce média par un fichier plus léger, réimporte l'archive dans Rustory, puis réessaie l'envoi.",
+    )
+    .with_details(serde_json::json!({
+        "source": "archive",
+        "cause": "asset_oversize",
+        "max_bytes": MAX_ARCHIVE_MEDIA_BYTES,
+        // Only the device basename (8 hex), never a path.
+        "asset": crate::domain::device::pack_transcode::device_asset_basename(filename),
+    }))
+}
+
 /// A media the story's structure references is not in the library's store
 /// (removed, or the store is damaged) — the send never reaches the device.
 fn media_asset_error(filename: &str) -> AppError {
@@ -628,6 +696,26 @@ fn media_asset_error(filename: &str) -> AppError {
     .with_details(serde_json::json!({
         "source": "media_store",
         "cause": "asset_missing",
+        // Only the device basename (8 hex), never a path.
+        "asset": crate::domain::device::pack_transcode::device_asset_basename(filename),
+    }))
+}
+
+/// A media of the library's store weighs more than the store itself admits
+/// (a file altered behind its back) — never loaded, and named for what it
+/// is rather than as a missing media.
+fn media_asset_oversize_error(filename: &str) -> AppError {
+    AppError::device_write_failed(
+        format!(
+            "Envoi impossible: un média de l'histoire dépasse la taille autorisée ({}).",
+            format_device_bytes(WEB_MAX_MEDIA_BYTES as u64)
+        ),
+        "Rouvre l'histoire pour remplacer ce média par un fichier plus léger, puis réessaie l'envoi.",
+    )
+    .with_details(serde_json::json!({
+        "source": "media_store",
+        "cause": "asset_oversize",
+        "max_bytes": WEB_MAX_MEDIA_BYTES as u64,
         // Only the device basename (8 hex), never a path.
         "asset": crate::domain::device::pack_transcode::device_asset_basename(filename),
     }))
@@ -1482,6 +1570,216 @@ mod tests {
             "asset_missing"
         );
         assert!(writer.calls.lock().unwrap().is_empty());
+    }
+
+    // ===== Per-media bound: too large is never "missing" =====
+
+    /// A one-stage pack descriptor whose only stage plays `audio`.
+    fn one_sound_descriptor(audio: &str) -> String {
+        format!(
+            r#"{{"format":"v1","version":1,"nightModeAvailable":false,"actionNodes":[],
+            "stageNodes":[{{"uuid":"{STORY_ID}","squareOne":true,"image":null,"audio":"{audio}",
+              "okTransition":null,"homeTransition":null,
+              "controlSettings":{{"wheel":true,"ok":true,"home":false,"pause":false,"autoplay":false}}}}]}}"#
+        )
+    }
+
+    #[test]
+    fn an_archive_media_is_read_up_to_the_bound_included_and_refused_one_byte_over() {
+        use crate::application::import_export::archive_creation::test_support::write_pack_archive;
+
+        let dir = tempfile::tempdir().expect("dir");
+        let zip = dir.path().join("pack.zip");
+        write_pack_archive(
+            &zip,
+            None,
+            &[
+                ("limite.mp3", MAX_ARCHIVE_MEDIA_BYTES),
+                ("trop.mp3", MAX_ARCHIVE_MEDIA_BYTES + 1),
+            ],
+        );
+        let mut source = ArchiveSource::open(&zip).expect("open the pack");
+
+        // Exactly the bound: sized, then read whole.
+        assert_eq!(source.asset_size("limite.mp3"), Ok(MAX_ARCHIVE_MEDIA_BYTES));
+        let read = source.read_asset("limite.mp3").expect("read at the bound");
+        assert_eq!(read.len() as u64, MAX_ARCHIVE_MEDIA_BYTES);
+        drop(read);
+
+        // One byte more: THERE, but too large — known when the asset is
+        // sized (before any work), and again when it is read.
+        assert_eq!(
+            source.asset_size("trop.mp3"),
+            Err(AssetUnavailable::Oversize)
+        );
+        assert_eq!(
+            source.read_asset("trop.mp3"),
+            Err(AssetUnavailable::Oversize)
+        );
+
+        // Not in the archive at all: missing — a different reason.
+        assert_eq!(
+            source.asset_size("absent.mp3"),
+            Err(AssetUnavailable::Missing)
+        );
+        assert_eq!(
+            source.read_asset("absent.mp3"),
+            Err(AssetUnavailable::Missing)
+        );
+    }
+
+    #[test]
+    fn a_pack_archive_sound_of_exactly_the_bound_is_sent_whole() {
+        use crate::application::import_export::archive_creation::test_support::write_pack_archive;
+
+        // The largest sound the creation admits goes through the WHOLE
+        // engine: sized, read, normalized (already a device sound — carried
+        // as is), assembled and handed to the writer.
+        let audio = format!("{}.mp3", "d".repeat(32) + "0badf00d");
+        let dir = tempfile::tempdir().expect("dir");
+        let zip = dir.path().join("long-son.zip");
+        write_pack_archive(
+            &zip,
+            Some(&one_sound_descriptor(&audio)),
+            &[(audio.as_str(), MAX_ARCHIVE_MEDIA_BYTES)],
+        );
+        let (_mount, scanner, device_identifier) = scratch_v3_mount();
+        let writer = RecordingWriter::default();
+        let sent = send_archive_to_device(
+            &scanner,
+            &writer,
+            &SendArchiveRequest {
+                device_identifier,
+                archive_path: zip,
+            },
+            Duration::from_millis(500),
+            &|_| {},
+        )
+        .expect("a sound of exactly the bound is sent");
+        assert_eq!(sent.pack_uuid, STORY_ID);
+        assert_eq!((sent.image_count, sent.audio_count), (0, 1));
+        assert_eq!(writer.calls.lock().unwrap().len(), 1, "one device write");
+        assert!(
+            *writer.written_bytes.lock().unwrap() >= MAX_ARCHIVE_MEDIA_BYTES,
+            "the whole sound reaches the device"
+        );
+    }
+
+    #[test]
+    fn a_pack_archive_media_over_the_bound_is_refused_as_too_large_and_a_missing_one_as_missing() {
+        use crate::application::import_export::archive_creation::test_support::write_pack_archive;
+
+        let audio = format!("{}.mp3", "d".repeat(32) + "0badf00d");
+        let dir = tempfile::tempdir().expect("dir");
+        let send = |zip: PathBuf| {
+            let (_mount, scanner, device_identifier) = scratch_v3_mount();
+            let writer = RecordingWriter::default();
+            let err = send_archive_to_device(
+                &scanner,
+                &writer,
+                &SendArchiveRequest {
+                    device_identifier,
+                    archive_path: zip,
+                },
+                Duration::from_millis(500),
+                &|_| {},
+            )
+            .expect_err("the pack must be refused");
+            assert!(
+                writer.calls.lock().unwrap().is_empty(),
+                "zero device write on a refusal"
+            );
+            serde_json::to_value(&err).expect("ser")
+        };
+
+        // The media is in the archive, one byte over the bound.
+        let oversize = dir.path().join("trop-gros.zip");
+        write_pack_archive(
+            &oversize,
+            Some(&one_sound_descriptor(&audio)),
+            &[(audio.as_str(), MAX_ARCHIVE_MEDIA_BYTES + 1)],
+        );
+        let v = send(oversize);
+        assert_eq!(v["code"], "DEVICE_WRITE_FAILED");
+        assert_eq!(v["details"]["source"], "archive");
+        assert_eq!(v["details"]["cause"], "asset_oversize");
+        assert_eq!(v["details"]["max_bytes"], MAX_ARCHIVE_MEDIA_BYTES);
+        assert_eq!(v["details"]["asset"], "0BADF00D", "device basename only");
+        assert_eq!(
+            v["message"],
+            "Envoi impossible: un média du pack dépasse la taille autorisée (134 Mo)."
+        );
+        assert!(v["userAction"]
+            .as_str()
+            .is_some_and(|action| action.contains("plus léger")));
+
+        // The media is not in the archive: the absence keeps its own words.
+        let missing = dir.path().join("incomplet.zip");
+        write_pack_archive(&missing, Some(&one_sound_descriptor(&audio)), &[]);
+        let v = send(missing);
+        assert_eq!(v["details"]["source"], "archive");
+        assert_eq!(v["details"]["cause"], "asset_missing");
+        assert_eq!(
+            v["message"],
+            "Envoi impossible: un média du pack est introuvable dans l'archive."
+        );
+    }
+
+    #[test]
+    fn a_store_media_over_the_store_ceiling_is_refused_as_too_large_before_any_read() {
+        use crate::domain::device::{synthesize_sequential_pack, EpisodeAssets};
+
+        // Nothing the store admitted is larger than its ceiling: only a file
+        // altered behind its back gets there. A sparse file (instant) that
+        // carries a sound signature, one byte over.
+        let media = tempfile::tempdir().expect("store");
+        let name = format!("{}.mp3", "e".repeat(56) + "0badcafe");
+        let path = media.path().join(&name);
+        std::fs::write(&path, [0xFF, 0xFB, 0x90, 0xC0]).expect("sound header");
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .expect("open")
+            .set_len(WEB_MAX_MEDIA_BYTES as u64 + 1)
+            .expect("set_len");
+
+        let mut source = MediaStoreSource::new(media.path().to_path_buf());
+        assert_eq!(source.asset_size(&name), Err(AssetUnavailable::Oversize));
+        assert_eq!(source.read_asset(&name), Err(AssetUnavailable::Oversize));
+
+        let (_mount, scanner, device_identifier) = scratch_v3_mount();
+        let writer = RecordingWriter::default();
+        let err = send_story_pack_to_device(
+            &scanner,
+            &writer,
+            &SendStoryPackRequest {
+                device_identifier,
+                pack: synthesize_sequential_pack(
+                    STORY_ID,
+                    &[EpisodeAssets {
+                        audio_ref: name,
+                        image_ref: None,
+                    }],
+                ),
+                media_dir: media.path().to_path_buf(),
+            },
+            Duration::from_millis(500),
+            &|_| {},
+        )
+        .expect_err("an oversize store media refuses");
+        let v = serde_json::to_value(&err).expect("ser");
+        assert_eq!(v["code"], "DEVICE_WRITE_FAILED");
+        assert_eq!(v["details"]["source"], "media_store");
+        assert_eq!(v["details"]["cause"], "asset_oversize");
+        assert_eq!(v["details"]["asset"], "0BADCAFE");
+        assert_eq!(
+            v["message"],
+            "Envoi impossible: un média de l'histoire dépasse la taille autorisée (134 Mo)."
+        );
+        assert!(
+            writer.calls.lock().unwrap().is_empty(),
+            "no write attempted"
+        );
     }
 
     /// Timing harness of the WHOLE story-pack path on a REAL episode file,

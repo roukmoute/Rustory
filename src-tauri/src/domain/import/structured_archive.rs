@@ -42,10 +42,11 @@ use super::structured_folder::{
 /// This bound stays only as an anti-runaway guard, sized for real packs.
 pub const MAX_ARCHIVE_MEDIA_FILES: usize = 8192;
 
-/// Ceiling on ONE media of a story archive — a memory guard: the creation
-/// loads a media whole. ONE constant for its probe, its extraction and its
-/// promotion, so a media the analysis retained is never refused further down
-/// for its size alone.
+/// Ceiling on ONE media of a story archive — a memory guard: every reader
+/// loads a media whole. ONE constant for every place an archive media is
+/// read (the creation's probe, extraction and promotion; the device send and
+/// the archive export of a story that retained its archive), so every media
+/// the creation admitted can be sent and exported again.
 ///
 /// It equals the widest ceiling of the node-media store: a media the library
 /// holds fits an archive as is, and a media an archive carries fits the
