@@ -44,7 +44,7 @@ use crate::domain::story::{
 };
 use crate::infrastructure::db::DbHandle;
 use crate::infrastructure::filesystem::{
-    ensure_node_media_store, resolve_node_media_dir, sniff_media, store_media, MediaKind,
+    ensure_node_media_store, resolve_node_media_dir, sniff_media, store_media_capped, MediaKind,
     StoredMedia, MAX_MEDIA_BYTES,
 };
 use crate::ipc::dto::import_export::{
@@ -176,6 +176,17 @@ pub(crate) struct CreationProvenance {
     pub findings: Vec<crate::domain::import::RecognitionFinding>,
 }
 
+/// The byte bounds a creation source applies to its media at promotion.
+/// Each source owns its pair — a hand-made folder and a story archive are
+/// not sized alike — and names both, so the two can never be swapped.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct MediaBounds {
+    /// Ceiling on ONE media file, on the bytes actually read.
+    pub per_media: u64,
+    /// Ceiling on the SUM of the distinct promoted media.
+    pub total: u64,
+}
+
 /// A prepare refusal: the typed error + the files ALREADY promoted when it
 /// struck. The caller MUST hand `promoted` to
 /// [`compensate_structured_creation`] (under a brief DB lock) so no
@@ -250,7 +261,12 @@ pub fn prepare_structured_creation(
             state: outcome.analysis.state,
             findings: outcome.analysis.findings,
         },
-        MAX_FOLDER_TOTAL_MEDIA_BYTES,
+        // The folder's own bounds: each media within the local-attach
+        // ceiling of the node-media store, the very bound its probe applies.
+        MediaBounds {
+            per_media: MAX_MEDIA_BYTES as u64,
+            total: MAX_FOLDER_TOTAL_MEDIA_BYTES,
+        },
         // No extraction step for a folder — promotion fills the whole bar.
         &|done, total| {
             if total > 0 {
@@ -265,13 +281,15 @@ pub fn prepare_structured_creation(
 /// archive): defensive title re-check, birth timestamp, media promotion
 /// from `media_base_dir` (the picked folder, or the archive's bounded
 /// extraction directory), asset wiring, canonical serialization. The
-/// caller owns the source-specific analysis and provenance validation.
+/// caller owns the source-specific analysis and provenance validation, and
+/// hands in the media bounds its own analysis applied (`media_bounds`) so
+/// the promotion can never disagree with the verdict it follows.
 pub(crate) fn prepare_from_creatable(
     app_data_dir: &Path,
     media_base_dir: &Path,
     creatable: &crate::domain::import::CreatableStory,
     provenance: CreationProvenance,
-    max_total_media_bytes: u64,
+    media_bounds: MediaBounds,
     // Called after each DISTINCT media is promoted, as `(done, total_distinct)`,
     // so a caller can surface real promotion progress. A no-op for callers that
     // do not stream progress.
@@ -294,8 +312,9 @@ pub(crate) fn prepare_from_creatable(
     };
 
     // FILES FIRST — promote each DISTINCT retained basename into the
-    // content-addressed store, re-applying the TOTAL byte bound on the
-    // bytes actually read. No DB handle exists here by construction.
+    // content-addressed store, re-applying the per-media and the TOTAL byte
+    // bounds on the bytes actually read. No DB handle exists here by
+    // construction.
     let total_distinct = creatable
         .retained_media
         .iter()
@@ -306,7 +325,7 @@ pub(crate) fn prepare_from_creatable(
         app_data_dir,
         media_base_dir,
         &creatable.retained_media,
-        max_total_media_bytes,
+        media_bounds,
         &|done| on_promote(done, total_distinct),
     )?;
 
@@ -369,16 +388,17 @@ pub(crate) fn prepare_from_creatable(
     })
 }
 
-/// Promote each DISTINCT retained basename, RE-APPLYING the total byte
-/// bound on the bytes actually read — the probe sizes may be stale (files
-/// can grow between the re-analysis and the promotion). Beyond
-/// `max_total_bytes` the accept refuses with EVERYTHING promoted so far
-/// (current file included) handed to the compensation.
+/// Promote each DISTINCT retained basename, RE-APPLYING the source's byte
+/// bounds on the bytes actually read — the probe sizes may be stale (files
+/// can grow between the re-analysis and the promotion). A file beyond
+/// `bounds.per_media` refuses without being promoted; beyond `bounds.total`
+/// the accept refuses with EVERYTHING promoted so far (current file
+/// included) handed to the compensation.
 fn promote_retained_media(
     app_data_dir: &Path,
     folder_path: &Path,
     retained_media: &[RetainedMediaRef],
-    max_total_bytes: u64,
+    bounds: MediaBounds,
     on_media: &dyn Fn(usize),
 ) -> Result<BTreeMap<String, StoredMedia>, PrepareFailure> {
     let mut promoted: BTreeMap<String, StoredMedia> = BTreeMap::new();
@@ -391,6 +411,7 @@ fn promote_retained_media(
             app_data_dir,
             &folder_path.join(&retained.basename),
             retained.kind,
+            bounds.per_media,
         ) {
             Ok(stored) => stored,
             Err(err) => {
@@ -404,7 +425,7 @@ fn promote_retained_media(
             }
         };
         total_bytes = total_bytes.saturating_add(stored.byte_size);
-        if total_bytes > max_total_bytes {
+        if total_bytes > bounds.total {
             // The current file IS promoted — it must be compensated too.
             let mut all = promoted_pairs(&promoted);
             all.push((stored.content_hash.clone(), stored.file_name.clone()));
@@ -724,26 +745,29 @@ fn probe_media(path: &Path) -> MediaProbe {
 }
 
 /// Read + validate + PROMOTE one retained media into the store (prepare
-/// phase). The slot kind is validated on the full bytes BEFORE the store
-/// promotion, so a kind drift since the re-analysis refuses WITHOUT having
-/// promoted anything for this file (nothing new to compensate); the store
-/// re-sniffs the same bytes underneath (defense in depth).
+/// phase), within the source's per-media bound (`max_media_bytes`, applied
+/// to the bytes actually read). The slot kind is validated on the full
+/// bytes BEFORE the store promotion, so a kind drift since the re-analysis
+/// refuses WITHOUT having promoted anything for this file (nothing new to
+/// compensate); the store re-sniffs the same bytes underneath (defense in
+/// depth).
 fn promote_media(
     app_data_dir: &Path,
     path: &Path,
     expected: FolderMediaKind,
+    max_media_bytes: u64,
 ) -> Result<StoredMedia, AppError> {
-    let (file, _) = match open_bounded_regular(path, MAX_MEDIA_BYTES as u64) {
+    let (file, _) = match open_bounded_regular(path, max_media_bytes) {
         RegularOpen::Open(file, byte_size) => (file, byte_size),
         RegularOpen::Absent => return Err(media_read_error("metadata")),
         RegularOpen::Oversize => return Err(media_read_error("oversize")),
         RegularOpen::Unusable => return Err(media_read_error("not_regular_file")),
     };
     let mut bytes = Vec::new();
-    file.take(MAX_MEDIA_BYTES as u64 + 1)
+    file.take(max_media_bytes.saturating_add(1))
         .read_to_end(&mut bytes)
         .map_err(|_| media_read_error("read"))?;
-    if bytes.len() > MAX_MEDIA_BYTES {
+    if bytes.len() as u64 > max_media_bytes {
         return Err(media_read_error("oversize"));
     }
 
@@ -757,7 +781,11 @@ fn promote_media(
 
     let (media_dir, staging_dir) =
         ensure_node_media_store(app_data_dir).map_err(|_| app_data_unavailable_error())?;
-    store_media(&media_dir, &staging_dir, &bytes).map_err(|_| media_promotion_error())
+    // The store re-applies the same ceiling (defense in depth): the bytes
+    // were just proven within it, so this cap never refuses on its own.
+    let store_cap = usize::try_from(max_media_bytes).unwrap_or(usize::MAX);
+    store_media_capped(&media_dir, &staging_dir, &bytes, store_cap)
+        .map_err(|_| media_promotion_error())
 }
 
 pub(crate) const fn folder_kind(kind: MediaKind) -> FolderMediaKind {
@@ -1523,8 +1551,13 @@ mod tests {
         let png_path = tmp.path().join("image.png");
         std::fs::write(&png_path, png()).expect("png");
 
-        let err = promote_media(app_data.path(), &png_path, FolderMediaKind::Audio)
-            .expect_err("a PNG promoted as audio must refuse");
+        let err = promote_media(
+            app_data.path(),
+            &png_path,
+            FolderMediaKind::Audio,
+            MAX_MEDIA_BYTES as u64,
+        )
+        .expect_err("a PNG promoted as audio must refuse");
         let v = serde_json::to_value(&err).expect("ser");
         assert_eq!(v["details"]["cause"], "media_promotion");
         assert_eq!(
@@ -1569,7 +1602,10 @@ mod tests {
             app_data.path(),
             tmp.path(),
             &retained,
-            MP3.len() as u64,
+            MediaBounds {
+                per_media: MAX_MEDIA_BYTES as u64,
+                total: MP3.len() as u64,
+            },
             &|_| {},
         )
         .expect_err("the re-summed total must refuse");
@@ -1630,10 +1666,68 @@ mod tests {
         file.set_len(MAX_MEDIA_BYTES as u64 + 1).expect("set_len");
         drop(file);
 
-        let err = promote_media(app_data.path(), &path, FolderMediaKind::Image)
-            .expect_err("an oversize media must refuse");
+        let err = promote_media(
+            app_data.path(),
+            &path,
+            FolderMediaKind::Image,
+            MAX_MEDIA_BYTES as u64,
+        )
+        .expect_err("an oversize media must refuse");
         let v = serde_json::to_value(&err).expect("ser");
         assert_eq!(v["details"]["stage"], "oversize");
+    }
+
+    #[test]
+    fn the_per_media_bound_is_the_sources_own_and_is_inclusive() {
+        // The promotion applies the bound its CALLER hands in (a folder and
+        // an archive are not sized alike): a media of exactly that size is
+        // promoted, one byte more refuses — and promotes nothing.
+        let tmp = TempDir::new().expect("tmp");
+        let app_data = TempDir::new().expect("app data");
+        let path = tmp.path().join("son.mp3");
+        std::fs::write(&path, MP3).expect("mp3");
+        let size = MP3.len() as u64;
+
+        let err = promote_media(app_data.path(), &path, FolderMediaKind::Audio, size - 1)
+            .expect_err("one byte over the bound must refuse");
+        let v = serde_json::to_value(&err).expect("ser");
+        assert_eq!(v["details"]["source"], "file_read");
+        assert_eq!(v["details"]["stage"], "oversize");
+        assert_eq!(
+            store_file_count(app_data.path()),
+            0,
+            "a refused media is never promoted"
+        );
+
+        let stored = promote_media(app_data.path(), &path, FolderMediaKind::Audio, size)
+            .expect("a media of exactly the bound is promoted");
+        assert_eq!(stored.byte_size, size);
+        assert_eq!(store_file_count(app_data.path()), 1);
+    }
+
+    #[test]
+    fn a_folder_media_over_the_local_attach_ceiling_is_still_discarded() {
+        // The folder flow keeps the node-media store's local-attach ceiling:
+        // a media one byte over it is discarded at the analysis, whatever a
+        // story archive admits. A sparse file (instant, no real I/O) carrying
+        // a genuine audio signature.
+        let tmp = TempDir::new().expect("tmp");
+        let folder = clean_folder(&tmp);
+        let path = folder.join("intro.mp3");
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .expect("open");
+        file.set_len(MAX_MEDIA_BYTES as u64 + 1).expect("set_len");
+        drop(file);
+
+        let outcome = analyze_structured_folder(&folder).expect("analyze");
+        assert_eq!(
+            outcome.analysis.discarded_media,
+            vec!["intro.mp3".to_string()]
+        );
+        let creatable = outcome.analysis.creatable.expect("still creatable");
+        assert_eq!(creatable.retained_media.len(), 1, "the picture is retained");
     }
 
     #[test]

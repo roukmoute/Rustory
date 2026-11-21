@@ -42,11 +42,22 @@ use super::structured_folder::{
 /// This bound stays only as an anti-runaway guard, sized for real packs.
 pub const MAX_ARCHIVE_MEDIA_FILES: usize = 8192;
 
+/// Ceiling on ONE media of a story archive — a memory guard: the creation
+/// loads a media whole. ONE constant for its probe, its extraction and its
+/// promotion, so a media the analysis retained is never refused further down
+/// for its size alone.
+///
+/// It equals the widest ceiling of the node-media store: a media the library
+/// holds fits an archive as is, and a media an archive carries fits the
+/// library. In the device sound format (128 kbps) it is about 2 h 20 of
+/// listening for one sound.
+pub const MAX_ARCHIVE_MEDIA_BYTES: u64 = 128 * 1024 * 1024;
+
 /// Ceiling on the SUM of the retained media bytes of a community pack.
 /// Complete audio collections can exceed 4 GiB even though each individual
-/// media remains within the 32 MiB store bound. ZIP64 archives support these
-/// collections; retain a finite aggregate bound without forcing users to
-/// split a collection or lower its audio quality.
+/// media remains within [`MAX_ARCHIVE_MEDIA_BYTES`]. ZIP64 archives support
+/// these collections; retain a finite aggregate bound without forcing users
+/// to split a collection or lower its audio quality.
 pub const MAX_ARCHIVE_TOTAL_MEDIA_BYTES: u64 = 32 * 1024 * 1024 * 1024;
 
 /// The exact descriptor entry name inside the archive — ONE listed name,

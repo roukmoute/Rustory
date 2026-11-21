@@ -32,16 +32,19 @@ pub const NODE_MEDIA_DIR_NAME: &str = "node-media";
 /// Hidden staging sub-directory (under `node-media/`) for in-flight copies.
 pub const NODE_MEDIA_STAGING_DIR_NAME: &str = ".staging";
 
-/// Hard ceiling on a single stored media file. Generous enough for a short
-/// node narration or an illustration, small enough to stop a hostile/oversized
+/// Hard ceiling on a media ATTACHED BY HAND (the editor's attach / replace,
+/// the structured-folder creation). Generous enough for a short node
+/// narration or an illustration, small enough to stop a hostile/oversized
 /// file from filling the disk. Applies to both images and audio.
 pub const MAX_MEDIA_BYTES: usize = 32 * 1024 * 1024;
 
-/// Hard ceiling for MEDIA DOWNLOADED BY A WEB IMPORT. Web podcast pages can
-/// link episodes much longer than a local node narration, so the web
-/// acquisition path uses this wider ceiling while the local-attach flow keeps
-/// [`MAX_MEDIA_BYTES`]. The read-back path admits it too (a stored 100 MB m4a
-/// must stay previewable).
+/// The WIDEST ceiling of the store — the largest media it ever holds. Web
+/// podcast pages link episodes much longer than a local node narration, so
+/// the web acquisition path uses this wider ceiling while the local-attach
+/// flow keeps [`MAX_MEDIA_BYTES`]; the creation from a story archive
+/// promotes up to the same value (its per-media bound,
+/// `MAX_ARCHIVE_MEDIA_BYTES`, is asserted equal to this one). The read-back
+/// path admits it too (a stored 100 MB m4a must stay previewable).
 pub const WEB_MAX_MEDIA_BYTES: usize = 128 * 1024 * 1024;
 
 /// The two media kinds a node can carry. Stable wire strings (`image`/`audio`)
@@ -92,7 +95,8 @@ pub enum NodeMediaError {
     /// The bytes are not a recognized supported media format.
     UnsupportedFormat,
     /// The bytes exceed the ceiling in force for the flow that stored them
-    /// ([`MAX_MEDIA_BYTES`] local-attach / [`WEB_MAX_MEDIA_BYTES`] web import).
+    /// ([`MAX_MEDIA_BYTES`] local-attach / [`WEB_MAX_MEDIA_BYTES`] web import
+    /// and story-archive creation).
     Oversize,
     /// A transport stage failed (`staging` / `promote` / `read` / `invalid_name`).
     Transport(&'static str),

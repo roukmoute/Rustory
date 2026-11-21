@@ -22,6 +22,7 @@ use rustory_lib::infrastructure::db::{self, DbHandle};
 use rustory_lib::infrastructure::device::{audio_is_device_ready, to_device_image};
 use rustory_lib::infrastructure::filesystem::{
     resolve_db_path, resolve_node_media_dir, resolve_source_archive_path, MediaKind,
+    MAX_MEDIA_BYTES,
 };
 use tempfile::TempDir;
 
@@ -238,6 +239,100 @@ fn another_library_imports_the_shared_archive_as_a_sendable_story() {
     let root: serde_json::Value =
         serde_json::from_slice(&read_zip(&onward)["story.json"]).expect("descriptor");
     assert_eq!(root["stageNodes"][0]["uuid"], id.as_str());
+}
+
+/// The pack identity of the archive at `path` and the sound its entry stage
+/// plays.
+fn entry_sound(path: &Path) -> (String, Vec<u8>) {
+    let mut entries = read_zip(path);
+    let root: serde_json::Value =
+        serde_json::from_slice(&entries["story.json"]).expect("the descriptor is JSON");
+    let pack = root["stageNodes"][0]["uuid"]
+        .as_str()
+        .expect("pack identity")
+        .to_string();
+    let name = root["stageNodes"][0]["audio"]
+        .as_str()
+        .expect("the entry stage plays a sound");
+    let sound = entries
+        .remove(&format!("assets/{name}"))
+        .expect("the sound is in the archive");
+    (pack, sound)
+}
+
+#[test]
+fn a_long_episode_travels_whole_from_one_library_to_another() {
+    // 36 minutes of sound, attached in the editor as a light low-rate WAV
+    // (well within the attach ceiling). Converted to the device format it
+    // weighs MORE than that ceiling — the bound the archive creation used to
+    // read an archive with, which left such an episode out of the imported
+    // story. The one slow test of this file: it really transcodes.
+    let mut source = library();
+    let id = create_story(
+        &mut source.db,
+        CreateStoryInput {
+            title: "La longue veillée".into(),
+        },
+    )
+    .expect("create story")
+    .id;
+    attach_node_media(
+        &mut source.db,
+        source.app_data.path(),
+        AttachNodeMediaInput {
+            story_id: id.clone(),
+            node_id: "n1".into(),
+            kind: MediaKind::Audio,
+            bytes: wav(6_000, 1, 2_160.0),
+        },
+    )
+    .expect("attach the long sound");
+    let out = TempDir::new().expect("out");
+    let archive = out.path().join("La longue veillée.zip");
+
+    export(&source, &id, &archive);
+
+    let (pack, sound) = entry_sound(&archive);
+    assert_eq!(pack, id, "the pack is the story");
+    assert!(audio_is_device_ready(&sound), "a device MP3");
+    assert!(
+        sound.len() > MAX_MEDIA_BYTES,
+        "the device sound ({} bytes) must outgrow the attach ceiling",
+        sound.len()
+    );
+
+    // Another Rustory imports it whole: nothing flagged, nothing left out…
+    let mut other = library();
+    let card = accept_structured_archive_creation(&mut other.db, other.app_data.path(), &archive)
+        .expect("the shared archive imports");
+    assert!(
+        card.import_report.is_none(),
+        "nothing to review: the long episode was not left out"
+    );
+    assert!(card.sendable, "it can be sent to a device from there");
+    let (sounds, smallest, largest): (i64, i64, i64) = other
+        .db
+        .conn()
+        .query_row(
+            "SELECT COUNT(*), MIN(byte_size), MAX(byte_size) \
+             FROM assets WHERE story_id = ?1 AND media_type = 'audio'",
+            rusqlite::params![&card.id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .expect("the imported sounds");
+    assert_eq!(sounds, 2, "the cover replays the episode");
+    assert_eq!(
+        (smallest as usize, largest as usize),
+        (sound.len(), sound.len()),
+        "the sound is stored whole"
+    );
+
+    // …and shares it onward unchanged.
+    let onward = out.path().join("plus-loin.zip");
+    export(&other, &card.id, &onward);
+    let (pack_onward, sound_onward) = entry_sound(&onward);
+    assert_eq!(pack_onward, id, "the pack keeps its identity");
+    assert!(sound_onward == sound, "the sound is carried byte for byte");
 }
 
 #[test]

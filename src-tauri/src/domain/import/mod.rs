@@ -40,8 +40,8 @@ pub use rss::{
     RSS_SOURCE_FORMAT_VERSION,
 };
 pub use structured_archive::{
-    analyze_structured_archive_components, archive_referenced_media, MAX_ARCHIVE_MEDIA_FILES,
-    MAX_ARCHIVE_TOTAL_MEDIA_BYTES, STRUCTURED_ARCHIVE_ASSETS_PREFIX,
+    analyze_structured_archive_components, archive_referenced_media, MAX_ARCHIVE_MEDIA_BYTES,
+    MAX_ARCHIVE_MEDIA_FILES, MAX_ARCHIVE_TOTAL_MEDIA_BYTES, STRUCTURED_ARCHIVE_ASSETS_PREFIX,
     STRUCTURED_ARCHIVE_FORMAT_VERSION, STRUCTURED_ARCHIVE_STORY_JSON_NAME,
 };
 pub use structured_folder::{

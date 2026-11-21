@@ -22,6 +22,10 @@
 //! on the bytes ACTUALLY read (`take(bound + 1)` — a lying header cannot
 //! bypass them), and the shared total-bytes bound re-applied by the
 //! promotion. Nothing is ever extracted at analysis time.
+//!
+//! One media bound, three steps: the probe, the extraction and the
+//! promotion all apply [`MAX_ARCHIVE_MEDIA_BYTES`], so a media the analysis
+//! retained is never refused further down for its size alone.
 
 use std::collections::BTreeMap;
 use std::io::Read;
@@ -29,20 +33,27 @@ use std::path::Path;
 
 use crate::domain::import::{
     analyze_structured_archive_components, archive_referenced_media, is_artifact_checksum,
-    is_supported_folder_source_name, MediaProbe, StructuredFolderAnalysis,
+    is_supported_folder_source_name, MediaProbe, StructuredFolderAnalysis, MAX_ARCHIVE_MEDIA_BYTES,
     MAX_ARCHIVE_TOTAL_MEDIA_BYTES, STRUCTURED_ARCHIVE_ASSETS_PREFIX,
     STRUCTURED_ARCHIVE_FORMAT_VERSION, STRUCTURED_ARCHIVE_STORY_JSON_NAME,
 };
 use crate::domain::shared::AppError;
 use crate::domain::story::content_checksum_bytes;
 use crate::infrastructure::db::DbHandle;
-use crate::infrastructure::filesystem::{sniff_media, MAX_MEDIA_BYTES};
+use crate::infrastructure::filesystem::{sniff_media, WEB_MAX_MEDIA_BYTES};
 use crate::ipc::dto::StoryCardDto;
 
 use super::structured_creation::{
     commit_structured_creation, compensate_structured_creation, folder_kind,
-    prepare_from_creatable, CreationProvenance, PrepareFailure, PreparedCreation,
+    prepare_from_creatable, CreationProvenance, MediaBounds, PrepareFailure, PreparedCreation,
 };
+
+// The archive media bound IS the widest ceiling of the node-media store, in
+// both directions: a media this flow promotes must stay readable from the
+// store (its read-back refuses anything larger), and a media the store
+// holds must fit an archive as is. Moving one without the other breaks one
+// of the two — refused at compile time.
+const _: () = assert!(MAX_ARCHIVE_MEDIA_BYTES == WEB_MAX_MEDIA_BYTES as u64);
 
 /// Hard ceiling on the descriptor bytes. A community descriptor is a few
 /// hundred kB at the very worst; a bigger entry is refused as an
@@ -179,7 +190,7 @@ pub fn prepare_structured_archive_creation(
         if !extracted.insert(retained.basename.as_str()) {
             continue;
         }
-        let bytes = read_entry_bounded(&mut archive, &retained.basename, MAX_MEDIA_BYTES as u64)
+        let bytes = read_entry_bounded(&mut archive, &retained.basename, MAX_ARCHIVE_MEDIA_BYTES)
             .ok_or_else(|| PrepareFailure::bare(archive_read_error("entry_read")))?;
         std::fs::write(staging.path().join(&retained.basename), bytes)
             .map_err(|_| PrepareFailure::bare(archive_read_error("staging_write")))?;
@@ -202,7 +213,12 @@ pub fn prepare_structured_archive_creation(
             state: outcome.analysis.state,
             findings: outcome.analysis.findings,
         },
-        MAX_ARCHIVE_TOTAL_MEDIA_BYTES,
+        // The archive's own bounds — the very ones the probe and the
+        // extraction above applied.
+        MediaBounds {
+            per_media: MAX_ARCHIVE_MEDIA_BYTES,
+            total: MAX_ARCHIVE_TOTAL_MEDIA_BYTES,
+        },
         // Promotion (transcoding / copying) rides the [EXTRACT_SEGMENT, 99] tail.
         &|done, total| {
             if total > 0 {
@@ -302,7 +318,9 @@ fn read_entry_bounded(
 }
 
 /// Probe one referenced basename straight from the archive: presence,
-/// declared size bound, magic-byte sniff on the first header bytes.
+/// declared size bound, magic-byte sniff on the first header bytes. An
+/// entry over [`MAX_ARCHIVE_MEDIA_BYTES`] is PRESENT but unusable — never
+/// reported absent.
 fn probe_archive_entry(archive: &mut zip::ZipArchive<std::fs::File>, basename: &str) -> MediaProbe {
     let prefixed = format!("{STRUCTURED_ARCHIVE_ASSETS_PREFIX}{basename}");
     let name = if archive.by_name(&prefixed).is_ok() {
@@ -316,7 +334,7 @@ fn probe_archive_entry(archive: &mut zip::ZipArchive<std::fs::File>, basename: &
         return MediaProbe::Absent;
     };
     let byte_size = entry.size();
-    if byte_size > MAX_MEDIA_BYTES as u64 {
+    if byte_size > MAX_ARCHIVE_MEDIA_BYTES {
         return MediaProbe::Unusable;
     }
     let mut header = Vec::with_capacity(MEDIA_SNIFF_BYTES);
@@ -402,8 +420,63 @@ fn archive_read_error(stage: &'static str) -> AppError {
 }
 
 #[cfg(test)]
+pub(crate) mod test_support {
+    //! Pack archives whose media are sized to the byte — shared by the tests
+    //! of every flow that reads an archive media under the per-media bound
+    //! (creation, device send, archive export).
+
+    use std::io::Write;
+    use std::path::Path;
+
+    /// First frame header of a device-ready sound (MPEG-1 Layer III,
+    /// 44 100 Hz, mono): the signature every reader of these tests sniffs.
+    pub const DEVICE_SOUND_HEADER: [u8; 4] = [0xFF, 0xFB, 0x90, 0xC0];
+
+    /// Write a pack archive at `path`: `descriptor` as `story.json` when
+    /// given, then one `assets/<name>` sound of EXACTLY `byte_size` bytes per
+    /// `sounds` entry — a device-sound header followed by zeros, deflated, so
+    /// a sound at the per-media bound costs a few hundred kilobytes on disk
+    /// (the very shape a per-media bound exists for). Streamed in chunks:
+    /// the writer never holds a whole sound.
+    pub fn write_pack_archive(path: &Path, descriptor: Option<&str>, sounds: &[(&str, u64)]) {
+        let file = std::fs::File::create(path).expect("create pack archive");
+        let mut writer = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated);
+        if let Some(descriptor) = descriptor {
+            writer
+                .start_file("story.json", options)
+                .expect("descriptor entry");
+            writer
+                .write_all(descriptor.as_bytes())
+                .expect("descriptor bytes");
+        }
+        let filler = vec![0u8; 1024 * 1024];
+        for (name, byte_size) in sounds {
+            writer
+                .start_file(format!("assets/{name}"), options)
+                .expect("sound entry");
+            writer
+                .write_all(&DEVICE_SOUND_HEADER)
+                .expect("sound header");
+            let mut remaining = byte_size
+                .checked_sub(DEVICE_SOUND_HEADER.len() as u64)
+                .expect("a sound holds at least its header");
+            while remaining > 0 {
+                let chunk = remaining.min(filler.len() as u64) as usize;
+                writer.write_all(&filler[..chunk]).expect("sound filler");
+                remaining -= chunk as u64;
+            }
+        }
+        writer.finish().expect("finish pack archive");
+    }
+}
+
+#[cfg(test)]
 mod tests {
+    use super::test_support::write_pack_archive;
     use super::*;
+    use crate::domain::import::{RecognitionAspect, RecognitionCategory};
     use crate::infrastructure::db;
     use std::io::Write;
 
@@ -690,6 +763,94 @@ mod tests {
         write_zip(&zip_path, &[("story.json", &big)]);
         let outcome = analyze_structured_archive(&zip_path).expect("analyze");
         assert!(outcome.analysis.creatable.is_none());
+    }
+
+    /// A two-stage pack: the entry stage plays `limite.mp3`, the second one
+    /// `trop.mp3`.
+    const TWO_SOUNDS_STORY_JSON: &str = r#"{
+        "format": "v1",
+        "version": 1,
+        "title": "Deux longs sons",
+        "stageNodes": [
+            {
+                "uuid": "stage-1",
+                "squareOne": true,
+                "name": "Premier",
+                "image": null,
+                "audio": "limite.mp3",
+                "okTransition": { "actionNode": "action-1", "optionIndex": 0 },
+                "controlSettings": { "wheel": true, "ok": true, "home": false, "pause": false, "autoplay": false }
+            },
+            {
+                "uuid": "stage-2",
+                "name": "Second",
+                "image": null,
+                "audio": "trop.mp3",
+                "okTransition": null,
+                "controlSettings": {}
+            }
+        ],
+        "actionNodes": [ { "id": "action-1", "options": ["stage-2"] } ]
+    }"#;
+
+    #[test]
+    fn a_media_of_exactly_the_archive_bound_is_created_and_one_byte_more_is_discarded() {
+        // The bound is inclusive, and the probe, the extraction and the
+        // promotion all apply the same one: the sound of exactly
+        // MAX_ARCHIVE_MEDIA_BYTES goes all the way to the store. The sound
+        // one byte larger is PRESENT but unusable: discarded, flagged as an
+        // ambiguity (never as a missing file), and the story is created
+        // without it.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let app_data_dir = dir.path().join("appdata");
+        std::fs::create_dir_all(&app_data_dir).expect("appdata");
+        let zip_path = dir.path().join("longs-sons.zip");
+        write_pack_archive(
+            &zip_path,
+            Some(TWO_SOUNDS_STORY_JSON),
+            &[
+                ("limite.mp3", MAX_ARCHIVE_MEDIA_BYTES),
+                ("trop.mp3", MAX_ARCHIVE_MEDIA_BYTES + 1),
+            ],
+        );
+
+        let outcome = analyze_structured_archive(&zip_path).expect("analyze");
+        assert_eq!(
+            outcome.analysis.discarded_media,
+            vec!["trop.mp3".to_string()]
+        );
+        let media_finding = outcome
+            .analysis
+            .findings
+            .iter()
+            .find(|finding| finding.aspect == RecognitionAspect::Media)
+            .expect("a media finding");
+        assert_eq!(
+            media_finding.category,
+            RecognitionCategory::Ambiguous,
+            "a media that is there but too large is never reported missing"
+        );
+        let creatable = outcome.analysis.creatable.as_ref().expect("creatable");
+        assert_eq!(creatable.retained_media.len(), 1);
+        assert_eq!(creatable.retained_media[0].basename, "limite.mp3");
+
+        let mut handle = fresh_db();
+        let card = accept_structured_archive_creation(&mut handle, &app_data_dir, &zip_path)
+            .expect("a media of exactly the bound is extracted and promoted");
+        let mut statement = handle
+            .conn()
+            .prepare("SELECT byte_size FROM assets WHERE story_id = ?1 AND media_type = 'audio'")
+            .expect("prepare");
+        let stored_sizes: Vec<u64> = statement
+            .query_map(rusqlite::params![&card.id], |row| row.get(0))
+            .expect("query")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("rows");
+        assert_eq!(
+            stored_sizes,
+            vec![MAX_ARCHIVE_MEDIA_BYTES],
+            "the sound at the bound is stored whole, the larger one never is"
+        );
     }
 
     #[test]
