@@ -48,6 +48,7 @@ import { CreateFromFolderSurface } from "../../features/import-export/components
 import { CreateFromRssSurface } from "../../features/import-export/components/CreateFromRssSurface";
 import { CreateFromWebSurface } from "../../features/import-export/components/CreateFromWebSurface";
 import { ImportArtifactSurface } from "../../features/import-export/components/ImportArtifactSurface";
+import { StoryArchiveExportSurface } from "../../features/import-export/components/StoryArchiveExportSurface";
 import {
   discardDropRequest,
   discardOsOpenRequest,
@@ -55,6 +56,7 @@ import {
 } from "../../ipc/commands/import-export";
 import { useArchiveCreation } from "../../features/import-export/hooks/use-archive-creation";
 import { useRssCreation } from "../../features/import-export/hooks/use-rss-creation";
+import { useStoryArchiveExport } from "../../features/import-export/hooks/use-story-archive-export";
 import { useWebCreation } from "../../features/import-export/hooks/use-web-creation";
 import { useStoryImport } from "../../features/import-export/hooks/use-story-import";
 import { useStructuredCreation } from "../../features/import-export/hooks/use-structured-creation";
@@ -377,6 +379,9 @@ export function LibraryRoute(): React.JSX.Element {
   // ("Choisir une archive de pack (.zip)…"). Picker-only channel — the
   // drop/os-open routing of archives is a separate extension.
   const archiveCreation = useArchiveCreation();
+  // The shareable-archive export of a library story. Strictly read-only on
+  // the library: it never invalidates the overview, whatever its outcome.
+  const archiveExport = useStoryArchiveExport();
   const isCreateFromArchiveBusy =
     archiveCreation.status.kind === "analyzing" ||
     archiveCreation.status.kind === "creating";
@@ -1649,6 +1654,13 @@ export function LibraryRoute(): React.JSX.Element {
         onAbandon={handleWebAbandon}
         onDismiss={handleWebDismiss}
       />
+      <StoryArchiveExportSurface
+        status={archiveExport.status}
+        onRetry={() => {
+          void archiveExport.retryExport();
+        }}
+        onDismiss={archiveExport.dismissStatus}
+      />
       {(trackedTransferView || trackedArchiveView) && (
         <SurfacePanel elevation={0} className="library-route__operation-notice">
           <div role="status">
@@ -2184,6 +2196,20 @@ export function LibraryRoute(): React.JSX.Element {
             {
               label: "Éditer",
               onSelect: () => handleOpenStory(storyMenu.id),
+            },
+            {
+              // The story as a ready-to-use archive, to share with another
+              // Rustory or another pack tool. Rust decides whether THIS
+              // story can become one and says why not; one export at a
+              // time, so the row waits while another is in flight.
+              label: "Exporter en archive",
+              disabled: archiveExport.isExporting,
+              onSelect: () => {
+                const title =
+                  overview?.stories.find((s) => s.id === storyMenu.id)
+                    ?.title ?? "";
+                void archiveExport.triggerExport(storyMenu.id, title);
+              },
             },
             {
               label: "Supprimer",

@@ -50,6 +50,7 @@ const mockAcceptRssCreation = vi.fn();
 const mockFetchWebPreview = vi.fn();
 const mockAcceptWebCreation = vi.fn();
 const mockReadContentSourcePolicy = vi.fn();
+const mockExportArchive = vi.fn();
 const mockGetOnboardingPreferences = vi.fn();
 const mockUpdateOnboardingPreferences = vi.fn();
 
@@ -303,6 +304,8 @@ vi.mock("../../ipc/commands/import-export", async () => {
     acceptWebPodcastCreation: (url: string, checksum: string) =>
       mockAcceptWebCreation(url, checksum),
     readContentSourcePolicy: () => mockReadContentSourcePolicy(),
+    exportStoryArchiveWithSaveDialog: (input: unknown, onProgress: unknown) =>
+      mockExportArchive(input, onProgress),
   };
 });
 
@@ -313,6 +316,7 @@ import type { JobSubscription } from "../../ipc/events/job-events";
 import type { ConnectedDeviceDto } from "../../shared/ipc-contracts/device";
 import type { OnboardingPreferences } from "../../shared/ipc-contracts/onboarding";
 import type { SendBlocker } from "../../shared/ipc-contracts/library";
+import { useArchiveExportShell } from "../../shell/state/archive-export-shell-store";
 import { useDropShell } from "../../shell/state/drop-shell-store";
 import {
   useDraftsShell,
@@ -552,6 +556,12 @@ describe("<LibraryRoute />", () => {
     mockDeleteStories.mockReset();
     mockDeleteStories.mockResolvedValue({ deletedIds: [] });
     mockCreateStory.mockImplementation(() => new Promise(() => {}));
+    // Default: the archive export is user-triggered; a cancelled save dialog
+    // is the safe default. Its status lives in a module-singleton store,
+    // reset here so one test's export never leaks into the next.
+    mockExportArchive.mockReset();
+    mockExportArchive.mockResolvedValue({ kind: "cancelled" });
+    useArchiveExportShell.setState({ status: { kind: "idle" } });
     // Default: the RSS preview is user-triggered; a never-settling fetch is
     // overridden by the tests that exercise the flow.
     mockFetchRssPreview.mockReset();
@@ -1002,6 +1012,256 @@ describe("<LibraryRoute />", () => {
         screen.queryByRole("button", { name: /à supprimer/i }),
       ).not.toBeInTheDocument(),
     );
+  });
+
+  it("exports a story as an archive from its menu and says where it went, without re-reading the library", async () => {
+    const user = userEvent.setup();
+    mockGet.mockResolvedValue({
+      stories: [
+        { id: "s1", title: "Les Bestioles", sendable: true },
+        { id: "s2", title: "Conservée" },
+      ],
+    });
+    mockExportArchive.mockResolvedValueOnce({
+      kind: "exported",
+      destinationPath: "/home/moi/Les_Bestioles.zip",
+      bytesWritten: 12_345_678,
+      imageCount: 1,
+      audioCount: 2,
+    });
+    renderLibrary();
+
+    const card = await screen.findByRole("button", { name: /les bestioles/i });
+    fireEvent.contextMenu(card);
+    const menu = await screen.findByRole("menu", {
+      name: /actions pour les bestioles/i,
+    });
+    // The export sits between the edit and the destructive action.
+    expect(
+      within(menu)
+        .getAllByRole("menuitem")
+        .map((item) => item.textContent),
+    ).toEqual(["Éditer", "Exporter en archive", "Supprimer"]);
+    await user.click(
+      within(menu).getByRole("menuitem", { name: "Exporter en archive" }),
+    );
+
+    // Rust gets the story and the suggested file name — never a path.
+    await waitFor(() => expect(mockExportArchive).toHaveBeenCalledTimes(1));
+    expect(mockExportArchive.mock.calls[0][0]).toEqual({
+      storyId: "s1",
+      suggestedFilename: "Les_Bestioles.zip",
+    });
+    expect(mockExportArchive.mock.calls[0][1]).toEqual(expect.any(Function));
+
+    const panel = await screen.findByRole("region", {
+      name: "Export en archive",
+    });
+    expect(within(panel).getByText("Archive exportée")).toBeInTheDocument();
+    expect(
+      within(panel).getByText("2 sons et 1 image · 12 Mo"),
+    ).toBeInTheDocument();
+    expect(
+      within(panel).getByText("Exportée vers /home/moi/Les_Bestioles.zip"),
+    ).toBeInTheDocument();
+    // An export never changes the library: the overview is not re-read.
+    expect(mockGet).toHaveBeenCalledTimes(1);
+
+    await user.click(within(panel).getByRole("button", { name: "Fermer" }));
+    expect(
+      screen.queryByRole("region", { name: "Export en archive" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("shows the export's progress, keeps the library usable and holds a second export meanwhile", async () => {
+    const user = userEvent.setup();
+    mockGet.mockResolvedValue({
+      stories: [
+        { id: "s1", title: "Les Bestioles", sendable: true },
+        { id: "s2", title: "Une autre", sendable: true },
+      ],
+    });
+    let tick: ((percent: number) => void) | undefined;
+    let settle: ((outcome: unknown) => void) | undefined;
+    mockExportArchive.mockImplementationOnce(
+      (_input: unknown, onProgress: (percent: number) => void) => {
+        tick = onProgress;
+        return new Promise((resolve) => {
+          settle = resolve;
+        });
+      },
+    );
+    renderLibrary();
+
+    fireEvent.contextMenu(
+      await screen.findByRole("button", { name: /les bestioles/i }),
+    );
+    await user.click(
+      await screen.findByRole("menuitem", { name: "Exporter en archive" }),
+    );
+
+    // Before the first tick: the story is named, the bar is indeterminate.
+    const panel = await screen.findByRole("region", {
+      name: "Export en archive",
+    });
+    expect(
+      within(panel).getByText("Export de « Les Bestioles » en archive"),
+    ).toBeInTheDocument();
+    expect(
+      within(panel).getByRole("progressbar", { name: "Exportation en cours…" }),
+    ).not.toHaveAttribute("aria-valuenow");
+
+    act(() => tick?.(42));
+    expect(
+      within(panel).getByRole("progressbar", {
+        name: "Exportation en cours… 42 %",
+      }),
+    ).toHaveAttribute("aria-valuenow", "42");
+
+    // The library stays usable — another card still opens its menu — but a
+    // second export waits for the first one.
+    fireEvent.contextMenu(
+      screen.getByRole("button", { name: /une autre/i }),
+    );
+    const otherMenu = await screen.findByRole("menu", {
+      name: /actions pour une autre/i,
+    });
+    expect(
+      within(otherMenu).getByRole("menuitem", { name: "Exporter en archive" }),
+    ).toHaveAttribute("aria-disabled", "true");
+    expect(
+      within(otherMenu).getByRole("menuitem", { name: "Éditer" }),
+    ).not.toHaveAttribute("aria-disabled", "true");
+    await user.keyboard("{Escape}");
+    expect(mockExportArchive).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      settle?.({
+        kind: "exported",
+        destinationPath: "/home/moi/Les_Bestioles.zip",
+        bytesWritten: 700_000_000,
+        imageCount: 0,
+        audioCount: 135,
+      });
+    });
+    expect(
+      await screen.findByText("135 sons · 700 Mo"),
+    ).toBeInTheDocument();
+  });
+
+  it("says why a story cannot be exported, with no pointless retry", async () => {
+    const user = userEvent.setup();
+    mockGet.mockResolvedValue({
+      stories: [
+        {
+          id: "s1",
+          title: "Sans audio",
+          sendBlocker: "missingAudio",
+        },
+      ],
+    });
+    mockExportArchive.mockRejectedValueOnce({
+      code: "EXPORT_FAILED",
+      message:
+        "Export impossible: un ou plusieurs épisodes de cette histoire n'ont pas d'audio.",
+      userAction: "Ajoute un audio à chaque épisode, puis réessaie l'export.",
+      details: { source: "story_pack", cause: "missing_audio" },
+    });
+    renderLibrary();
+
+    fireEvent.contextMenu(
+      await screen.findByRole("button", { name: /sans audio/i }),
+    );
+    await user.click(
+      await screen.findByRole("menuitem", { name: "Exporter en archive" }),
+    );
+
+    const panel = await screen.findByRole("region", {
+      name: "Export en archive",
+    });
+    const alert = within(panel).getByRole("alert");
+    expect(alert).toHaveTextContent("Exportation échouée");
+    expect(alert).toHaveTextContent("« Sans audio »");
+    expect(alert).toHaveTextContent(
+      "Export impossible: un ou plusieurs épisodes de cette histoire n'ont pas d'audio.",
+    );
+    expect(alert).toHaveTextContent(
+      "Ajoute un audio à chaque épisode, puis réessaie l'export.",
+    );
+    expect(
+      within(panel)
+        .getAllByRole("button")
+        .map((button) => button.textContent),
+    ).toEqual(["Fermer"]);
+  });
+
+  it("lets a destination problem be fixed by picking another destination", async () => {
+    const user = userEvent.setup();
+    mockGet.mockResolvedValue({
+      stories: [{ id: "s1", title: "Les Bestioles", sendable: true }],
+    });
+    mockExportArchive
+      .mockRejectedValueOnce({
+        code: "EXPORT_DESTINATION_UNAVAILABLE",
+        message: "Écriture refusée par le système pour ce dossier.",
+        userAction: "Choisis un dossier où tu as les droits en écriture.",
+        details: { source: "temp_create", kind: "permission_denied" },
+      })
+      .mockResolvedValueOnce({
+        kind: "exported",
+        destinationPath: "/home/moi/Documents/Les_Bestioles.zip",
+        bytesWritten: 2_000_000,
+        imageCount: 1,
+        audioCount: 1,
+      });
+    renderLibrary();
+
+    fireEvent.contextMenu(
+      await screen.findByRole("button", { name: /les bestioles/i }),
+    );
+    await user.click(
+      await screen.findByRole("menuitem", { name: "Exporter en archive" }),
+    );
+    await user.click(
+      await screen.findByRole("button", {
+        name: "Choisir un autre emplacement",
+      }),
+    );
+
+    // The same story is exported again — the dialog reopens Rust-side.
+    await waitFor(() => expect(mockExportArchive).toHaveBeenCalledTimes(2));
+    expect(mockExportArchive.mock.calls[1][0]).toEqual({
+      storyId: "s1",
+      suggestedFilename: "Les_Bestioles.zip",
+    });
+    expect(
+      await screen.findByText(
+        "Exportée vers /home/moi/Documents/Les_Bestioles.zip",
+      ),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("does nothing visible when the save dialog is cancelled", async () => {
+    const user = userEvent.setup();
+    mockGet.mockResolvedValue({
+      stories: [{ id: "s1", title: "Les Bestioles", sendable: true }],
+    });
+    renderLibrary();
+
+    fireEvent.contextMenu(
+      await screen.findByRole("button", { name: /les bestioles/i }),
+    );
+    await user.click(
+      await screen.findByRole("menuitem", { name: "Exporter en archive" }),
+    );
+    await waitFor(() => expect(mockExportArchive).toHaveBeenCalledTimes(1));
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("region", { name: "Export en archive" }),
+      ).not.toBeInTheDocument(),
+    );
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
 
   it("deletes the confirmed selection, clears it, and re-reads the overview", async () => {
