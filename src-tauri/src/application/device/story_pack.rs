@@ -11,12 +11,19 @@
 //! here, BEFORE any device or destination is touched, as a typed
 //! [`StoryPackRefusal`]: the send words it with the copy the library card
 //! announces pre-click ([`plan_story_pack`]), the export with its own.
+//!
+//! A story WITH CHOICES (a node offering an option) is not an episode list:
+//! the caller says what to do with one ([`ChoiceStories`]). The send still
+//! refuses it; the archive export lays it out by its own graph — every node
+//! a stage, the options of a node the wheel that follows it.
 
 use std::collections::HashMap;
 
 use crate::domain::device::{
-    linear_episodes, menu_blocker, stage_names, synthesize_menu_pack, synthesize_sequential_pack,
-    EpisodeAssets, MenuEpisode, MenuPackAssets, StoryLayout, StoryPackBlocker, StudioStoryPack,
+    choice_nodes, choice_pack_uuid, choice_stage_names, linear_episodes, menu_blocker,
+    offers_choices, stage_names, synthesize_choice_pack, synthesize_menu_pack,
+    synthesize_sequential_pack, ChoiceLayoutBlocker, ChoiceNodeAssets, EpisodeAssets, MenuEpisode,
+    MenuPackAssets, StoryLayout, StoryPackBlocker, StudioStoryPack,
 };
 use crate::domain::shared::AppError;
 use crate::domain::story::CanonicalStructure;
@@ -42,6 +49,22 @@ pub enum StoryPackRefusal {
     /// A spoken announcement is referenced but its asset is gone — the
     /// question (`"question"`) or an episode's spoken title (its node id).
     AnnouncementMissing { which: String },
+    /// A story with choices whose node `node_id` offers an option that
+    /// leads nowhere (not linked yet, or its destination is gone): a wheel
+    /// entry must be a stage.
+    OptionWithoutDestination { node_id: String },
+}
+
+/// What a plan does with a story WITH CHOICES (any node offering an option).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChoiceStories {
+    /// Refused as [`StoryPackBlocker::Branching`] — the device send, whose
+    /// library card announces that reason before any click.
+    Refused,
+    /// Laid out by their own graph
+    /// ([`synthesize_choice_pack`](crate::domain::device::synthesize_choice_pack))
+    /// — the archive export.
+    LaidOut,
 }
 
 /// A planned pack with what a shared archive carries beside the graph: the
@@ -56,16 +79,18 @@ pub struct PlannedStoryPack {
 /// Build the device pack of `story_id` (per its layout), or refuse with the
 /// reason — worded for the SEND gesture.
 pub fn plan_story_pack(db: &DbHandle, story_id: &str) -> Result<StudioStoryPack, AppError> {
-    plan_named_story_pack(db, story_id)
+    plan_named_story_pack(db, story_id, ChoiceStories::Refused)
         .map(|planned| planned.pack)
         .map_err(send_refusal_error)
 }
 
 /// Build the pack of `story_id` together with its title and stage names, or
-/// say why not as a typed refusal the caller words itself.
+/// say why not as a typed refusal the caller words itself. `choices` settles
+/// what becomes of a story with choices.
 pub fn plan_named_story_pack(
     db: &DbHandle,
     story_id: &str,
+    choices: ChoiceStories,
 ) -> Result<PlannedStoryPack, StoryPackRefusal> {
     let (title, structure_json): (String, String) = db
         .conn()
@@ -95,6 +120,9 @@ pub fn plan_named_story_pack(
 
     let structure: CanonicalStructure = serde_json::from_str(&structure_json)
         .map_err(|_| StoryPackRefusal::Blocked(StoryPackBlocker::Malformed))?;
+    if choices == ChoiceStories::LaidOut && offers_choices(&structure) {
+        return plan_choice_pack(db, story_id, title, &structure);
+    }
     let episodes = linear_episodes(&structure).map_err(StoryPackRefusal::Blocked)?;
     let episode_labels: Vec<&str> = episodes.iter().map(|episode| episode.label).collect();
 
@@ -182,6 +210,97 @@ pub fn plan_named_story_pack(
     })
 }
 
+/// The pack of a story WITH CHOICES: its own node graph, every node a stage
+/// carrying the node's stored media. The presentation (`À la suite` /
+/// `Au choix`) does not apply — the options ARE the navigation.
+fn plan_choice_pack(
+    db: &DbHandle,
+    story_id: &str,
+    title: String,
+    structure: &CanonicalStructure,
+) -> Result<PlannedStoryPack, StoryPackRefusal> {
+    let nodes = choice_nodes(structure).map_err(|blocker| match blocker {
+        ChoiceLayoutBlocker::Structure(blocker) => StoryPackRefusal::Blocked(blocker),
+        ChoiceLayoutBlocker::OptionWithoutDestination { node_id } => {
+            StoryPackRefusal::OptionWithoutDestination { node_id }
+        }
+    })?;
+    let pack_uuid = choice_pack_uuid(story_id, &nodes)
+        .ok_or(StoryPackRefusal::Blocked(StoryPackBlocker::Malformed))?;
+
+    // A story created from a pack carries thousands of media: ONE read of
+    // the story's asset rows, not two per node.
+    let stored = stored_file_names(db, story_id)?;
+    let mut assets = Vec::with_capacity(nodes.len());
+    for node in &nodes {
+        // A sound the structure references must still be backed by the
+        // library (the same rule as an episode's); a picture that is gone
+        // is decoration lost, never a refusal.
+        let audio_ref = match node.audio_asset_id {
+            Some(id) => Some(stored.audio.get(id).cloned().ok_or_else(|| {
+                StoryPackRefusal::AssetMissing {
+                    node_id: node.node_id.to_string(),
+                }
+            })?),
+            None => None,
+        };
+        let image_ref = node
+            .image_asset_id
+            .and_then(|id| stored.image.get(id).cloned());
+        assets.push(ChoiceNodeAssets {
+            audio_ref,
+            image_ref,
+        });
+    }
+
+    let stage_names = choice_stage_names(&pack_uuid, &title, &nodes);
+    Ok(PlannedStoryPack {
+        pack: synthesize_choice_pack(&pack_uuid, &nodes, &assets),
+        title,
+        stage_names,
+    })
+}
+
+/// Every stored media of the story, by kind: asset id → node-media store
+/// file name. Kept apart by kind so an id never resolves to a media of the
+/// other one.
+#[derive(Default)]
+struct StoredFileNames {
+    audio: HashMap<String, String>,
+    image: HashMap<String, String>,
+}
+
+fn stored_file_names(db: &DbHandle, story_id: &str) -> Result<StoredFileNames, StoryPackRefusal> {
+    let mut stmt = db
+        .conn()
+        .prepare("SELECT media_type, id, file_name FROM assets WHERE story_id = ?1")
+        .map_err(|_| StoryPackRefusal::Storage("read_assets"))?;
+    let rows = stmt
+        .query_map(rusqlite::params![story_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })
+        .map_err(|_| StoryPackRefusal::Storage("read_assets"))?;
+    let mut stored = StoredFileNames::default();
+    for row in rows {
+        let (media_type, id, file_name) =
+            row.map_err(|_| StoryPackRefusal::Storage("read_assets"))?;
+        match media_type.as_str() {
+            "audio" => {
+                stored.audio.insert(id, file_name);
+            }
+            "image" => {
+                stored.image.insert(id, file_name);
+            }
+            _ => {}
+        }
+    }
+    Ok(stored)
+}
+
 /// The presentation rows a plan needs: the layout, the spoken title and
 /// question asset ids, and the (node id → asset id) spoken titles.
 struct PresentationRows {
@@ -266,6 +385,11 @@ fn send_refusal_error(refusal: StoryPackRefusal) -> AppError {
         StoryPackRefusal::Blocked(blocker) => blocker_error(blocker),
         StoryPackRefusal::AssetMissing { node_id } => asset_missing_error(&node_id),
         StoryPackRefusal::AnnouncementMissing { which } => announcement_missing_error(&which),
+        // Only a plan that lays choices out can meet this, and the send
+        // does not: worded as the refusal the send gives every such story.
+        StoryPackRefusal::OptionWithoutDestination { .. } => {
+            blocker_error(StoryPackBlocker::Branching)
+        }
     }
 }
 
@@ -606,7 +730,7 @@ mod tests {
         insert_asset(&db, &id, "aud-2", "audio", "aaaa2222.mp3");
         insert_asset(&db, &id, "img-1", "image", "bbbb1111.png");
 
-        let planned = plan_named_story_pack(&db, &id).expect("plan");
+        let planned = plan_named_story_pack(&db, &id, ChoiceStories::Refused).expect("plan");
         assert_eq!(planned.title, "Série");
         assert_eq!(planned.stage_names.len(), planned.pack.stage_nodes.len());
         // The cover is named after the story, the episodes after their labels
@@ -640,7 +764,7 @@ mod tests {
         insert_asset(&db, &id, "p-1", "audio", "cccc1111.wav");
         set_menu(&db, &id, Some("q-1"), &[("n1", "p-1")]);
 
-        let planned = plan_named_story_pack(&db, &id).expect("plan");
+        let planned = plan_named_story_pack(&db, &id, ChoiceStories::Refused).expect("plan");
         let names: Vec<&str> = planned
             .pack
             .stage_nodes
@@ -654,17 +778,17 @@ mod tests {
     fn refusals_are_typed_so_each_gesture_words_its_own() {
         let mut db = fresh_db();
         assert_eq!(
-            plan_named_story_pack(&db, "nope").unwrap_err(),
+            plan_named_story_pack(&db, "nope", ChoiceStories::Refused).unwrap_err(),
             StoryPackRefusal::NotFound
         );
         let id = story(&mut db);
         assert_eq!(
-            plan_named_story_pack(&db, &id).unwrap_err(),
+            plan_named_story_pack(&db, &id, ChoiceStories::Refused).unwrap_err(),
             StoryPackRefusal::Blocked(StoryPackBlocker::MissingAudio)
         );
         set_structure(&db, &id, &[("n1", Some("aud-gone"), None)]);
         assert_eq!(
-            plan_named_story_pack(&db, &id).unwrap_err(),
+            plan_named_story_pack(&db, &id, ChoiceStories::Refused).unwrap_err(),
             StoryPackRefusal::AssetMissing {
                 node_id: "n1".into()
             }
@@ -673,10 +797,261 @@ mod tests {
         set_menu(&db, &id, Some("q-gone"), &[("n1", "p-1")]);
         insert_asset(&db, &id, "p-1", "audio", "cccc1111.wav");
         assert_eq!(
-            plan_named_story_pack(&db, &id).unwrap_err(),
+            plan_named_story_pack(&db, &id, ChoiceStories::Refused).unwrap_err(),
             StoryPackRefusal::AnnouncementMissing {
                 which: "question".into()
             }
         );
+    }
+
+    // ===== stories with choices =====
+
+    /// One node of a story with choices: id, audio, image, and the
+    /// destination of each of its options (`None` = not linked yet).
+    type ChoiceNodeSpec<'a> = (
+        &'a str,
+        Option<&'a str>,
+        Option<&'a str>,
+        &'a [Option<&'a str>],
+    );
+
+    fn set_choice_structure(
+        db: &DbHandle,
+        story_id: &str,
+        start: &str,
+        nodes: &[ChoiceNodeSpec<'_>],
+    ) {
+        let nodes: Vec<serde_json::Value> = nodes
+            .iter()
+            .map(|(id, audio, image, destinations)| {
+                let options: Vec<serde_json::Value> = destinations
+                    .iter()
+                    .map(|target| serde_json::json!({ "label": "suite", "target": target }))
+                    .collect();
+                serde_json::json!({
+                    "id": id, "text": "", "label": id,
+                    "imageAssetId": image, "audioAssetId": audio, "options": options,
+                })
+            })
+            .collect();
+        let json = serde_json::json!({ "schemaVersion": 3, "startNodeId": start, "nodes": nodes });
+        db.conn()
+            .execute(
+                "UPDATE stories SET structure_json = ?1 WHERE id = ?2",
+                rusqlite::params![json.to_string(), story_id],
+            )
+            .expect("update structure");
+    }
+
+    #[test]
+    fn the_send_refuses_a_story_with_choices_and_the_export_plan_lays_it_out() {
+        let mut db = fresh_db();
+        let id = story(&mut db);
+        insert_asset(&db, &id, "aud-1", "audio", "aaaa1111.mp3");
+        insert_asset(&db, &id, "aud-2", "audio", "aaaa2222.mp3");
+        insert_asset(&db, &id, "img-1", "image", "bbbb1111.png");
+        set_choice_structure(
+            &db,
+            &id,
+            "n1",
+            &[
+                (
+                    "n1",
+                    Some("aud-1"),
+                    Some("img-1"),
+                    &[Some("n2"), Some("n3")],
+                ),
+                ("n2", Some("aud-2"), None, &[Some("n1")]),
+                ("n3", None, None, &[]),
+            ],
+        );
+
+        // The send: refused, with the reason its library card announces.
+        let err = plan_story_pack(&db, &id).expect_err("refused");
+        let v = serde_json::to_value(&err).unwrap();
+        assert_eq!(v["code"], "DEVICE_WRITE_FAILED");
+        assert_eq!(v["details"]["cause"], "branching");
+        assert_eq!(
+            plan_named_story_pack(&db, &id, ChoiceStories::Refused).unwrap_err(),
+            StoryPackRefusal::Blocked(StoryPackBlocker::Branching)
+        );
+
+        // The export's plan: the story's own graph, one stage per node.
+        let planned = plan_named_story_pack(&db, &id, ChoiceStories::LaidOut).expect("laid out");
+        assert_eq!(planned.title, "Série");
+        let stages = &planned.pack.stage_nodes;
+        assert_eq!(
+            stages.iter().map(|s| s.uuid.as_str()).collect::<Vec<_>>(),
+            vec![id.as_str(), "n2", "n3"],
+            "the start node is filed under the story id"
+        );
+        assert!(stages[0].square_one);
+        assert_eq!(stages[0].audio.as_deref(), Some("aaaa1111.mp3"));
+        assert_eq!(stages[0].image.as_deref(), Some("bbbb1111.png"));
+        assert_eq!(stages[1].audio.as_deref(), Some("aaaa2222.mp3"));
+        assert_eq!(stages[1].image, None);
+        // A node without any media is a stage all the same.
+        assert_eq!(
+            (stages[2].audio.as_deref(), stages[2].image.as_deref()),
+            (None, None)
+        );
+        // The options are the wheel that follows the node.
+        let wheel = &planned.pack.action_nodes[0];
+        assert_eq!(wheel.options, vec!["n2".to_string(), "n3".to_string()]);
+        assert_eq!(
+            stages[0]
+                .ok_transition
+                .as_ref()
+                .map(|t| t.action_node.as_str()),
+            Some(wheel.id.as_str())
+        );
+        // …and an option back to the start node points at the pack entry.
+        assert_eq!(planned.pack.action_nodes[1].options, vec![id.clone()]);
+        let names: Vec<&str> = stages
+            .iter()
+            .map(|stage| planned.stage_names[&stage.uuid].as_str())
+            .collect();
+        assert_eq!(names, vec!["n1", "n2", "n3"]);
+        assert!(crate::domain::device::transcode_pack(&planned.pack).is_ok());
+    }
+
+    #[test]
+    fn a_story_created_from_a_pack_is_laid_out_under_that_packs_identity() {
+        const PACK: &str = "01a06ed9-2040-77c1-9e03-b8f429f4e954";
+        const ENTRY: &str = "9c1f0e52-77aa-4b1d-8f39-0d6b1e2a3c44";
+        let mut db = fresh_db();
+        let id = story(&mut db);
+        insert_asset(&db, &id, "aud-1", "audio", "aaaa1111.mp3");
+        set_choice_structure(
+            &db,
+            &id,
+            PACK,
+            &[
+                (ENTRY, Some("aud-1"), None, &[]),
+                (PACK, Some("aud-1"), None, &[Some(ENTRY)]),
+            ],
+        );
+        let planned = plan_named_story_pack(&db, &id, ChoiceStories::LaidOut).expect("laid out");
+        assert_eq!(
+            planned
+                .pack
+                .stage_nodes
+                .iter()
+                .map(|s| s.uuid.as_str())
+                .collect::<Vec<_>>(),
+            vec![PACK, ENTRY],
+            "the start node comes first and keeps the pack's own identity"
+        );
+    }
+
+    #[test]
+    fn an_option_without_a_destination_is_refused_by_node() {
+        let mut db = fresh_db();
+        let id = story(&mut db);
+        insert_asset(&db, &id, "aud-1", "audio", "aaaa1111.mp3");
+        // Not linked yet.
+        set_choice_structure(
+            &db,
+            &id,
+            "n1",
+            &[
+                ("n1", Some("aud-1"), None, &[Some("n2")]),
+                ("n2", Some("aud-1"), None, &[None]),
+            ],
+        );
+        assert_eq!(
+            plan_named_story_pack(&db, &id, ChoiceStories::LaidOut).unwrap_err(),
+            StoryPackRefusal::OptionWithoutDestination {
+                node_id: "n2".into()
+            }
+        );
+        // Linked to a node that is gone.
+        set_choice_structure(
+            &db,
+            &id,
+            "n1",
+            &[("n1", Some("aud-1"), None, &[Some("ghost")])],
+        );
+        assert_eq!(
+            plan_named_story_pack(&db, &id, ChoiceStories::LaidOut).unwrap_err(),
+            StoryPackRefusal::OptionWithoutDestination {
+                node_id: "n1".into()
+            }
+        );
+    }
+
+    #[test]
+    fn a_story_with_choices_needs_its_sounds_backed_but_not_its_pictures() {
+        let mut db = fresh_db();
+        let id = story(&mut db);
+        insert_asset(&db, &id, "aud-1", "audio", "aaaa1111.mp3");
+        // An image id that names an AUDIO row is not a picture.
+        set_choice_structure(
+            &db,
+            &id,
+            "n1",
+            &[
+                ("n1", Some("aud-1"), Some("img-gone"), &[Some("n2")]),
+                ("n2", Some("aud-1"), Some("aud-1"), &[]),
+            ],
+        );
+        let planned = plan_named_story_pack(&db, &id, ChoiceStories::LaidOut).expect("laid out");
+        assert_eq!(planned.pack.stage_nodes[0].image, None);
+        assert_eq!(planned.pack.stage_nodes[1].image, None);
+
+        set_choice_structure(
+            &db,
+            &id,
+            "n1",
+            &[
+                ("n1", Some("aud-1"), None, &[Some("n2")]),
+                ("n2", Some("aud-gone"), None, &[]),
+            ],
+        );
+        assert_eq!(
+            plan_named_story_pack(&db, &id, ChoiceStories::LaidOut).unwrap_err(),
+            StoryPackRefusal::AssetMissing {
+                node_id: "n2".into()
+            }
+        );
+    }
+
+    #[test]
+    fn the_presentation_does_not_apply_to_a_story_with_choices() {
+        let mut db = fresh_db();
+        let id = story(&mut db);
+        insert_asset(&db, &id, "aud-1", "audio", "aaaa1111.mp3");
+        set_choice_structure(
+            &db,
+            &id,
+            "n1",
+            &[
+                ("n1", Some("aud-1"), None, &[Some("n2")]),
+                ("n2", Some("aud-1"), None, &[]),
+            ],
+        );
+        // `Au choix` without a single announcement: it would block an
+        // episode list, it is irrelevant here.
+        set_menu(&db, &id, None, &[]);
+        let planned = plan_named_story_pack(&db, &id, ChoiceStories::LaidOut).expect("laid out");
+        assert_eq!(planned.pack.stage_nodes.len(), 2);
+    }
+
+    #[test]
+    fn a_story_without_choices_plans_the_same_whatever_the_policy() {
+        let mut db = fresh_db();
+        let id = story(&mut db);
+        set_structure(&db, &id, &[("n1", Some("aud-1"), None)]);
+        insert_asset(&db, &id, "aud-1", "audio", "aaaa1111.mp3");
+        let uuids = |choices: ChoiceStories| -> Vec<String> {
+            plan_named_story_pack(&db, &id, choices)
+                .expect("plan")
+                .pack
+                .stage_nodes
+                .iter()
+                .map(|stage| stage.uuid.clone())
+                .collect()
+        };
+        assert_eq!(uuids(ChoiceStories::LaidOut), uuids(ChoiceStories::Refused));
     }
 }

@@ -2,15 +2,21 @@
 //! archive (`story.json` + `assets/` + `thumbnail.png`, zipped) another
 //! Rustory library imports as is and other pack tools read.
 //!
-//! The archive carries EXACTLY the pack the single "send to the device"
-//! gesture would write, from the same source:
+//! The archive carries the pack the single "send to the device" gesture
+//! writes, from the same source:
 //!
 //! - a story that RETAINED its source archive is exported from that archive
 //!   (its own descriptor, its own assets);
 //! - any other story (created from a web page, an RSS feed, a folder or the
 //!   editor) has its pack SYNTHESIZED from its structure and its node media
-//!   — the same plan, the same refusals (an episode without audio, a story
-//!   with choices, a device-copied pack), worded for the export.
+//!   — the same plan, the same refusals (an episode without audio, a
+//!   device-copied pack), worded for the export.
+//!
+//! One layout goes beyond the send: a story WITH CHOICES is exported by its
+//! own graph — every node a stage, the options of a node the wheel that
+//! follows it — where the send still refuses it. A story created from a
+//! pack whose archive was not retained is such a story: its stages, its
+//! media and its navigation go back out as the pack they came from.
 //!
 //! Every asset goes through the send engine's own DEVICE NORMALIZATION
 //! ([`to_device_image`] / [`to_device_audio`]): what lands in the archive is
@@ -47,7 +53,9 @@ use serde_json::Value;
 use crate::application::device::send::{
     ArchiveSource, AssetUnavailable, MediaStoreSource, PackAssetSource,
 };
-use crate::application::device::story_pack::{plan_named_story_pack, StoryPackRefusal};
+use crate::application::device::story_pack::{
+    plan_named_story_pack, ChoiceStories, StoryPackRefusal,
+};
 use crate::domain::device::pack_transcode::device_asset_basename;
 use crate::domain::device::{format_device_bytes, StoryPackBlocker};
 use crate::domain::export::{
@@ -130,7 +138,8 @@ pub fn plan_story_archive_export(
             PackSource::RetainedArchive(path),
         ),
         None => {
-            let planned = plan_named_story_pack(db, story_id).map_err(refusal_error)?;
+            let planned = plan_named_story_pack(db, story_id, ChoiceStories::LaidOut)
+                .map_err(refusal_error)?;
             let descriptor = studio_pack_descriptor(&planned.pack, &planned.stage_names);
             (planned.title, PackSource::Synthesized(descriptor))
         }
@@ -505,6 +514,15 @@ fn refusal_error(refusal: StoryPackRefusal) -> AppError {
             "cause": "announcement_missing",
             "announcement": which,
         })),
+        StoryPackRefusal::OptionWithoutDestination { node_id } => AppError::export_failed(
+            "Export impossible: une option de cette histoire ne mène à aucun nœud.",
+            "Rouvre l'histoire pour lier chaque option à un nœud (ou la retirer), puis réessaie l'export.",
+        )
+        .with_details(serde_json::json!({
+            "source": "story_pack",
+            "cause": "option_without_destination",
+            "node": node_id,
+        })),
     }
 }
 
@@ -516,13 +534,12 @@ fn blocker_error(blocker: StoryPackBlocker) -> AppError {
             "Export impossible: cette histoire n'a aucun épisode.",
             "Ajoute au moins un épisode avec un audio, puis réessaie l'export.",
         ),
-        StoryPackBlocker::Malformed => (
+        // A story with choices is laid out by its own graph: the export's
+        // plan never returns `Branching`. Should it ever, the structure did
+        // not read as the plan expected — the same next step.
+        StoryPackBlocker::Malformed | StoryPackBlocker::Branching => (
             "Export impossible: la structure de cette histoire est illisible.",
             "Rouvre l'histoire pour la vérifier, puis réessaie l'export.",
-        ),
-        StoryPackBlocker::Branching => (
-            "Export impossible: les histoires à choix ne sont pas encore prises en charge pour l'export en archive.",
-            "Exporte une histoire dont les épisodes s'enchaînent sans choix.",
         ),
         StoryPackBlocker::MissingAudio => (
             "Export impossible: un ou plusieurs épisodes de cette histoire n'ont pas d'audio.",
@@ -810,6 +827,39 @@ mod tests {
                 .collect();
             let json =
                 serde_json::json!({ "schemaVersion": 3, "startNodeId": "n1", "nodes": nodes });
+            self.db
+                .conn()
+                .execute(
+                    "UPDATE stories SET structure_json = ?1 WHERE id = ?2",
+                    rusqlite::params![json.to_string(), story_id],
+                )
+                .expect("update structure");
+        }
+
+        /// A story WITH CHOICES: each node is `(id, label, audio, image,
+        /// destinations of its options)`.
+        #[allow(clippy::type_complexity)]
+        fn choice_structure(
+            &self,
+            story_id: &str,
+            start: &str,
+            nodes: &[(&str, &str, Option<&str>, Option<&str>, &[&str])],
+        ) {
+            let nodes: Vec<Value> = nodes
+                .iter()
+                .map(|(id, label, audio, image, destinations)| {
+                    let options: Vec<Value> = destinations
+                        .iter()
+                        .map(|target| serde_json::json!({ "label": "suite", "target": target }))
+                        .collect();
+                    serde_json::json!({
+                        "id": id, "text": "", "label": label,
+                        "imageAssetId": image, "audioAssetId": audio, "options": options,
+                    })
+                })
+                .collect();
+            let json =
+                serde_json::json!({ "schemaVersion": 3, "startNodeId": start, "nodes": nodes });
             self.db
                 .conn()
                 .execute(
@@ -1113,6 +1163,439 @@ mod tests {
                 "stage {stage} {field} is carried byte for byte"
             );
         }
+    }
+
+    // ===== Stories with choices: exported by their own graph =====
+
+    /// A small story with choices written in the editor: a crossroads that
+    /// offers two paths, each path leading to its own scene, both scenes
+    /// coming back to the choice. The last scene has no label.
+    fn crossroads_story(library: &mut Library) -> String {
+        let id = library.story("Le Chemin");
+        let cover = format!("{}.png", "b".repeat(56) + "5678ef01");
+        library.asset(&id, "img-1", "image", &cover, &png(64, 48));
+        for (index, tone) in [440.0, 520.0, 600.0, 680.0, 760.0].into_iter().enumerate() {
+            let name = format!("{}{:08x}.wav", "a".repeat(56), 0x1234_ab00 + index);
+            library.asset(
+                &id,
+                &format!("aud-{}", index + 1),
+                "audio",
+                &name,
+                &wav_sine(44_100, 1, tone, 0.5, 0.5),
+            );
+        }
+        library.choice_structure(
+            &id,
+            "n1",
+            &[
+                (
+                    "n1",
+                    "Le carrefour",
+                    Some("aud-1"),
+                    Some("img-1"),
+                    &["n2", "n3"],
+                ),
+                ("n2", "À gauche", Some("aud-2"), None, &["n4"]),
+                ("n3", "À droite", Some("aud-3"), None, &["n5"]),
+                ("n4", "La forêt", Some("aud-4"), None, &["n2", "n3"]),
+                ("n5", "", Some("aud-5"), None, &["n2", "n3"]),
+            ],
+        );
+        id
+    }
+
+    /// The navigation a descriptor describes, stage by stage, every
+    /// transition RESOLVED to the option list it enters — what two archives
+    /// must agree on to be the same pack, whatever their action ids and
+    /// their asset names.
+    fn graph_of(root: &Value) -> Vec<Value> {
+        let entered = |transition: &Value| -> Value {
+            if transition.is_null() {
+                return Value::Null;
+            }
+            let action = root["actionNodes"]
+                .as_array()
+                .expect("actions")
+                .iter()
+                .find(|action| action["id"] == transition["actionNode"])
+                .expect("the action exists");
+            serde_json::json!({
+                "options": action["options"],
+                "optionIndex": transition["optionIndex"],
+            })
+        };
+        root["stageNodes"]
+            .as_array()
+            .expect("stages")
+            .iter()
+            .map(|stage| {
+                serde_json::json!({
+                    "uuid": stage["uuid"],
+                    "name": stage["name"],
+                    "squareOne": stage.get("squareOne").and_then(Value::as_bool).unwrap_or(false),
+                    "controlSettings": stage["controlSettings"],
+                    "ok": entered(&stage["okTransition"]),
+                    "home": entered(&stage["homeTransition"]),
+                    "hasImage": !stage["image"].is_null(),
+                    "hasAudio": !stage["audio"].is_null(),
+                })
+            })
+            .collect()
+    }
+
+    fn controls(wheel: bool, ok: bool, home: bool, pause: bool, autoplay: bool) -> Value {
+        serde_json::json!({
+            "wheel": wheel, "ok": ok, "home": home, "pause": pause, "autoplay": autoplay,
+        })
+    }
+
+    /// The bytes of the asset stage `stage` references in `field`.
+    fn stage_asset(
+        entries: &BTreeMap<String, Vec<u8>>,
+        root: &Value,
+        stage: usize,
+        field: &str,
+    ) -> Vec<u8> {
+        let name = root["stageNodes"][stage][field]
+            .as_str()
+            .expect("reference");
+        entries[&format!("assets/{name}")].clone()
+    }
+
+    fn drop_retained_archive(library: &Library, story_id: &str) {
+        std::fs::remove_file(resolve_source_archive_path(
+            library.app_data.path(),
+            story_id,
+        ))
+        .expect("drop the retained archive");
+    }
+
+    #[test]
+    fn a_story_with_choices_is_exported_by_its_own_graph() {
+        let mut library = Library::new();
+        let id = crossroads_story(&mut library);
+        let out_dir = TempDir::new().expect("out");
+        let destination = out_dir.path().join("Le Chemin.zip");
+
+        let exported = library.export(&id, &destination).expect("export");
+        assert_eq!((exported.image_count, exported.audio_count), (1, 5));
+        let entries = read_archive(&destination);
+        let root: Value = serde_json::from_slice(&entries["story.json"]).expect("descriptor");
+        assert_eq!(root["title"], "Le Chemin");
+
+        // One stage per node, the start node first, every id a UUID.
+        let stages = root["stageNodes"].as_array().expect("stages");
+        assert_eq!(stages.len(), 5);
+        let uuids: Vec<&str> = stages
+            .iter()
+            .map(|stage| stage["uuid"].as_str().expect("uuid"))
+            .collect();
+        assert_eq!(
+            uuids[0],
+            id.as_str(),
+            "the pack is filed under the story id"
+        );
+        assert!(uuids.iter().all(|uuid| is_canonical_pack_uuid(uuid)));
+        assert_eq!(
+            uuids
+                .iter()
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
+            5
+        );
+        let graph = graph_of(&root);
+        assert_eq!(
+            graph.iter().map(|stage| &stage["name"]).collect::<Vec<_>>(),
+            vec!["Le carrefour", "À gauche", "À droite", "La forêt", "Nœud 5"]
+        );
+
+        // The options of a node are the wheel that follows it.
+        let wheel = serde_json::json!([uuids[1], uuids[2]]);
+        assert_eq!(graph[0]["squareOne"], true);
+        assert_eq!(
+            graph[0]["controlSettings"],
+            controls(true, true, false, false, false)
+        );
+        assert_eq!(
+            graph[0]["ok"],
+            serde_json::json!({ "options": wheel, "optionIndex": 0 })
+        );
+        assert_eq!(graph[0]["home"], Value::Null);
+        // Its entries wait for the listener, and lead each to its scene.
+        for (entry, scene) in [(1, 3), (2, 4)] {
+            assert_eq!(
+                graph[entry]["controlSettings"],
+                controls(true, true, true, false, false)
+            );
+            assert_eq!(
+                graph[entry]["ok"],
+                serde_json::json!({ "options": [uuids[scene]], "optionIndex": 0 })
+            );
+            assert_eq!(graph[entry]["home"], Value::Null);
+        }
+        // A scene plays through, then returns to the wheel ON ITS OWN ENTRY
+        // — and home takes the listener to that same spot.
+        for (scene, entry_index) in [(3, 0), (4, 1)] {
+            let back = serde_json::json!({ "options": wheel, "optionIndex": entry_index });
+            assert_eq!(
+                graph[scene]["controlSettings"],
+                controls(false, false, true, true, true)
+            );
+            assert_eq!(graph[scene]["ok"], back);
+            assert_eq!(graph[scene]["home"], back);
+        }
+        // Three option lists, three action nodes — the two scenes share the
+        // wheel they return to.
+        let actions = root["actionNodes"].as_array().expect("actions");
+        assert_eq!(actions.len(), 3);
+        assert!(actions
+            .iter()
+            .all(|action| is_canonical_pack_uuid(action["id"].as_str().expect("id"))));
+
+        // A pack the device engine itself accepts, every media in place.
+        let pack: StudioStoryPack = serde_json::from_value(root.clone()).expect("typed pack");
+        let transcoded = transcode_pack(&pack).expect("a consistent graph");
+        assert_eq!((transcoded.images.len(), transcoded.audios.len()), (1, 5));
+        for name in transcoded.images.iter().chain(&transcoded.audios) {
+            assert!(entries.contains_key(&format!("assets/{name}")), "{name}");
+        }
+        assert!(entries.contains_key("thumbnail.png"));
+    }
+
+    #[test]
+    fn a_story_with_choices_travels_from_library_to_library_as_the_same_pack() {
+        let mut library = Library::new();
+        let id = crossroads_story(&mut library);
+        let out_dir = TempDir::new().expect("out");
+        let first_path = out_dir.path().join("premier.zip");
+        library.export(&id, &first_path).expect("export");
+        let first = read_archive(&first_path);
+        let first_root: Value = serde_json::from_slice(&first["story.json"]).expect("first");
+
+        // Another Rustory imports it: every stage a node, every wheel the
+        // options of the node before it.
+        let mut second_library = Library::new();
+        let card = accept_structured_archive_creation(
+            &mut second_library.db,
+            second_library.app_data.path(),
+            &first_path,
+        )
+        .expect("the shared archive imports");
+        assert_eq!(card.title, "Le Chemin");
+        assert!(card.import_report.is_none(), "a clean import");
+        let structure_json: String = second_library
+            .db
+            .conn()
+            .query_row(
+                "SELECT structure_json FROM stories WHERE id = ?1",
+                rusqlite::params![&card.id],
+                |row| row.get(0),
+            )
+            .expect("structure");
+        let structure: CanonicalStructure =
+            serde_json::from_str(&structure_json).expect("canonical structure");
+        let stages = first_root["stageNodes"].as_array().expect("stages");
+        assert_eq!(structure.start_node_id, id);
+        assert_eq!(
+            structure
+                .nodes
+                .iter()
+                .map(|node| node.id.as_str())
+                .collect::<Vec<_>>(),
+            stages
+                .iter()
+                .map(|stage| stage["uuid"].as_str().expect("uuid"))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            structure
+                .nodes
+                .iter()
+                .map(|node| node.label.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Le carrefour", "À gauche", "À droite", "La forêt", "Nœud 5"]
+        );
+        let destinations = |node: usize| -> Vec<&str> {
+            structure.nodes[node]
+                .options
+                .iter()
+                .map(|option| option.target.as_deref().expect("a linked option"))
+                .collect()
+        };
+        let uuid = |stage: usize| stages[stage]["uuid"].as_str().expect("uuid");
+        assert_eq!(destinations(0), vec![uuid(1), uuid(2)]);
+        assert_eq!(destinations(1), vec![uuid(3)]);
+        assert_eq!(destinations(2), vec![uuid(4)]);
+        assert_eq!(destinations(3), vec![uuid(1), uuid(2)]);
+        assert_eq!(destinations(4), vec![uuid(1), uuid(2)]);
+
+        // Exported from there WITHOUT its retained archive — from the
+        // structure and the media alone: the same pack comes out, sound for
+        // sound.
+        drop_retained_archive(&second_library, &card.id);
+        let second_path = out_dir.path().join("deuxieme.zip");
+        let exported = second_library
+            .export(&card.id, &second_path)
+            .expect("export from the structure");
+        assert_eq!((exported.image_count, exported.audio_count), (1, 5));
+        let second = read_archive(&second_path);
+        let second_root: Value = serde_json::from_slice(&second["story.json"]).expect("second");
+        assert_eq!(graph_of(&second_root), graph_of(&first_root));
+        assert_eq!(
+            stage_asset(&second, &second_root, 0, "image"),
+            stage_asset(&first, &first_root, 0, "image")
+        );
+        for stage in 0..5 {
+            assert_eq!(
+                stage_asset(&second, &second_root, stage, "audio"),
+                stage_asset(&first, &first_root, stage, "audio"),
+                "stage {stage} sound is carried byte for byte"
+            );
+        }
+
+        // One more library, one more hop: nothing moves anymore — the very
+        // same archive, byte for byte.
+        let mut third_library = Library::new();
+        let third_card = accept_structured_archive_creation(
+            &mut third_library.db,
+            third_library.app_data.path(),
+            &second_path,
+        )
+        .expect("the second archive imports");
+        drop_retained_archive(&third_library, &third_card.id);
+        let third_path = out_dir.path().join("troisieme.zip");
+        third_library
+            .export(&third_card.id, &third_path)
+            .expect("export from the structure");
+        assert_eq!(
+            std::fs::read(&third_path).expect("third"),
+            std::fs::read(&second_path).expect("second"),
+        );
+    }
+
+    /// A menu pack as a pack tool writes one — cover, spoken question, one
+    /// wheel entry per story, each story returning to the wheel — stored as a
+    /// ready-made archive at `path`. Returns its descriptor.
+    fn menu_pack_archive(path: &Path, pack_uuid: &str, stories: usize) -> Value {
+        use crate::domain::device::{
+            stage_names, synthesize_menu_pack, MenuEpisode, MenuPackAssets, StoryLayout,
+        };
+        let menu = MenuPackAssets {
+            title_ref: Some("titre.mp3".into()),
+            question_ref: "question.mp3".into(),
+            episodes: (1..=stories)
+                .map(|i| MenuEpisode {
+                    audio_ref: format!("histoire-{i}.mp3"),
+                    image_ref: None,
+                    prompt_ref: format!("annonce-{i}.mp3"),
+                })
+                .collect(),
+            auto_continue: false,
+        };
+        let pack = synthesize_menu_pack(pack_uuid, &menu);
+        let labels: Vec<String> = (1..=stories).map(|i| format!("Histoire {i}")).collect();
+        let labels: Vec<&str> = labels.iter().map(String::as_str).collect();
+        let names = stage_names(StoryLayout::Menu, pack_uuid, "Collection", &labels);
+        let prepared =
+            prepare_story_archive_descriptor(studio_pack_descriptor(&pack, &names), "Collection")
+                .expect("a pack descriptor");
+        // Every sound its own size, so every sound its own content.
+        let sounds: Vec<(&str, u64)> = prepared
+            .assets
+            .iter()
+            .enumerate()
+            .map(|(index, asset)| (asset.archive_name.as_str(), 4096 + 64 * index as u64))
+            .collect();
+        write_pack_archive(
+            path,
+            Some(std::str::from_utf8(&prepared.story_json).expect("utf-8")),
+            &sounds,
+        );
+        serde_json::from_slice(&prepared.story_json).expect("descriptor json")
+    }
+
+    #[test]
+    fn a_story_created_from_a_pack_whose_archive_is_gone_is_exported_as_that_pack_again() {
+        const PACK: &str = "01a06ed9-2040-77c1-9e03-b8f429f4e954";
+        let out_dir = TempDir::new().expect("out");
+        let source_path = out_dir.path().join("collection.zip");
+        let source_root = menu_pack_archive(&source_path, PACK, 3);
+        let source = read_archive(&source_path);
+
+        let mut library = Library::new();
+        let card = accept_structured_archive_creation(
+            &mut library.db,
+            library.app_data.path(),
+            &source_path,
+        )
+        .expect("the pack imports");
+        assert!(card.import_report.is_none(), "a clean import");
+        // The archive the creation retained is lost (a library moved without
+        // it, a retention that failed): what is left is the structure — its
+        // stages as nodes, its wheels as options — and the media.
+        drop_retained_archive(&library, &card.id);
+
+        let destination = out_dir.path().join("retour.zip");
+        let exported = library.export(&card.id, &destination).expect("export");
+        assert_eq!(
+            (exported.image_count, exported.audio_count),
+            (0, 8),
+            "the title, the question, three announcements, three stories"
+        );
+        let entries = read_archive(&destination);
+        let root: Value = serde_json::from_slice(&entries["story.json"]).expect("descriptor");
+        assert_eq!(root["title"], "Collection");
+        assert_eq!(
+            root["stageNodes"][0]["uuid"], PACK,
+            "the pack's own identity"
+        );
+
+        // The same pack: its stages under their ids and names, its wheels,
+        // where OK and home lead — and the controls of every stage but one.
+        let mut expected = graph_of(&source_root);
+        // The question played with every control off; read back from the
+        // structure it plays through like any node (pause and home on).
+        assert_eq!(expected[1]["name"], "Question");
+        assert_eq!(
+            expected[1]["controlSettings"],
+            controls(false, false, false, false, true)
+        );
+        expected[1]["controlSettings"] = controls(false, false, true, true, true);
+        assert_eq!(graph_of(&root), expected);
+        for stage in 0..8 {
+            assert_eq!(
+                stage_asset(&entries, &root, stage, "audio"),
+                stage_asset(&source, &source_root, stage, "audio"),
+                "stage {stage} sound is carried byte for byte"
+            );
+        }
+    }
+
+    #[test]
+    fn an_option_that_leads_nowhere_is_refused_before_any_destination() {
+        let mut library = Library::new();
+        let id = library.story("En cours");
+        library.choice_structure(
+            &id,
+            "n1",
+            &[
+                ("n1", "Début", None, None, &["n2", "ailleurs"]),
+                ("n2", "Suite", None, None, &[]),
+            ],
+        );
+        let err = library.plan(&id).expect_err("refused");
+        assert_eq!(err.code, AppErrorCode::ExportFailed);
+        assert_eq!(details(&err)["source"], "story_pack");
+        assert_eq!(details(&err)["cause"], "option_without_destination");
+        assert_eq!(details(&err)["node"], "n1");
+        assert_eq!(
+            err.message,
+            "Export impossible: une option de cette histoire ne mène à aucun nœud."
+        );
+        assert!(err
+            .user_action
+            .as_deref()
+            .is_some_and(|action| action.contains("export")));
     }
 
     // ===== Per-media bound: what is exported is always imported whole =====
@@ -1669,5 +2152,26 @@ mod tests {
             .expect("export the menu sample");
         // question + two spoken titles + two episodes; one picture.
         assert_eq!((exported.image_count, exported.audio_count), (1, 5));
+
+        // A story with choices written in the editor, laid out by its own
+        // graph (a library of its own: the samples reuse asset ids).
+        let mut choices_library = Library::new();
+        let crossroads = crossroads_story(&mut choices_library);
+        choices_library
+            .export(&crossroads, &out_dir.join("exemple-choix.zip"))
+            .expect("export the choices sample");
+
+        // A pack read back from the story it became, its archive gone.
+        let pack_path = out_dir.join("pack-source.zip");
+        menu_pack_archive(&pack_path, "01a06ed9-2040-77c1-9e03-b8f429f4e954", 3);
+        let mut reader = Library::new();
+        let card =
+            accept_structured_archive_creation(&mut reader.db, reader.app_data.path(), &pack_path)
+                .expect("the pack imports");
+        drop_retained_archive(&reader, &card.id);
+        reader
+            .export(&card.id, &out_dir.join("exemple-pack-relu.zip"))
+            .expect("export the read-back pack sample");
+        std::fs::remove_file(&pack_path).expect("drop the source pack");
     }
 }

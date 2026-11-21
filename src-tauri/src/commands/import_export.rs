@@ -177,8 +177,8 @@ pub async fn export_story_with_save_dialog(
 ///
 /// 1. the export is PLANNED under the SQLite lock (released before any
 ///    `.await`): a story that cannot become an archive — an episode without
-///    audio, a story with choices, a device-copied pack — rejects with
-///    `EXPORT_FAILED` BEFORE the dialog opens;
+///    audio, an option that leads nowhere, a device-copied pack — rejects
+///    with `EXPORT_FAILED` BEFORE the dialog opens;
 /// 2. the dialog, then the destination checks;
 /// 3. the conversion and the write run on a blocking worker, WITHOUT the
 ///    lock: a long transcode never freezes the library. The archive is

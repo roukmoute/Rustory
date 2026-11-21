@@ -4,10 +4,11 @@
 //! tool that reads the community pack format.
 //!
 //! PURE: descriptors in, descriptor out — no I/O, no zip, no transcoding.
-//! The application layer feeds it the pack the device send would write (the
-//! story's retained source descriptor, or the pack synthesized from its
-//! structure) and gets back the `story.json` bytes plus the ORDERED list of
-//! assets to convert and store under `assets/`.
+//! The application layer feeds it the story's pack (its retained source
+//! descriptor, or the pack synthesized from its structure — the one the
+//! device send writes, or the graph of a story with choices) and gets back
+//! the `story.json` bytes plus the ORDERED list of assets to convert and
+//! store under `assets/`.
 //!
 //! What makes the archive ready to use elsewhere, beyond the graph itself:
 //!

@@ -15,7 +15,7 @@ use rustory_lib::application::import_export::{
 use rustory_lib::application::story::node::{
     attach_node_media, save_node_content, AttachNodeMediaInput, SaveNodeContentInput,
 };
-use rustory_lib::application::story::structure::add_node;
+use rustory_lib::application::story::structure::{add_node, add_option, set_option_link};
 use rustory_lib::application::story::{create_story, CreateStoryInput};
 use rustory_lib::domain::shared::AppErrorCode;
 use rustory_lib::infrastructure::db::{self, DbHandle};
@@ -353,4 +353,152 @@ fn a_freshly_created_story_is_refused_with_the_reason_and_writes_nothing() {
     assert_eq!(wire["code"], "EXPORT_FAILED");
     assert_eq!(wire["details"]["source"], "story_pack");
     assert_eq!(wire["details"]["cause"], "missing_audio");
+}
+
+/// Label a node and give it a sound, the way the editor writes them.
+fn voice(library: &mut Library, story_id: &str, node_id: &str, label: &str) {
+    save_node_content(
+        &mut library.db,
+        library.app_data.path(),
+        SaveNodeContentInput {
+            story_id: story_id.into(),
+            node_id: node_id.into(),
+            text: String::new(),
+            label: label.into(),
+        },
+    )
+    .expect("label the node");
+    attach_node_media(
+        &mut library.db,
+        library.app_data.path(),
+        AttachNodeMediaInput {
+            story_id: story_id.into(),
+            node_id: node_id.into(),
+            kind: MediaKind::Audio,
+            bytes: wav(44_100, 1, 0.3),
+        },
+    )
+    .expect("attach the sound");
+}
+
+#[test]
+fn a_story_with_choices_written_in_the_editor_is_exported_and_shared() {
+    let mut source = library();
+    let id = create_story(
+        &mut source.db,
+        CreateStoryInput {
+            title: "Le Chemin".into(),
+        },
+    )
+    .expect("create story")
+    .id;
+    // The start node offers two options; each is created and linked to a
+    // new node in one gesture, like the editor's `Créer et lier`.
+    add_option(&mut source.db, &id, "n1", "À gauche").expect("first option");
+    let left = add_node(&mut source.db, &id, Some(("n1", 0)))
+        .expect("create and link")
+        .structure
+        .nodes[1]
+        .id
+        .clone();
+    add_option(&mut source.db, &id, "n1", "À droite").expect("second option");
+    let right = add_node(&mut source.db, &id, Some(("n1", 1)))
+        .expect("create and link")
+        .structure
+        .nodes[2]
+        .id
+        .clone();
+    voice(&mut source, &id, "n1", "Le carrefour");
+    voice(&mut source, &id, &left, "La forêt");
+    voice(&mut source, &id, &right, "La rivière");
+
+    let out = TempDir::new().expect("out");
+    let archive = out.path().join("Le Chemin.zip");
+
+    // An option still without a destination: refused with the reason,
+    // before any destination is touched.
+    add_option(&mut source.db, &id, &left, "Revenir").expect("an option not linked yet");
+    let err = plan_story_archive_export(&source.db, &id, None).expect_err("refused");
+    assert_eq!(err.code, AppErrorCode::ExportFailed);
+    let wire = serde_json::to_value(&err).expect("serialize");
+    assert_eq!(wire["details"]["cause"], "option_without_destination");
+    assert_eq!(wire["details"]["node"], left.as_str());
+    assert!(!archive.exists());
+
+    // Linked back to the crossroads: the story is exported by its own graph.
+    set_option_link(&mut source.db, &id, &left, 0, Some("n1")).expect("link the option");
+    export(&source, &id, &archive);
+    let entries = read_zip(&archive);
+    let root: serde_json::Value =
+        serde_json::from_slice(&entries["story.json"]).expect("descriptor");
+    let stages = root["stageNodes"].as_array().expect("stages");
+    assert_eq!(stages.len(), 3, "one stage per node");
+    assert_eq!(stages[0]["uuid"], id.as_str());
+    assert_eq!(
+        stages
+            .iter()
+            .map(|stage| &stage["name"])
+            .collect::<Vec<_>>(),
+        vec!["Le carrefour", "La forêt", "La rivière"]
+    );
+    // The two options of the start node are the wheel that follows it.
+    let actions = root["actionNodes"].as_array().expect("actions");
+    let wheel = actions
+        .iter()
+        .find(|action| action["id"] == stages[0]["okTransition"]["actionNode"])
+        .expect("the wheel");
+    assert_eq!(
+        wheel["options"],
+        serde_json::json!([stages[1]["uuid"], stages[2]["uuid"]])
+    );
+    for entry in [&stages[1], &stages[2]] {
+        assert_eq!(entry["controlSettings"]["wheel"], true);
+        assert_eq!(entry["controlSettings"]["autoplay"], false);
+    }
+    // Every sound is a device sound, stored under the name its stage gives.
+    for stage in stages {
+        let name = stage["audio"].as_str().expect("a sound");
+        assert!(audio_is_device_ready(&entries[&format!("assets/{name}")]));
+    }
+
+    // Another Rustory imports it as a story with the same choices…
+    let mut other = library();
+    let card = accept_structured_archive_creation(&mut other.db, other.app_data.path(), &archive)
+        .expect("the shared archive imports");
+    assert_eq!(card.title, "Le Chemin");
+    assert!(card.import_report.is_none(), "nothing to review");
+    assert!(card.sendable, "sendable from its retained archive");
+    let structure_json: String = other
+        .db
+        .conn()
+        .query_row(
+            "SELECT structure_json FROM stories WHERE id = ?1",
+            rusqlite::params![&card.id],
+            |row| row.get(0),
+        )
+        .expect("structure");
+    let structure: serde_json::Value = serde_json::from_str(&structure_json).expect("json");
+    let nodes = structure["nodes"].as_array().expect("nodes");
+    assert_eq!(nodes.len(), 3);
+    let targets = |node: &serde_json::Value| -> Vec<serde_json::Value> {
+        node["options"]
+            .as_array()
+            .expect("options")
+            .iter()
+            .map(|option| option["target"].clone())
+            .collect()
+    };
+    assert_eq!(
+        targets(&nodes[0]),
+        vec![stages[1]["uuid"].clone(), stages[2]["uuid"].clone()]
+    );
+    assert_eq!(targets(&nodes[1]), vec![stages[0]["uuid"].clone()]);
+    assert!(targets(&nodes[2]).is_empty());
+
+    // …and shares it onward under the same identity.
+    let onward = out.path().join("plus-loin.zip");
+    export(&other, &card.id, &onward);
+    let onward_root: serde_json::Value =
+        serde_json::from_slice(&read_zip(&onward)["story.json"]).expect("descriptor");
+    assert_eq!(onward_root["stageNodes"][0]["uuid"], id.as_str());
 }
