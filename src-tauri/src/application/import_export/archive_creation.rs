@@ -41,6 +41,7 @@ use crate::domain::shared::AppError;
 use crate::domain::story::content_checksum_bytes;
 use crate::infrastructure::db::DbHandle;
 use crate::infrastructure::filesystem::{sniff_media, WEB_MAX_MEDIA_BYTES};
+use crate::ipc::dto::import_export::archive_import_report_dto;
 use crate::ipc::dto::StoryCardDto;
 
 use super::structured_creation::{
@@ -212,6 +213,7 @@ pub fn prepare_structured_archive_creation(
             artifact_checksum: descriptor_checksum,
             state: outcome.analysis.state,
             findings: outcome.analysis.findings,
+            import_report: archive_import_report_dto,
         },
         // The archive's own bounds — the very ones the probe and the
         // extraction above applied.
@@ -652,6 +654,53 @@ mod tests {
             std::fs::read(&retained_path).expect("read retained"),
             source_bytes,
             "the retained archive must be byte-identical to the source"
+        );
+    }
+
+    #[test]
+    fn the_created_card_words_its_report_with_the_archive_copy() {
+        // A pack without a title falls back to the archive stem: an
+        // ambiguity, so the created card carries a report — worded for an
+        // archive (its descriptor), exactly like the review before it and
+        // the durable report after it. Never the folder copy (a manifest).
+        let dir = tempfile::tempdir().expect("tempdir");
+        let app_data_dir = dir.path().join("appdata");
+        std::fs::create_dir_all(&app_data_dir).expect("appdata");
+        let zip_path = dir.path().join("Histoire du soir.zip");
+        let story = r#"{
+            "stageNodes": [
+                { "uuid": "s1", "squareOne": true, "image": null, "audio": null,
+                  "okTransition": null, "controlSettings": {} }
+            ],
+            "actionNodes": []
+        }"#;
+        write_zip(&zip_path, &[("story.json", story.as_bytes())]);
+
+        let mut handle = fresh_db();
+        let card = accept_structured_archive_creation(&mut handle, &app_data_dir, &zip_path)
+            .expect("accept");
+        let report = card.import_report.expect("an ambiguity carries a report");
+        let message_of = |aspect: crate::ipc::dto::ImportAspectDto| {
+            report
+                .iter()
+                .find(|finding| finding.aspect == aspect)
+                .expect("a finding for the aspect")
+                .message
+                .clone()
+        };
+        assert_eq!(
+            message_of(crate::ipc::dto::ImportAspectDto::Envelope),
+            "Le descripteur story.json est présent et lisible."
+        );
+        assert_eq!(
+            message_of(crate::ipc::dto::ImportAspectDto::Title),
+            "Le titre a été complété ou normalisé à la création (titre absent du descripteur ou espaces ajustés)."
+        );
+        assert!(
+            report
+                .iter()
+                .all(|finding| !finding.message.contains("manifest")),
+            "an archive has no manifest: {report:?}"
         );
     }
 

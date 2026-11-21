@@ -48,7 +48,7 @@ use crate::infrastructure::filesystem::{
     StoredMedia, MAX_MEDIA_BYTES,
 };
 use crate::ipc::dto::import_export::{
-    folder_import_report_dto, serialize_findings_summary, state_db_tag, state_dto,
+    folder_import_report_dto, serialize_findings_summary, state_db_tag, state_dto, ImportFindingDto,
 };
 use crate::ipc::dto::StoryCardDto;
 
@@ -141,6 +141,8 @@ pub struct PreparedCreation {
     artifact_checksum: String,
     state: crate::domain::import::ImportState,
     findings: Vec<crate::domain::import::RecognitionFinding>,
+    /// The source's own wording of the findings, for the created card.
+    import_report: ImportReportRenderer,
     asset_rows: Vec<AssetRow>,
     /// `(content_hash, file_name)` of every file this prepare promoted —
     /// what [`compensate_structured_creation`] reclaims if the commit
@@ -164,6 +166,14 @@ impl PreparedCreation {
     }
 }
 
+/// How a creation source words its findings on the card returned at
+/// creation: each source owns its per-pair copy (a folder speaks of its
+/// manifest, an archive of its descriptor), and the created card must read
+/// like the review that preceded it and like the durable report that
+/// follows it.
+pub(crate) type ImportReportRenderer =
+    fn(&[crate::domain::import::RecognitionFinding]) -> Vec<ImportFindingDto>;
+
 /// The provenance facts a creation source hands to
 /// [`prepare_from_creatable`] — everything the shared tail cannot derive
 /// itself (it only owns the media promotion and the asset wiring).
@@ -174,6 +184,7 @@ pub(crate) struct CreationProvenance {
     pub artifact_checksum: String,
     pub state: crate::domain::import::ImportState,
     pub findings: Vec<crate::domain::import::RecognitionFinding>,
+    pub import_report: ImportReportRenderer,
 }
 
 /// The byte bounds a creation source applies to its media at promotion.
@@ -260,6 +271,7 @@ pub fn prepare_structured_creation(
             artifact_checksum: manifest_checksum,
             state: outcome.analysis.state,
             findings: outcome.analysis.findings,
+            import_report: folder_import_report_dto,
         },
         // The folder's own bounds: each media within the local-attach
         // ceiling of the node-media store, the very bound its probe applies.
@@ -380,6 +392,7 @@ pub(crate) fn prepare_from_creatable(
         artifact_checksum: provenance.artifact_checksum,
         state: provenance.state,
         findings: provenance.findings,
+        import_report: provenance.import_report,
         asset_rows,
         promoted: promoted_pairs(&promoted),
         // Default: nothing to retain. The structured-archive flow overrides
@@ -543,7 +556,7 @@ pub fn commit_structured_creation(
         }
     }
 
-    let import_report = folder_import_report_dto(&prepared.findings);
+    let import_report = (prepared.import_report)(&prepared.findings);
     Ok(StoryCardDto {
         id: story_id,
         title: prepared.title,

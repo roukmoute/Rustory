@@ -8,14 +8,19 @@ use crate::domain::story::CanonicalStructure;
 use crate::infrastructure::db::DbHandle;
 use crate::infrastructure::filesystem::ensure_app_data_dir;
 use crate::ipc::dto::import_export::{
-    folder_import_findings_from_summary, import_findings_from_summary, import_state_dto_from_tag,
-    rss_import_findings_from_summary, ImportStateDto,
+    archive_import_findings_from_summary, folder_import_findings_from_summary,
+    import_findings_from_summary, import_state_dto_from_tag, rss_import_findings_from_summary,
+    ImportStateDto,
 };
 use crate::ipc::dto::{LibraryOverviewDto, SendBlockerDto, StoryCardDto};
 
 /// The `story_local_imports.source_format` tag of a structured-folder
 /// creation — selects the FOLDER per-pair copy for the durable card report.
 const STRUCTURED_FOLDER_FORMAT: &str = "structured-folder";
+
+/// The `story_local_imports.source_format` tag of a structured-archive
+/// creation — selects the ARCHIVE per-pair copy (descriptor wording).
+const STRUCTURED_ARCHIVE_FORMAT: &str = "structured-archive";
 
 /// The `story_local_imports.source_format` tag of an RSS ingestion —
 /// selects the RSS per-pair copy (feed / episode wording).
@@ -191,11 +196,13 @@ fn project_story_card(
     // its findings in base as the trace but never renders them again: its
     // card goes quiet, exactly like a recognized import. The per-pair copy
     // follows the provenance's format: a structured-folder story speaks of
-    // its manifest, a `.rustory` one of its artifact.
+    // its manifest, a structured-archive one of its descriptor, a `.rustory`
+    // one of its artifact.
     let review_pending = matches!(state, ImportStateDto::Partial | ImportStateDto::NeedsReview);
     let import_report = if review_pending {
         let render = match source_format.as_deref() {
             Some(STRUCTURED_FOLDER_FORMAT) => folder_import_findings_from_summary,
+            Some(STRUCTURED_ARCHIVE_FORMAT) => archive_import_findings_from_summary,
             Some(RSS_FORMAT) => rss_import_findings_from_summary,
             _ => import_findings_from_summary,
         };
@@ -612,6 +619,63 @@ mod tests {
         assert!(report
             .iter()
             .any(|f| f.category == ImportCategoryDto::Missing));
+    }
+
+    #[test]
+    fn read_stories_projects_a_structured_archive_creation_with_the_archive_copy() {
+        // An archive story's durable report speaks of ITS source: the
+        // `story.json` descriptor — never of a manifest (the folder copy)
+        // nor of an artifact (the `.rustory` copy).
+        let mut db = fresh_db();
+        let created = create_story(
+            &mut db,
+            CreateStoryInput {
+                title: "Depuis une archive".into(),
+            },
+        )
+        .expect("create");
+        db.conn()
+            .execute(
+                "INSERT INTO story_local_imports (story_id, source_format, source_format_version, source_name, artifact_checksum, import_state, findings_summary, imported_at) \
+                 VALUES (?1, 'structured-archive', 1, 'Mon pack.zip', ?2, 'needs_review', ?3, '2026-11-21T00:00:00.000Z')",
+                rusqlite::params![
+                    created.id,
+                    "a".repeat(64),
+                    "[{\"aspect\":\"envelope\",\"category\":\"recognized\"},{\"aspect\":\"title\",\"category\":\"ambiguous\"},{\"aspect\":\"structure\",\"category\":\"recognized\"},{\"aspect\":\"media\",\"category\":\"recognized\"}]",
+                ],
+            )
+            .expect("insert archive provenance");
+
+        let stories = read_stories(&db).expect("read");
+        let card = stories
+            .iter()
+            .find(|s| s.id == created.id)
+            .expect("archive card");
+        assert_eq!(
+            card.import_state,
+            Some(crate::ipc::dto::import_export::ImportStateDto::NeedsReview)
+        );
+        let report = card.import_report.as_ref().expect("durable report");
+        let message_of = |aspect: crate::ipc::dto::ImportAspectDto| {
+            report
+                .iter()
+                .find(|f| f.aspect == aspect)
+                .expect("a finding for the aspect")
+                .message
+                .as_str()
+        };
+        assert_eq!(
+            message_of(crate::ipc::dto::ImportAspectDto::Envelope),
+            "Le descripteur story.json est présent et lisible."
+        );
+        assert_eq!(
+            message_of(crate::ipc::dto::ImportAspectDto::Title),
+            "Le titre a été complété ou normalisé à la création (titre absent du descripteur ou espaces ajustés)."
+        );
+        assert_eq!(
+            message_of(crate::ipc::dto::ImportAspectDto::Structure),
+            "La structure du pack est reconnue et convertie en histoire."
+        );
     }
 
     #[test]

@@ -1190,7 +1190,10 @@ pub fn structured_folder_finding_message(
 
 /// The structured-ARCHIVE per-pair FR copy: the community pack's
 /// `story.json` descriptor wording. Media pairs fall back to the shared
-/// [`finding_message`] copy (identical semantics: referenced files).
+/// [`finding_message`] copy (identical semantics: referenced files). Used by
+/// the archive analysis DTO AND by the card report of an archive story —
+/// the one returned at creation and the durable one, picked by the
+/// provenance's `source_format = 'structured-archive'`.
 pub fn structured_archive_finding_message(
     aspect: ImportAspectDto,
     category: ImportCategoryDto,
@@ -1263,6 +1266,15 @@ pub fn folder_import_findings_from_summary(summary: &str) -> Vec<ImportFindingDt
     findings_from_summary_with(summary, structured_folder_finding_message)
 }
 
+/// The structured-archive variant of [`import_findings_from_summary`]: the
+/// same stored pairs, re-rendered with the ARCHIVE per-pair copy. Picked by
+/// the provenance's `source_format = 'structured-archive'` so an archive
+/// story's durable card report speaks of its descriptor — never of a
+/// manifest it does not have, nor of an artifact.
+pub fn archive_import_findings_from_summary(summary: &str) -> Vec<ImportFindingDto> {
+    findings_from_summary_with(summary, structured_archive_finding_message)
+}
+
 /// The RSS variant of [`import_findings_from_summary`]: the same stored
 /// pairs, re-rendered with the RSS per-pair copy. Picked by the
 /// provenance's `source_format = 'rss'` so an ingested story's durable
@@ -1312,6 +1324,21 @@ pub fn folder_import_report_dto(findings: &[RecognitionFinding]) -> Vec<ImportFi
     findings
         .iter()
         .map(ImportFindingDto::from_folder_domain)
+        .collect()
+}
+
+/// The structured-archive variant of [`import_report_dto`] — same rules,
+/// the ARCHIVE per-pair copy.
+pub fn archive_import_report_dto(findings: &[RecognitionFinding]) -> Vec<ImportFindingDto> {
+    if findings
+        .iter()
+        .all(|f| f.category == RecognitionCategory::Recognized)
+    {
+        return Vec::new();
+    }
+    findings
+        .iter()
+        .map(ImportFindingDto::from_archive_domain)
         .collect()
 }
 
