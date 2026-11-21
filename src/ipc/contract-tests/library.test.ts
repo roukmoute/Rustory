@@ -254,7 +254,7 @@ describe("isLibraryOverviewDto guard", () => {
                 aspect: "media",
                 category: "recognized",
                 message:
-                  "Tous les fichiers audio et image référencés par le dossier sont présents et reconnus.",
+                  "Tous les fichiers audio et image référencés par le pack sont présents dans l'archive et reconnus.",
               },
               {
                 aspect: "mediaSize",

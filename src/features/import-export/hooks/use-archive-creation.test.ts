@@ -43,7 +43,7 @@ const ARCHIVE_ANALYZED_CLEAN = {
       aspect: "media" as const,
       category: "recognized" as const,
       message:
-        "Tous les fichiers audio et image référencés sont présents et reconnus.",
+        "Tous les fichiers audio et image référencés par le pack sont présents dans l'archive et reconnus.",
     },
     {
       aspect: "mediaSize" as const,

@@ -1142,10 +1142,11 @@ pub fn finding_message(aspect: ImportAspectDto, category: ImportCategoryDto) -> 
         (A::Timestamps, _) => {
             "Une date de l'histoire n'a pas le format attendu ; elle a été conservée telle quelle."
         }
-        // `media` pairs — emitted by the structured-folder and archive
-        // flows; the copy lives here too so a persisted `(media, …)` pair
-        // re-rendered through the shared path never panics nor falls back
-        // empty.
+        // `media` pairs — the structured-FOLDER flow's copy (it delegates
+        // here; the archive flow words its own pairs, an archive is not a
+        // folder). It lives in the shared table so a persisted `(media, …)`
+        // pair re-rendered through the shared path never panics nor falls
+        // back empty.
         (A::Media, C::Recognized) => {
             "Tous les fichiers audio et image référencés par le dossier sont présents et reconnus."
         }
@@ -1277,14 +1278,16 @@ pub fn structured_folder_finding_message(
     }
 }
 
-/// The structured-ARCHIVE per-pair FR copy: the community pack's
-/// `story.json` descriptor wording, the `mediaSize` pairs that name ITS
-/// bounds, and the `media` ambiguity (never a size reason here). The other
-/// media pairs fall back to the shared [`finding_message`] copy (identical
-/// semantics: referenced files). Used by
-/// the archive analysis DTO AND by the card report of an archive story —
-/// the one returned at creation and the durable one, picked by the
-/// provenance's `source_format = 'structured-archive'`.
+/// The structured-ARCHIVE per-pair FR copy (frozen in
+/// `product-language.md#Structured-archive recognition copy`): the community
+/// pack's `story.json` descriptor wording, the `media` pairs that speak of
+/// presence — an archive is not a folder: its PACK references files that
+/// are, or are not, IN THE ARCHIVE —, the `media` ambiguity (never a size
+/// reason here) and the `mediaSize` pairs that name ITS bounds. Every other
+/// pair delegates to the shared table. Used by the archive analysis DTO AND
+/// by the card report of an archive story — the one returned at creation
+/// and the durable one, picked by the provenance's `source_format =
+/// 'structured-archive'`.
 pub fn structured_archive_finding_message(
     aspect: ImportAspectDto,
     category: ImportCategoryDto,
@@ -1311,7 +1314,18 @@ pub fn structured_archive_finding_message(
         (A::Structure, C::Missing | C::Blocking) => {
             "La structure du descripteur est incomplète ou incohérente. Corrige l'archive puis relance l'analyse."
         }
+        (A::Media, C::Recognized) => {
+            "Tous les fichiers audio et image référencés par le pack sont présents dans l'archive et reconnus."
+        }
         (A::Media, C::Ambiguous) => MEDIA_UNUSABLE_COPY,
+        (A::Media, C::Missing) => {
+            "Certains fichiers audio ou image référencés par le pack sont introuvables dans l'archive. L'histoire sera créée sans eux ; tu pourras les ajouter dans l'éditeur."
+        }
+        // No flow emits `(media, blocking)` — the archive's own defensive
+        // copy, coherent with its chip like the shared one, so a
+        // persisted/forged pair never makes an archive report speak of a
+        // folder.
+        (A::Media, C::Blocking) => "Un média référencé par le pack bloque la création.",
         (A::MediaSize, C::Ambiguous) => ARCHIVE_MEDIA_OVERSIZE_COPY.as_str(),
         (A::MediaSize, C::Blocking) => ARCHIVE_MEDIA_TOTAL_OVERSIZE_COPY.as_str(),
         _ => finding_message(aspect, category),
@@ -1825,8 +1839,8 @@ mod tests {
             finding_message(ImportAspectDto::Envelope, ImportCategoryDto::Blocking),
             "the .rustory copy keeps speaking of an artifact"
         );
-        // …the `media` pairs that speak of presence are ONE copy, shared by
-        // construction…
+        // …the `media` pairs that speak of presence are the shared table's,
+        // by construction (the archive words its own: it is not a folder)…
         for category in [
             ImportCategoryDto::Recognized,
             ImportCategoryDto::Missing,
@@ -1834,10 +1848,6 @@ mod tests {
         ] {
             assert_eq!(
                 structured_folder_finding_message(ImportAspectDto::Media, category),
-                finding_message(ImportAspectDto::Media, category)
-            );
-            assert_eq!(
-                structured_archive_finding_message(ImportAspectDto::Media, category),
                 finding_message(ImportAspectDto::Media, category)
             );
         }
@@ -1955,9 +1965,14 @@ mod tests {
         // No flow emits `(media, blocking)`, but a persisted/forged summary
         // can re-render it: the defensive copy must stay coherent with the
         // `blocage réel` chip — never "the story will be created anyway".
-        let copy = finding_message(ImportAspectDto::Media, ImportCategoryDto::Blocking);
-        assert!(!copy.contains("sera créée"), "no creation promise: {copy}");
-        assert!(!copy.is_empty());
+        // The archive words its own, like its other `media` pairs.
+        for copy in [
+            finding_message(ImportAspectDto::Media, ImportCategoryDto::Blocking),
+            structured_archive_finding_message(ImportAspectDto::Media, ImportCategoryDto::Blocking),
+        ] {
+            assert!(!copy.contains("sera créée"), "no creation promise: {copy}");
+            assert!(!copy.is_empty());
+        }
     }
 
     #[test]
@@ -1993,6 +2008,87 @@ mod tests {
             assert!(
                 copy.contains("relance l'analyse"),
                 "{aspect:?} blocking copy must name the gesture: {copy}"
+            );
+        }
+    }
+
+    #[test]
+    fn archive_copy_words_the_media_presence_for_a_pack_in_its_archive() {
+        use ImportAspectDto::Media;
+        use ImportCategoryDto::{Blocking, Missing, Recognized};
+        // An archive is not a folder: its pack references files that are,
+        // or are not, in the archive — the review-time words of the send
+        // refusal (`un média du pack est introuvable dans l'archive`).
+        assert_eq!(
+            structured_archive_finding_message(Media, Recognized),
+            "Tous les fichiers audio et image référencés par le pack sont présents dans l'archive et reconnus."
+        );
+        assert_eq!(
+            structured_archive_finding_message(Media, Missing),
+            "Certains fichiers audio ou image référencés par le pack sont introuvables dans l'archive. L'histoire sera créée sans eux ; tu pourras les ajouter dans l'éditeur."
+        );
+        // The dead pair, in the archive's words too.
+        assert_eq!(
+            structured_archive_finding_message(Media, Blocking),
+            "Un média référencé par le pack bloque la création."
+        );
+        // The folder flow keeps its own copies, verbatim.
+        assert_eq!(
+            structured_folder_finding_message(Media, Recognized),
+            "Tous les fichiers audio et image référencés par le dossier sont présents et reconnus."
+        );
+        assert_eq!(
+            structured_folder_finding_message(Media, Missing),
+            "Certains fichiers audio ou image référencés par le dossier sont introuvables. L'histoire sera créée sans eux ; tu pourras les ajouter dans l'éditeur."
+        );
+    }
+
+    #[test]
+    fn no_archive_copy_speaks_of_a_folder_or_a_manifest() {
+        // Whatever pair an archive report renders — emitted by the analysis,
+        // or carried by a persisted/forged summary — it never borrows the
+        // folder's words.
+        use ImportAspectDto::*;
+        use ImportCategoryDto::*;
+        for aspect in [
+            Envelope,
+            FormatVersion,
+            SchemaVersion,
+            Structure,
+            Integrity,
+            Title,
+            Timestamps,
+            Media,
+            MediaSize,
+            Source,
+        ] {
+            for category in [Recognized, Ambiguous, Missing, Blocking] {
+                let copy = structured_archive_finding_message(aspect, category);
+                assert!(
+                    !copy.contains("dossier") && !copy.contains("manifest"),
+                    "archive {aspect:?}/{category:?} speaks of a folder: {copy}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn an_archive_summary_words_a_missing_media_with_the_archive_copy() {
+        // Stored as bare codes, worded at read time: the durable card report
+        // of an archive story speaks the archive's words — whether its
+        // summary judged the size (today) or was persisted before it did.
+        for summary in [
+            r#"[{"aspect":"media","category":"missing"},{"aspect":"mediaSize","category":"recognized"}]"#,
+            r#"[{"aspect":"media","category":"missing"}]"#,
+        ] {
+            assert_eq!(
+                archive_import_findings_from_summary(summary)[0].message,
+                "Certains fichiers audio ou image référencés par le pack sont introuvables dans l'archive. L'histoire sera créée sans eux ; tu pourras les ajouter dans l'éditeur."
+            );
+            // The same pair of a folder story keeps the folder copy.
+            assert_eq!(
+                folder_import_findings_from_summary(summary)[0].message,
+                "Certains fichiers audio ou image référencés par le dossier sont introuvables. L'histoire sera créée sans eux ; tu pourras les ajouter dans l'éditeur."
             );
         }
     }

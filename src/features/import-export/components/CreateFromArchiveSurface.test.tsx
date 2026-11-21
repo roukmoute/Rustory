@@ -4,6 +4,14 @@ import { describe, expect, it } from "vitest";
 import { CreateFromArchiveSurface } from "./CreateFromArchiveSurface";
 import type { ArchiveCreationStatus } from "../hooks/use-archive-creation";
 
+// The `media` copies Rust sends for an ARCHIVE: a pack and its archive —
+// never the folder flow's wording (the surface renders a finding's message
+// verbatim).
+const MEDIA_ALL_PRESENT =
+  "Tous les fichiers audio et image référencés par le pack sont présents dans l'archive et reconnus.";
+const MEDIA_MISSING =
+  "Certains fichiers audio ou image référencés par le pack sont introuvables dans l'archive. L'histoire sera créée sans eux ; tu pourras les ajouter dans l'éditeur.";
+
 // The REAL wire shape of a creatable archive verdict (exactly the five
 // archive aspects — what the facade guard lets through).
 const CLEAN_FINDINGS = [
@@ -25,8 +33,7 @@ const CLEAN_FINDINGS = [
   {
     aspect: "media",
     category: "recognized",
-    message:
-      "Tous les fichiers audio et image référencés sont présents et reconnus.",
+    message: MEDIA_ALL_PRESENT,
   },
   {
     aspect: "mediaSize",
@@ -168,11 +175,7 @@ describe("<CreateFromArchiveSurface /> — media size", () => {
     expect(screen.queryByText("information manquante")).toBeNull();
     // The media themselves are neither missing nor of an unknown format.
     expect(
-      within(
-        findingRow(
-          "Tous les fichiers audio et image référencés sont présents et reconnus.",
-        ),
-      ).getByText("reconnu"),
+      within(findingRow(MEDIA_ALL_PRESENT)).getByText("reconnu"),
     ).toBeInTheDocument();
     // The story is still creatable, and the left-out file is named.
     expect(screen.getByText("Médias écartés : trop.mp3")).toBeInTheDocument();
@@ -213,5 +216,55 @@ describe("<CreateFromArchiveSurface /> — media size", () => {
     expect(screen.queryByText("Ce qui sera créé")).toBeNull();
     expect(screen.queryByRole("button", { name: "Créer l'histoire" })).toBeNull();
     expect(screen.getByRole("button", { name: "Abandonner" })).toBeInTheDocument();
+  });
+});
+
+describe("<CreateFromArchiveSurface /> — media presence", () => {
+  it("words the media of a clean pack for an archive — never for a folder", () => {
+    renderSurface(reviewWithMedia(2));
+
+    expect(
+      within(findingRow(MEDIA_ALL_PRESENT)).getByText("reconnu"),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/dossier/)).toBeNull();
+  });
+
+  it("names a media absent from the archive as a missing information of a creatable pack", () => {
+    renderSurface({
+      kind: "review",
+      verdict: {
+        kind: "analyzed",
+        quality: "partial",
+        state: "partial",
+        findings: [
+          ...CLEAN_FINDINGS.slice(0, 3),
+          { aspect: "media", category: "missing", message: MEDIA_MISSING },
+          CLEAN_FINDINGS[4],
+        ],
+        creatableSummary: {
+          title: "Sans couverture",
+          nodeCount: 2,
+          retainedMedia: ["intro.mp3"],
+          discardedMedia: ["cover.png"],
+        },
+        archiveName: "sans-couverture.zip",
+        archivePath: "/home/user/sans-couverture.zip",
+      },
+    });
+
+    expect(screen.getByText("Partiellement exploitable")).toBeInTheDocument();
+    expect(screen.getByText("Points d'attention")).toBeInTheDocument();
+    // The line speaks of the pack and of its archive, under its own chip.
+    expect(
+      within(findingRow(MEDIA_MISSING)).getByText("information manquante"),
+    ).toBeInTheDocument();
+    // An archive is not a folder: no line of its review says so.
+    expect(screen.queryByText(/dossier/)).toBeNull();
+    // The story is still creatable, and the missing file is named.
+    expect(screen.getByText("Médias écartés : cover.png")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Créer l'histoire" }),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("alert")).toBeNull();
   });
 });

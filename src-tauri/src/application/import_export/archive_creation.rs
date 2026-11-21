@@ -768,12 +768,93 @@ mod tests {
             message_of(crate::ipc::dto::ImportAspectDto::Title),
             "Le titre a été complété ou normalisé à la création (titre absent du descripteur ou espaces ajustés)."
         );
+        assert_eq!(
+            message_of(crate::ipc::dto::ImportAspectDto::Media),
+            "Tous les fichiers audio et image référencés par le pack sont présents dans l'archive et reconnus."
+        );
+        assert!(
+            report.iter().all(|finding| {
+                !finding.message.contains("manifest") && !finding.message.contains("dossier")
+            }),
+            "an archive has no manifest and is not a folder: {report:?}"
+        );
+    }
+
+    #[test]
+    fn a_media_absent_from_the_archive_is_worded_for_an_archive_from_the_review_to_the_card() {
+        // The pack references a cover its archive does not carry: the review,
+        // the card returned at creation and the summary the library re-reads
+        // after a restart all say so in the archive's words — never the
+        // folder's.
+        const MISSING: &str = "Certains fichiers audio ou image référencés par le pack sont introuvables dans l'archive. L'histoire sera créée sans eux ; tu pourras les ajouter dans l'éditeur.";
+        fn media_line(report: &[ImportFindingDto]) -> (ImportCategoryDto, &str) {
+            let finding = report
+                .iter()
+                .find(|finding| finding.aspect == ImportAspectDto::Media)
+                .expect("a media finding");
+            (finding.category, finding.message.as_str())
+        }
+        let dir = tempfile::tempdir().expect("tempdir");
+        let app_data_dir = dir.path().join("appdata");
+        std::fs::create_dir_all(&app_data_dir).expect("appdata");
+        let zip_path = dir.path().join("sans-couverture.zip");
+        write_zip(
+            &zip_path,
+            &[
+                ("story.json", CLEAN_STORY_JSON.as_bytes()),
+                ("assets/intro.mp3", MP3_BYTES),
+            ],
+        );
+
+        // The review, as the command serializes it.
+        let outcome = analyze_structured_archive(&zip_path).expect("analyze");
+        let ArchiveCreationAnalysisDto::Analyzed {
+            state,
+            findings,
+            creatable_summary,
+            ..
+        } = ArchiveCreationAnalysisDto::analyzed(
+            &outcome.analysis,
+            outcome.archive_name.clone(),
+            zip_path.to_string_lossy().into_owned(),
+        )
+        else {
+            unreachable!("an analysis always maps to the analyzed verdict");
+        };
+        assert_eq!(state, ImportStateDto::Partial);
+        assert_eq!(media_line(&findings), (ImportCategoryDto::Missing, MISSING));
+        assert_eq!(
+            creatable_summary.expect("creatable").discarded_media,
+            vec!["cover.png".to_string()]
+        );
+
+        // The card returned at creation.
+        let mut handle = fresh_db();
+        let card = accept_structured_archive_creation(&mut handle, &app_data_dir, &zip_path)
+            .expect("the story is created without the missing cover");
+        assert_eq!(card.import_state, Some(ImportStateDto::Partial));
+        let report = card
+            .import_report
+            .expect("a pending review carries a report");
+        assert_eq!(media_line(&report), (ImportCategoryDto::Missing, MISSING));
         assert!(
             report
                 .iter()
-                .all(|finding| !finding.message.contains("manifest")),
-            "an archive has no manifest: {report:?}"
+                .all(|finding| !finding.message.contains("dossier")),
+            "an archive is not a folder: {report:?}"
         );
+
+        // The durable summary: codes only, re-worded at read time.
+        let summary: String = handle
+            .conn()
+            .query_row(
+                "SELECT findings_summary FROM story_local_imports WHERE story_id = ?1",
+                rusqlite::params![&card.id],
+                |row| row.get(0),
+            )
+            .expect("findings summary");
+        assert!(summary.contains(r#"{"aspect":"media","category":"missing"}"#));
+        assert_eq!(archive_import_findings_from_summary(&summary), report);
     }
 
     #[test]

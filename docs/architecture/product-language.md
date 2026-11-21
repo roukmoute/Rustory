@@ -483,11 +483,13 @@ The UI branches on the discriminants, never on this text; the folder flow owns
 the wording of EVERY `Envelope`, `FormatVersion`, `Title` and `Structure` pair
 of its matrix (they speak of a manifest and a creation — the `.rustory` copy
 keeps speaking of an artifact and an import), except the shared
-`Title × reconnu` line whose copy is identical; the `Media` pairs are shared
-with the structured archive; the `MediaSize` pairs name the folder's OWN
-bounds, spelled from the constants the analysis applies. Every `blocage réel`
-copy names the corrective gesture (fix or lighten the folder/manifest, re-run
-the analysis). Quality labels are reused verbatim
+`Title × reconnu` line whose copy is identical; the `Media × reconnu` and
+`Media × information manquante` pairs speak of the FOLDER (the structured
+archive words its own — see below), while the `Media × ambiguïté` copy is
+shared with the structured archive; the `MediaSize` pairs name the folder's
+OWN bounds, spelled from the constants the analysis applies. Every
+`blocage réel` copy names the corrective gesture (fix or lighten the
+folder/manifest, re-run the analysis). Quality labels are reused verbatim
 (`Propre` / `Partiellement exploitable` / `Inexploitable`), as are the report
 headers and the per-category chips (`reconnu` / `ambiguïté` /
 `information manquante` / `blocage réel`).
@@ -535,10 +537,13 @@ One canonical FR message per `(aspect, catégorie)` pair of the
 structured-archive matrix (see
 [device-support-profile.md#Structured archive v1 format contract](./device-support-profile.md)).
 The archive flow owns the wording of its `Envelope`, `Title` and `Structure`
-pairs (they speak of a descriptor and a pack) and of the `MediaSize` pairs
-that name ITS bounds; it analyzes no `FormatVersion`. The other `Media` pairs
-are the folder table's, verbatim. These copies render in the review, on the
-card returned at creation and in the durable card report alike.
+pairs (they speak of a descriptor and a pack), of the `Media` pairs that speak
+of presence (an archive is not a folder: the PACK references files that are,
+or are not, IN THE ARCHIVE) and of the `MediaSize` pairs that name ITS bounds;
+it analyzes no `FormatVersion`. Only the `Media × ambiguïté` copy is the
+folder table's, verbatim. These copies render in the review, on the card
+returned at creation and in the durable card report alike — and none of them
+speaks of a folder or of a manifest, whatever pair a report carries.
 
 | Aspect | Catégorie | Message figé |
 | --- | --- | --- |
@@ -550,10 +555,26 @@ card returned at creation and in the durable card report alike.
 | Structure | reconnu | `La structure du pack est reconnue et convertie en histoire.` |
 | Structure | ambiguïté | `La structure du pack contient des références incomplètes ; l'histoire sera créée telle quelle et tu pourras corriger dans l'éditeur.` |
 | Structure | blocage réel | `La structure du descripteur est incomplète ou incohérente. Corrige l'archive puis relance l'analyse.` |
+| Media | reconnu | `Tous les fichiers audio et image référencés par le pack sont présents dans l'archive et reconnus.` |
 | Media | ambiguïté | `Certains fichiers audio ou image référencés ne sont pas utilisables (format non reconnu ou nom invalide). L'histoire sera créée sans eux ; tu pourras les ajouter dans l'éditeur.` |
+| Media | information manquante | `Certains fichiers audio ou image référencés par le pack sont introuvables dans l'archive. L'histoire sera créée sans eux ; tu pourras les ajouter dans l'éditeur.` |
 | MediaSize | reconnu | `Aucun fichier audio ou image référencé ne dépasse la taille autorisée.` |
 | MediaSize | ambiguïté | `Certains fichiers audio ou image référencés dépassent la taille autorisée (134 Mo par fichier). L'histoire sera créée sans eux ; pour les garder, remplace-les dans l'archive par des fichiers plus légers puis relance l'analyse.` |
 | MediaSize | blocage réel | `Les fichiers audio et image référencés dépassent ensemble la taille autorisée (34,4 Go). Allège l'archive (moins de médias ou des fichiers plus légers) puis relance l'analyse.` |
+
+The `Media × reconnu` and `Media × information manquante` copies name what
+REFERENCES the files (the pack) and where they are, or are not (the archive)
+— the review-time words of the send refusal for the same fact (`Envoi
+impossible: un média du pack est introuvable dans l'archive.`). The folder
+table says `référencés par le dossier` for these pairs; no line of an archive
+report does.
+
+KNOWN ROUGH EDGE: the `Media × information manquante` and `Media × ambiguïté`
+copies still end on the editor's gesture (`tu pourras les ajouter dans
+l'éditeur`), as the folder's do. An archive story is sent from the archive it
+retained: a media added in the editor does not reach the device, and a send
+refuses on a media the archive lacks. Giving these two lines the archive's
+own gesture, as `MediaSize × ambiguïté` has, is a separate change.
 
 The archive's `MediaSize × ambiguïté` gesture is NOT the folder's: an archive
 story is sent from the archive it retained, so the media is replaced IN the

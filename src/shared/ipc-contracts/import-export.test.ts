@@ -847,7 +847,8 @@ const ARCHIVE_FINDINGS_CLEAN = [
   {
     aspect: "media",
     category: "recognized",
-    message: "Tous les fichiers référencés sont présents et reconnus.",
+    message:
+      "Tous les fichiers audio et image référencés par le pack sont présents dans l'archive et reconnus.",
   },
   {
     aspect: "mediaSize",
@@ -964,6 +965,40 @@ describe("isArchiveCreationAnalysis", () => {
     expect(isArchiveCreationAnalysis({ ...verdict, state: "partial" })).toBe(
       false,
     );
+  });
+
+  it("accepts a media absent from the archive: a missing information, the durable state is partial", () => {
+    // Symmetric twin of the Rust producer test
+    // (`structured_archive_media_findings_use_the_archive_copy`): the copy
+    // is the archive's own — a pack and its archive, never a folder.
+    const verdict = {
+      ...ARCHIVE_ANALYZED_CLEAN,
+      quality: "partial",
+      state: "partial",
+      findings: [
+        ...ARCHIVE_FINDINGS_CLEAN.slice(0, 3),
+        {
+          aspect: "media",
+          category: "missing",
+          message:
+            "Certains fichiers audio ou image référencés par le pack sont introuvables dans l'archive. L'histoire sera créée sans eux ; tu pourras les ajouter dans l'éditeur.",
+        },
+        ARCHIVE_FINDINGS_CLEAN[4],
+      ],
+      creatableSummary: {
+        ...ARCHIVE_ANALYZED_CLEAN.creatableSummary,
+        retainedMedia: [],
+        discardedMedia: ["cover.png"],
+      },
+    };
+    expect(isArchiveCreationAnalysis(verdict)).toBe(true);
+    // A missing media is never the `needsReview` state of an ambiguity.
+    expect(
+      isArchiveCreationAnalysis({ ...verdict, state: "needsReview" }),
+    ).toBe(false);
+    // The same verdict settles the drop and the OS-open channels.
+    expect(isDropAnalysis({ ...verdict, kind: "archive" })).toBe(true);
+    expect(isOsOpenAnalysis({ ...verdict, kind: "archive" })).toBe(true);
   });
 
   it("accepts a verdict blocked on the media size, every aspect judged and nothing to create", () => {

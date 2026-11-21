@@ -676,6 +676,15 @@ mod tests {
             message_of(crate::ipc::dto::ImportAspectDto::Structure),
             "La structure du pack est reconnue et convertie en histoire."
         );
+        // Its media are those of a pack in its archive — not of a folder.
+        assert_eq!(
+            message_of(crate::ipc::dto::ImportAspectDto::Media),
+            "Tous les fichiers audio et image référencés par le pack sont présents dans l'archive et reconnus."
+        );
+        assert!(
+            report.iter().all(|f| !f.message.contains("dossier")),
+            "an archive is not a folder: {report:?}"
+        );
     }
 
     #[test]

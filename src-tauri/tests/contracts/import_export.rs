@@ -756,6 +756,115 @@ fn the_media_size_aspect_never_reaches_the_flows_that_judge_no_media() {
     );
 }
 
+// ===== Media presence (structured archive) =====
+//
+// An archive is not a folder: the `media` findings of its review, of the
+// card returned at creation and of its durable report speak of a pack and
+// of its archive — one Rust-authoritative copy, on every wire.
+
+const ARCHIVE_MEDIA_RECOGNIZED: &str = "Tous les fichiers audio et image référencés par le pack sont présents dans l'archive et reconnus.";
+
+const ARCHIVE_MEDIA_MISSING: &str = "Certains fichiers audio ou image référencés par le pack sont introuvables dans l'archive. L'histoire sera créée sans eux ; tu pourras les ajouter dans l'éditeur.";
+
+#[test]
+fn structured_archive_media_findings_use_the_archive_copy() {
+    // Every referenced media is in the archive…
+    let present = archive_analysis_with(
+        ONE_SOUND_PACK,
+        &[(
+            "long.mp3",
+            MediaProbe::Usable {
+                kind: FolderMediaKind::Audio,
+                byte_size: 4096,
+            },
+        )],
+    );
+    let clean = serde_json::to_value(ArchiveCreationAnalysisDto::analyzed(
+        &present,
+        "p.zip".into(),
+        "/tmp/p.zip".into(),
+    ))
+    .expect("serialize");
+    assert_eq!(clean["quality"], "clean");
+    assert_eq!(
+        finding_of(&clean, "media"),
+        &serde_json::json!({
+            "aspect": "media",
+            "category": "recognized",
+            "message": ARCHIVE_MEDIA_RECOGNIZED,
+        })
+    );
+
+    // …or one is not: the story is created without it.
+    let absent = archive_analysis_with(ONE_SOUND_PACK, &[("long.mp3", MediaProbe::Absent)]);
+    let picker = serde_json::to_value(ArchiveCreationAnalysisDto::analyzed(
+        &absent,
+        "p.zip".into(),
+        "/tmp/p.zip".into(),
+    ))
+    .expect("serialize");
+    assert_eq!(picker["quality"], "partial");
+    assert_eq!(picker["state"], "partial");
+    assert_eq!(
+        finding_of(&picker, "media"),
+        &serde_json::json!({
+            "aspect": "media",
+            "category": "missing",
+            "message": ARCHIVE_MEDIA_MISSING,
+        })
+    );
+    assert_eq!(
+        picker["creatableSummary"]["discardedMedia"],
+        serde_json::json!(["long.mp3"])
+    );
+
+    // The drop and OS-open channels re-tag the picker verdict: same copy.
+    let dropped = serde_json::to_value(DropAnalysisDto::archive(
+        &absent,
+        "p.zip".into(),
+        "/tmp/p.zip".into(),
+    ))
+    .expect("serialize");
+    let opened = serde_json::to_value(OsOpenAnalysisDto::archive(
+        &absent,
+        "p.zip".into(),
+        "/tmp/p.zip".into(),
+    ))
+    .expect("serialize");
+    assert_eq!(dropped["findings"], picker["findings"]);
+    assert_eq!(opened["findings"], picker["findings"]);
+
+    // No line of an archive review speaks of a folder.
+    for wire in [&clean, &picker] {
+        for finding in wire["findings"].as_array().expect("findings") {
+            let message = finding["message"].as_str().expect("message");
+            assert!(!message.contains("dossier"), "{message}");
+        }
+    }
+}
+
+#[test]
+fn an_archive_story_report_words_its_media_with_the_archive_copy() {
+    // The durable card report re-words the stored codes with the copy of the
+    // story's own flow: an archive story never reads the folder's.
+    let summary = r#"[{"aspect":"envelope","category":"recognized"},{"aspect":"title","category":"recognized"},{"aspect":"structure","category":"recognized"},{"aspect":"media","category":"missing"},{"aspect":"mediaSize","category":"recognized"}]"#;
+    let media_of = |report: Vec<ImportFindingDto>| {
+        report
+            .into_iter()
+            .find(|finding| finding.aspect == ImportAspectDto::Media)
+            .expect("the media finding")
+            .message
+    };
+    assert_eq!(
+        media_of(archive_import_findings_from_summary(summary)),
+        ARCHIVE_MEDIA_MISSING
+    );
+    assert_eq!(
+        media_of(folder_import_findings_from_summary(summary)),
+        "Certains fichiers audio ou image référencés par le dossier sont introuvables. L'histoire sera créée sans eux ; tu pourras les ajouter dans l'éditeur."
+    );
+}
+
 // ===== Persisted findings summaries =====
 
 #[test]
