@@ -1,5 +1,6 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { useState } from "react";
+import { flushSync } from "react-dom";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
@@ -91,6 +92,63 @@ describe("<ContextMenu />", () => {
     const { onClose } = renderMenu();
     await user.pointer({ keys: "[MouseLeft>]", target: document.body });
     expect(onClose).toHaveBeenCalled();
+  });
+
+  /** A surface that opens the menu from its own right-click, committing
+   *  the menu WITHIN the event — what React does in the app for a discrete
+   *  event, effects included. */
+  function RightClickHarness() {
+    const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
+    return (
+      <div>
+        <div
+          data-testid="card"
+          onContextMenu={(event) => {
+            event.preventDefault();
+            const { clientX, clientY } = event;
+            flushSync(() => setMenu({ x: clientX, y: clientY }));
+          }}
+        >
+          Carte
+        </div>
+        <p data-testid="elsewhere">Ailleurs</p>
+        {menu ? (
+          <ContextMenu
+            x={menu.x}
+            y={menu.y}
+            ariaLabel="Actions"
+            onClose={() => setMenu(null)}
+            items={[{ label: "Éditer", onSelect: () => undefined }]}
+          />
+        ) : null}
+      </div>
+    );
+  }
+
+  it("stays open on the very right-click that opens it", () => {
+    // The opening `contextmenu` is still bubbling toward `document` when
+    // the menu mounts: it must not be taken for an outside gesture.
+    render(<RightClickHarness />);
+    fireEvent.contextMenu(screen.getByTestId("card"));
+    expect(screen.getByRole("menu", { name: "Actions" })).toBeInTheDocument();
+  });
+
+  it("still closes on a later right-click or press elsewhere", async () => {
+    render(<RightClickHarness />);
+    fireEvent.contextMenu(screen.getByTestId("card"));
+    expect(screen.getByRole("menu")).toBeInTheDocument();
+    // Once the opening gesture is over, an outside right-click closes it…
+    await waitFor(() => {
+      fireEvent.contextMenu(screen.getByTestId("elsewhere"));
+      expect(screen.queryByRole("menu")).not.toBeInTheDocument();
+    });
+    // …and so does an outside press after it was opened again.
+    fireEvent.contextMenu(screen.getByTestId("card"));
+    expect(screen.getByRole("menu")).toBeInTheDocument();
+    await waitFor(() => {
+      fireEvent.mouseDown(screen.getByTestId("elsewhere"));
+      expect(screen.queryByRole("menu")).not.toBeInTheDocument();
+    });
   });
 
   it("navigates with the arrow keys and activates with Enter", async () => {

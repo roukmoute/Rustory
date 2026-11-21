@@ -89,7 +89,19 @@ export function ContextMenu({
     };
     // A click/contextmenu/scroll/blur ANYWHERE closes the menu. `mousedown`
     // (not click) so it closes before a downstream click lands.
+    //
+    // The outside listeners are ARMED only once the gesture that opened the
+    // menu has finished dispatching. React runs the effects of a discrete
+    // event synchronously, i.e. while the opening right-click is still on
+    // its way up to `document`: a listener added there at that moment
+    // receives that very `contextmenu`, sees a target outside the (brand
+    // new) menu, and closes it before it was ever painted.
+    let armed = false;
+    const arming = window.setTimeout(() => {
+      armed = true;
+    }, 0);
     const onOutside = (event: MouseEvent): void => {
+      if (!armed) return;
       if (!menuRef.current?.contains(event.target as Node)) onClose();
     };
     const onScrollOrBlur = (): void => onClose();
@@ -99,6 +111,7 @@ export function ContextMenu({
     window.addEventListener("scroll", onScrollOrBlur, true);
     window.addEventListener("blur", onScrollOrBlur);
     return () => {
+      window.clearTimeout(arming);
       document.removeEventListener("keydown", onKey);
       document.removeEventListener("mousedown", onOutside);
       document.removeEventListener("contextmenu", onOutside);
