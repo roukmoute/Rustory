@@ -2,7 +2,10 @@ use std::collections::HashSet;
 
 use tauri::AppHandle;
 
-use crate::domain::device::{linear_episodes, menu_blocker, StoryLayout, StoryPackBlocker};
+use crate::domain::device::{
+    choice_layout, linear_episodes, menu_blocker, offers_choices, SilentNodes, StoryLayout,
+    StoryPackBlocker,
+};
 use crate::domain::shared::AppError;
 use crate::domain::story::CanonicalStructure;
 use crate::infrastructure::db::DbHandle;
@@ -182,7 +185,7 @@ fn project_story_card(
         // (and says so as its V3 send blocker).
         return StoryCardDto::device_pack(id, title);
     }
-    let (sendable, send_blocker) = send_readiness(structure, sendable_archive, presentation);
+    let (sendable, send_blocker) = send_readiness(&id, structure, sendable_archive, presentation);
     let Some(state) = import_state.as_deref().and_then(import_state_dto_from_tag) else {
         let mut card = StoryCardDto::native(id, title);
         card.sendable = sendable;
@@ -243,11 +246,15 @@ pub(crate) struct PresentationFacts<'a> {
 
 /// Whether a (non device-pack) story can be sent to a Lunii V3, and why not
 /// otherwise: a retained source archive always can (the archive engine); a
-/// structure that lays out as a device pack can — every episode has an
-/// audio, no choices (`domain::device::story_pack`) and, for the menu
-/// layout, every spoken announcement exists; anything else is blocked for
-/// the domain's reason (an unparsable structure counts as malformed).
+/// structure that lays out as a device pack can (`domain::device::story_pack`)
+/// — WITHOUT choices, every episode has an audio and, for the menu layout,
+/// every spoken announcement exists; WITH choices, every option leads to a
+/// node and every node has an audio (the presentation does not apply: the
+/// options are the navigation). Anything else is blocked for the domain's
+/// reason (an unparsable structure counts as malformed) — the very verdict
+/// the send's plan reaches at the gesture.
 pub(crate) fn send_readiness(
+    story_id: &str,
     structure: Option<&CanonicalStructure>,
     retained_archive: bool,
     presentation: &PresentationFacts<'_>,
@@ -255,9 +262,15 @@ pub(crate) fn send_readiness(
     if retained_archive {
         return (true, None);
     }
-    let by_structure = match structure {
-        Some(structure) => {
-            linear_episodes(structure).and_then(|episodes| match presentation.layout {
+    let blocker = match structure {
+        // A story with choices: its own graph, read as the plan reads it.
+        Some(structure) if offers_choices(structure) => {
+            choice_layout(story_id, structure, SilentNodes::Refused)
+                .err()
+                .map(|blocker| SendBlockerDto::from_choice_layout(&blocker))
+        }
+        Some(structure) => linear_episodes(structure)
+            .and_then(|episodes| match presentation.layout {
                 StoryLayout::Sequential => Ok(()),
                 StoryLayout::Menu => {
                     let has_prompt =
@@ -268,23 +281,23 @@ pub(crate) fn send_readiness(
                     }
                 }
             })
-        }
-        None => Err(StoryPackBlocker::Malformed),
+            .err()
+            .map(SendBlockerDto::from_domain),
+        None => Some(SendBlockerDto::from_domain(StoryPackBlocker::Malformed)),
     };
-    match by_structure {
-        Ok(()) => (true, None),
-        Err(blocker) => (false, Some(SendBlockerDto::from_domain(blocker))),
-    }
+    (blocker.is_none(), blocker)
 }
 
 /// [`send_readiness`] from the persisted canonical JSON, for a story in the
 /// default (sequential) presentation — a creation-flow card.
 pub(crate) fn send_readiness_of_json(
+    story_id: &str,
     structure_json: &str,
     retained_archive: bool,
 ) -> (bool, Option<SendBlockerDto>) {
     let structure: Option<CanonicalStructure> = serde_json::from_str(structure_json).ok();
     send_readiness(
+        story_id,
         structure.as_ref(),
         retained_archive,
         &PresentationFacts::default(),
@@ -339,6 +352,10 @@ mod tests {
         db::run_migrations(&mut db).expect("migrate");
         db
     }
+
+    /// The story a send readiness is judged for: a story with choices is
+    /// filed under its id (unless its start node carries a pack identity).
+    const STORY_ID: &str = "0197a5d0-0000-7000-8000-000000000000";
 
     #[test]
     fn empty_overview_is_consistent() {
@@ -824,33 +841,117 @@ mod tests {
         // Every episode with an audio, no choices → sendable (a web / RSS
         // creation, or an editor story with narration).
         let linear = structure_json(&[("n1", Some("a1"), false), ("n2", Some("a2"), false)]);
-        assert_eq!(super::send_readiness_of_json(&linear, false), (true, None));
+        assert_eq!(
+            super::send_readiness_of_json(STORY_ID, &linear, false),
+            (true, None)
+        );
 
         // An episode without audio → blocked, and the card says so.
         let mute = structure_json(&[("n1", Some("a1"), false), ("n2", None, false)]);
         assert_eq!(
-            super::send_readiness_of_json(&mute, false),
+            super::send_readiness_of_json(STORY_ID, &mute, false),
             (false, Some(SendBlockerDto::MissingAudio))
         );
-        // Choices → blocked as branching.
-        let branching = structure_json(&[("n1", Some("a1"), true)]);
+        // An option that is not linked yet → blocked, for that reason.
+        let unlinked = structure_json(&[("n1", Some("a1"), true)]);
         assert_eq!(
-            super::send_readiness_of_json(&branching, false),
-            (false, Some(SendBlockerDto::Branching))
+            super::send_readiness_of_json(STORY_ID, &unlinked, false),
+            (false, Some(SendBlockerDto::OptionWithoutDestination))
         );
         // The freshly created empty start node (no audio) → missing audio.
         let fresh = structure_json(&[("n1", None, false)]);
         assert_eq!(
-            super::send_readiness_of_json(&fresh, false),
+            super::send_readiness_of_json(STORY_ID, &fresh, false),
             (false, Some(SendBlockerDto::MissingAudio))
         );
         // Unparsable JSON → malformed; a retained archive still sends.
         assert_eq!(
-            super::send_readiness_of_json("not json", false),
+            super::send_readiness_of_json(STORY_ID, "not json", false),
             (false, Some(SendBlockerDto::Malformed))
         );
         assert_eq!(
-            super::send_readiness_of_json("not json", true),
+            super::send_readiness_of_json(STORY_ID, "not json", true),
+            (true, None)
+        );
+    }
+
+    /// One node of a story with choices: its id, its audio, and the
+    /// destination of each of its options (`None` = not linked yet).
+    type ChoiceNodeSpec<'a> = (&'a str, Option<&'a str>, &'a [Option<&'a str>]);
+
+    /// The persisted JSON of a story with choices, its first node the start.
+    fn choice_structure_json(nodes: &[ChoiceNodeSpec<'_>]) -> String {
+        let nodes: Vec<serde_json::Value> = nodes
+            .iter()
+            .map(|(id, audio, destinations)| {
+                let options: Vec<serde_json::Value> = destinations
+                    .iter()
+                    .map(|target| serde_json::json!({ "label": "suite", "target": target }))
+                    .collect();
+                serde_json::json!({
+                    "id": id, "text": "", "label": id,
+                    "imageAssetId": null, "audioAssetId": audio, "options": options,
+                })
+            })
+            .collect();
+        let start = nodes[0]["id"].clone();
+        serde_json::json!({ "schemaVersion": 3, "startNodeId": start, "nodes": nodes }).to_string()
+    }
+
+    fn choice_structure(nodes: &[ChoiceNodeSpec<'_>]) -> CanonicalStructure {
+        serde_json::from_str(&choice_structure_json(nodes)).expect("structure")
+    }
+
+    #[test]
+    fn a_story_with_choices_is_sendable_by_its_own_graph() {
+        let sequential = PresentationFacts::default();
+        // Every option leads to a node, every node has an audio → sendable.
+        let ready = choice_structure(&[
+            ("n1", Some("a1"), &[Some("n2"), Some("n3")]),
+            ("n2", Some("a2"), &[Some("n1")]),
+            ("n3", Some("a3"), &[]),
+        ]);
+        assert_eq!(
+            super::send_readiness(STORY_ID, Some(&ready), false, &sequential),
+            (true, None)
+        );
+        // The presentation does not apply: `Au choix` without a single
+        // announcement would block an episode list, never this story.
+        let menu_without_announcements = PresentationFacts {
+            layout: StoryLayout::Menu,
+            has_question: false,
+            prompt_node_ids: &[],
+        };
+        assert_eq!(
+            super::send_readiness(STORY_ID, Some(&ready), false, &menu_without_announcements),
+            (true, None)
+        );
+
+        // A node without audio → the device would stay mute on it.
+        let mute = choice_structure(&[("n1", Some("a1"), &[Some("n2")]), ("n2", None, &[])]);
+        assert_eq!(
+            super::send_readiness(STORY_ID, Some(&mute), false, &sequential),
+            (false, Some(SendBlockerDto::NodeWithoutAudio))
+        );
+        // An option whose destination is gone → the graph comes first.
+        let dangling = choice_structure(&[("n1", None, &[Some("ghost")])]);
+        assert_eq!(
+            super::send_readiness(STORY_ID, Some(&dangling), false, &sequential),
+            (false, Some(SendBlockerDto::OptionWithoutDestination))
+        );
+        // Another node carrying the story's own id: two stages cannot share
+        // the pack identity.
+        let clash = choice_structure(&[
+            ("n1", Some("a1"), &[Some(STORY_ID)]),
+            (STORY_ID, Some("a2"), &[]),
+        ]);
+        assert_eq!(
+            super::send_readiness(STORY_ID, Some(&clash), false, &sequential),
+            (false, Some(SendBlockerDto::Malformed))
+        );
+        // A retained archive is sent as such, whatever the structure says.
+        assert_eq!(
+            super::send_readiness(STORY_ID, Some(&mute), true, &sequential),
             (true, None)
         );
     }
@@ -869,7 +970,7 @@ mod tests {
             prompt_node_ids: &prompts,
         };
         assert_eq!(
-            super::send_readiness(Some(&structure), false, &complete),
+            super::send_readiness(STORY_ID, Some(&structure), false, &complete),
             (true, None)
         );
         let one_short = vec!["n1".to_string()];
@@ -879,7 +980,7 @@ mod tests {
             prompt_node_ids: &one_short,
         };
         assert_eq!(
-            super::send_readiness(Some(&structure), false, &partial),
+            super::send_readiness(STORY_ID, Some(&structure), false, &partial),
             (false, Some(SendBlockerDto::MissingAnnouncements))
         );
         let no_question = PresentationFacts {
@@ -888,19 +989,19 @@ mod tests {
             prompt_node_ids: &prompts,
         };
         assert_eq!(
-            super::send_readiness(Some(&structure), false, &no_question),
+            super::send_readiness(STORY_ID, Some(&structure), false, &no_question),
             (false, Some(SendBlockerDto::MissingAnnouncements))
         );
         // A retained archive is sent as such, whatever the layout says.
         assert_eq!(
-            super::send_readiness(Some(&structure), true, &no_question),
+            super::send_readiness(STORY_ID, Some(&structure), true, &no_question),
             (true, None)
         );
         // The structure's own blockers come first.
         let mute: CanonicalStructure =
             serde_json::from_str(&structure_json(&[("n1", None, false)])).unwrap();
         assert_eq!(
-            super::send_readiness(Some(&mute), false, &complete),
+            super::send_readiness(STORY_ID, Some(&mute), false, &complete),
             (false, Some(SendBlockerDto::MissingAudio))
         );
     }
@@ -987,5 +1088,67 @@ mod tests {
         let card = cards.iter().find(|c| c.id == story.id).expect("card");
         assert!(card.sendable);
         assert_eq!(card.send_blocker, None);
+    }
+
+    #[test]
+    fn the_card_of_a_story_with_choices_announces_what_the_send_will_decide() {
+        use crate::application::device::story_pack::plan_story_pack;
+
+        let mut db = fresh_db();
+        let story = create_story(
+            &mut db,
+            CreateStoryInput {
+                title: "Le Chemin".into(),
+            },
+        )
+        .expect("create");
+        for (asset, file_name) in [("a1", "aaaa1111.mp3"), ("a2", "aaaa2222.mp3")] {
+            db.conn()
+                .execute(
+                    "INSERT INTO assets (id, story_id, content_hash, media_type, media_format, byte_size, file_name, created_at) \
+                     VALUES (?1, ?2, ?3, 'audio', 'mp3', 10, ?4, '2026-01-01T00:00:00Z')",
+                    rusqlite::params![asset, &story.id, "a".repeat(64), file_name],
+                )
+                .expect("insert asset");
+        }
+        // The pre-click reason of the card, and the cause the send's plan
+        // gives at the gesture: one verdict, read from the same structure.
+        let cases: [(&[ChoiceNodeSpec<'_>], Option<SendBlockerDto>, Option<&str>); 3] = [
+            (
+                &[("n1", Some("a1"), &[Some("n2")]), ("n2", Some("a2"), &[])],
+                None,
+                None,
+            ),
+            (
+                &[("n1", Some("a1"), &[None])],
+                Some(SendBlockerDto::OptionWithoutDestination),
+                Some("option_without_destination"),
+            ),
+            (
+                &[("n1", Some("a1"), &[Some("n2")]), ("n2", None, &[])],
+                Some(SendBlockerDto::NodeWithoutAudio),
+                Some("node_without_audio"),
+            ),
+        ];
+        for (nodes, blocker, cause) in cases {
+            db.conn()
+                .execute(
+                    "UPDATE stories SET structure_json = ?1 WHERE id = ?2",
+                    rusqlite::params![choice_structure_json(nodes), &story.id],
+                )
+                .expect("update");
+            let cards = super::read_stories(&db).expect("read");
+            let card = cards.iter().find(|c| c.id == story.id).expect("card");
+            assert_eq!(card.sendable, blocker.is_none());
+            assert_eq!(card.send_blocker, blocker);
+            match (plan_story_pack(&db, &story.id), cause) {
+                (Ok(pack), None) => assert_eq!(pack.stage_nodes.len(), nodes.len()),
+                (Err(err), Some(cause)) => {
+                    let wire = serde_json::to_value(&err).expect("serialize");
+                    assert_eq!(wire["details"]["cause"], cause);
+                }
+                (outcome, _) => panic!("the card and the plan disagree: {outcome:?}"),
+            }
+        }
     }
 }

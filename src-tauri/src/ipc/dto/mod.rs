@@ -44,9 +44,9 @@ pub use presentation::{
     AnnouncementVoiceDto, AnnouncementVoicesDto, AttachRecordedAnnouncementInputDto,
     ChapterAnnouncementDto, EmbeddedVoiceStateDto, EmbeddedVoiceStatusDto,
     GenerateAnnouncementsInputDto, GenerateAnnouncementsOutcomeDto, LinearBlockerDto,
-    PreviewAnnouncementVoiceInputDto, RemoveAnnouncementInputDto, SetAnnouncementVoiceInputDto,
-    SetStoryAutoContinueInputDto, SetStoryLayoutInputDto, StoryLayoutDto, StoryPresentationDto,
-    VoiceEngineDto, VoicePreviewDto,
+    LinearBlockerReasonDto, PreviewAnnouncementVoiceInputDto, RemoveAnnouncementInputDto,
+    SetAnnouncementVoiceInputDto, SetStoryAutoContinueInputDto, SetStoryLayoutInputDto,
+    StoryLayoutDto, StoryPresentationDto, VoiceEngineDto, VoicePreviewDto,
 };
 pub use settings::{
     DeviceCapabilityDto, DeviceSupportLineDto, LocalArtifactLineDto, SupportProfileDto,

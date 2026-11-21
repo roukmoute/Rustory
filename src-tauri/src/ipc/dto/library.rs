@@ -39,8 +39,9 @@ pub struct StoryCardDto {
     /// `true` iff the story can be sent to a Lunii V3 via the single
     /// "Envoyer vers la Lunii" gesture: it either retains its ORIGINAL source
     /// `.zip` (a structured-archive import — transcode + re-cipher for the
-    /// target) or its structure lays out as a sequential device pack (every
-    /// episode has an audio, no choices — a web / RSS / editor story).
+    /// target) or its structure lays out as a device pack (a web / RSS /
+    /// editor story): without choices, every episode has an audio; with
+    /// choices, every option leads to a node and every node has an audio.
     /// Independent of `transferable` (the V1/V2 byte-copy round-trip).
     /// Skipped on the wire when `false` so a card without it keeps its
     /// minimal shape. The library overview projection is authoritative; a
@@ -112,26 +113,43 @@ pub enum SendBlockerDto {
     DevicePack,
     /// The structure has no episode.
     Empty,
-    /// The structure's start node is missing from its nodes.
+    /// The structure does not read as a story (its start node is missing
+    /// from its nodes, two nodes share an identity…).
     Malformed,
-    /// The story offers choices — not laid out by the sequential synthesis.
-    Branching,
-    /// At least one episode has no audio.
+    /// At least one episode has no audio (a story without choices).
     MissingAudio,
     /// The menu layout still lacks spoken announcements (question or
     /// episode titles) — generate them first.
     MissingAnnouncements,
+    /// A story with choices: an option leads to no node (not linked yet,
+    /// or its destination is gone).
+    OptionWithoutDestination,
+    /// A story with choices: at least one node has no audio.
+    NodeWithoutAudio,
 }
 
 impl SendBlockerDto {
+    /// The reason a story WITHOUT choices does not lay out as episodes.
     pub const fn from_domain(blocker: crate::domain::device::StoryPackBlocker) -> Self {
         use crate::domain::device::StoryPackBlocker;
         match blocker {
             StoryPackBlocker::Empty => Self::Empty,
-            StoryPackBlocker::Malformed => Self::Malformed,
-            StoryPackBlocker::Branching => Self::Branching,
+            // A story with choices never reaches the episode reading on a
+            // card (it is read by its own graph). Should `Branching` ever
+            // come through, the structure did not read as expected.
+            StoryPackBlocker::Malformed | StoryPackBlocker::Branching => Self::Malformed,
             StoryPackBlocker::MissingAudio => Self::MissingAudio,
             StoryPackBlocker::MissingAnnouncements => Self::MissingAnnouncements,
+        }
+    }
+
+    /// The reason a story WITH choices does not lay out as a device pack.
+    pub const fn from_choice_layout(blocker: &crate::domain::device::ChoiceLayoutBlocker) -> Self {
+        use crate::domain::device::ChoiceLayoutBlocker;
+        match blocker {
+            ChoiceLayoutBlocker::Structure(blocker) => Self::from_domain(*blocker),
+            ChoiceLayoutBlocker::OptionWithoutDestination { .. } => Self::OptionWithoutDestination,
+            ChoiceLayoutBlocker::NodeWithoutAudio { .. } => Self::NodeWithoutAudio,
         }
     }
 }
@@ -250,11 +268,10 @@ mod tests {
 
     #[test]
     fn send_blockers_serialize_in_camel_case_from_their_domain_reasons() {
-        use crate::domain::device::StoryPackBlocker;
+        use crate::domain::device::{ChoiceLayoutBlocker, StoryPackBlocker};
         for (domain, wire) in [
             (StoryPackBlocker::Empty, "empty"),
             (StoryPackBlocker::Malformed, "malformed"),
-            (StoryPackBlocker::Branching, "branching"),
             (StoryPackBlocker::MissingAudio, "missingAudio"),
             (
                 StoryPackBlocker::MissingAnnouncements,
@@ -264,9 +281,41 @@ mod tests {
             let dto = SendBlockerDto::from_domain(domain);
             assert_eq!(serde_json::to_value(dto).expect("serialize"), wire);
         }
+        // A story with choices: its own reasons, and the ones it shares.
+        for (domain, wire) in [
+            (
+                ChoiceLayoutBlocker::OptionWithoutDestination {
+                    node_id: "n1".into(),
+                },
+                "optionWithoutDestination",
+            ),
+            (
+                ChoiceLayoutBlocker::NodeWithoutAudio {
+                    node_id: "n1".into(),
+                },
+                "nodeWithoutAudio",
+            ),
+            (
+                ChoiceLayoutBlocker::Structure(StoryPackBlocker::Malformed),
+                "malformed",
+            ),
+            (
+                ChoiceLayoutBlocker::Structure(StoryPackBlocker::Empty),
+                "empty",
+            ),
+        ] {
+            let dto = SendBlockerDto::from_choice_layout(&domain);
+            assert_eq!(serde_json::to_value(dto).expect("serialize"), wire);
+        }
         assert_eq!(
             serde_json::to_value(SendBlockerDto::DevicePack).expect("serialize"),
             "devicePack"
+        );
+        // "Having choices" is no longer a reason on a card: a story with
+        // choices is sent by its own graph.
+        assert_eq!(
+            SendBlockerDto::from_domain(StoryPackBlocker::Branching),
+            SendBlockerDto::Malformed
         );
     }
 }

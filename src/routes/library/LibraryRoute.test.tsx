@@ -4362,8 +4362,11 @@ describe("<LibraryRoute />", () => {
     expect(reason("missingAudio")).toBe(
       "Envoi indisponible: un ou plusieurs épisodes n'ont pas d'audio",
     );
-    expect(reason("branching")).toBe(
-      "Envoi indisponible: les histoires à choix ne sont pas encore prises en charge",
+    expect(reason("optionWithoutDestination")).toBe(
+      "Envoi indisponible: une option de l'histoire ne mène à aucun nœud",
+    );
+    expect(reason("nodeWithoutAudio")).toBe(
+      "Envoi indisponible: un ou plusieurs nœuds n'ont pas d'audio",
     );
     expect(reason("devicePack")).toBe(
       "Envoi indisponible: histoire copiée depuis une Lunii, non convertible pour ce modèle",

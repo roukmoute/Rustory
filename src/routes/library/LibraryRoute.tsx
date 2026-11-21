@@ -2475,8 +2475,10 @@ export function sendBlockerReason(blocker: SendBlocker | undefined): string {
       return "Envoi indisponible: un ou plusieurs épisodes n'ont pas d'audio";
     case "missingAnnouncements":
       return "Envoi indisponible: génère d'abord les annonces du menu depuis l'histoire";
-    case "branching":
-      return "Envoi indisponible: les histoires à choix ne sont pas encore prises en charge";
+    case "optionWithoutDestination":
+      return "Envoi indisponible: une option de l'histoire ne mène à aucun nœud";
+    case "nodeWithoutAudio":
+      return "Envoi indisponible: un ou plusieurs nœuds n'ont pas d'audio";
     case "empty":
       return "Envoi indisponible: l'histoire n'a aucun épisode";
     case "malformed":

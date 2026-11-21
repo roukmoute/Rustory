@@ -32,9 +32,10 @@ export interface StoryCardDto {
   transferable?: boolean;
   /** `true` iff the story can be sent to a Lunii V3 via the single
    *  "Envoyer vers la Lunii" gesture: it retained its ORIGINAL source `.zip`
-   *  (a structured-archive import) OR its structure lays out as a sequential
-   *  device pack (every episode has an audio, no choices — a web / RSS /
-   *  editor story). Independent of `transferable` (the V1/V2 round-trip).
+   *  (a structured-archive import) OR its structure lays out as a device
+   *  pack (a web / RSS / editor story): without choices, every episode has
+   *  an audio; with choices, every option leads to a node and every node
+   *  has an audio. Independent of `transferable` (the V1/V2 round-trip).
    *  Absent (falsy) otherwise, so the shape is unchanged. */
   sendable?: boolean;
   /** WHY the story is not sendable, when it is not — the closed set behind
@@ -48,22 +49,26 @@ export interface StoryCardDto {
   coverAssetId?: string;
 }
 
-/** Mirror of `SendBlockerDto` (camelCase wire values). */
+/** Mirror of `SendBlockerDto` (camelCase wire values). A story with choices
+ *  is sent by its own graph: its two reasons are an option that leads to no
+ *  node, and a node without audio. */
 export type SendBlocker =
   | "devicePack"
   | "empty"
   | "malformed"
-  | "branching"
   | "missingAudio"
-  | "missingAnnouncements";
+  | "missingAnnouncements"
+  | "optionWithoutDestination"
+  | "nodeWithoutAudio";
 
 const SEND_BLOCKERS: ReadonlySet<string> = new Set([
   "devicePack",
   "empty",
   "malformed",
-  "branching",
   "missingAudio",
   "missingAnnouncements",
+  "optionWithoutDestination",
+  "nodeWithoutAudio",
 ]);
 
 const CARD_IMPORT_STATES: ReadonlySet<string> = new Set([

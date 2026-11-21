@@ -91,8 +91,13 @@ fn library_overview_send_readiness_wire_shape() {
         (SendBlockerDto::DevicePack, "devicePack"),
         (SendBlockerDto::Empty, "empty"),
         (SendBlockerDto::Malformed, "malformed"),
-        (SendBlockerDto::Branching, "branching"),
         (SendBlockerDto::MissingAudio, "missingAudio"),
+        (SendBlockerDto::MissingAnnouncements, "missingAnnouncements"),
+        (
+            SendBlockerDto::OptionWithoutDestination,
+            "optionWithoutDestination",
+        ),
+        (SendBlockerDto::NodeWithoutAudio, "nodeWithoutAudio"),
     ] {
         assert_eq!(serde_json::to_value(blocker).expect("serialize"), wire);
     }

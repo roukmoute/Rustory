@@ -5,9 +5,9 @@ use rustory_lib::ipc::dto::{
     AnnouncementDto, AnnouncementSourceDto, AnnouncementStatusDto, AnnouncementTargetDto,
     AnnouncementVoiceDto, AnnouncementVoicesDto, AttachRecordedAnnouncementInputDto,
     ChapterAnnouncementDto, EmbeddedVoiceStateDto, EmbeddedVoiceStatusDto,
-    GenerateAnnouncementsInputDto, LinearBlockerDto, SendBlockerDto, SetAnnouncementVoiceInputDto,
-    SetStoryAutoContinueInputDto, SetStoryLayoutInputDto, StoryLayoutDto, StoryPresentationDto,
-    VoiceEngineDto, VoicePreviewDto,
+    GenerateAnnouncementsInputDto, LinearBlockerDto, LinearBlockerReasonDto,
+    SetAnnouncementVoiceInputDto, SetStoryAutoContinueInputDto, SetStoryLayoutInputDto,
+    StoryLayoutDto, StoryPresentationDto, VoiceEngineDto, VoicePreviewDto,
 };
 
 #[test]
@@ -72,7 +72,7 @@ fn a_non_linear_presentation_names_the_node_to_fix() {
         archive_retained: false,
         linear: false,
         linear_blocker: Some(LinearBlockerDto {
-            reason: SendBlockerDto::MissingAudio,
+            reason: LinearBlockerReasonDto::MissingAudio,
             node_id: Some("n2".into()),
             label: Some("Deux".into()),
         }),
@@ -96,6 +96,16 @@ fn a_non_linear_presentation_names_the_node_to_fix() {
         v["linearBlocker"],
         serde_json::json!({ "reason": "missingAudio", "nodeId": "n2", "label": "Deux" })
     );
+    // The closed set of reasons the frontend mirrors — `branching` tells a
+    // story with choices, played by its own options.
+    for (reason, wire) in [
+        (LinearBlockerReasonDto::Empty, "empty"),
+        (LinearBlockerReasonDto::Malformed, "malformed"),
+        (LinearBlockerReasonDto::Branching, "branching"),
+        (LinearBlockerReasonDto::MissingAudio, "missingAudio"),
+    ] {
+        assert_eq!(serde_json::to_value(reason).expect("serialize"), wire);
+    }
 }
 
 #[test]

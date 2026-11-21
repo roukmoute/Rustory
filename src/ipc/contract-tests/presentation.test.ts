@@ -86,8 +86,22 @@ describe("presentation guards", () => {
         linearBlocker: { reason: "missingAudio", nodeId: "n2", label: "Deux" },
       }),
     ).toBe(true);
+    // The closed set of the episode reading — `branching` tells a story
+    // with choices, played by its own options.
+    for (const reason of ["empty", "malformed", "branching", "missingAudio"]) {
+      expect(
+        isStoryPresentationDto({ ...PRESENTATION, linear: false, linearBlocker: { reason } }),
+      ).toBe(true);
+    }
     expect(
       isStoryPresentationDto({ ...PRESENTATION, linearBlocker: { reason: "tooLong" } }),
+    ).toBe(false);
+    // A card's send reasons are another set: never a reason of this reading.
+    expect(
+      isStoryPresentationDto({
+        ...PRESENTATION,
+        linearBlocker: { reason: "nodeWithoutAudio" },
+      }),
     ).toBe(false);
     expect(
       isStoryPresentationDto({

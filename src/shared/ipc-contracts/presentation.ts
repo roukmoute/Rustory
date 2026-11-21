@@ -49,7 +49,10 @@ export interface RemoveAnnouncementInput {
   target: AnnouncementTarget;
 }
 
-/** Why the structure does not lay out as episodes, naming the node to fix. */
+/** Why the structure does not lay out as episodes, naming the node to fix.
+ *  Mirror of `LinearBlockerReasonDto`: the reasons of the EPISODE reading,
+ *  not a card's send reasons — `branching` only says the story has choices
+ *  and is played by its own options instead. */
 export interface LinearBlockerDto {
   reason: "empty" | "malformed" | "branching" | "missingAudio";
   nodeId?: string;
@@ -67,7 +70,8 @@ export interface StoryPresentationDto {
    *  layout then does not apply to the send. */
   archiveRetained: boolean;
   /** `true` iff the structure lays out as episodes (announcements make
-   *  sense); `false` for a story with choices or without audio. */
+   *  sense); `false` for a story with choices (played by its own options:
+   *  the layout then does not apply) or without audio. */
   linear: boolean;
   /** When `linear` is false: the reason and the first node to fix. */
   linearBlocker?: LinearBlockerDto;

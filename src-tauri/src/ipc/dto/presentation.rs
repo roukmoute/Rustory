@@ -8,9 +8,8 @@ use crate::application::story::presentation::{
     Announcement, AnnouncementSource, AnnouncementStatus, AnnouncementTarget, ChapterAnnouncement,
     LinearBlocker, StoryPresentation,
 };
-use crate::domain::device::StoryLayout;
+use crate::domain::device::{StoryLayout, StoryPackBlocker};
 use crate::infrastructure::speech::{EmbeddedVoiceStatus, Voice, VoiceEngine};
-use crate::ipc::dto::SendBlockerDto;
 
 /// `sequential` | `menu` — see `StoryLayout`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -178,7 +177,8 @@ pub struct StoryPresentationDto {
     /// layout then does not apply to the send.
     pub archive_retained: bool,
     /// `true` iff the structure lays out as episodes (announcements make
-    /// sense); `false` for a story with choices or without audio.
+    /// sense); `false` for a story with choices (played by its own options,
+    /// the layout then does not apply) or without audio.
     pub linear: bool,
     /// When `linear` is false: the reason, and the first node to fix.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -188,11 +188,43 @@ pub struct StoryPresentationDto {
     pub chapters: Vec<ChapterAnnouncementDto>,
 }
 
+/// Why the structure does not lay out as EPISODES. Closed set, camelCase on
+/// the wire — the reasons of the episode reading, not the reasons a story
+/// cannot be sent (a card's `SendBlockerDto`): `branching` here only says
+/// the story is played by its own options instead.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum LinearBlockerReasonDto {
+    /// The structure has no episode.
+    Empty,
+    /// The structure does not read as a story.
+    Malformed,
+    /// A node offers an option: a story with choices.
+    Branching,
+    /// An episode has no audio.
+    MissingAudio,
+}
+
+impl LinearBlockerReasonDto {
+    pub const fn from_domain(blocker: StoryPackBlocker) -> Self {
+        match blocker {
+            StoryPackBlocker::Empty => Self::Empty,
+            // The episode reading never reports missing announcements (they
+            // are judged on a structure that already reads as episodes).
+            // Should one ever come through, the reading did not go as
+            // expected.
+            StoryPackBlocker::Malformed | StoryPackBlocker::MissingAnnouncements => Self::Malformed,
+            StoryPackBlocker::Branching => Self::Branching,
+            StoryPackBlocker::MissingAudio => Self::MissingAudio,
+        }
+    }
+}
+
 /// Why the structure does not lay out as episodes, naming the node to fix.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LinearBlockerDto {
-    pub reason: SendBlockerDto,
+    pub reason: LinearBlockerReasonDto,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub node_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -202,7 +234,7 @@ pub struct LinearBlockerDto {
 impl LinearBlockerDto {
     fn from_domain(blocker: &LinearBlocker) -> Self {
         Self {
-            reason: SendBlockerDto::from_domain(blocker.blocker),
+            reason: LinearBlockerReasonDto::from_domain(blocker.blocker),
             node_id: blocker.node_id.clone(),
             label: blocker.label.clone(),
         }
@@ -449,6 +481,19 @@ mod tests {
             v["linearBlocker"],
             serde_json::json!({ "reason": "missingAudio", "nodeId": "n2", "label": "Deux" })
         );
+    }
+
+    #[test]
+    fn linear_blocker_reasons_serialize_in_camel_case_from_the_episode_reading() {
+        for (domain, wire) in [
+            (StoryPackBlocker::Empty, "empty"),
+            (StoryPackBlocker::Malformed, "malformed"),
+            (StoryPackBlocker::Branching, "branching"),
+            (StoryPackBlocker::MissingAudio, "missingAudio"),
+        ] {
+            let dto = LinearBlockerReasonDto::from_domain(domain);
+            assert_eq!(serde_json::to_value(dto).expect("serialize"), wire);
+        }
     }
 
     #[test]

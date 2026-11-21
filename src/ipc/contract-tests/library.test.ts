@@ -177,9 +177,10 @@ describe("isLibraryOverviewDto guard", () => {
       "devicePack",
       "empty",
       "malformed",
-      "branching",
       "missingAudio",
       "missingAnnouncements",
+      "optionWithoutDestination",
+      "nodeWithoutAudio",
     ]) {
       expect(
         isLibraryOverviewDto({
@@ -190,6 +191,13 @@ describe("isLibraryOverviewDto guard", () => {
     expect(
       isLibraryOverviewDto({
         stories: [{ id: "a", title: "A", sendBlocker: "noSourceArchive" }],
+      }),
+    ).toBe(false);
+    // "Having choices" is no reason on a card any more: a story with
+    // choices is sent by its own graph.
+    expect(
+      isLibraryOverviewDto({
+        stories: [{ id: "a", title: "A", sendBlocker: "branching" }],
       }),
     ).toBe(false);
     expect(
