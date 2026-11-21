@@ -930,7 +930,9 @@ else any `Ambiguous` → quality `Partial` → `needs_review`; else `Clean` →
 
 Named bounds (anti-DoS, tested): `MAX_MANIFEST_BYTES` = 1 MiB;
 `MAX_FOLDER_MEDIA_FILES` = 64 referenced media; per-media bound = the node-media
-store ceiling (`MAX_MEDIA_BYTES`, 32 MiB); `MAX_FOLDER_TOTAL_MEDIA_BYTES` =
+store's local-attach ceiling (`MAX_MEDIA_BYTES`, 32 MiB — the bound of a media
+added by hand in the editor, deliberately NOT the wider one of a story archive
+below); `MAX_FOLDER_TOTAL_MEDIA_BYTES` =
 256 MiB. Only `histoire.json` and the files it references are ever read — the
 folder is NEVER listed (no recursive walk); unreferenced files are ignored by
 construction (never opened). Referenced basenames are validated for sobriety
@@ -977,16 +979,57 @@ failure leaves the previous library state intact, media files compensated).
 The community `.zip` pack (a `story.json` stage/action graph plus an
 `assets/` directory) is the creation entry point for the files users actually
 hold. It rides the folder flow's analysis, findings and commit discipline —
-only the bounds below are its own, and ONE constant governs both the analysis
-verdict and the promotion, so the two can never disagree.
+only the bounds below are its own, and for each of them ONE constant governs
+both the analysis verdict and the promotion, so the two can never disagree.
 
 | Bound | Value | Why |
 | --- | --- | --- |
 | Distinct referenced media | 8192 | A real pack carries one image + one sound per stage node — hundreds to a few thousand. An anti-runaway guard, sized for real packs. |
 | Aggregate referenced media bytes | 32 GiB, inclusive | A COMPLETE audio collection (a whole podcast series, a long narrated collection) exceeds a few gigabytes while every single media stays well under the per-file bound. ZIP64 carries such an archive; the user should not have to split the collection or lower its audio quality to import it. Only REFERENCED media count, and a media referenced twice counts once. |
-| One media file | 32 MiB | The node-media store's own ceiling, applied when each file is promoted. |
+| One media file | 128 MiB, inclusive | A MEMORY guard: every reader loads a media whole. See "One media, one bound" below. |
 | Archive entries | 32 768 | Bounds the enumeration of a hostile or runaway archive. |
 | `story.json` | 4 MiB | The descriptor is a graph, never a payload. |
+
+**One media, one bound.** `MAX_ARCHIVE_MEDIA_BYTES` (128 MiB) is the ONLY
+per-media bound of a story archive, applied everywhere one of its media is
+read whole — and to every media Rustory writes into one:
+
+| Where | What the bound does |
+| --- | --- |
+| Creation — probe | An entry whose declared size is over the bound is present but unusable: discarded, never extracted. |
+| Creation — extraction and promotion | Re-applied to the bytes actually read (a lying header gains nothing). A media the probe retained is never refused further down for its size alone. |
+| Device send and archive export of a story that RETAINED its archive | The same bound reads the archive back: every media the creation admitted can be sent and exported again. |
+| Archive export — what it writes | No media over the bound is ever written (see [Structured archive export contract](#structured-archive-export-contract)), so an archive Rustory exported is always one Rustory imports whole. |
+
+The value is the widest ceiling of the node-media store (the web-import
+ceiling, also the store's read-back bound) — an equality asserted at compile
+time, because it holds in both directions: a media the library holds fits an
+archive as is, and a media an archive carries fits the library and stays
+readable from it. In the device sound format (bare MP3, 128 kbps) it is about
+2 h 20 of listening for ONE sound; a sound that is already a device MP3 at a
+lower bitrate lasts longer within the same bound. The bound stays finite on
+purpose: every one of these readers loads a media whole. The creation and the
+export work on one media at a time (the media and, for the export, its
+converted form — a few times the bound in memory at the very most); the send
+keeps every device-ready asset of the pack until the write.
+
+A media over the bound is THERE, and is never reported as absent:
+
+- the creation discards it under the `Media` ambiguity (`… format non reconnu,
+  fichier trop volumineux ou nom invalide …`) — not under `information
+  manquante`, which stays the copy of a referenced file that is not in the
+  archive — and creates the story without it;
+- the retained archive still carries it, so a send or an export from that
+  archive refuses on it with the size as the stated reason:
+  `details.cause = "asset_oversize"` (with `max_bytes`), `Envoi impossible: un
+  média du pack dépasse la taille autorisée (134 Mo).` — distinct from
+  `asset_missing` / `… est introuvable dans l'archive.`, whose next gesture is
+  not the same. The refusal lands when the pack's assets are sized, before
+  any conversion and before any device or destination byte.
+
+The folder creation and the media added by hand in the editor keep their own
+32 MiB bound (`MAX_MEDIA_BYTES`): a media picked one at a time is a narration
+or an illustration, and nothing an archive needs depends on raising it.
 
 What the aggregate bound actually protects is the LOCAL DISK, never the
 device: at import only images are transcoded (audio is stored verbatim), and a
@@ -1003,6 +1046,10 @@ illisible ou incohérente.` — the generic structure copy, not a size reason.
 Saying it honestly needs a new aspect in the finding matrix, which is shared
 by every import flow (domain enum, DTO, TS contract, per-flow message
 matrices, contract tests); it is deliberately NOT bundled with a bound change.
+For the same reason the creation's review words a media over the PER-MEDIA
+bound through the shared `Media` ambiguity copy, which lists three possible
+causes (format, size, name) without saying which one applies: only the send
+and the export — plain refusals, outside the matrix — name the size alone.
 
 The `.rustory` artifact is unaffected: it stays a JSON document that embeds NO
 media (see its contract above), so a portable story WITH its images and sounds
@@ -1067,10 +1114,20 @@ side:
   cover, the episode labels, `Question` and `Choix : <titre>` for a menu).
 - **The export is reproducible**: entry timestamps are pinned, so exporting
   the same story twice yields the same bytes.
+- **No media exceeds the per-media bound of the creation flow** (128 MiB,
+  `MAX_ARCHIVE_MEDIA_BYTES` — see "One media, one bound" above). The check is
+  made on the CONVERTED bytes, the ones actually written: transcoding to the
+  fixed device bitrate makes a long, lightly encoded sound LARGER than its
+  source (a 3-hour episode at 64 kbps weighs 82 MiB in the library and
+  165 MiB as a device MP3), so no bound on the source could promise it. An
+  export that would cross the bound is refused (see the refusal table) rather
+  than write an archive whose importer would leave that sound out.
 
 Round trip: an exported archive goes back through the structured-archive
-creation flow with a clean verdict, is retained there, and exports again with
-its device-ready assets carried byte for byte and its pack identity unchanged.
+creation flow with a clean verdict — whatever the size of its media, since the
+export writes nothing the creation would discard —, is retained there, and
+exports again with its device-ready assets carried byte for byte and its pack
+identity unchanged. It can be sent to a device from either library.
 The layout above also follows the reader rules of the tools that consume the
 community pack — the STUdio archive reader, and the STUdio-archive import of
 Lunii.QT (UUID-shaped stage ids, a `v1` format tag, the media type taken from
@@ -1091,22 +1148,30 @@ rules is outside what this contract can promise.
 | The retained source pack cannot be read back | `source_archive` / `open`, `not_a_zip`, `too_many_entries`, `descriptor_missing`, `descriptor_invalid` |
 | The pack's graph cannot be described (no stage, a dangling reference, an entry stage without a UUID identity) | `source_archive` or `media_store` / `descriptor_unreadable`, `descriptor_empty`, `descriptor_inconsistent`, `pack_identity` |
 | A media is not where the pack says it is | `source_archive` or `media_store` / `asset_missing` |
+| A media is where the pack says, but over the per-media bound — never loaded (`details.max_bytes`) | `source_archive` or `media_store` / `asset_oversize` |
 | A media cannot be converted to the device format | `asset_convert` / `image_undecodable`, `audio_unsupported` |
+| A media, once converted to the device format, is over the per-media bound — in practice a transcoded sound longer than about 2 h 20 (`details.byte_size`, `details.max_bytes`) | `asset_convert` / `oversize` |
 
 Every story-level refusal is decided BEFORE a destination is asked for. A
-problem with the destination itself is NOT this code: it stays
-`EXPORT_DESTINATION_UNAVAILABLE`, with the taxonomy of the `.rustory` export.
-Whatever fails, the destination is either the complete archive or untouched
-(the archive is staged beside it and promoted with an atomic rename).
+media that is missing or too large to be read is refused when the pack's
+assets are sized, before anything is staged. A problem with the destination
+itself is NOT this code: it stays `EXPORT_DESTINATION_UNAVAILABLE`, with the
+taxonomy of the `.rustory` export. Whatever fails, the destination is either
+the complete archive or untouched (the archive is staged beside it and
+promoted with an atomic rename).
 
-KNOWN ROUGH EDGE: at 128 kbps a transcoded sound weighs about 1 MiB per
-minute, so an episode longer than ~35 minutes exceeds the 32 MiB per-media
-bound the CREATION flow applies (see the table above). A library importing
-such an archive keeps the archive — the send from it stays possible up to the
-send engine's own 64 MiB per-asset bound, about 70 minutes — but flags that
-media and leaves it out of the imported story. Raising those bounds is a
-change to the creation and send contracts; it is deliberately NOT bundled with
-the export.
+KNOWN LIMIT: one sound of an archive weighs at most 128 MiB — about 2 h 20 in
+the device format. A longer episode that has to be transcoded (anything that
+is not already a mono 44 100 Hz MP3) cannot be exported: the export stops
+when that sound has been converted, with `Export impossible: un son de
+l'histoire est trop long pour une archive (plus de 2 h 20 environ).` and the
+next gesture of its source (shorter episodes in the library, or shorter sounds
+in the archive the story was imported from). No finite bound on the READING
+side could close that case — the lower the source bitrate, the larger the
+device form — and the bound itself stays a memory guard, so the export
+refuses instead of writing an archive that would not come back whole. The
+DIRECT send of such a story to a device is not concerned: it writes its
+converted sounds without a per-media bound of their own.
 
 ## File Association Contract
 
