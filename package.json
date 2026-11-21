@@ -1,7 +1,7 @@
 {
   "name": "rustory",
   "private": true,
-  "version": "0.24.2",
+  "version": "0.25.0",
   "type": "module",
   "packageManager": "pnpm@10.28.2",
   "scripts": {
