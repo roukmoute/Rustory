@@ -803,7 +803,7 @@ flow; the "drop on a node slot" gesture is a dedicated deferred workstream.
 | --- | --- | --- | --- |
 | Rustory story artifact | `.rustory` | `formatVersion == 1` | ✅ supported (import + export) |
 | Structured folder (`histoire.json` + referenced media) | — (a local folder) | `formatVersion == 1` | ✅ supported (creation) |
-| Structured archive (`story.json` + `assets/`, zipped) | `.zip` | `formatVersion == 1` (OUR reader-support revision — the foreign format declares none) | ✅ supported (creation) — activated 2026-07-22, the zero-dependency rationale lifted (the zip reader crate was already compiled in the tree) |
+| Structured archive (`story.json` + `assets/`, zipped) | `.zip` | `formatVersion == 1` (OUR reader-support revision — the foreign format declares none) | ✅ supported (creation + export) — creation activated 2026-07-22, the zero-dependency rationale lifted (the zip reader crate was already compiled in the tree); export added 2026-11-21 (see [Structured archive export contract](#structured-archive-export-contract)) |
 
 ### `.rustory` v1 format contract
 

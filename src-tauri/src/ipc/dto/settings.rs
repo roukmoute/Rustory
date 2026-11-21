@@ -168,6 +168,7 @@ pub fn local_artifact_capabilities_label(support: LocalArtifactSupport) -> Optio
     match support {
         LocalArtifactSupport::ImportAndExport => Some("Import et export"),
         LocalArtifactSupport::StoryCreation => Some("Création d'une histoire"),
+        LocalArtifactSupport::StoryCreationAndExport => Some("Création d'une histoire et export"),
         LocalArtifactSupport::Deferred { .. } => None,
     }
 }

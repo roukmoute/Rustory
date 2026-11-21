@@ -239,7 +239,7 @@ const ARTIFACT_CAPABILITIES_LABELS: Readonly<
 > = {
   rustoryArtifact: "Import et export",
   structuredFolder: "Création d'une histoire",
-  structuredArchive: "Création d'une histoire",
+  structuredArchive: "Création d'une histoire et export",
 };
 
 /** The frozen kind → reason couples of the DEFERRED lines. */

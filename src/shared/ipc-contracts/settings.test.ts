@@ -158,7 +158,7 @@ function officialProfile() {
         label: "Archive structurée",
         formatLabel: "Format v1",
         available: true,
-        capabilitiesLabel: "Création d'une histoire",
+        capabilitiesLabel: "Création d'une histoire et export",
       },
     ],
     fileAssociation: officialFileAssociation(),
@@ -536,7 +536,7 @@ describe("isLocalArtifactLine", () => {
       label: "Archive structurée",
       formatLabel: "Format v1",
       available: true,
-      capabilitiesLabel: "Création d'une histoire",
+      capabilitiesLabel: "Création d'une histoire et export",
     })).toBe(true);
   });
 
@@ -547,6 +547,20 @@ describe("isLocalArtifactLine", () => {
         available: true,
         capabilitiesLabel: "Import",
         reason: undefined,
+      }),
+    ).toBe(false);
+  });
+
+  it("rejects an archive still carrying the creation-only wording of the folder", () => {
+    // The archive line documents `creation + export`: the folder's
+    // creation-only copy on it would under-promise the registry.
+    expect(
+      isLocalArtifactLine({
+        kind: "structuredArchive",
+        label: "Archive structurée",
+        formatLabel: "Format v1",
+        available: true,
+        capabilitiesLabel: "Création d'une histoire",
       }),
     ).toBe(false);
   });

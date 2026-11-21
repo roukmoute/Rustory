@@ -150,7 +150,7 @@ function officialProfile(): SupportProfile {
         label: "Archive structurée",
         formatLabel: "Format v1",
         available: true,
-        capabilitiesLabel: "Création d'une histoire",
+        capabilitiesLabel: "Création d'une histoire et export",
       },
     ],
     fileAssociation: {
@@ -342,14 +342,15 @@ describe("<SupportProfileView />", () => {
     expect(openChip).toHaveClass("ds-chip--success");
     expect(openChip).toHaveTextContent("Disponible");
     expect(openItem.querySelector(".ds-chip--neutral")).toBeNull();
-    // The archive is available for story creation in the Rust registry.
+    // The archive is available for story creation AND as the artifact a
+    // library story is exported to, in the Rust registry.
     const archiveItem = screen
       .getByText("Archive structurée")
       .closest("li") as HTMLElement;
     expect(archiveItem.querySelector(".ds-chip")).toHaveClass(
       "ds-chip--success",
     );
-    expect(archiveItem).toHaveTextContent("Création d'une histoire");
+    expect(archiveItem).toHaveTextContent("Création d'une histoire et export");
   });
 
   it("renders the three artifact registry lines plus the node-media formats line verbatim", () => {
@@ -361,7 +362,10 @@ describe("<SupportProfileView />", () => {
     expect(screen.getByText("Archive structurée")).toBeInTheDocument();
     expect(screen.getAllByText("Format v1")).toHaveLength(3);
     expect(screen.getByText("Import et export")).toBeInTheDocument();
-    expect(screen.getAllByText("Création d'une histoire")).toHaveLength(2);
+    expect(screen.getByText("Création d'une histoire")).toBeInTheDocument();
+    expect(
+      screen.getByText("Création d'une histoire et export"),
+    ).toBeInTheDocument();
     expect(
       screen.queryByText("Lecture d'archives non prise en charge"),
     ).not.toBeInTheDocument();

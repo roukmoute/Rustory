@@ -117,7 +117,7 @@ function officialProfile() {
         label: "Archive structurée",
         formatLabel: "Format v1",
         available: true,
-        capabilitiesLabel: "Création d'une histoire",
+        capabilitiesLabel: "Création d'une histoire et export",
       },
     ],
     fileAssociation: {
@@ -182,7 +182,7 @@ describe("readSupportProfile", () => {
       label: "Archive structurée",
       formatLabel: "Format v1",
       available: true,
-      capabilitiesLabel: "Création d'une histoire",
+      capabilitiesLabel: "Création d'une histoire et export",
     });
     expect(profile.fileAssociation.channels).toHaveLength(4);
     expect(profile.fileAssociation.channels[1].reason).toBe(

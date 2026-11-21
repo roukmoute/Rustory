@@ -6,8 +6,8 @@
 //! mirrors WORD FOR WORD the `Supported local artifact types` table of
 //! `docs/architecture/device-support-profile.md#Local Artifact Import
 //! Contract`: a kind lands here when the product speaks about it — NOT
-//! when its flow is implemented (the structured archive is a known
-//! kind whose reader is deliberately absent, zero-dependency rule).
+//! when its flow is implemented (the structured archive was first listed
+//! as a known kind whose reader was deliberately absent).
 //!
 //! Pure domain: kind in, documented capabilities out, zero I/O.
 
@@ -20,8 +20,9 @@ pub enum LocalArtifactKind {
     /// The structured local folder (`histoire.json` + referenced
     /// media) used as a story-creation entry point.
     StructuredFolder,
-    /// The structured archive (zip…) — a KNOWN kind whose reader is
-    /// deliberately absent (deferred, zero-dependency rule).
+    /// The structured archive (`story.json` + `assets/`, zipped) — the
+    /// community pack: a story-creation entry point AND the artifact a
+    /// library story is exported to, media included.
     StructuredArchive,
 }
 
@@ -48,7 +49,7 @@ impl LocalArtifactKind {
 
 /// The closed capability view of a local artifact line — each field
 /// mirrors one word of the documented table's `Status` column
-/// (`import + export` / `creation`). Derived from
+/// (`import + export` / `creation` / `creation + export`). Derived from
 /// [`LocalArtifactSupport`]: the bundles are the only representable
 /// combinations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -88,6 +89,11 @@ pub enum LocalArtifactSupport {
     ImportAndExport,
     /// The documented structured-folder bundle: story creation.
     StoryCreation,
+    /// The documented structured-archive bundle: story creation, and the
+    /// export of a library story to that same artifact. NOT an "import":
+    /// the archive never enters the library as is — it CREATES a story
+    /// through the reviewed creation flow, exactly like the folder.
+    StoryCreationAndExport,
     /// The line is deferred, with its frozen reason.
     Deferred { reason: &'static str },
 }
@@ -101,7 +107,7 @@ impl LocalArtifactSupport {
     /// one (the availability itself replaces it).
     pub const fn reason(self) -> Option<&'static str> {
         match self {
-            Self::ImportAndExport | Self::StoryCreation => None,
+            Self::ImportAndExport | Self::StoryCreation | Self::StoryCreationAndExport => None,
             Self::Deferred { reason } => Some(reason),
         }
     }
@@ -118,6 +124,11 @@ impl LocalArtifactSupport {
             Self::StoryCreation => LocalArtifactCapabilities {
                 import_artifact: false,
                 export_artifact: false,
+                create_story: true,
+            },
+            Self::StoryCreationAndExport => LocalArtifactCapabilities {
+                import_artifact: false,
+                export_artifact: true,
                 create_story: true,
             },
             Self::Deferred { .. } => LocalArtifactCapabilities::NONE,
@@ -154,17 +165,20 @@ const OFFICIAL_LOCAL_ARTIFACTS: &[LocalArtifactLine] = &[
         format_version: Some(1),
         support: LocalArtifactSupport::StoryCreation,
     },
-    // Structured archive v1 ✅ creation — the community `.zip` pack
-    // (`story.json` stage/action graph + `assets/`), the story-creation
-    // entry point for files users actually hold. Activated 2026-07-22 by
-    // explicit product decision (the deferred line's zero-dependency
-    // rationale was lifted: the zip reader crate was already compiled in
-    // the tree). `format_version` is OUR reader-support revision — the
+    // Structured archive v1 ✅ creation + export — the community `.zip`
+    // pack (`story.json` stage/action graph + `assets/`), the
+    // story-creation entry point for files users actually hold.
+    // Activated 2026-07-22 by explicit product decision (the deferred
+    // line's zero-dependency rationale was lifted: the zip reader crate
+    // was already compiled in the tree). Export added 2026-11-21: a
+    // library story is written back to this same artifact, media
+    // included, so it can be shared with another library or another
+    // pack tool. `format_version` is OUR reader-support revision — the
     // foreign format declares none itself.
     LocalArtifactLine {
         kind: LocalArtifactKind::StructuredArchive,
         format_version: Some(1),
-        support: LocalArtifactSupport::StoryCreation,
+        support: LocalArtifactSupport::StoryCreationAndExport,
     },
 ];
 
@@ -210,19 +224,21 @@ mod tests {
     }
 
     #[test]
-    fn official_registry_supports_the_structured_archive_for_creation() {
+    fn official_registry_supports_the_structured_archive_for_creation_and_export() {
         // The announced re-scope happened (2026-07-22): the archive reader
-        // ships, the line moved from deferred to the story-creation
-        // bundle — the exact folder-line shape.
+        // ships, the line moved from deferred to story creation. The
+        // export followed (2026-11-21): a library story is written back
+        // to the same artifact. Still never an "import" — the archive
+        // creates a story through the reviewed creation flow.
         let line = official_local_artifacts()
             .iter()
             .find(|line| line.kind == LocalArtifactKind::StructuredArchive)
             .expect("archive line");
         assert_eq!(line.format_version, Some(1));
-        assert_eq!(line.support, LocalArtifactSupport::StoryCreation);
+        assert_eq!(line.support, LocalArtifactSupport::StoryCreationAndExport);
         let capabilities = line.support.capabilities();
         assert!(!capabilities.import_artifact);
-        assert!(!capabilities.export_artifact);
+        assert!(capabilities.export_artifact);
         assert!(capabilities.create_story);
     }
 
@@ -276,6 +292,14 @@ mod tests {
             }
         );
         assert_eq!(
+            LocalArtifactSupport::StoryCreationAndExport.capabilities(),
+            LocalArtifactCapabilities {
+                import_artifact: false,
+                export_artifact: true,
+                create_story: true,
+            }
+        );
+        assert_eq!(
             LocalArtifactSupport::Deferred { reason: "why" }.capabilities(),
             LocalArtifactCapabilities::NONE
         );
@@ -287,6 +311,8 @@ mod tests {
         assert_eq!(LocalArtifactSupport::ImportAndExport.reason(), None);
         assert!(LocalArtifactSupport::StoryCreation.is_available());
         assert_eq!(LocalArtifactSupport::StoryCreation.reason(), None);
+        assert!(LocalArtifactSupport::StoryCreationAndExport.is_available());
+        assert_eq!(LocalArtifactSupport::StoryCreationAndExport.reason(), None);
         let deferred = LocalArtifactSupport::Deferred { reason: "why" };
         assert!(!deferred.is_available());
         assert_eq!(deferred.reason(), Some("why"));

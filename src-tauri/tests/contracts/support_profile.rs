@@ -221,6 +221,10 @@ fn local_artifact_capability_and_format_copies_are_frozen() {
         Some("Création d'une histoire")
     );
     assert_eq!(
+        local_artifact_capabilities_label(LocalArtifactSupport::StoryCreationAndExport),
+        Some("Création d'une histoire et export")
+    );
+    assert_eq!(
         local_artifact_capabilities_label(LocalArtifactSupport::Deferred { reason: "why" }),
         None
     );
@@ -335,7 +339,7 @@ fn the_official_artifact_registry_serializes_exactly() {
                 "label": "Archive structurée",
                 "formatLabel": "Format v1",
                 "available": true,
-                "capabilitiesLabel": "Création d'une histoire",
+                "capabilitiesLabel": "Création d'une histoire et export",
             },
         ])
     );

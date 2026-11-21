@@ -577,7 +577,7 @@ function officialProfile() {
         label: "Archive structurée",
         formatLabel: "Format v1",
         available: true,
-        capabilitiesLabel: "Création d'une histoire",
+        capabilitiesLabel: "Création d'une histoire et export",
       },
     ],
     fileAssociation: {
