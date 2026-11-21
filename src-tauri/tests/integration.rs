@@ -15,6 +15,9 @@ mod story_archive_export;
 #[path = "integration/story_choice_send.rs"]
 mod story_choice_send;
 
+#[path = "integration/pack_asset_names.rs"]
+mod pack_asset_names;
+
 #[path = "integration/story_drafts_migration.rs"]
 mod story_drafts_migration;
 

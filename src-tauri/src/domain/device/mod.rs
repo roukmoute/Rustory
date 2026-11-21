@@ -38,7 +38,9 @@ pub use pack::{
     MAX_PACK_ASSET_DEPTH, OPTIONAL_PACK_FILES, OS_CRUFT_NAMES, OS_CRUFT_PREFIX, PACK_ASSET_DIRS,
     REQUIRED_PACK_FILES,
 };
-pub use pack_transcode::{transcode_pack, StudioStoryPack, TranscodeError, TranscodedPack};
+pub use pack_transcode::{
+    transcode_pack, StudioStoryPack, TranscodeError, TranscodedAsset, TranscodedPack,
+};
 pub use profile::{
     classify_flam, classify_lunii, DeviceProfile, DeviceProfileClassification, UnsupportedReason,
 };

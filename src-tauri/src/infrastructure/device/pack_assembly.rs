@@ -16,7 +16,7 @@
 //! by `assembles_a_real_pack_matching_the_device` — every produced file equals
 //! the device's actual file.
 
-use crate::domain::device::pack_transcode::{device_asset_basename, TranscodedPack};
+use crate::domain::device::pack_transcode::TranscodedPack;
 
 use super::cipher::{v3_cipher_in_place, v3_forge_bt, v3_story_key_iv, V3_CIPHER_REGION};
 
@@ -37,10 +37,12 @@ pub enum AssembleError {
 }
 
 /// Assemble every file of `.content/<SHORTID>/` for a V3 device whose `.md` is
-/// `md`. `resolve_asset(filename)` returns DEVICE-FORMAT bytes of an asset
+/// `md`. `resolve_asset(source_ref)` returns DEVICE-FORMAT bytes of an asset
 /// (BMP-4bit-RLE4-320x240 / bare MP3 — the send layer normalizes them via
 /// `asset_convert` before handing the resolver over); they are copied as-is,
-/// then ciphered per the module-doc regime.
+/// then ciphered per the module-doc regime. Every returned file has a path
+/// of its own: an asset is written under the device name the transcoder
+/// gave it, which no other asset of its kind bears.
 ///
 /// The caller writes each returned file under the pack folder, then appends the
 /// pack UUID to the device `.pi` (files first, index second — the writer's
@@ -86,16 +88,17 @@ pub fn assemble_v3_pack(
         });
     }
 
-    // Ciphered assets, named by their device basename under rf/000 (images) and
-    // sf/000 (audio), in index order.
+    // Ciphered assets, each under its device name in rf/000 (images) and
+    // sf/000 (audio), in index order. The name is the one the transcoder
+    // settled — the one the `ri` / `si` entry carries, and no other asset's.
     for (dir, assets) in [("rf", &transcoded.images), ("sf", &transcoded.audios)] {
-        for filename in assets {
-            let mut bytes = resolve_asset(filename)
-                .ok_or_else(|| AssembleError::MissingAsset(filename.clone()))?;
+        for asset in assets {
+            let mut bytes = resolve_asset(&asset.source_ref)
+                .ok_or_else(|| AssembleError::MissingAsset(asset.source_ref.clone()))?;
             pad_short_ciphered_file(&mut bytes);
             v3_cipher_in_place(&mut bytes, &key, &iv);
             files.push(AssembledFile {
-                rel_path: format!("{dir}/000/{}", device_asset_basename(filename)),
+                rel_path: format!("{dir}/000/{}", asset.device_name),
                 bytes,
             });
         }
@@ -368,6 +371,79 @@ mod tests {
             digest, "2f4b5f0a77b06cf42ab20e00d0f562d4da97494f84dc755976bb4d6c3c0344ff",
             "the bytes written for a pack without a name clash changed"
         );
+    }
+
+    #[test]
+    fn two_assets_whose_names_end_alike_are_assembled_as_two_files_holding_their_own_bytes() {
+        // Two pictures and two sounds whose names end with the same 8
+        // characters: each must become a file of its own, found through its
+        // own index entry — never one file written twice.
+        let picture_one = format!("{}1234abcd.bmp", "a".repeat(32));
+        let picture_two = format!("{}1234abcd.bmp", "b".repeat(32));
+        let sound_one = format!("{}5678ef01.mp3", "c".repeat(32));
+        let sound_two = format!("{}5678ef01.mp3", "d".repeat(32));
+        let stage = |uuid: &str, image: &str, audio: &str| {
+            format!(
+                r#"{{"uuid":"{uuid}","squareOne":{},"image":"{image}","audio":"{audio}",
+                    "okTransition":null,"homeTransition":null,
+                    "controlSettings":{{"wheel":true,"ok":true,"home":false,"pause":false,"autoplay":false}}}}"#,
+                uuid == "s0"
+            )
+        };
+        let json = format!(
+            r#"{{"version":1,"nightModeAvailable":false,"stageNodes":[{},{}],"actionNodes":[]}}"#,
+            stage("s0", &picture_one, &sound_one),
+            stage("s1", &picture_two, &sound_two),
+        );
+        let pack: crate::domain::device::StudioStoryPack = serde_json::from_str(&json).unwrap();
+        let transcoded = transcode_pack(&pack).unwrap();
+
+        let assets: HashMap<&str, Vec<u8>> = HashMap::from([
+            (picture_one.as_str(), asset_bytes(1, 600)),
+            (picture_two.as_str(), asset_bytes(2, 600)),
+            (sound_one.as_str(), asset_bytes(3, 700)),
+            (sound_two.as_str(), asset_bytes(4, 700)),
+        ]);
+        let resolve = |f: &str| assets.get(f).cloned();
+        let files = assemble_v3_pack(&transcoded, &tiny_md(), &resolve).expect("assemble");
+
+        // No two files of the pack share a path.
+        let mut paths = std::collections::HashSet::new();
+        for file in &files {
+            assert!(paths.insert(file.rel_path.as_str()), "{}", file.rel_path);
+        }
+
+        // Each index entry names a file that holds ITS asset: read the way
+        // the device does, through the deciphered `ri` / `si`.
+        let (key, iv) = v3_story_key_iv(&tiny_md()).unwrap();
+        let deciphered = |rel_path: &str| -> Vec<u8> {
+            let file = files
+                .iter()
+                .find(|f| f.rel_path == rel_path)
+                .unwrap_or_else(|| panic!("{rel_path} is assembled"));
+            let mut bytes = file.bytes.clone();
+            super::super::cipher::v3_decipher_in_place(&mut bytes, &key, &iv);
+            bytes
+        };
+        for (index_file, dir, sources) in [
+            ("ri", "rf", [&picture_one, &picture_two]),
+            ("si", "sf", [&sound_one, &sound_two]),
+        ] {
+            let table = deciphered(index_file);
+            for (index, source) in sources.into_iter().enumerate() {
+                let entry = &table[index * 12..(index + 1) * 12];
+                assert_eq!(&entry[..4], b"000\\");
+                let name = std::str::from_utf8(&entry[4..]).expect("an ascii name");
+                assert_eq!(
+                    deciphered(&format!("{dir}/000/{name}")),
+                    assets[source.as_str()],
+                    "{index_file} entry {index} leads to its own asset"
+                );
+            }
+        }
+        // The first of each pair keeps the name it always had.
+        assert!(paths.contains("rf/000/1234ABCD"));
+        assert!(paths.contains("sf/000/5678EF01"));
     }
 
     /// Ground truth: assemble the full pack from a real STUdio `story.json` + its

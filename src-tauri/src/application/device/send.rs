@@ -258,7 +258,7 @@ fn send_pack(
     // otherwise reach the device as files it cannot decode — a blank menu
     // image, then "Error SD Card".
     let mut assets = std::collections::HashMap::new();
-    for filename in &transcoded.images {
+    for filename in transcoded.images.iter().map(|asset| &asset.source_ref) {
         if !assets.contains_key(filename) {
             let bytes = source
                 .read_asset(filename)
@@ -272,7 +272,7 @@ fn send_pack(
         done_cost += plan.cost_of(filename);
         report(done_cost);
     }
-    for filename in &transcoded.audios {
+    for filename in transcoded.audios.iter().map(|asset| &asset.source_ref) {
         if !assets.contains_key(filename) {
             let bytes = source
                 .read_asset(filename)
@@ -303,21 +303,15 @@ fn send_pack(
         })?;
 
     // The EXACT room check, on the bytes actually about to be written and
-    // BEFORE the first of them. A repeated asset lands on the SAME relative
-    // path, so it costs its bytes once. The writer stages the whole pack on
-    // the volume before promoting it and only then drops the pack it
-    // replaces, so a replacement discounts nothing. This models no
-    // filesystem slack (cluster rounding, directory entries), so a pack that
-    // fits by a hair can still be refused by the device itself — with its
-    // own reason, after this check passed.
-    let required_bytes: u64 = {
-        let mut counted = std::collections::HashSet::new();
-        files
-            .iter()
-            .filter(|file| counted.insert(file.rel_path.as_str()))
-            .map(|file| file.bytes.len() as u64)
-            .sum()
-    };
+    // BEFORE the first of them. Every assembled file has a path of its own
+    // (an asset referenced by several stages is ONE asset, and no two assets
+    // share a device name), so the need is the plain sum. The writer stages
+    // the whole pack on the volume before promoting it and only then drops
+    // the pack it replaces, so a replacement discounts nothing. This models
+    // no filesystem slack (cluster rounding, directory entries), so a pack
+    // that fits by a hair can still be refused by the device itself — with
+    // its own reason, after this check passed.
+    let required_bytes: u64 = files.iter().map(|file| file.bytes.len() as u64).sum();
     ensure_device_room(free_space, required_bytes, SpaceProof::Exact)?;
 
     // Write to the device (atomic staging + promotion + `.pi`). The writer's
@@ -361,7 +355,7 @@ impl ProgressPlan {
         let mut costs = std::collections::HashMap::new();
         let mut asset_cost = 0.0f64;
         let mut write_cost = 0.0f64;
-        for filename in &transcoded.images {
+        for filename in transcoded.images.iter().map(|asset| &asset.source_ref) {
             if costs.contains_key(filename) {
                 continue;
             }
@@ -374,7 +368,7 @@ impl ProgressPlan {
             asset_cost += cost;
             write_cost += size;
         }
-        for filename in &transcoded.audios {
+        for filename in transcoded.audios.iter().map(|asset| &asset.source_ref) {
             if costs.contains_key(filename) {
                 continue;
             }
@@ -821,9 +815,9 @@ mod tests {
     }
 
     /// A `DeviceV3PackWriter` that records the pack UUID + file count it was
-    /// asked to write, the deduplicated byte total it would land on the
-    /// volume, and answers a programmable free space (`None` by default —
-    /// unknown, so the room checks stand down).
+    /// asked to write, the byte total it would land on the volume, and
+    /// answers a programmable free space (`None` by default — unknown, so
+    /// the room checks stand down).
     #[derive(Default)]
     struct RecordingWriter {
         calls: std::sync::Mutex<Vec<(String, usize)>>,
@@ -854,16 +848,11 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push((pack_uuid.to_string(), files.len()));
-            // What the volume actually gains: a repeated asset lands on the
-            // same relative path, so it counts once.
-            let mut counted = std::collections::HashSet::new();
-            *self.written_bytes.lock().unwrap() = files
-                .iter()
-                .filter(|f| counted.insert(f.rel_path.clone()))
-                .map(|f| f.bytes.len() as u64)
-                .sum();
-            // Report a complete write, like the real writer's last tick.
+            // What the volume gains: every file of the pack, each on a path
+            // of its own.
             let total: u64 = files.iter().map(|f| f.bytes.len() as u64).sum();
+            *self.written_bytes.lock().unwrap() = total;
+            // Report a complete write, like the real writer's last tick.
             progress(WriteProgress {
                 bytes_done: total,
                 bytes_total: total,

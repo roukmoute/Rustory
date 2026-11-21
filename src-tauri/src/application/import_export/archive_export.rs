@@ -991,12 +991,12 @@ mod tests {
         // converting it again is a no-op.
         assert_eq!(transcoded.images.len(), 1);
         assert_eq!(transcoded.audios.len(), 2);
-        for name in &transcoded.images {
+        for name in transcoded.images.iter().map(|asset| &asset.source_ref) {
             assert!(name.ends_with(".bmp"));
             let bytes = &entries[&format!("assets/{name}")];
             assert_eq!(&to_device_image(bytes).expect("device image"), bytes);
         }
-        for name in &transcoded.audios {
+        for name in transcoded.audios.iter().map(|asset| &asset.source_ref) {
             assert!(name.ends_with(".mp3"));
             let bytes = &entries[&format!("assets/{name}")];
             assert!(audio_is_device_ready(bytes), "{name} must be a device MP3");
@@ -1354,7 +1354,8 @@ mod tests {
         let pack: StudioStoryPack = serde_json::from_value(root.clone()).expect("typed pack");
         let transcoded = transcode_pack(&pack).expect("a consistent graph");
         assert_eq!((transcoded.images.len(), transcoded.audios.len()), (1, 5));
-        for name in transcoded.images.iter().chain(&transcoded.audios) {
+        for asset in transcoded.images.iter().chain(&transcoded.audios) {
+            let name = &asset.source_ref;
             assert!(entries.contains_key(&format!("assets/{name}")), "{name}");
         }
         assert!(entries.contains_key("thumbnail.png"));

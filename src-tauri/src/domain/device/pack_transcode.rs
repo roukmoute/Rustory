@@ -14,11 +14,19 @@
 //!     offset of its list within `li` (in 4-byte units), assigned in
 //!     first-appearance order, OK transition before HOME.
 //!
+//! Every asset is ONE FILE on the device, under a name assigned here and
+//! nowhere else ([`TranscodedAsset::device_name`]): its `ri` / `si` entry and
+//! the file the caller writes carry that same name. It is the asset's
+//! NATURAL name — the last 8 characters of its source file name, what a
+//! device pack has always been written with — unless another asset of the
+//! same kind already bears it: two different assets never share a file.
+//!
 //! All `ni`/`li` integers are little-endian; absent transitions write `-1`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 
 /// Size of the `ni` header and the offset at which stage records begin.
 const NI_HEADER_LEN: usize = 512;
@@ -98,20 +106,33 @@ pub enum TranscodeError {
     MissingStageNode(String),
 }
 
+/// One asset of a transcoded pack: where its bytes come from, and the file
+/// it becomes on the device.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TranscodedAsset {
+    /// The reference the pack's stages carry — an entry of the pack archive,
+    /// or a media-store file name. The caller resolves the bytes from it.
+    pub source_ref: String,
+    /// The name of the asset's file on the device (`rf/000/<name>` for a
+    /// picture, `sf/000/<name>` for a sound) — the very name its `ri` / `si`
+    /// entry carries. No other asset of the same kind bears it.
+    pub device_name: String,
+}
+
 /// The transcoded device pack: the four binary index files plus the ORDERED
-/// asset reference lists (`images[i]` / `audios[i]` are the source asset
-/// filenames at index `i`). The caller copies each asset verbatim to
-/// `rf/000/<basename>` / `sf/000/<basename>` where `<basename>` =
-/// [`device_asset_basename`] of the filename (same value the `ri`/`si` entry
-/// carries), and emits an empty `nm` iff `night_mode`.
+/// asset lists (`images[i]` / `audios[i]` is the asset at index `i`). The
+/// caller writes each asset to `rf/000/<name>` / `sf/000/<name>`, `<name>`
+/// being the asset's [`device_name`](TranscodedAsset::device_name) — the
+/// value its `ri`/`si` entry carries — and emits an empty `nm` iff
+/// `night_mode`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TranscodedPack {
     pub ni: Vec<u8>,
     pub li: Vec<u8>,
     pub ri: Vec<u8>,
     pub si: Vec<u8>,
-    pub images: Vec<String>,
-    pub audios: Vec<String>,
+    pub images: Vec<TranscodedAsset>,
+    pub audios: Vec<TranscodedAsset>,
     pub night_mode: bool,
 }
 
@@ -128,24 +149,28 @@ pub fn transcode_pack(pack: &StudioStoryPack) -> Result<TranscodedPack, Transcod
 
     // Image/sound indices: first-appearance order over the stage nodes,
     // deduplicated by asset reference.
-    let mut images: Vec<String> = Vec::new();
+    let mut image_refs: Vec<String> = Vec::new();
     let mut image_index: HashMap<&str, i32> = HashMap::new();
-    let mut audios: Vec<String> = Vec::new();
+    let mut audio_refs: Vec<String> = Vec::new();
     let mut audio_index: HashMap<&str, i32> = HashMap::new();
     for node in &pack.stage_nodes {
         if let Some(img) = node.image.as_deref() {
             image_index.entry(img).or_insert_with(|| {
-                images.push(img.to_string());
-                images.len() as i32 - 1
+                image_refs.push(img.to_string());
+                image_refs.len() as i32 - 1
             });
         }
         if let Some(aud) = node.audio.as_deref() {
             audio_index.entry(aud).or_insert_with(|| {
-                audios.push(aud.to_string());
-                audios.len() as i32 - 1
+                audio_refs.push(aud.to_string());
+                audio_refs.len() as i32 - 1
             });
         }
     }
+    // The file each asset becomes on the device, settled here once: the
+    // `ri` / `si` tables below and the caller's writes both read it.
+    let images = name_device_assets(AssetKind::Image, image_refs);
+    let audios = name_device_assets(AssetKind::Audio, audio_refs);
 
     // `li` is a flat concatenation of ALL action nodes' option lists, in
     // `actionNodes[]` ARRAY order (validated byte-for-byte against a real
@@ -200,11 +225,12 @@ pub fn transcode_pack(pack: &StudioStoryPack) -> Result<TranscodedPack, Transcod
         li.extend_from_slice(&entry.to_le_bytes());
     }
 
-    // ri / si: flat 12-byte ASCII `000\XXXXXXXX` entries, XXXXXXXX = the device
-    // asset basename = last 8 hex chars of the asset's (SHA-1) filename stem,
-    // UPPERCASE. The asset file is stored on-device at `rf/000/XXXXXXXX` /
-    // `sf/000/XXXXXXXX` (no extension) — same basename, so the ri/si entry and
-    // the folder name are one self-consistent contract.
+    // ri / si: flat 12-byte ASCII `000\XXXXXXXX` entries, XXXXXXXX = the
+    // asset's device name — for a pack without a clash, the last 8 hex chars
+    // of the asset's (SHA-1) filename stem, UPPERCASE. The asset file is
+    // stored on-device at `rf/000/XXXXXXXX` / `sf/000/XXXXXXXX` (no
+    // extension) — the same name, so the ri/si entry and the file name are
+    // one self-consistent contract.
     let ri = asset_index_table(&images);
     let si = asset_index_table(&audios);
 
@@ -259,10 +285,6 @@ fn write_transition_fields(
     ni.extend_from_slice(&selected.to_le_bytes());
 }
 
-/// The on-device basename of an asset: the last 8 characters of its filename
-/// stem (drop any extension), UPPERCASED. For a SHA-1-named STUdio asset
-/// (`<40 hex>.bmp`) this is the last 8 hex chars, matching the `.content`
-/// convention observed on real devices.
 /// READ back the ENTRY stage's image index from a cleartext `ni` (the exact
 /// inverse of the record layout this module writes): stage record 0 starts at
 /// the 512-byte header boundary and its first field is the i32 LE image
@@ -294,6 +316,13 @@ pub fn ri_entry_basename(ri_plain: &[u8], index: usize) -> Option<String> {
     Some(String::from_utf8_lossy(basename).into_owned())
 }
 
+/// The NATURAL on-device name of an asset: the last 8 characters of its
+/// filename stem (drop any extension), UPPERCASED. For a SHA-1-named STUdio
+/// asset (`<40 hex>.bmp`) this is the last 8 hex chars, matching the
+/// `.content` convention observed on real devices. It is the name the asset
+/// gets on the device unless another asset of its kind bears it already
+/// (see [`TranscodedAsset::device_name`]) — and the short tag a diagnostic
+/// names a source file by.
 pub fn device_asset_basename(filename: &str) -> String {
     let stem = filename
         .rsplit_once('.')
@@ -303,12 +332,96 @@ pub fn device_asset_basename(filename: &str) -> String {
     stem[start..].to_ascii_uppercase()
 }
 
+/// The two kinds of asset a pack carries. Each has its own folder on the
+/// device (`rf/000` for pictures, `sf/000` for sounds) and its own index
+/// (`ri`, `si`): a device name only has to be unique within its kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AssetKind {
+    Image,
+    Audio,
+}
+
+impl AssetKind {
+    /// Stable tag mixed into a derived device name.
+    const fn tag(self) -> &'static [u8] {
+        match self {
+            Self::Image => b"image",
+            Self::Audio => b"audio",
+        }
+    }
+}
+
+/// Give every asset of one kind (`references`, in index order) the name of
+/// its file on the device, so that two different assets NEVER share one: the
+/// later file would replace the earlier without a word, and a stage would
+/// show or play another stage's asset.
+///
+/// An asset keeps its natural name ([`device_asset_basename`]) when it is
+/// the first of its kind to bear it — the only case there is in a pack
+/// without a clash, which is therefore written byte for byte as it always
+/// was. An asset whose natural name is already borne gets a DERIVED one
+/// ([`derived_device_name`]). The natural names are settled first, so a
+/// derived name is never drawn onto the natural name of another asset,
+/// wherever that asset stands in the list.
+fn name_device_assets(kind: AssetKind, references: Vec<String>) -> Vec<TranscodedAsset> {
+    let mut taken: HashSet<String> = HashSet::with_capacity(references.len());
+    let natural_names: Vec<Option<String>> = references
+        .iter()
+        .map(|reference| {
+            let name = device_asset_basename(reference);
+            taken.insert(name.clone()).then_some(name)
+        })
+        .collect();
+    references
+        .into_iter()
+        .zip(natural_names)
+        .map(|(source_ref, natural_name)| {
+            let device_name = natural_name.unwrap_or_else(|| {
+                let mut salt = 0u32;
+                loop {
+                    let candidate = derived_device_name(kind, &source_ref, salt);
+                    if taken.insert(candidate.clone()) {
+                        break candidate;
+                    }
+                    salt += 1;
+                }
+            });
+            TranscodedAsset {
+                source_ref,
+                device_name,
+            }
+        })
+        .collect()
+}
+
+/// A device name for the asset `reference` of kind `kind` that does not come
+/// from its file name: 8 uppercase hexadecimal characters — the shape of
+/// every name in a device pack — taken from a SHA-256 over the kind, the
+/// reference and `salt`. Deterministic: the same pack always gets the same
+/// names. `salt` only moves on when the name drawn is itself taken.
+fn derived_device_name(kind: AssetKind, reference: &str, salt: u32) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"rustory:device-pack:asset-name\0");
+    hasher.update(kind.tag());
+    hasher.update([0]);
+    hasher.update(reference.as_bytes());
+    hasher.update([0]);
+    hasher.update(salt.to_le_bytes());
+    // 4 bytes, 8 hexadecimal characters.
+    hasher
+        .finalize()
+        .iter()
+        .take(4)
+        .map(|byte| format!("{byte:02X}"))
+        .collect()
+}
+
 /// Build a `ri`/`si` table: one fixed 12-byte ASCII entry `000\XXXXXXXX` per
-/// asset (in index order), `\` = 0x5C, `XXXXXXXX` = [`device_asset_basename`].
-fn asset_index_table(assets: &[String]) -> Vec<u8> {
+/// asset (in index order), `\` = 0x5C, `XXXXXXXX` = the asset's device name.
+fn asset_index_table(assets: &[TranscodedAsset]) -> Vec<u8> {
     let mut out = Vec::with_capacity(assets.len() * 12);
-    for filename in assets {
-        out.extend_from_slice(format!("000\\{}", device_asset_basename(filename)).as_bytes());
+    for asset in assets {
+        out.extend_from_slice(format!("000\\{}", asset.device_name).as_bytes());
     }
     out
 }
@@ -325,6 +438,22 @@ mod tests {
             pause: false,
             autoplay: false,
         }
+    }
+
+    /// The source references of `assets`, in index order.
+    fn source_refs(assets: &[TranscodedAsset]) -> Vec<&str> {
+        assets
+            .iter()
+            .map(|asset| asset.source_ref.as_str())
+            .collect()
+    }
+
+    /// The device names of `assets`, in index order.
+    fn device_names(assets: &[TranscodedAsset]) -> Vec<&str> {
+        assets
+            .iter()
+            .map(|asset| asset.device_name.as_str())
+            .collect()
     }
 
     #[test]
@@ -490,8 +619,8 @@ mod tests {
         };
         let out = transcode_pack(&pack).expect("transcode");
         // Image dedup: only 1 distinct image, 2 distinct audios.
-        assert_eq!(out.images, vec!["i0"]);
-        assert_eq!(out.audios, vec!["a0", "a1"]);
+        assert_eq!(source_refs(&out.images), vec!["i0"]);
+        assert_eq!(source_refs(&out.audios), vec!["a0", "a1"]);
         // li: A0 at offset 0 (1 opt → s1=1), A1 at offset 1 (opts → s0=0, s1=1).
         let li: Vec<i32> = out
             .li
@@ -530,12 +659,194 @@ mod tests {
 
     #[test]
     fn ri_si_entries_are_12_byte_hash_suffix_paths() {
-        let table = asset_index_table(&[
-            "5b699d67ef92f738012e3db36f3b2837532195b9.bmp".to_string(),
-            "ca31822c1384c4847d22acfedfb0c2ff8b70753a.mp3".to_string(),
-        ]);
+        let table = asset_index_table(&name_device_assets(
+            AssetKind::Image,
+            vec![
+                "5b699d67ef92f738012e3db36f3b2837532195b9.bmp".to_string(),
+                "ca31822c1384c4847d22acfedfb0c2ff8b70753a.mp3".to_string(),
+            ],
+        ));
         assert_eq!(&table[0..12], b"000\\532195B9");
         assert_eq!(&table[12..24], b"000\\8B70753A");
+    }
+
+    // ===== One device file per asset =====
+
+    /// A stage that shows `image` and plays `audio`, with no transition.
+    fn media_stage(uuid: &str, image: Option<&str>, audio: Option<&str>) -> StudioStageNode {
+        StudioStageNode {
+            uuid: uuid.into(),
+            square_one: uuid == "s0",
+            image: image.map(Into::into),
+            audio: audio.map(Into::into),
+            ok_transition: None,
+            home_transition: None,
+            control_settings: cs(true, true),
+        }
+    }
+
+    fn media_pack(stage_nodes: Vec<StudioStageNode>) -> StudioStoryPack {
+        StudioStoryPack {
+            version: 1,
+            night_mode_available: false,
+            stage_nodes,
+            action_nodes: vec![],
+        }
+    }
+
+    /// The image and sound indices of stage `index`, read from `ni`.
+    fn stage_asset_indices(ni: &[u8], index: usize) -> (i32, i32) {
+        let at = NI_HEADER_LEN + index * NI_STAGE_RECORD_LEN;
+        (
+            i32::from_le_bytes(ni[at..at + 4].try_into().unwrap()),
+            i32::from_le_bytes(ni[at + 4..at + 8].try_into().unwrap()),
+        )
+    }
+
+    fn is_device_name(name: &str) -> bool {
+        name.len() == 8
+            && name
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'A'..=b'F').contains(&b))
+    }
+
+    #[test]
+    fn two_assets_whose_names_end_alike_get_two_device_names_each_in_its_own_index_entry() {
+        // Two pictures and two sounds whose file names end with the same 8
+        // characters: named by those characters alone, the second file of
+        // each pair would land on the first.
+        let picture_one = format!("{}1234abcd.png", "a".repeat(32));
+        let picture_two = format!("{}1234abcd.png", "b".repeat(32));
+        let sound_one = format!("{}5678ef01.mp3", "c".repeat(32));
+        let sound_two = format!("{}5678ef01.mp3", "d".repeat(32));
+        let pack = media_pack(vec![
+            media_stage("s0", Some(&picture_one), Some(&sound_one)),
+            media_stage("s1", Some(&picture_two), Some(&sound_two)),
+            // The first picture again: one asset, one index, one file.
+            media_stage("s2", Some(&picture_one), None),
+        ]);
+        let out = transcode_pack(&pack).expect("transcode");
+
+        // The first of each pair keeps the name it always had; the second
+        // gets a name of its own, of the same shape.
+        assert_eq!(
+            source_refs(&out.images),
+            vec![picture_one.as_str(), picture_two.as_str()]
+        );
+        assert_eq!(
+            source_refs(&out.audios),
+            vec![sound_one.as_str(), sound_two.as_str()]
+        );
+        let pictures = device_names(&out.images);
+        let sounds = device_names(&out.audios);
+        assert_eq!(pictures[0], "1234ABCD");
+        assert_eq!(sounds[0], "5678EF01");
+        assert_ne!(pictures[1], pictures[0]);
+        assert_ne!(sounds[1], sounds[0]);
+        assert!(is_device_name(pictures[1]), "{}", pictures[1]);
+        assert!(is_device_name(sounds[1]), "{}", sounds[1]);
+        assert_eq!(
+            pictures[1],
+            derived_device_name(AssetKind::Image, &picture_two, 0)
+        );
+        assert_eq!(
+            sounds[1],
+            derived_device_name(AssetKind::Audio, &sound_two, 0)
+        );
+
+        // `ri` / `si` name those very files, entry for entry…
+        assert_eq!(
+            out.ri,
+            format!("000\\{}000\\{}", pictures[0], pictures[1]).into_bytes()
+        );
+        assert_eq!(
+            out.si,
+            format!("000\\{}000\\{}", sounds[0], sounds[1]).into_bytes()
+        );
+        assert_eq!(ri_entry_basename(&out.ri, 0).as_deref(), Some(pictures[0]));
+        assert_eq!(
+            ri_entry_basename(&out.ri, 1).as_deref(),
+            Some(pictures[1]),
+            "a derived name reads back like any other"
+        );
+        // …and every stage points at the entry of ITS picture and sound.
+        assert_eq!(stage_asset_indices(&out.ni, 0), (0, 0));
+        assert_eq!(stage_asset_indices(&out.ni, 1), (1, 1));
+        assert_eq!(stage_asset_indices(&out.ni, 2), (0, -1));
+
+        // The same pack always gets the same names.
+        assert_eq!(transcode_pack(&pack).expect("transcode"), out);
+    }
+
+    #[test]
+    fn a_picture_and_a_sound_may_bear_the_same_device_name() {
+        // Pictures and sounds live in two folders and two indices: the same
+        // 8 characters on both sides are no clash, and both keep them.
+        let picture = format!("{}1234abcd.bmp", "a".repeat(32));
+        let sound = format!("{}1234abcd.mp3", "b".repeat(32));
+        let pack = media_pack(vec![media_stage("s0", Some(&picture), Some(&sound))]);
+        let out = transcode_pack(&pack).expect("transcode");
+        assert_eq!(device_names(&out.images), vec!["1234ABCD"]);
+        assert_eq!(device_names(&out.audios), vec!["1234ABCD"]);
+        assert_eq!(out.ri, b"000\\1234ABCD");
+        assert_eq!(out.si, b"000\\1234ABCD");
+    }
+
+    #[test]
+    fn a_derived_name_never_lands_on_the_natural_name_of_another_asset() {
+        // The second picture clashes with the first and would be given the
+        // derived name `drawn` — but a THIRD picture, further down the pack,
+        // bears exactly that name naturally. It keeps it, and the second
+        // picture draws again.
+        let first = format!("{}1234abcd.png", "a".repeat(32));
+        let second = format!("{}1234abcd.png", "b".repeat(32));
+        let drawn = derived_device_name(AssetKind::Image, &second, 0);
+        let third = format!("{}{}.png", "c".repeat(32), drawn.to_ascii_lowercase());
+        let pack = media_pack(vec![
+            media_stage("s0", Some(&first), None),
+            media_stage("s1", Some(&second), None),
+            media_stage("s2", Some(&third), None),
+        ]);
+        let out = transcode_pack(&pack).expect("transcode");
+        let redrawn = derived_device_name(AssetKind::Image, &second, 1);
+        assert_ne!(redrawn, drawn);
+        assert_eq!(
+            device_names(&out.images),
+            vec!["1234ABCD", redrawn.as_str(), drawn.as_str()]
+        );
+    }
+
+    #[test]
+    fn every_asset_gets_its_own_device_name_however_many_end_alike() {
+        // 500 pictures whose names all end with the same 8 characters, in a
+        // pack that also holds pictures with a name of their own.
+        let mut stages = Vec::new();
+        for index in 0..500 {
+            let clashing = format!("{index:032x}1234abcd.png");
+            stages.push(media_stage(&format!("c{index}"), Some(&clashing), None));
+            if index % 50 == 0 {
+                let unique = format!("{}{index:08x}.png", "f".repeat(32));
+                stages.push(media_stage(&format!("u{index}"), Some(&unique), None));
+            }
+        }
+        let out = transcode_pack(&media_pack(stages)).expect("transcode");
+        assert_eq!(out.images.len(), 510);
+        let names = device_names(&out.images);
+        let distinct: HashSet<&str> = names.iter().copied().collect();
+        assert_eq!(distinct.len(), names.len(), "no two pictures share a file");
+        assert!(names.iter().all(|name| is_device_name(name)));
+        for (index, asset) in out.images.iter().enumerate() {
+            // An asset alone to bear its natural name keeps it.
+            if asset.source_ref.starts_with('f') {
+                assert_eq!(asset.device_name, device_asset_basename(&asset.source_ref));
+            }
+            // The index entry of every asset names its file.
+            assert_eq!(
+                &out.ri[index * 12..(index + 1) * 12],
+                format!("000\\{}", asset.device_name).as_bytes()
+            );
+        }
+        assert_eq!(names[0], "1234ABCD", "the first one keeps the shared name");
     }
 
     /// Ground truth: transcode a real STUdio `story.json` and compare the

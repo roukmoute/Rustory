@@ -286,11 +286,11 @@ pub fn prepare_story_archive_descriptor(
     let mut allocator = AssetNameAllocator::default();
     let mut assets = Vec::with_capacity(transcoded.images.len() + transcoded.audios.len());
     let mut archive_names: HashMap<(StoryArchiveAssetKind, String), String> = HashMap::new();
-    for (kind, references) in [
+    for (kind, sources) in [
         (StoryArchiveAssetKind::Image, &transcoded.images),
         (StoryArchiveAssetKind::Audio, &transcoded.audios),
     ] {
-        for reference in references {
+        for reference in sources.iter().map(|asset| &asset.source_ref) {
             let archive_name = allocator.allocate(kind, reference);
             archive_names.insert((kind, reference.clone()), archive_name.clone());
             assets.push(StoryArchiveAsset {
