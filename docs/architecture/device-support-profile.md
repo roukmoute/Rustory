@@ -1275,11 +1275,9 @@ shared with the single send gesture:
   its own graph when the story has choices (below).
 
 The export therefore refuses what the send refuses, for the same reasons
-(worded for the export, see the refusal table below) — with ONE difference,
-on a story with choices: **a node without sound is exported as a silent
-stage, where the send refuses it** (below). It involves **no device**: the
-pack is never ciphered, nothing is read from or written to a device, and no
-device needs to be connected.
+(worded for the export, see the refusal table below). It involves **no
+device**: the pack is never ciphered, nothing is read from or written to a
+device, and no device needs to be connected.
 
 **A story with choices is laid out by its own graph**, for the send and the
 export alike. A story has choices as soon as ONE node offers an option; its
@@ -1293,7 +1291,7 @@ was NOT retained — a retention that failed, a library moved without its
 
 | The story | The pack |
 | --- | --- |
-| Every node, the start node first, the others in their node order | One stage each, carrying the node's stored picture and sound. The picture may always be absent. The sound may be absent in an ARCHIVE only (a pack stage may be a picture alone, and a story created from a pack goes back out with the stages it had); the device SEND asks every node for a sound. |
+| Every node, the start node first, the others in their node order | One stage each, carrying the node's stored picture and sound. Either may be absent: unlike an episode, a node needs no sound — a pack stage may be a picture alone, and a story created from a pack goes back out with the stages it had. Sent to a device, a node without sound is a SILENT stage (no sound index, its navigation intact). |
 | The options of a node, in their order | The action node its OK transition enters: ONE option, its destination comes next; SEVERAL, they are the entries of a wheel. Nodes that offer the same options share one action node. |
 | The start node | The cover (`squareOne`): wheel + OK, no home. |
 | A node offered beside at least one other (an entry of a wheel) | Waits for the listener: wheel + OK + home, no autoplay. |
@@ -1316,16 +1314,15 @@ that write the format — the same ones the menu layout follows:
   identity, exactly as its retained archive would be — else the story id,
   like the other layouts.
 
-**One verdict, read before any click.** The send reads a story with choices
-exactly as the library card does (`sendBlocker`, see
-[ui-states.md](./ui-states.md)): the graph first — a usable structure, every
-option a destination, a pack identity — then a sound on every node. The
-device plays nothing else, so a pack Rustory lays out for one never holds a
-stage it would stay mute on: the rule every episode already follows, applied
-to every node (reachable or not — a node the listener cannot reach yet is
-still a stage of the pack). The export skips that last check alone. A story
-whose pack has a silent stage therefore goes to a device from its retained
-archive (sent as it is), or once every node has a sound.
+**One verdict, read before any click.** The send and the export read a
+story with choices exactly as the library card does (`sendBlocker`, see
+[ui-states.md](./ui-states.md)): a usable structure, every option a
+destination, a pack identity. A node without sound is no reason, for either
+gesture: it is written as a silent stage, as the same pack sent from its
+retained archive would carry it. What a device does on a stage without
+sound has not been observed on real hardware — the editor says so plainly
+(`Un nœud sans audio reste silencieux sur la Lunii.`), and an EPISODE still
+needs its audio (a story without choices is nothing but its sounds).
 
 A menu pack written by the menu layout and read back as a story lays out as
 that very graph again, with one difference: its question stage, played with
@@ -1411,11 +1408,7 @@ rules is outside what this contract can promise.
 | A media, once converted to the device format, is over the per-media bound — in practice a transcoded sound longer than about 2 h 20 (`details.byte_size`, `details.max_bytes`) | `asset_convert` / `oversize` |
 
 The send gives the `story_pack` reasons above as `DEVICE_WRITE_FAILED`
-(`Envoi impossible: …`), plus the one the export does not have:
-
-| Refusal of the send only (`DEVICE_WRITE_FAILED`) | `details.source` / `details.cause` |
-| --- | --- |
-| A story with choices has a node without sound (`details.node`, the first one in layout order) | `story_pack` / `node_without_audio` |
+(`Envoi impossible: …`), with the same `details`.
 
 Every story-level refusal is decided BEFORE a destination is asked for. A
 media that is missing or too large to be read is refused when the pack's
