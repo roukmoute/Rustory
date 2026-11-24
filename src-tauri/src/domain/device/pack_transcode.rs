@@ -16,10 +16,13 @@
 //!
 //! Every asset is ONE FILE on the device, under a name assigned here and
 //! nowhere else ([`TranscodedAsset::device_name`]): its `ri` / `si` entry and
-//! the file the caller writes carry that same name. It is the asset's
-//! NATURAL name — the last 8 characters of its source file name, what a
-//! device pack has always been written with — unless another asset of the
-//! same kind already bears it: two different assets never share a file.
+//! the file the caller writes carry that same name — always 8 characters,
+//! digits and uppercase ASCII letters, so an entry is always 12 bytes and a
+//! file always sits directly in its asset folder. It is the asset's NATURAL
+//! name — the last 8 characters of its source file name, what a device pack
+//! has always been written with — unless that is no such name, or another
+//! asset of the same kind already bears it: two different assets never
+//! share a file.
 //!
 //! All `ni`/`li` integers are little-endian; absent transitions write `-1`.
 
@@ -115,7 +118,8 @@ pub struct TranscodedAsset {
     pub source_ref: String,
     /// The name of the asset's file on the device (`rf/000/<name>` for a
     /// picture, `sf/000/<name>` for a sound) — the very name its `ri` / `si`
-    /// entry carries. No other asset of the same kind bears it.
+    /// entry carries. Always 8 characters, each a digit or an uppercase
+    /// ASCII letter, and no other asset of the same kind bears it.
     pub device_name: String,
 }
 
@@ -226,11 +230,11 @@ pub fn transcode_pack(pack: &StudioStoryPack) -> Result<TranscodedPack, Transcod
     }
 
     // ri / si: flat 12-byte ASCII `000\XXXXXXXX` entries, XXXXXXXX = the
-    // asset's device name — for a pack without a clash, the last 8 hex chars
-    // of the asset's (SHA-1) filename stem, UPPERCASE. The asset file is
-    // stored on-device at `rf/000/XXXXXXXX` / `sf/000/XXXXXXXX` (no
-    // extension) — the same name, so the ri/si entry and the file name are
-    // one self-consistent contract.
+    // asset's device name — for a pack of hash-named files without a clash,
+    // the last 8 hex chars of the asset's (SHA-1) filename stem, UPPERCASE.
+    // The asset file is stored on-device at `rf/000/XXXXXXXX` /
+    // `sf/000/XXXXXXXX` (no extension) — the same name, so the ri/si entry
+    // and the file name are one self-consistent contract.
     let ri = asset_index_table(&images);
     let si = asset_index_table(&audios);
 
@@ -316,13 +320,32 @@ pub fn ri_entry_basename(ri_plain: &[u8], index: usize) -> Option<String> {
     Some(String::from_utf8_lossy(basename).into_owned())
 }
 
+/// Length of an asset's file name on a device, in characters — and in bytes,
+/// every one of them being ASCII: an `ri` / `si` entry is `000\` followed by
+/// exactly that many.
+const DEVICE_ASSET_NAME_LEN: usize = 8;
+
+/// Whether `name` can be written on a device as the file name of an asset:
+/// exactly 8 characters, each an ASCII digit or an ASCII uppercase letter.
+/// Only such a name keeps its `ri` / `si` entry at 12 bytes and its file
+/// directly in the asset folder: a shorter name shifts every entry after
+/// its own, a separator opens a folder under `rf/000` / `sf/000`, and a
+/// character that is not ASCII takes more than one byte of the entry.
+fn is_device_asset_name(name: &str) -> bool {
+    name.len() == DEVICE_ASSET_NAME_LEN
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || byte.is_ascii_uppercase())
+}
+
 /// The NATURAL on-device name of an asset: the last 8 characters of its
 /// filename stem (drop any extension), UPPERCASED. For a SHA-1-named STUdio
 /// asset (`<40 hex>.bmp`) this is the last 8 hex chars, matching the
 /// `.content` convention observed on real devices. It is the name the asset
-/// gets on the device unless another asset of its kind bears it already
-/// (see [`TranscodedAsset::device_name`]) — and the short tag a diagnostic
-/// names a source file by.
+/// gets on the device when it is one a device can be given — 8 digits and
+/// uppercase ASCII letters — that no other asset of its kind bears already
+/// (see [`TranscodedAsset::device_name`]) — and, whatever it is, the short
+/// tag a diagnostic names a source file by.
 ///
 /// The 8 are counted in BYTES, which for a hash-named file is the same
 /// thing. A name that is not ASCII is never cut inside a character: when the
@@ -333,7 +356,7 @@ pub fn device_asset_basename(filename: &str) -> String {
         .rsplit_once('.')
         .map(|(s, _)| s)
         .unwrap_or(filename);
-    let mut start = stem.len().saturating_sub(8);
+    let mut start = stem.len().saturating_sub(DEVICE_ASSET_NAME_LEN);
     // The end of the stem is a boundary: the walk always stops.
     while !stem.is_char_boundary(start) {
         start += 1;
@@ -361,24 +384,30 @@ impl AssetKind {
 }
 
 /// Give every asset of one kind (`references`, in index order) the name of
-/// its file on the device, so that two different assets NEVER share one: the
-/// later file would replace the earlier without a word, and a stage would
-/// show or play another stage's asset.
+/// its file on the device: a name the device can be given
+/// ([`is_device_asset_name`]), and one that two different assets NEVER
+/// share — the later file would replace the earlier without a word, and a
+/// stage would show or play another stage's asset.
 ///
-/// An asset keeps its natural name ([`device_asset_basename`]) when it is
-/// the first of its kind to bear it — the only case there is in a pack
-/// without a clash, which is therefore written byte for byte as it always
-/// was. An asset whose natural name is already borne gets a DERIVED one
-/// ([`derived_device_name`]). The natural names are settled first, so a
-/// derived name is never drawn onto the natural name of another asset,
-/// wherever that asset stands in the list.
+/// An asset keeps its natural name ([`device_asset_basename`]) when that is
+/// a device name and the asset is the first of its kind to bear it — the
+/// only case there is in a pack of hash-named files without a clash, which
+/// is therefore written byte for byte as it always was. Any other asset
+/// gets a DERIVED name ([`derived_device_name`]): one whose natural name is
+/// already borne, and one whose natural name is no device name at all (a
+/// short file name, one that is not ASCII, a reference inside a folder).
+/// The natural names are settled first, so a derived name is never drawn
+/// onto the natural name of another asset, wherever that asset stands in
+/// the list.
 fn name_device_assets(kind: AssetKind, references: Vec<String>) -> Vec<TranscodedAsset> {
     let mut taken: HashSet<String> = HashSet::with_capacity(references.len());
     let natural_names: Vec<Option<String>> = references
         .iter()
         .map(|reference| {
             let name = device_asset_basename(reference);
-            taken.insert(name.clone()).then_some(name)
+            // A name that is no device name is never written, so it holds
+            // no file and takes no name from anyone.
+            (is_device_asset_name(&name) && taken.insert(name.clone())).then_some(name)
         })
         .collect();
     references
@@ -404,10 +433,11 @@ fn name_device_assets(kind: AssetKind, references: Vec<String>) -> Vec<Transcode
 }
 
 /// A device name for the asset `reference` of kind `kind` that does not come
-/// from its file name: 8 uppercase hexadecimal characters — the shape of
-/// every name in a device pack — taken from a SHA-256 over the kind, the
-/// reference and `salt`. Deterministic: the same pack always gets the same
-/// names. `salt` only moves on when the name drawn is itself taken.
+/// from its file name: 8 uppercase hexadecimal characters — the shape of the
+/// name of a hash-named file, always a device name — taken from a SHA-256
+/// over the kind, the reference and `salt`. Deterministic: the same pack
+/// always gets the same names. `salt` only moves on when the name drawn is
+/// itself taken.
 fn derived_device_name(kind: AssetKind, reference: &str, salt: u32) -> String {
     let mut hasher = Sha256::new();
     hasher.update(b"rustory:device-pack:asset-name\0");
@@ -426,7 +456,9 @@ fn derived_device_name(kind: AssetKind, reference: &str, salt: u32) -> String {
 }
 
 /// Build a `ri`/`si` table: one fixed 12-byte ASCII entry `000\XXXXXXXX` per
-/// asset (in index order), `\` = 0x5C, `XXXXXXXX` = the asset's device name.
+/// asset (in index order), `\` = 0x5C, `XXXXXXXX` = the asset's device name
+/// — 8 ASCII characters whatever the asset, which is what makes every entry
+/// 12 bytes and lets the device find entry `i` at byte `12 × i`.
 fn asset_index_table(assets: &[TranscodedAsset]) -> Vec<u8> {
     let mut out = Vec::with_capacity(assets.len() * 12);
     for asset in assets {
@@ -739,6 +771,8 @@ mod tests {
         )
     }
 
+    /// The shape of a hash-named file's name and of a derived name: 8
+    /// uppercase hexadecimal characters.
     fn is_device_name(name: &str) -> bool {
         name.len() == 8
             && name
@@ -883,6 +917,234 @@ mod tests {
             );
         }
         assert_eq!(names[0], "1234ABCD", "the first one keeps the shared name");
+    }
+
+    // ===== A name the device can read, whatever the source file is called =====
+
+    /// The device names a pack of pictures gets, in index order.
+    fn picture_device_names(references: &[&str]) -> Vec<String> {
+        let stages = references
+            .iter()
+            .enumerate()
+            .map(|(index, reference)| media_stage(&format!("s{index}"), Some(reference), None))
+            .collect();
+        transcode_pack(&media_pack(stages))
+            .expect("transcode")
+            .images
+            .into_iter()
+            .map(|asset| asset.device_name)
+            .collect()
+    }
+
+    #[test]
+    fn a_name_of_8_digits_and_letters_is_kept_as_the_device_name() {
+        for (reference, device_name) in [
+            // A hash-named file: its last 8 hexadecimal characters.
+            ("5b699d67ef92f738012e3db36f3b2837532195b9.bmp", "532195B9"),
+            // Any other 8 digits and ASCII letters, in either case.
+            ("chapitre.mp3", "CHAPITRE"),
+            ("Image001.PNG", "IMAGE001"),
+            ("12345678", "12345678"),
+            // A reference inside a folder whose file name is long enough.
+            ("assets/lesoirvenu.png", "SOIRVENU"),
+        ] {
+            assert!(is_device_asset_name(device_name), "{device_name}");
+            assert_eq!(
+                picture_device_names(&[reference]),
+                vec![device_name],
+                "{reference}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_name_that_is_no_device_name_is_never_written_as_it_stands() {
+        for reference in [
+            // Fewer than 8 characters — down to none at all.
+            "a.bmp",
+            "cover.png",
+            "1234567.png",
+            ".png",
+            "",
+            // 8 characters, one of which is neither a digit nor a letter.
+            "my_story.png",
+            "mon-conte.png",
+            "le conte.png",
+            "v1.2.final.png",
+            "conte(1).png",
+            // A folder separator within the last 8 characters.
+            "assets/cover.png",
+            "assets\\cover.png",
+            "../cover.png",
+            // Characters that are not ASCII: a cut inside one, 8 bytes that
+            // make 7 characters, wide characters, digits of another script.
+            "xé1234567.png",
+            "éé123456.png",
+            "ÉCOUTONS.png",
+            "日本語の物語.png",
+            "１２３４５６７８.png",
+        ] {
+            let natural = device_asset_basename(reference);
+            assert!(
+                !is_device_asset_name(&natural),
+                "{reference}: {natural} is no device name"
+            );
+            let names = picture_device_names(&[reference]);
+            assert_eq!(
+                names,
+                vec![derived_device_name(AssetKind::Image, reference, 0)],
+                "{reference}"
+            );
+            assert!(is_device_name(&names[0]), "{reference}: {}", names[0]);
+        }
+    }
+
+    #[test]
+    fn names_too_short_for_the_device_still_make_12_byte_index_entries() {
+        // `a.bmp` would be `A` on the device and `assets/cover.png`
+        // `TS/COVER`: written as they stand, the two entries made a table of
+        // 17 bytes (`000\A000\TS/COVER`) that the device reads 12 at a time.
+        let pack = media_pack(vec![
+            media_stage("s0", Some("a.bmp"), Some("story.mp3")),
+            media_stage("s1", Some("assets/cover.png"), Some("fin.mp3")),
+        ]);
+        let out = transcode_pack(&pack).expect("transcode");
+
+        let pictures = device_names(&out.images);
+        let sounds = device_names(&out.audios);
+        assert_eq!(
+            pictures,
+            vec![
+                derived_device_name(AssetKind::Image, "a.bmp", 0),
+                derived_device_name(AssetKind::Image, "assets/cover.png", 0),
+            ]
+        );
+        assert_eq!(
+            sounds,
+            vec![
+                derived_device_name(AssetKind::Audio, "story.mp3", 0),
+                derived_device_name(AssetKind::Audio, "fin.mp3", 0),
+            ]
+        );
+        assert_eq!(
+            out.ri,
+            format!("000\\{}000\\{}", pictures[0], pictures[1]).into_bytes()
+        );
+        assert_eq!(
+            out.si,
+            format!("000\\{}000\\{}", sounds[0], sounds[1]).into_bytes()
+        );
+        assert_eq!((out.ri.len(), out.si.len()), (24, 24));
+        // Every entry reads back, and every stage points at its own.
+        assert_eq!(ri_entry_basename(&out.ri, 0).as_deref(), Some(pictures[0]));
+        assert_eq!(ri_entry_basename(&out.ri, 1).as_deref(), Some(pictures[1]));
+        assert_eq!(stage_asset_indices(&out.ni, 0), (0, 0));
+        assert_eq!(stage_asset_indices(&out.ni, 1), (1, 1));
+        // The source references are untouched: the caller reads the media
+        // from them.
+        assert_eq!(source_refs(&out.images), vec!["a.bmp", "assets/cover.png"]);
+        assert_eq!(source_refs(&out.audios), vec!["story.mp3", "fin.mp3"]);
+    }
+
+    #[test]
+    fn a_reference_inside_a_folder_never_opens_a_folder_on_the_device() {
+        // The last 8 characters of each reference hold a separator: written
+        // as they stand, `assets/cover.png` landed in `rf/000/TS/COVER`.
+        for reference in [
+            "assets/cover.png",
+            "assets\\cover.png",
+            "sous/dossier/a.bmp",
+            "x/1234567.png",
+        ] {
+            let names = picture_device_names(&[reference]);
+            assert!(
+                names[0].bytes().all(|b| b.is_ascii_alphanumeric()),
+                "{reference}: {}",
+                names[0]
+            );
+            assert_eq!(names[0].len(), 8, "{reference}: {}", names[0]);
+        }
+    }
+
+    #[test]
+    fn a_name_fit_for_the_device_is_kept_among_names_that_are_not() {
+        // The hash-named picture and the 8-letter one keep their names,
+        // wherever they stand among pictures that get a derived one.
+        let hashed = format!("{}1234abcd.png", "a".repeat(32));
+        let names = picture_device_names(&["a.bmp", &hashed, "xé1234567.png", "chapitre.png"]);
+        assert_eq!(
+            names,
+            vec![
+                derived_device_name(AssetKind::Image, "a.bmp", 0),
+                "1234ABCD".to_string(),
+                derived_device_name(AssetKind::Image, "xé1234567.png", 0),
+                "CHAPITRE".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_name_derived_for_an_unfit_name_never_lands_on_the_natural_name_of_another_asset() {
+        // `a.bmp` would be given the derived name `drawn` — but a picture
+        // further down the pack bears exactly that name naturally. It keeps
+        // it, and `a.bmp` draws again.
+        let drawn = derived_device_name(AssetKind::Image, "a.bmp", 0);
+        let holder = format!("{}{}.png", "c".repeat(32), drawn.to_ascii_lowercase());
+        let redrawn = derived_device_name(AssetKind::Image, "a.bmp", 1);
+        assert_ne!(redrawn, drawn);
+        assert_eq!(
+            picture_device_names(&["a.bmp", &holder]),
+            vec![redrawn, drawn]
+        );
+    }
+
+    #[test]
+    fn every_media_of_a_pack_of_unfit_names_gets_a_device_name_of_its_own() {
+        // 400 pictures and 400 sounds, none of which has a name a device
+        // could be given: too short, spaced, accented, inside a folder.
+        let mut stages = Vec::new();
+        for index in 0..400 {
+            let picture = match index % 4 {
+                0 => format!("{index}.png"),
+                1 => format!("image {index}.png"),
+                2 => format!("forêt-{index}.png"),
+                _ => format!("images/{index}.png"),
+            };
+            let sound = match index % 4 {
+                0 => format!("{index}.mp3"),
+                1 => format!("chapitre {index}.mp3"),
+                2 => format!("été-{index}.mp3"),
+                _ => format!("sons/{index}.mp3"),
+            };
+            stages.push(media_stage(
+                &format!("s{index}"),
+                Some(&picture),
+                Some(&sound),
+            ));
+        }
+        let pack = media_pack(stages);
+        let out = transcode_pack(&pack).expect("transcode");
+        for (table, assets) in [(&out.ri, &out.images), (&out.si, &out.audios)] {
+            assert_eq!(assets.len(), 400);
+            assert_eq!(table.len(), 400 * 12, "12 bytes per entry");
+            let names = device_names(assets);
+            let distinct: HashSet<&str> = names.iter().copied().collect();
+            assert_eq!(distinct.len(), names.len(), "no two media share a file");
+            for (index, asset) in assets.iter().enumerate() {
+                assert!(
+                    is_device_asset_name(&asset.device_name),
+                    "{}: {}",
+                    asset.source_ref,
+                    asset.device_name
+                );
+                assert_eq!(
+                    &table[index * 12..(index + 1) * 12],
+                    format!("000\\{}", asset.device_name).as_bytes()
+                );
+            }
+        }
+        // The same pack always gets the same names.
+        assert_eq!(transcode_pack(&pack).expect("transcode"), out);
     }
 
     /// Ground truth: transcode a real STUdio `story.json` and compare the

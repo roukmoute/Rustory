@@ -1,11 +1,21 @@
-//! Media whose names END ALIKE, sent to a device, end to end through the
-//! public send services. A device file is named after the last 8 characters
-//! of its source name: two different pictures (or two different sounds) that
-//! share those 8 characters must still land on two files, every stage showing
-//! and playing its own — for a pack sent from its archive and for a pack laid
-//! out from the library alike. The volume is written by the real pack writer
-//! and read back the way the device reads it: the cleartext node index, the
-//! deciphered picture and sound indices, the deciphered files.
+//! The names of a pack's media on a device, end to end through the public
+//! send services. A device file is named after the last 8 characters of its
+//! source name, and two things must hold whatever the source files are
+//! called:
+//!
+//! - media whose names END ALIKE — two different pictures, or two different
+//!   sounds, that share those 8 characters — still land on two files, every
+//!   stage showing and playing its own, for a pack sent from its archive and
+//!   for a pack laid out from the library alike;
+//! - media whose names are NO DEVICE NAME — too short, referenced inside a
+//!   folder, not ASCII — still land on files the device finds: 8 digits and
+//!   uppercase letters each, directly in the asset folder, behind 12-byte
+//!   index entries. That pack takes the way a hand-made one does: created as
+//!   a story of a library, then sent from the archive the library kept.
+//!
+//! The volume is written by the real pack writer and read back the way the
+//! device reads it: the cleartext node index, the deciphered picture and
+//! sound indices, the deciphered files.
 
 use std::collections::HashSet;
 use std::io::Write;
@@ -16,11 +26,14 @@ use rustory_lib::application::device::send::{
     send_archive_to_device, send_story_pack_to_device, SendArchiveRequest, SendStoryPackRequest,
 };
 use rustory_lib::application::device::{read_connected_lunii, ConnectedLuniiOutcome};
+use rustory_lib::application::import_export::accept_structured_archive_creation;
 use rustory_lib::domain::device::{synthesize_sequential_pack, DeviceFamily, EpisodeAssets};
+use rustory_lib::infrastructure::db;
 use rustory_lib::infrastructure::device::{
     to_device_audio, to_device_image, v3_decipher_in_place, v3_story_key_iv, DeviceLibraryReader,
     SystemDeviceLibraryReader, SystemDeviceScanner, SystemDeviceV3PackWriter,
 };
+use rustory_lib::infrastructure::filesystem::{resolve_db_path, resolve_source_archive_path};
 use tempfile::TempDir;
 
 /// The identity of the pack sent in both tests.
@@ -173,10 +186,11 @@ fn assert_is_the_device_form_of(media: &DeviceMedia, device_form: &[u8], what: &
     );
 }
 
-/// The names of the files actually present in one asset folder of the pack.
+/// The names of the entries actually present in one folder of the pack
+/// (`.` for the pack folder itself).
 fn files_in(content: &Path, dir: &str) -> HashSet<String> {
     std::fs::read_dir(content.join(dir))
-        .expect("an asset folder")
+        .expect("a folder of the pack")
         .map(|entry| {
             entry
                 .expect("an entry")
@@ -193,6 +207,16 @@ fn is_device_name(name: &str) -> bool {
         && name
             .bytes()
             .all(|b| b.is_ascii_digit() || (b'A'..=b'F').contains(&b))
+}
+
+/// The entries of one folder of the pack that are NOT regular files.
+fn folders_in(content: &Path, dir: &str) -> Vec<String> {
+    std::fs::read_dir(content.join(dir))
+        .expect("a folder of the pack")
+        .map(|entry| entry.expect("an entry"))
+        .filter(|entry| !entry.file_type().expect("a file type").is_file())
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .collect()
 }
 
 /// The pixels of an encoded picture.
@@ -467,5 +491,244 @@ fn a_library_story_whose_media_names_end_alike_puts_every_media_on_its_own_devic
     assert_eq!(
         files_in(&content, "sf/000"),
         HashSet::from([first_sound, second_sound])
+    );
+}
+
+#[test]
+fn a_pack_archive_whose_media_names_are_no_device_names_puts_every_media_on_a_file_its_index_leads_to(
+) {
+    // The first three pictures and the first three sounds have names no
+    // device file could bear: too short, referenced inside a folder, not
+    // ASCII — the last 8 bytes of `xé1234567` and of `écoutons` start inside
+    // an `é`. The fourth of each kind has one: the last 8 hexadecimal
+    // characters of a hash-named picture, the 8 letters of `chapitre`.
+    let hashed_picture = format!("{}1234abcd.png", "a".repeat(32));
+    let picture_refs = [
+        "a.png",
+        "assets/cover.png",
+        "xé1234567.png",
+        hashed_picture.as_str(),
+    ];
+    let sound_refs = [
+        "story.wav",
+        "assets/fin.wav",
+        "écoutons.wav",
+        "chapitre.wav",
+    ];
+    let pictures = [
+        png([255, 40, 40]),
+        png([40, 255, 40]),
+        png([40, 40, 255]),
+        png([255, 200, 40]),
+    ];
+    let sounds = [wav(0.30), wav(0.35), wav(0.40), wav(0.45)];
+
+    // A pack of four stages played one after the other, each with its own
+    // picture and its own sound.
+    let uuids = [PACK, "second", "third", "fourth"];
+    let stages: Vec<String> = (0..4)
+        .map(|index| {
+            let ok = match uuids.get(index + 1) {
+                Some(next) => format!(r#"{{"actionNode":"to-{next}","optionIndex":0}}"#),
+                None => "null".to_string(),
+            };
+            format!(
+                r#"{{"uuid":"{}","squareOne":{},"image":"{}","audio":"{}",
+                "okTransition":{ok},"homeTransition":null,
+                "controlSettings":{{"wheel":true,"ok":true,"home":false,"pause":false,"autoplay":false}}}}"#,
+                uuids[index],
+                index == 0,
+                picture_refs[index],
+                sound_refs[index]
+            )
+        })
+        .collect();
+    let actions: Vec<String> = uuids[1..]
+        .iter()
+        .map(|next| format!(r#"{{"id":"to-{next}","options":["{next}"]}}"#))
+        .collect();
+    let descriptor = format!(
+        r#"{{"format":"v1","version":1,"title":"Fait main","nightModeAvailable":false,
+            "stageNodes":[{}],"actionNodes":[{}]}}"#,
+        stages.join(","),
+        actions.join(",")
+    );
+    let dir = TempDir::new().expect("dir");
+    let archive = dir.path().join("pack.zip");
+    {
+        let mut writer = zip::ZipWriter::new(std::fs::File::create(&archive).expect("archive"));
+        let options = zip::write::SimpleFileOptions::default();
+        writer
+            .start_file("story.json", options)
+            .expect("descriptor");
+        writer.write_all(descriptor.as_bytes()).expect("descriptor");
+        for (reference, bytes) in picture_refs
+            .iter()
+            .zip(&pictures)
+            .chain(sound_refs.iter().zip(&sounds))
+        {
+            // Every media sits under `assets/`, whether its reference says
+            // so or names the file alone.
+            let entry = match reference.strip_prefix("assets/") {
+                Some(_) => reference.to_string(),
+                None => format!("assets/{reference}"),
+            };
+            writer.start_file(entry, options).expect("asset");
+            writer.write_all(bytes).expect("asset");
+        }
+        writer.finish().expect("finish the archive");
+    }
+
+    // The way a hand-made pack reaches a device: the archive becomes a story
+    // of the library, which keeps it, and the send reads that retained copy.
+    let app_data = TempDir::new().expect("app data");
+    let mut library = db::open_at(&resolve_db_path(app_data.path())).expect("open the library");
+    db::run_migrations(&mut library).expect("migrate");
+    let card = accept_structured_archive_creation(&mut library, app_data.path(), &archive)
+        .expect("create the story from the archive");
+    assert!(card.sendable, "a story created from a pack can be sent");
+    let retained = resolve_source_archive_path(app_data.path(), &card.id);
+    assert!(retained.is_file(), "the library keeps the pack archive");
+
+    let (volume, md) = scratch_v3_volume();
+    let scanner = SystemDeviceScanner::with_explicit_mount_roots(vec![volume.path().to_path_buf()]);
+    let sent = send_archive_to_device(
+        &scanner,
+        &SystemDeviceV3PackWriter,
+        &SendArchiveRequest {
+            device_identifier: device_identifier(&scanner),
+            archive_path: retained,
+        },
+        Duration::from_secs(30),
+        &|_| {},
+    )
+    .expect("send the pack archive");
+    assert_eq!(sent.pack_uuid, PACK);
+    assert_eq!(sent.short_id, SHORT_ID);
+    assert_eq!((sent.image_count, sent.audio_count), (4, 4));
+
+    // What every stage must show and play: the device form of ITS media.
+    let device_pictures: Vec<Vec<u8>> = pictures
+        .iter()
+        .map(|picture| to_device_image(picture).expect("a device bitmap"))
+        .collect();
+    let device_sounds: Vec<Vec<u8>> = sounds
+        .iter()
+        .map(|sound| to_device_audio(sound).expect("a device sound"))
+        .collect();
+    assert_eq!(
+        device_pictures.iter().collect::<HashSet<_>>().len(),
+        4,
+        "the pictures differ"
+    );
+    assert_eq!(
+        device_sounds.iter().collect::<HashSet<_>>().len(),
+        4,
+        "the sounds differ"
+    );
+
+    // The pack folder holds the index files and the two asset folders, each
+    // of which holds its `000` folder and nothing else.
+    let content = volume.path().join(".content").join(SHORT_ID);
+    assert_eq!(
+        files_in(&content, "."),
+        ["ni", "bt", "li", "ri", "si", "rf", "sf"]
+            .map(String::from)
+            .into_iter()
+            .collect()
+    );
+    for dir in ["rf", "sf"] {
+        assert_eq!(files_in(&content, dir), HashSet::from(["000".to_string()]));
+    }
+    // An index of 4 media is 4 entries of 12 bytes — a whole number of
+    // cipher blocks, so not one byte of padding either.
+    for index in ["ri", "si"] {
+        assert_eq!(
+            std::fs::metadata(content.join(index))
+                .expect("an asset index")
+                .len(),
+            48,
+            "{index}: 4 entries of 12 bytes"
+        );
+    }
+
+    // Read the way the device does, every stage finds its own picture and
+    // its own sound.
+    let stages = read_stages(&content, &md);
+    assert_eq!(stages.len(), 4);
+    for (index, (picture, sound)) in stages.iter().enumerate() {
+        assert_is_the_device_form_of(
+            picture.as_ref().expect("a picture"),
+            &device_pictures[index],
+            &format!("the picture of stage {index}"),
+        );
+        assert_is_the_device_form_of(
+            sound.as_ref().expect("a sound"),
+            &device_sounds[index],
+            &format!("the sound of stage {index}"),
+        );
+    }
+
+    // The names: 8 digits and uppercase letters each, and none shared.
+    let picture_files: Vec<&str> = stages
+        .iter()
+        .map(|(picture, _)| picture.as_ref().expect("a picture").name.as_str())
+        .collect();
+    let sound_files: Vec<&str> = stages
+        .iter()
+        .map(|(_, sound)| sound.as_ref().expect("a sound").name.as_str())
+        .collect();
+    for names in [&picture_files, &sound_files] {
+        for name in names {
+            assert!(
+                name.len() == 8
+                    && name
+                        .bytes()
+                        .all(|b| b.is_ascii_digit() || b.is_ascii_uppercase()),
+                "{name} is a name a device file can bear"
+            );
+        }
+        assert_eq!(
+            names.iter().collect::<HashSet<_>>().len(),
+            4,
+            "four media, four files: {names:?}"
+        );
+    }
+    // A name that was no device name is replaced by a derived one; a name
+    // that was one is kept, among the others.
+    for name in picture_files[..3].iter().chain(&sound_files[..3]) {
+        assert!(is_device_name(name), "{name} is a derived name");
+    }
+    assert_eq!(picture_files[3], PICTURE_SUFFIX);
+    assert_eq!(sound_files[3], "CHAPITRE");
+
+    // Each asset folder holds those four files and nothing else: no file
+    // under a shorter name, no folder opened by a reference.
+    assert_eq!(
+        files_in(&content, "rf/000"),
+        picture_files.iter().map(|name| name.to_string()).collect()
+    );
+    assert_eq!(
+        files_in(&content, "sf/000"),
+        sound_files.iter().map(|name| name.to_string()).collect()
+    );
+    for dir in ["rf/000", "sf/000"] {
+        assert_eq!(folders_in(&content, dir), Vec::<String>::new(), "{dir}");
+    }
+
+    // The cover the device panel shows for the pack is read back through the
+    // picture index: the first stage's picture, found under its derived name.
+    let library = SystemDeviceLibraryReader
+        .read_library(volume.path(), DeviceFamily::Lunii, Duration::from_secs(30))
+        .expect("read the device");
+    let entry = library
+        .entries
+        .iter()
+        .find(|entry| entry.uuid == PACK)
+        .expect("the pack is listed");
+    let cover = entry.cover_png.as_deref().expect("a cover");
+    assert!(
+        pixels(cover) == pixels(&device_pictures[0]),
+        "the cover is the first stage's picture"
     );
 }

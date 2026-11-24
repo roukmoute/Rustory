@@ -446,6 +446,98 @@ mod tests {
         assert!(paths.contains("sf/000/5678EF01"));
     }
 
+    #[test]
+    fn media_whose_names_are_no_device_names_are_assembled_as_files_their_index_entries_lead_to() {
+        // Too short, inside a folder, not ASCII: written under the last 8
+        // characters of these names, the pack had index entries of every
+        // length and a picture in a folder of its own.
+        let pictures = ["a.bmp", "assets/cover.png", "xé1234567.png"];
+        let sounds = ["story.mp3", "sons/fin.mp3", "écoutons.mp3"];
+        let stages: Vec<String> = (0..3)
+            .map(|index| {
+                format!(
+                    r#"{{"uuid":"s{index}","squareOne":{},"image":"{}","audio":"{}",
+                    "okTransition":null,"homeTransition":null,
+                    "controlSettings":{{"wheel":true,"ok":true,"home":false,"pause":false,"autoplay":false}}}}"#,
+                    index == 0,
+                    pictures[index],
+                    sounds[index]
+                )
+            })
+            .collect();
+        let json = format!(
+            r#"{{"version":1,"nightModeAvailable":false,"stageNodes":[{}],"actionNodes":[]}}"#,
+            stages.join(",")
+        );
+        let pack: crate::domain::device::StudioStoryPack = serde_json::from_str(&json).unwrap();
+        let transcoded = transcode_pack(&pack).unwrap();
+
+        let assets: HashMap<&str, Vec<u8>> = pictures
+            .iter()
+            .chain(&sounds)
+            .enumerate()
+            .map(|(seed, name)| (*name, asset_bytes(seed as u8 + 1, 600)))
+            .collect();
+        let resolve = |f: &str| assets.get(f).cloned();
+        let files = assemble_v3_pack(&transcoded, &tiny_md(), &resolve).expect("assemble");
+
+        // Six assets, six files, each directly in its folder under 8 digits
+        // and uppercase letters.
+        let mut asset_paths = std::collections::HashSet::new();
+        for file in &files {
+            let Some(name) = file
+                .rel_path
+                .strip_prefix("rf/000/")
+                .or_else(|| file.rel_path.strip_prefix("sf/000/"))
+            else {
+                assert!(
+                    ["ni", "bt", "li", "ri", "si"].contains(&file.rel_path.as_str()),
+                    "{} is neither an index file nor in an asset folder",
+                    file.rel_path
+                );
+                continue;
+            };
+            assert!(
+                name.len() == 8
+                    && name
+                        .bytes()
+                        .all(|b| b.is_ascii_digit() || b.is_ascii_uppercase()),
+                "{}",
+                file.rel_path
+            );
+            assert!(asset_paths.insert(file.rel_path.as_str()), "{}", name);
+        }
+        assert_eq!(asset_paths.len(), 6);
+
+        // Each index holds one 12-byte entry per asset, and each entry leads
+        // to the file of ITS asset: read the way the device does.
+        let (key, iv) = v3_story_key_iv(&tiny_md()).unwrap();
+        let deciphered = |rel_path: &str| -> Vec<u8> {
+            let file = files
+                .iter()
+                .find(|f| f.rel_path == rel_path)
+                .unwrap_or_else(|| panic!("{rel_path} is assembled"));
+            let mut bytes = file.bytes.clone();
+            super::super::cipher::v3_decipher_in_place(&mut bytes, &key, &iv);
+            bytes
+        };
+        for (index_file, dir, sources) in [("ri", "rf", pictures), ("si", "sf", sounds)] {
+            let table = deciphered(index_file);
+            assert_eq!(table.len(), 48, "{index_file}: 36 bytes, a whole block");
+            assert_eq!(&table[36..], &[0u8; 12], "{index_file}: zero padding");
+            for (index, source) in sources.into_iter().enumerate() {
+                let entry = &table[index * 12..(index + 1) * 12];
+                assert_eq!(&entry[..4], b"000\\", "{index_file} entry {index}");
+                let name = std::str::from_utf8(&entry[4..]).expect("an ascii name");
+                assert_eq!(
+                    deciphered(&format!("{dir}/000/{name}")),
+                    assets[source],
+                    "{index_file} entry {index} leads to its own asset"
+                );
+            }
+        }
+    }
+
     /// Ground truth: assemble the full pack from a real STUdio `story.json` + its
     /// `.zip` assets + the device `.md`, and assert EVERY produced file equals the
     /// device's actual `.content/<SHORTID>/` file, byte-for-byte. Env:
