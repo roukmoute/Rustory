@@ -1853,6 +1853,33 @@ mod tests {
     }
 
     #[test]
+    fn a_retained_pack_missing_media_whose_name_is_not_ascii_is_refused_by_name() {
+        // The 8th byte from the end of `écoutons` is the second half of its
+        // `é`: cut there, the name of the media stopped the export on a
+        // panic instead of this refusal.
+        let mut library = Library::new();
+        let id = library.story("Importée");
+        let descriptor = format!(
+            r#"{{"format":"v1","version":1,"title":"Importée","nightModeAvailable":false,"actionNodes":[],
+            "stageNodes":[{{"uuid":"{id}","squareOne":true,"image":null,"audio":"écoutons.mp3",
+              "okTransition":null,"homeTransition":null,
+              "controlSettings":{{"wheel":true,"ok":true,"home":false,"pause":false,"autoplay":false}}}}]}}"#
+        );
+        let retained = resolve_source_archive_path(library.app_data.path(), &id);
+        std::fs::create_dir_all(retained.parent().expect("parent")).expect("dir");
+        write_pack_archive(&retained, Some(&descriptor), &[]);
+        let out_dir = TempDir::new().expect("out");
+        let destination = out_dir.path().join("histoire.zip");
+
+        let err = library.export(&id, &destination).expect_err("refused");
+        assert_eq!(err.code, AppErrorCode::ExportFailed);
+        assert_eq!(details(&err)["source"], "source_archive");
+        assert_eq!(details(&err)["cause"], "asset_missing");
+        assert_eq!(details(&err)["asset"], "COUTONS");
+        assert!(!destination.exists());
+    }
+
+    #[test]
     fn a_renamed_imported_story_is_exported_under_its_library_title() {
         let mut library = Library::new();
         let id = two_episode_story(&mut library);

@@ -323,12 +323,21 @@ pub fn ri_entry_basename(ri_plain: &[u8], index: usize) -> Option<String> {
 /// gets on the device unless another asset of its kind bears it already
 /// (see [`TranscodedAsset::device_name`]) — and the short tag a diagnostic
 /// names a source file by.
+///
+/// The 8 are counted in BYTES, which for a hash-named file is the same
+/// thing. A name that is not ASCII is never cut inside a character: when the
+/// 8th byte from the end falls in the middle of one, the name starts at the
+/// next whole character and is shorter.
 pub fn device_asset_basename(filename: &str) -> String {
     let stem = filename
         .rsplit_once('.')
         .map(|(s, _)| s)
         .unwrap_or(filename);
-    let start = stem.len().saturating_sub(8);
+    let mut start = stem.len().saturating_sub(8);
+    // The end of the stem is a boundary: the walk always stops.
+    while !stem.is_char_boundary(start) {
+        start += 1;
+    }
     stem[start..].to_ascii_uppercase()
 }
 
@@ -655,6 +664,33 @@ mod tests {
         );
         // No extension, short name → whole stem uppercased.
         assert_eq!(device_asset_basename("abc"), "ABC");
+    }
+
+    #[test]
+    fn device_asset_basename_never_cuts_a_character_in_two() {
+        // `é` takes two bytes, and the 8th byte from the end of `xé1234567`
+        // is its second half: the name starts at the next whole character.
+        assert_eq!(device_asset_basename("xé1234567.png"), "1234567");
+        // A cut that falls between two characters stays where it always was.
+        assert_eq!(device_asset_basename("éé123456.png"), "é123456");
+        // Characters of three and of four bytes.
+        assert_eq!(device_asset_basename("日本語の物語.bmp"), "物語");
+        assert_eq!(device_asset_basename("🦊🦊x"), "🦊X");
+    }
+
+    #[test]
+    fn a_pack_whose_media_names_are_not_ascii_is_transcoded() {
+        // Either name used to stop the transcoding with a panic, the cut of
+        // its last 8 bytes landing inside a character.
+        let pack = media_pack(vec![media_stage(
+            "s0",
+            Some("xé1234567.png"),
+            Some("écoutons.mp3"),
+        )]);
+        let out = transcode_pack(&pack).expect("transcode");
+        assert_eq!(source_refs(&out.images), vec!["xé1234567.png"]);
+        assert_eq!(source_refs(&out.audios), vec!["écoutons.mp3"]);
+        assert_eq!(stage_asset_indices(&out.ni, 0), (0, 0));
     }
 
     #[test]

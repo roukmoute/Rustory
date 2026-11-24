@@ -844,6 +844,30 @@ mod tests {
     }
 
     #[test]
+    fn a_retained_descriptor_whose_media_names_are_not_ascii_is_exported_like_any_other() {
+        // The transcoder that validates the graph names a media after the
+        // last 8 bytes of its file name: here that cut falls inside an `é`,
+        // and it used to stop the export on a panic.
+        let mut source = retained_source();
+        source["stageNodes"][0]["image"] = json!("xé1234567.png");
+        source["stageNodes"][0]["audio"] = json!("écoutons.ogg");
+        let descriptor = prepare_story_archive_descriptor(source, "T").expect("ok");
+        let sources: Vec<&str> = descriptor
+            .assets
+            .iter()
+            .map(|asset| asset.source_ref.as_str())
+            .collect();
+        assert_eq!(sources, vec!["xé1234567.png", "écoutons.ogg", "story.mp3"]);
+        // Every exported name is the bare hex name of any other asset.
+        for asset in &descriptor.assets {
+            let (stem, extension) = asset.archive_name.split_once('.').expect("an extension");
+            assert_eq!(stem.len(), ASSET_STEM_HEX_CHARS, "{}", asset.archive_name);
+            assert!(stem.bytes().all(|b| b.is_ascii_hexdigit()));
+            assert_eq!(extension, asset.kind.extension());
+        }
+    }
+
+    #[test]
     fn a_non_uuid_stage_id_of_a_retained_descriptor_is_made_portable_too() {
         let mut source = retained_source();
         source["stageNodes"][1]["uuid"] = json!("histoire-1");

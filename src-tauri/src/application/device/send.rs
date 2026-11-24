@@ -1715,6 +1715,66 @@ mod tests {
     }
 
     #[test]
+    fn a_pack_archive_media_whose_name_is_not_ascii_is_sent_and_refused_by_name_when_missing() {
+        use crate::application::import_export::archive_creation::test_support::write_pack_archive;
+
+        // The 8th byte from the end of `écoutons` is the second half of its
+        // `é`: cut there, the name of the media stopped the send on a panic.
+        let audio = "écoutons.mp3";
+        let dir = tempfile::tempdir().expect("dir");
+
+        // The media is in the archive: the pack is sent.
+        let present = dir.path().join("accent.zip");
+        write_pack_archive(
+            &present,
+            Some(&one_sound_descriptor(audio)),
+            &[(audio, 4096)],
+        );
+        let (_mount, scanner, device_identifier) = scratch_v3_mount();
+        let writer = RecordingWriter::default();
+        let sent = send_archive_to_device(
+            &scanner,
+            &writer,
+            &SendArchiveRequest {
+                device_identifier,
+                archive_path: present,
+            },
+            Duration::from_millis(500),
+            &|_| {},
+        )
+        .expect("a media whose name is not ASCII is sent");
+        assert_eq!((sent.image_count, sent.audio_count), (0, 1));
+        assert_eq!(writer.calls.lock().unwrap().len(), 1, "one device write");
+
+        // The media is not in the archive: refused as missing, and named by
+        // a tag made of whole characters.
+        let missing = dir.path().join("accent-incomplet.zip");
+        write_pack_archive(&missing, Some(&one_sound_descriptor(audio)), &[]);
+        let (_mount, scanner, device_identifier) = scratch_v3_mount();
+        let writer = RecordingWriter::default();
+        let err = send_archive_to_device(
+            &scanner,
+            &writer,
+            &SendArchiveRequest {
+                device_identifier,
+                archive_path: missing,
+            },
+            Duration::from_millis(500),
+            &|_| {},
+        )
+        .expect_err("a missing media refuses the send");
+        let v = serde_json::to_value(&err).expect("ser");
+        assert_eq!(v["code"], "DEVICE_WRITE_FAILED");
+        assert_eq!(v["details"]["source"], "archive");
+        assert_eq!(v["details"]["cause"], "asset_missing");
+        assert_eq!(v["details"]["asset"], "COUTONS");
+        assert!(
+            writer.calls.lock().unwrap().is_empty(),
+            "zero device write on a refusal"
+        );
+    }
+
+    #[test]
     fn a_store_media_over_the_store_ceiling_is_refused_as_too_large_before_any_read() {
         use crate::domain::device::{synthesize_sequential_pack, EpisodeAssets};
 
