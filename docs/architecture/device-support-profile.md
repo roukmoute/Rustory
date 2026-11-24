@@ -110,21 +110,42 @@ barely arises there.
 its pictures under `rf/000/` and its sounds under `sf/000/`, one file per
 media, and its two asset indices — `ri` for the pictures, `si` for the sounds
 — list those files as fixed 12-byte entries `000\XXXXXXXX`, in the order the
-node index counts them. The name of each file is settled ONCE, when the
-pack's graph is transcoded, and everything downstream reads that one answer:
-the `ri` / `si` entry, the assembled file, the room check.
+node index counts them: entry `i` is the 12 bytes found at `12 × i`. The name
+of each file is settled ONCE, when the pack's graph is transcoded, and
+everything downstream reads that one answer: the `ri` / `si` entry, the
+assembled file, the room check.
+
+A DEVICE NAME is exactly 8 characters, each an ASCII digit or an uppercase
+ASCII letter (`0-9`, `A-Z`). Every media is written under one, whatever its
+source file is called. Its NATURAL name — the last 8 characters of the stem of
+its source file name, uppercased — is the starting point:
 
 | The media | Its file name on the device |
 | --- | --- |
-| The first picture — or the first sound — of the pack to bear a name | Its NATURAL name: the last 8 characters of the stem of its source file name, uppercased. For a hash-named file (the tools that write the format, the library's media store, an archive Rustory exported) that is its last 8 hexadecimal characters — the name a device pack has always been written with. |
-| A later picture whose natural name another picture of the pack already bears — and likewise among the sounds | A DERIVED name: 8 uppercase hexadecimal characters taken from a SHA-256 of the media's kind and source reference, drawn again (a salt) for as long as the name drawn is taken. The same pack always gets the same names. |
+| Its natural name is a device name, and it is the first picture — or the first sound — of the pack to bear it | That natural name. For a hash-named file (the tools that write the format, the library's media store, an archive Rustory exported) it is the last 8 hexadecimal characters of the file name — the name a device pack has always been written with. |
+| Its natural name is a device name that another picture of the pack already bears — and likewise among the sounds | A DERIVED name: 8 uppercase hexadecimal characters taken from a SHA-256 of the media's kind and source reference, drawn again (a salt) for as long as the name drawn is taken. The same pack always gets the same names. |
+| Its natural name is NOT a device name | A derived name, drawn the same way. |
 
 "First" is the index order — the order in which the stages first reference
 their media. Names are unique WITHIN a kind: pictures and sounds live in two
 folders and two indices, so a picture and a sound may bear the same 8
-characters, as they always could. The natural names are settled before any
-name is derived, so a derived name never takes the natural name of another
-media, wherever that media stands in the pack.
+characters, as they always could. The natural names that are kept are settled
+before any name is derived, so a derived name never takes the natural name of
+another media, wherever that media stands in the pack.
+
+A natural name is no device name in four cases. The first three are packs
+that a name written as it stood left unreadable somewhere; the fourth is
+replaced as a precaution:
+
+| The natural name | For instance | Written as it stood |
+| --- | --- | --- |
+| Is shorter than 8 characters | `a.bmp` → `A`, `cover.png` → `COVER` | Its index entry was shorter than 12 bytes, so every entry after it was read from the wrong offset: two pictures `a.bmp` and `assets/cover.png` made the 17-byte table `000\A000\TS/COVER`, where the device reads two entries of 12. |
+| Holds a folder separator — a reference inside a folder whose file name is short | `assets/cover.png` → `TS/COVER` | The media landed in a folder of its own, `rf/000/TS/COVER`, instead of the asset folder. |
+| Holds a character that is not ASCII | `éé123456.png` → `é123456` | Its 8 bytes were not 8 characters. And when the last 8 bytes began INSIDE a character (`xé1234567.png`, `écoutons.mp3`), cutting the name there stopped the send — and the archive export, which runs the same transcoding — on a crash. The natural name is now cut at the next whole character, and is shorter. |
+| Is 8 ASCII characters, one of which is neither a digit nor a letter | `my_story.png` → `MY_STORY`, `le conte.mp3` → `LE CONTE` | Its entry was well formed. It is replaced all the same: the rule keeps digits and letters only, rather than weigh each other character against what a device volume accepts. |
+
+The natural name also remains the short tag a refusal names a media by
+(`details.asset`), whatever the media is called on the device.
 
 What it guarantees, for a pack sent from its retained archive and for a pack
 laid out from the library alike:
@@ -135,14 +156,26 @@ laid out from the library alike:
   showed or played another stage's media. The odds are small for one pack but
   grow with the square of its media count — a collection of thousands of
   media is where they stop being negligible.
-- **A pack without a clash is written byte for byte as before**: every one of
-  its media keeps its natural name, so the format proven against real
-  hardware is untouched. Beside the hardware ground-truth tests (which need a
-  capture of a real device), a test freezes the assembled files of a
-  clash-free pack — their paths, their order, their bytes.
+- **Every index entry is 12 bytes and every media sits directly in its asset
+  folder**, whatever the source files are called: a pack made by hand with
+  `cover.png` and `story.mp3`, a reference written `assets/<name>`, an
+  accented file name are all sent as a pack the device reads entry by entry.
+- **A pack whose natural names are all device names, none of them shared, is
+  written byte for byte as before** — every pack of hash-named files without
+  a clash: its media keep their natural names, so the format proven against
+  real hardware is untouched. Beside the hardware ground-truth tests (which
+  need a capture of a real device), a test freezes the assembled files of
+  such a pack — their paths, their order, their bytes. A pack with a natural
+  name that is no device name is NOT written as it was: the media concerned
+  are the same bytes under another name, and their index entries name that
+  file.
 - **The cover of the device panel follows the name.** It is read back through
   the same index (the `ri` entry of the entry stage, then `rf/000/<name>`),
-  so a derived name reads exactly like a natural one.
+  so a derived name reads exactly like the natural name of a hash-named file.
+  That read-back accepts 8 uppercase HEXADECIMAL characters only: a pack whose
+  entry picture keeps a natural name with a letter past `F` (`IMAGE001`) is
+  written and indexed like any other, and listed by the panel without its
+  cover.
 - **The writer never lets one file of a pack replace another.** It stages
   every file with an exclusive create, on the device volume itself — so the
   volume, the only authority on which names it holds for one file, has the
